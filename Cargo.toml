@@ -1,0 +1,14 @@
+[package]
+name = "stc-keepass"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+keepass = { git = "https://github.com/elias-tilegant/keepass-rs", branch = "master", version = "0.0.0-placeholder-version" }
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+
+[lints.rust]
+unsafe_code = "forbid"
