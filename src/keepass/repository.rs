@@ -102,6 +102,9 @@ fn entry_from_ref(
     let password = entry.get_password().unwrap_or_default();
     let has_password = !password.is_empty();
     let password_length = password.chars().count();
+    let has_otp = entry
+        .get_raw_otp_value()
+        .is_some_and(|otp| !otp.trim().is_empty());
 
     let updated = entry
         .times
@@ -127,6 +130,7 @@ fn entry_from_ref(
         notes,
         has_password,
         password_length,
+        has_otp,
         updated,
         tags,
         starred,

@@ -40,7 +40,7 @@ impl AppShell {
         });
         let keyfile_input = cx.new(|cx| InputState::new(window, cx).placeholder("Optional key file path"));
         let search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search 0 entries…  ⌘F"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search vault…  ⌘F"));
         let new_entry_title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
         let new_entry_username_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Username"));

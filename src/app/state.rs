@@ -24,7 +24,7 @@ pub enum VaultStatus {
     Open {
         path: PathBuf,
         document: Box<VaultDocument>,
-        selected_group_id: String,
+        selection: LibrarySelection,
         selected_entry_id: Option<String>,
         search_query: String,
     },
@@ -32,6 +32,45 @@ pub enum VaultStatus {
         message: String,
         path: Option<PathBuf>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LibrarySelection {
+    Group(String),
+    AllItems,
+    Favorites,
+    RecentlyUsed,
+    Trash,
+    Tag(String),
+}
+
+impl LibrarySelection {
+    pub fn group_id(&self) -> Option<&str> {
+        match self {
+            LibrarySelection::Group(id) => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn tag(&self) -> Option<&str> {
+        match self {
+            LibrarySelection::Tag(name) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn is_all_items(&self) -> bool {
+        matches!(self, LibrarySelection::AllItems)
+    }
+    pub fn is_favorites(&self) -> bool {
+        matches!(self, LibrarySelection::Favorites)
+    }
+    pub fn is_recently_used(&self) -> bool {
+        matches!(self, LibrarySelection::RecentlyUsed)
+    }
+    pub fn is_trash(&self) -> bool {
+        matches!(self, LibrarySelection::Trash)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,8 +120,8 @@ pub struct VaultSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultBrowserModel {
     pub root: VaultGroup,
-    pub selected_group_id: String,
-    pub selected_group_name: String,
+    pub selection: LibrarySelection,
+    pub selection_label: String,
     pub selected_entry_id: Option<String>,
     pub entries: Vec<VaultEntry>,
     pub selected_entry: Option<VaultEntry>,
@@ -180,13 +219,14 @@ impl AppState {
         self.vault = match result {
             Ok(document) => {
                 let snapshot = document.snapshot();
-                let selected_group_id = snapshot.root.id.clone();
-                let selected_entry_id = snapshot.root.entries.first().map(|entry| entry.id.clone());
+                let selection = LibrarySelection::Group(snapshot.root.id.clone());
+                let selected_entry_id =
+                    snapshot.root.entries.first().map(|entry| entry.id.clone());
 
                 VaultStatus::Open {
                     path,
                     document: Box::new(document),
-                    selected_group_id,
+                    selection,
                     selected_entry_id,
                     search_query: String::new(),
                 }
@@ -248,7 +288,7 @@ impl AppState {
 
         let VaultStatus::Open {
             document,
-            selected_group_id,
+            selection,
             selected_entry_id,
             search_query,
             ..
@@ -263,9 +303,30 @@ impl AppState {
         };
         let selected_entry_id_for_group = group.entries.first().map(|entry| entry.id.clone());
 
-        *selected_group_id = group_id;
+        *selection = LibrarySelection::Group(group_id);
         *selected_entry_id = selected_entry_id_for_group;
         search_query.clear();
+        cx.notify();
+    }
+
+    pub fn select_library(&mut self, sel: LibrarySelection, cx: &mut Context<Self>) {
+        let VaultStatus::Open {
+            document,
+            selection,
+            selected_entry_id,
+            search_query,
+            ..
+        } = &mut self.vault
+        else {
+            return;
+        };
+        if *selection == sel {
+            return;
+        }
+        *selection = sel;
+        search_query.clear();
+        let entries = entries_for_selection(document.snapshot(), selection, "");
+        *selected_entry_id = entries.first().map(|entry| entry.id.clone());
         cx.notify();
     }
 
@@ -292,7 +353,7 @@ impl AppState {
 
         let VaultStatus::Open {
             document,
-            selected_group_id,
+            selection,
             selected_entry_id,
             search_query,
             ..
@@ -306,7 +367,7 @@ impl AppState {
         }
 
         *search_query = query;
-        let entries = visible_entries(document.snapshot(), selected_group_id, search_query);
+        let entries = entries_for_selection(document.snapshot(), selection, search_query);
         let selected_entry_is_visible = selected_entry_id
             .as_deref()
             .is_some_and(|id| entries.iter().any(|entry| entry.id == id));
@@ -321,7 +382,7 @@ impl AppState {
     pub fn clear_search(&mut self, cx: &mut Context<Self>) {
         let VaultStatus::Open {
             document,
-            selected_group_id,
+            selection,
             selected_entry_id,
             search_query,
             ..
@@ -334,16 +395,9 @@ impl AppState {
             return;
         }
 
-        let selected_entry_id_for_group = document
-            .snapshot()
-            .find_group(selected_group_id)
-            .unwrap_or(&document.snapshot().root)
-            .entries
-            .first()
-            .map(|entry| entry.id.clone());
-
         search_query.clear();
-        *selected_entry_id = selected_entry_id_for_group;
+        let entries = entries_for_selection(document.snapshot(), selection, "");
+        *selected_entry_id = entries.first().map(|entry| entry.id.clone());
         cx.notify();
     }
 
@@ -367,7 +421,7 @@ impl AppState {
     pub fn vault_browser(&self) -> Option<VaultBrowserModel> {
         let VaultStatus::Open {
             document,
-            selected_group_id,
+            selection,
             selected_entry_id,
             search_query,
             ..
@@ -377,11 +431,8 @@ impl AppState {
         };
 
         let snapshot = document.snapshot();
-        let selected_group = snapshot
-            .find_group(selected_group_id)
-            .unwrap_or(&snapshot.root);
         let showing_search_results = !search_query.trim().is_empty();
-        let entries = visible_entries(snapshot, selected_group_id, search_query);
+        let entries = entries_for_selection(snapshot, selection, search_query);
 
         let selected_entry = selected_entry_id
             .as_deref()
@@ -395,10 +446,12 @@ impl AppState {
             .cloned()
             .collect::<Vec<_>>();
 
+        let selection_label = selection_label_for(selection, snapshot);
+
         Some(VaultBrowserModel {
             root: snapshot.root.clone(),
-            selected_group_id: selected_group.id.clone(),
-            selected_group_name: selected_group.name.clone(),
+            selection: selection.clone(),
+            selection_label,
             selected_entry_id: selected_entry.as_ref().map(|entry| entry.id.clone()),
             entries,
             selected_entry,
@@ -471,9 +524,9 @@ impl AppState {
     }
 }
 
-fn visible_entries(
+fn entries_for_selection(
     snapshot: &VaultSnapshot,
-    selected_group_id: &str,
+    selection: &LibrarySelection,
     search_query: &str,
 ) -> Vec<VaultEntry> {
     let query = search_query.trim().to_lowercase();
@@ -487,11 +540,48 @@ fn visible_entries(
             .collect();
     }
 
-    snapshot
-        .find_group(selected_group_id)
-        .unwrap_or(&snapshot.root)
-        .entries
-        .clone()
+    match selection {
+        LibrarySelection::Group(id) => snapshot
+            .find_group(id)
+            .unwrap_or(&snapshot.root)
+            .entries
+            .clone(),
+        LibrarySelection::AllItems => snapshot
+            .entries_recursive()
+            .into_iter()
+            .cloned()
+            .collect(),
+        LibrarySelection::Favorites => {
+            snapshot.entries_starred().into_iter().cloned().collect()
+        }
+        LibrarySelection::RecentlyUsed => {
+            let mut entries: Vec<VaultEntry> =
+                snapshot.entries_recursive().into_iter().cloned().collect();
+            entries.sort_by(|a, b| b.updated.cmp(&a.updated));
+            entries.truncate(50);
+            entries
+        }
+        LibrarySelection::Trash => Vec::new(),
+        LibrarySelection::Tag(name) => snapshot
+            .entries_with_tag(name)
+            .into_iter()
+            .cloned()
+            .collect(),
+    }
+}
+
+fn selection_label_for(selection: &LibrarySelection, snapshot: &VaultSnapshot) -> String {
+    match selection {
+        LibrarySelection::Group(id) => snapshot
+            .find_group(id)
+            .map(|g| g.name.clone())
+            .unwrap_or_else(|| snapshot.root.name.clone()),
+        LibrarySelection::AllItems => "All items".to_string(),
+        LibrarySelection::Favorites => "Favorites".to_string(),
+        LibrarySelection::RecentlyUsed => "Recently used".to_string(),
+        LibrarySelection::Trash => "Trash".to_string(),
+        LibrarySelection::Tag(name) => format!("Tag · {name}"),
+    }
 }
 
 fn entry_matches_query(entry: &VaultEntry, query: &str) -> bool {

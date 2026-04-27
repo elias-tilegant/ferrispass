@@ -37,10 +37,14 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 
     let snapshot_for_sidebar = snapshot_owned.clone();
 
+    let selection = browser
+        .as_ref()
+        .map(|b| b.selection.clone())
+        .unwrap_or(crate::app::LibrarySelection::AllItems);
     let sidebar_el = sidebar(
         &summary,
         snapshot_for_sidebar.as_ref(),
-        browser.as_ref().map(|b| b.selected_group_id.clone()),
+        &selection,
         shell.state().clone(),
         cx,
     )
@@ -58,19 +62,23 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 fn sidebar(
     summary: &VaultSummary,
     snapshot: Option<&VaultSnapshot>,
-    selected_group_id: Option<String>,
+    selection: &crate::app::LibrarySelection,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let provider = summary.provider.unwrap_or("OneDrive");
     let synced_at = summary.synced_at.unwrap_or("just now");
     let entry_count = summary.entries;
+    let starred_count = snapshot
+        .map(|s| s.entries_starred().len())
+        .unwrap_or(0);
+    let twofa_count = snapshot
+        .map(|s| s.entries_with_tag("2FA").len())
+        .unwrap_or(0);
 
     let groups = snapshot
         .map(|s| s.root.groups.clone())
         .unwrap_or_default();
-
-    let selected_id = selected_group_id.unwrap_or_default();
 
     v_flex()
         .w(px(220.))
@@ -112,12 +120,20 @@ fn sidebar(
         )
         .child(
             v_flex()
+                .id("sidebar-scroll")
                 .flex_1()
                 .min_h(px(0.))
+                .overflow_y_scroll()
                 .py_2()
-                .child(library_section(entry_count))
-                .child(groups_section(&groups, &selected_id, state_entity.clone(), cx))
-                .child(tags_section()),
+                .child(library_section(
+                    selection,
+                    entry_count,
+                    starred_count,
+                    state_entity.clone(),
+                    cx,
+                ))
+                .child(groups_section(&groups, selection, state_entity.clone(), cx))
+                .child(tags_section(twofa_count, selection, state_entity.clone(), cx)),
         )
         .child(
             h_flex()
@@ -156,33 +172,82 @@ fn sidebar(
         )
 }
 
-fn library_section(entry_count: usize) -> impl gpui::IntoElement {
+fn library_section(
+    selection: &crate::app::LibrarySelection,
+    entry_count: usize,
+    starred_count: usize,
+    state_entity: gpui::Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    use crate::app::LibrarySelection as L;
+
     v_flex()
         .gap_0p5()
         .pb_2()
         .child(div().px_3p5().pb_1().child(section_heading("Library")))
-        .child(nav_pill(AppIcon::Key, "All items", Some(entry_count.max(1)), true, palette::BLUE))
-        .child(nav_pill(AppIcon::Note, "Favorites", Some(8), false, palette::ORANGE))
-        .child(nav_pill(AppIcon::Cloud, "Recently used", Some(12), false, palette::TEXT_MUTED))
-        .child(nav_pill(AppIcon::Note, "Trash", Some(3), false, palette::TEXT_MUTED))
+        .child(nav_row(
+            "lib-all",
+            AppIcon::Key,
+            "All items",
+            Some(entry_count),
+            selection.is_all_items(),
+            palette::BLUE,
+            state_entity.clone(),
+            L::AllItems,
+            cx,
+        ))
+        .child(nav_row(
+            "lib-favorites",
+            AppIcon::Note,
+            "Favorites",
+            Some(starred_count),
+            selection.is_favorites(),
+            palette::ORANGE,
+            state_entity.clone(),
+            L::Favorites,
+            cx,
+        ))
+        .child(nav_row(
+            "lib-recent",
+            AppIcon::Cloud,
+            "Recently used",
+            None,
+            selection.is_recently_used(),
+            palette::TEXT_MUTED,
+            state_entity.clone(),
+            L::RecentlyUsed,
+            cx,
+        ))
+        .child(nav_row(
+            "lib-trash",
+            AppIcon::Note,
+            "Trash",
+            None,
+            selection.is_trash(),
+            palette::TEXT_MUTED,
+            state_entity,
+            L::Trash,
+            cx,
+        ))
 }
 
 fn groups_section(
     groups: &[VaultGroup],
-    selected_id: &str,
+    selection: &crate::app::LibrarySelection,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let palette_colors = [palette::BLUE, palette::ORANGE, palette::GREEN, palette::TEXT_MUTED];
+    let selected_group = selection.group_id().unwrap_or_default().to_string();
 
     let mut col = v_flex()
         .gap_0p5()
         .pb_2()
         .child(div().px_3p5().pb_1().child(section_heading("Groups")));
 
-    for (i, group) in groups.iter().take(6).enumerate() {
+    for (i, group) in groups.iter().enumerate() {
         let color = palette_colors[i % palette_colors.len()];
-        let is_selected = group.id == selected_id;
+        let is_selected = group.id == selected_group;
         let group_id = group.id.clone();
         let count = group.entry_count();
         let state_for_click = state_entity.clone();
@@ -190,7 +255,7 @@ fn groups_section(
         col = col.child(
             div()
                 .id(gpui::SharedString::from(format!("group-{}", group.id)))
-                .child(group_pill(
+                .child(nav_pill_visual(
                     AppIcon::Note,
                     &group.name,
                     Some(count),
@@ -208,55 +273,78 @@ fn groups_section(
     col
 }
 
-fn tags_section() -> impl gpui::IntoElement {
+fn tags_section(
+    twofa_count: usize,
+    selection: &crate::app::LibrarySelection,
+    state_entity: gpui::Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    use crate::app::LibrarySelection as L;
+    let selected_tag = selection.tag().unwrap_or_default().to_string();
+
     v_flex()
         .gap_0p5()
         .pb_2()
         .child(div().px_3p5().pb_1().child(section_heading("Tags")))
-        .child(nav_pill(AppIcon::Dot, "2FA enabled", Some(28), false, palette::BLUE))
-        .child(nav_pill(AppIcon::Dot, "Weak password", Some(4), false, palette::RED))
-        .child(nav_pill(AppIcon::Dot, "Reused", Some(7), false, palette::YELLOW))
+        .child(nav_row(
+            "tag-2fa",
+            AppIcon::Dot,
+            "2FA enabled",
+            Some(twofa_count),
+            selected_tag.eq_ignore_ascii_case("2FA"),
+            palette::BLUE,
+            state_entity.clone(),
+            L::Tag("2FA".to_string()),
+            cx,
+        ))
+        .child(nav_row(
+            "tag-personal",
+            AppIcon::Dot,
+            "Personal",
+            None,
+            selected_tag.eq_ignore_ascii_case("Personal"),
+            palette::GREEN,
+            state_entity.clone(),
+            L::Tag("Personal".to_string()),
+            cx,
+        ))
+        .child(nav_row(
+            "tag-work",
+            AppIcon::Dot,
+            "Work",
+            None,
+            selected_tag.eq_ignore_ascii_case("Work"),
+            palette::YELLOW,
+            state_entity,
+            L::Tag("Work".to_string()),
+            cx,
+        ))
 }
 
-fn nav_pill(
+#[allow(clippy::too_many_arguments)]
+fn nav_row(
+    id: &'static str,
     icon: AppIcon,
     label_text: &'static str,
     count: Option<usize>,
     selected: bool,
     icon_color: Hsla,
+    state_entity: gpui::Entity<AppState>,
+    target: crate::app::LibrarySelection,
+    cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
-    let bg = if selected { palette::BLUE } else { palette::SIDEBAR };
-    let fg = if selected { palette::PANEL } else { palette::TEXT };
-    let count_color = if selected {
-        palette::PANEL
-    } else {
-        palette::TEXT_FAINT
-    };
-    let icon_resolved = if selected { palette::PANEL } else { icon_color };
-
-    h_flex()
-        .gap_2()
-        .items_center()
-        .h(px(26.))
-        .mx(px(6.))
-        .px_3()
-        .rounded(px(5.))
-        .bg(bg)
-        .text_color(fg)
-        .text_sm()
-        .font_weight(if selected { gpui::FontWeight::MEDIUM } else { gpui::FontWeight::NORMAL })
-        .child(
-            gpui_component::Icon::from(icon)
-                .with_size(gpui_component::Size::Size(px(13.)))
-                .text_color(icon_resolved),
-        )
-        .child(div().flex_1().child(label_text))
-        .when_some(count, |this, c| {
-            this.child(div().text_xs().text_color(count_color).child(c.to_string()))
-        })
+    div()
+        .id(id)
+        .child(nav_pill_visual(icon, label_text, count, selected, icon_color))
+        .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+            let target = target.clone();
+            state_entity.update(cx, |state, cx| {
+                state.select_library(target, cx);
+            });
+        }))
 }
 
-fn group_pill(
+fn nav_pill_visual(
     icon: AppIcon,
     label_text: &str,
     count: Option<usize>,
@@ -283,15 +371,25 @@ fn group_pill(
         .bg(bg)
         .text_color(fg)
         .text_sm()
-        .font_weight(if selected { gpui::FontWeight::MEDIUM } else { gpui::FontWeight::NORMAL })
+        .font_weight(if selected {
+            gpui::FontWeight::MEDIUM
+        } else {
+            gpui::FontWeight::NORMAL
+        })
         .child(
             gpui_component::Icon::from(icon)
                 .with_size(gpui_component::Size::Size(px(13.)))
                 .text_color(icon_resolved),
         )
-        .child(div().flex_1().child(label_owned))
+        .child(div().flex_1().min_w_0().truncate().child(label_owned))
         .when_some(count, |this, c| {
-            this.child(div().text_xs().text_color(count_color).child(c.to_string()))
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(count_color)
+                    .child(c.to_string()),
+            )
         })
 }
 
@@ -303,7 +401,7 @@ fn workspace(
     is_busy: bool,
     is_open: bool,
 ) -> impl gpui::IntoElement {
-    let toolbar = workspace_toolbar(summary, is_open, cx).into_any_element();
+    let toolbar = workspace_toolbar(summary, shell, is_open, cx).into_any_element();
 
     let content: AnyElement = if let Some(browser) = browser {
         vault_split(browser, shell, cx).into_any_element()
@@ -318,16 +416,21 @@ fn workspace(
     v_flex()
         .flex_1()
         .min_w(px(0.))
+        .min_h(px(0.))
+        .h_full()
+        .overflow_hidden()
         .child(toolbar)
         .child(content)
         .child(status)
 }
 
 fn workspace_toolbar(
-    summary: &VaultSummary,
+    _summary: &VaultSummary,
+    shell: &AppShell,
     is_open: bool,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
+    let search_input = shell.search_input().clone();
     h_flex()
         .h(px(48.))
         .flex_shrink_0()
@@ -374,17 +477,9 @@ fn workspace_toolbar(
         )
         .child(div().flex_1())
         .child(
-            div().w(px(220.)).child(
-                v_flex().gap_0p5().child(
-                    div()
-                        .text_xs()
-                        .text_color(palette::TEXT_MUTED)
-                        .child(format!(
-                            "Search {} entries · ⌘F",
-                            summary.entries
-                        )),
-                ),
-            ),
+            div()
+                .w(px(280.))
+                .child(Input::new(&search_input).cleanable(true)),
         )
         .child(
             div()
@@ -441,6 +536,66 @@ fn toolbar_button(
         .child(text)
 }
 
+#[derive(Clone, Copy)]
+enum ActionStyle {
+    Primary,
+    Default,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn action_button(
+    id: &'static str,
+    text: &'static str,
+    icon: AppIcon,
+    style: ActionStyle,
+    enabled: bool,
+    flex: bool,
+    kind: CopyValueKind,
+    state_entity: gpui::Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    let (bg, fg, bd) = match (style, enabled) {
+        (ActionStyle::Primary, true) => (palette::BLUE, palette::PANEL, palette::BLUE_HOVER),
+        (ActionStyle::Primary, false) => {
+            (palette::SIDEBAR, palette::TEXT_FAINT, palette::BORDER_STRONG)
+        }
+        (ActionStyle::Default, true) => (palette::PANEL, palette::TEXT, palette::BORDER_STRONG),
+        (ActionStyle::Default, false) => (palette::SIDEBAR, palette::TEXT_FAINT, palette::BORDER),
+    };
+
+    let mut row = div().id(id);
+    if flex {
+        row = row.flex_1();
+    }
+
+    row.child(
+        h_flex()
+            .h(px(28.))
+            .px(px(12.))
+            .gap_1p5()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .bg(bg)
+            .text_color(fg)
+            .border_1()
+            .border_color(bd)
+            .text_xs()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(
+                gpui_component::Icon::from(icon)
+                    .with_size(gpui_component::Size::Size(px(12.)))
+                    .text_color(fg),
+            )
+            .child(text),
+    )
+    .when(enabled, move |this| {
+        this.on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, window, cx| {
+            copy_value(kind, &state_entity, window, cx);
+        }))
+    })
+}
+
 fn vault_split(
     browser: VaultBrowserModel,
     shell: &AppShell,
@@ -451,13 +606,14 @@ fn vault_split(
     let group_name = if browser.showing_search_results {
         "Search results".to_string()
     } else {
-        browser.selected_group_name.clone()
+        browser.selection_label.clone()
     };
 
     h_flex()
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
+        .overflow_hidden()
         .child(entry_list(
             &entries,
             &group_name,
@@ -477,15 +633,17 @@ fn entry_list(
     search_query: String,
     showing_search: bool,
     selected_entry_id: Option<String>,
-    search_input: &gpui::Entity<InputState>,
+    _search_input: &gpui::Entity<InputState>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let entries_owned: Vec<VaultEntry> = entries.iter().cloned().collect();
     let total = entries_owned.len();
     let mut list = v_flex()
+        .id("entry-list-scroll")
         .flex_1()
         .min_h(px(0.))
+        .overflow_y_scroll()
         .gap_0p5()
         .p_2();
 
@@ -533,13 +691,16 @@ fn entry_list(
 
     v_flex()
         .h_full()
+        .min_h(px(0.))
         .w(px(360.))
         .flex_shrink_0()
+        .overflow_hidden()
         .border_r_1()
         .border_color(palette::BORDER)
         .bg(palette::PANEL)
         .child(
             v_flex()
+                .flex_shrink_0()
                 .gap_2()
                 .p_4()
                 .border_b_1()
@@ -550,21 +711,25 @@ fn entry_list(
                         .gap_2()
                         .child(
                             div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(palette::TEXT)
                                 .child(group_name.to_string()),
                         )
                         .child(
                             div()
+                                .flex_shrink_0()
                                 .text_xs()
                                 .text_color(palette::TEXT_MUTED)
                                 .child(format!("{} entries", total)),
                         ),
                 )
-                .child(Input::new(search_input).cleanable(true))
                 .when(showing_search, |this| {
                     this.child(
                         div()
+                            .truncate()
                             .text_xs()
                             .text_color(palette::TEXT_MUTED)
                             .child(format!("Across vault for \"{search_query}\"")),
@@ -624,7 +789,10 @@ fn entry_row(
             h_flex()
                 .gap_2p5()
                 .items_center()
+                .h(px(56.))
+                .flex_shrink_0()
                 .p_2p5()
+                .overflow_hidden()
                 .rounded(px(6.))
                 .bg(bg)
                 .border_1()
@@ -635,14 +803,22 @@ fn entry_row(
                         .gap_0p5()
                         .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .child(
                             h_flex()
                                 .gap_1p5()
                                 .items_center()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(palette::TEXT)
-                                .child(title)
+                                .min_w(px(0.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(palette::TEXT)
+                                        .child(title),
+                                )
                                 .when(starred, |this| {
                                     this.child(
                                         gpui_component::Icon::from(
@@ -655,10 +831,10 @@ fn entry_row(
                         )
                         .child(
                             div()
+                                .truncate()
                                 .text_xs()
                                 .text_color(palette::TEXT_MUTED)
                                 .font_family("JetBrains Mono")
-                                .overflow_hidden()
                                 .child(if username.is_empty() {
                                     if url.is_empty() { "—".to_string() } else { url }
                                 } else {
@@ -669,6 +845,7 @@ fn entry_row(
                 .child(
                     v_flex()
                         .items_end()
+                        .flex_shrink_0()
                         .gap_1()
                         .child({
                             let mut row = h_flex().gap_1();
@@ -687,6 +864,7 @@ fn entry_row(
                         .child(
                             div()
                                 .text_xs()
+                                .whitespace_nowrap()
                                 .text_color(palette::TEXT_FAINT)
                                 .child(updated),
                         ),
@@ -722,9 +900,11 @@ fn entry_detail(
     };
 
     v_flex()
-        .w(px(380.))
-        .flex_shrink_0()
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(0.))
         .h_full()
+        .overflow_hidden()
         .bg(palette::SIDEBAR)
         .border_l_1()
         .border_color(palette::BORDER)
@@ -742,158 +922,214 @@ fn entry_detail_body(
     let notes = entry.notes.clone();
     let strength = entry.strength;
     let length = entry.password_length;
-    let group = entry.group_path.last().cloned().unwrap_or_else(|| "Vault".into());
-    let updated = entry
-        .updated
-        .clone()
-        .unwrap_or_else(|| "recently".to_string());
+    let group = entry
+        .group_path
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "Vault root".into());
+    let updated = entry.updated.clone();
     let starred = entry.starred;
     let fav_color = favicon_color(entry.favicon.palette_index);
     let fav_letter = entry.favicon.letter.clone();
     let has_password = entry.has_password;
+    let has_otp = entry.has_otp;
+    let tags = entry.tags.clone();
 
-    v_flex()
-        .h_full()
+    let mut chips_row = h_flex().gap_1().flex_wrap();
+    for tag in tags.iter().take(4) {
+        let tone = if tag.eq_ignore_ascii_case("Work") || tag.eq_ignore_ascii_case(&group) {
+            ChipTone::Orange
+        } else if tag.eq_ignore_ascii_case("2FA") {
+            ChipTone::Green
+        } else {
+            ChipTone::Blue
+        };
+        chips_row = chips_row.child(chip(tag.clone(), tone));
+    }
+
+    let header = div()
+        .flex_shrink_0()
+        .p_5()
+        .border_b_1()
+        .border_color(palette::BORDER)
         .child(
-            div()
-                .p_5()
-                .border_b_1()
-                .border_color(palette::BORDER)
+            h_flex()
+                .gap_3()
+                .items_start()
                 .child(
-                    h_flex()
-                        .gap_3()
-                        .items_start()
+                    div()
+                        .size(px(44.))
+                        .rounded(px(9.))
+                        .bg(fav_color)
+                        .text_color(palette::PANEL)
+                        .text_lg()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_shrink_0()
+                        .child(fav_letter),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .gap_1()
                         .child(
                             div()
-                                .size(px(44.))
-                                .rounded(px(9.))
-                                .bg(fav_color)
-                                .text_color(palette::PANEL)
+                                .truncate()
                                 .text_lg()
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(fav_letter),
+                                .child(title),
                         )
                         .child(
-                            v_flex()
-                                .flex_1()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(palette::TEXT_MUTED)
-                                        .child(format!(
-                                            "Updated {updated} · in {group}"
-                                        )),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .child(chip(group.clone(), ChipTone::Orange))
-                                        .child(chip("2FA", ChipTone::Green)),
-                                ),
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(palette::TEXT_MUTED)
+                                .child(match updated {
+                                    Some(updated) => {
+                                        format!("Updated {updated} · in {group}")
+                                    }
+                                    None => format!("in {group}"),
+                                }),
                         )
-                        .when(starred, |this| {
-                            this.child(
-                                gpui_component::Icon::from(
-                                    gpui_component::IconName::StarFill,
-                                )
-                                .with_size(gpui_component::Size::Size(px(16.)))
-                                .text_color(palette::ORANGE),
-                            )
+                        .when(!tags.is_empty(), |this| this.child(chips_row)),
+                )
+                .when(starred, |this| {
+                    this.child(
+                        gpui_component::Icon::from(gpui_component::IconName::StarFill)
+                            .with_size(gpui_component::Size::Size(px(16.)))
+                            .text_color(palette::ORANGE),
+                    )
+                }),
+        );
+
+    let mut body_col = v_flex()
+        .id("entry-detail-scroll")
+        .flex_1()
+        .min_h(px(0.))
+        .min_w(px(0.))
+        .overflow_y_scroll()
+        .gap_3p5()
+        .p_5()
+        .child(detail_row("Username", value_or_dash(&username), true, false))
+        .child(if has_password {
+            detail_row("Password", String::new(), true, true)
+        } else {
+            detail_row("Password", "Not set".to_string(), false, false)
+        })
+        .child(detail_row("URL", value_or_dash(&url), false, false));
+
+    if has_otp {
+        body_col = body_col.child(detail_row("TOTP", "—".to_string(), true, false));
+    }
+
+    body_col = body_col
+        .child(
+            v_flex()
+                .gap_1()
+                .child(label("Notes"))
+                .child(
+                    div()
+                        .min_h(px(54.))
+                        .p_3()
+                        .rounded(px(6.))
+                        .bg(palette::PANEL)
+                        .border_1()
+                        .border_color(palette::BORDER)
+                        .text_xs()
+                        .text_color(if notes.is_empty() {
+                            palette::TEXT_FAINT
+                        } else {
+                            palette::TEXT
+                        })
+                        .child(if notes.is_empty() {
+                            "No notes for this entry.".to_string()
+                        } else {
+                            notes
                         }),
                 ),
         )
         .child(
             v_flex()
-                .flex_1()
-                .min_h(px(0.))
-                .gap_3p5()
-                .p_5()
-                .child(detail_row("Username", username.clone(), true, false))
-                .child(detail_row("Password", String::new(), true, has_password))
-                .child(detail_row(
-                    "URL",
-                    if url.is_empty() { "—".to_string() } else { url.clone() },
-                    false,
-                    false,
-                ))
-                .child(detail_row("TOTP", "284 391".to_string(), true, false))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(label("Notes"))
-                        .child(
-                            div()
-                                .p_3()
-                                .rounded(px(6.))
-                                .bg(palette::PANEL)
-                                .border_1()
-                                .border_color(palette::BORDER)
-                                .text_xs()
-                                .text_color(palette::TEXT)
-                                .child(if notes.is_empty() {
-                                    "No notes for this entry.".to_string()
-                                } else {
-                                    notes
-                                }),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(label("Password health"))
-                        .child(strength_card(strength, length)),
-                ),
-        )
-        .child(
-            h_flex()
-                .gap_2()
-                .p_3()
-                .border_t_1()
-                .border_color(palette::BORDER)
-                .child(
+                .gap_1()
+                .child(label("Password health"))
+                .child(if has_password {
+                    strength_card(strength, length).into_any_element()
+                } else {
                     div()
-                        .id("detail-copy-password")
-                        .flex_1()
-                        .child(toolbar_button("Copy password", Some(AppIcon::Key), true))
-                        .on_click(cx.listener({
-                            let state_for_click = state_entity.clone();
-                            move |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                                copy_value(
-                                    CopyValueKind::Password,
-                                    &state_for_click,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        })),
-                )
-                .child(
-                    div()
-                        .id("detail-copy-username")
-                        .child(toolbar_button("User", Some(AppIcon::Note), false))
-                        .on_click(cx.listener({
-                            let state_for_click = state_entity.clone();
-                            move |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                                copy_value(
-                                    CopyValueKind::Username,
-                                    &state_for_click,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        })),
-                ),
-        )
+                        .p_3()
+                        .rounded(px(6.))
+                        .bg(palette::PANEL)
+                        .border_1()
+                        .border_color(palette::BORDER)
+                        .text_xs()
+                        .text_color(palette::TEXT_FAINT)
+                        .child("No password stored for this entry.")
+                        .into_any_element()
+                }),
+        );
+
+    let username_present = !entry.username.is_empty();
+    let url_present = !entry.url.is_empty();
+
+    let footer = h_flex()
+        .flex_shrink_0()
+        .gap_2()
+        .p_3()
+        .border_t_1()
+        .border_color(palette::BORDER)
+        .child(action_button(
+            "detail-copy-password",
+            "Copy password",
+            AppIcon::Key,
+            ActionStyle::Primary,
+            has_password,
+            true,
+            CopyValueKind::Password,
+            state_entity.clone(),
+            cx,
+        ))
+        .child(action_button(
+            "detail-copy-username",
+            "User",
+            AppIcon::Note,
+            ActionStyle::Default,
+            username_present,
+            false,
+            CopyValueKind::Username,
+            state_entity.clone(),
+            cx,
+        ))
+        .child(action_button(
+            "detail-copy-url",
+            "URL",
+            AppIcon::Cloud,
+            ActionStyle::Default,
+            url_present,
+            false,
+            CopyValueKind::Url,
+            state_entity.clone(),
+            cx,
+        ));
+
+    v_flex()
+        .h_full()
+        .min_h(px(0.))
+        .min_w(px(0.))
+        .overflow_hidden()
+        .child(header)
+        .child(body_col)
+        .child(footer)
+}
+
+fn value_or_dash(value: &str) -> String {
+    if value.is_empty() {
+        "—".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn copy_value(

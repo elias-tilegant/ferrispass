@@ -157,6 +157,8 @@ pub fn footer_chip(text: impl Into<String>, _cx: &gpui::App) -> AnyElement {
 }
 
 /// Form field row with a label above an input-like display value.
+/// Long values are clipped with an ellipsis so the detail panel stays a fixed shape;
+/// the user can copy the full value via the bottom action buttons.
 pub fn detail_row(
     label_text: &'static str,
     value: impl Into<String>,
@@ -168,11 +170,13 @@ pub fn detail_row(
 
     v_flex()
         .gap_1()
+        .min_w(px(0.))
         .child(label(label_text))
         .child(
             div()
-                .min_h(px(34.))
+                .h(px(34.))
                 .w_full()
+                .min_w(px(0.))
                 .rounded(px(6.))
                 .border_1()
                 .border_color(palette::BORDER)
@@ -180,6 +184,7 @@ pub fn detail_row(
                 .px_3()
                 .py_2()
                 .text_sm()
+                .truncate()
                 .when(mono, |this| this.font_family("JetBrains Mono"))
                 .child(display),
         )
