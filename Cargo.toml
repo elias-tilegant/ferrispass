@@ -13,6 +13,7 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 rust-embed = "8"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+zxcvbn = { version = "3", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"

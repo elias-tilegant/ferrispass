@@ -1,5 +1,5 @@
 mod document;
 mod repository;
 
-pub use document::VaultDocument;
+pub use document::{StrengthReport, VaultDocument};
 pub use repository::KeePassRepository;

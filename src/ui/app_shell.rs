@@ -11,8 +11,10 @@ use crate::{
 };
 use gpui::{
     AppContext as _, ClickEvent, ClipboardItem, Context, Entity, InteractiveElement as _,
-    ParentElement as _, PathPromptOptions, Render, Styled as _, Subscription, Window, div,
+    ParentElement as _, PathPromptOptions, Render, ScrollStrategy, Styled as _, Subscription,
+    Task, Window, div,
 };
+use std::time::Duration;
 use gpui_component::{
     ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
     input::{InputEvent, InputState},
@@ -32,6 +34,10 @@ pub struct AppShell {
     /// render — without it the list resets to the top on every re-render and
     /// mouse-wheel events appear to do nothing.
     entry_list_scroll: VirtualListScrollHandle,
+    /// Held debounce task for the search input. Replacing it cancels the prior task
+    /// (GPUI cancels tasks on drop unless `.detach()`-ed), so only the latest
+    /// keystroke gets to fire the actual filter rebuild.
+    search_debounce: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -69,6 +75,7 @@ impl AppShell {
             new_entry_password_input,
             new_entry_url_input,
             entry_list_scroll: VirtualListScrollHandle::new(),
+            search_debounce: None,
             _subscriptions,
         }
     }
@@ -283,11 +290,35 @@ impl AppShell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(event, InputEvent::Change) {
-            let query = search_input.read(cx).value().to_string();
-            self.state
-                .update(cx, |state, cx| state.set_search_query(query, cx));
+        if !matches!(event, InputEvent::Change) {
+            return;
         }
+        let query = search_input.read(cx).value().to_string();
+        // Empty query — apply immediately so closing search feels instant.
+        if query.is_empty() {
+            self.search_debounce = None;
+            self.state
+                .update(cx, |state, cx| state.set_search_query(String::new(), cx));
+            self.entry_list_scroll
+                .scroll_to_item(0, ScrollStrategy::Top);
+            return;
+        }
+        // 150ms is short enough to feel live as you type, long enough to skip the
+        // intermediate filter rebuilds while you're still typing a word.
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                shell
+                    .state
+                    .update(cx, |state, cx| state.set_search_query(query, cx));
+                shell
+                    .entry_list_scroll
+                    .scroll_to_item(0, ScrollStrategy::Top);
+            });
+        });
+        self.search_debounce = Some(task);
     }
 
     pub fn prompt_for_vault_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {

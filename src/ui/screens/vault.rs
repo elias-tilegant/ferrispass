@@ -624,7 +624,12 @@ fn vault_split(
             shell.entry_list_scroll().clone(),
             cx,
         ))
-        .child(entry_detail(selected_entry, shell.state().clone(), cx))
+        .child(entry_detail(
+            selected_entry,
+            browser.selected_strength,
+            shell.state().clone(),
+            cx,
+        ))
 }
 
 /// One row in the virtual entry list — either a section heading or an index
@@ -960,11 +965,13 @@ fn entry_row(
 
 fn entry_detail(
     selected: Option<VaultEntry>,
+    selected_strength: Option<crate::keepass::StrengthReport>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let body: AnyElement = match selected {
-        Some(entry) => entry_detail_body(entry, state_entity, cx).into_any_element(),
+        Some(entry) => entry_detail_body(entry, selected_strength, state_entity, cx)
+            .into_any_element(),
         None => v_flex()
             .flex_1()
             .items_center()
@@ -999,6 +1006,7 @@ fn entry_detail(
 
 fn entry_detail_body(
     entry: VaultEntry,
+    selected_strength: Option<crate::keepass::StrengthReport>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
@@ -1006,8 +1014,12 @@ fn entry_detail_body(
     let username = entry.username.clone();
     let url = entry.url.clone();
     let notes = entry.notes.clone();
-    let strength = entry.strength;
-    let length = entry.password_length;
+    // Prefer the real zxcvbn report; fall back to the synthesized snapshot value
+    // (length-based) when the entry has no decryptable password.
+    let (strength, length, bits) = match selected_strength {
+        Some(report) => (report.strength, report.length, Some(report.bits)),
+        None => (entry.strength, entry.password_length, None),
+    };
     let group = entry
         .group_path
         .last()
@@ -1142,7 +1154,7 @@ fn entry_detail_body(
                 .gap_1()
                 .child(label("Password health"))
                 .child(if has_password {
-                    strength_card(strength, length).into_any_element()
+                    strength_card(strength, length, bits).into_any_element()
                 } else {
                     div()
                         .p_3()

@@ -1,5 +1,5 @@
 use crate::domain::{VaultEntry, VaultSnapshot};
-use crate::keepass::VaultDocument;
+use crate::keepass::{StrengthReport, VaultDocument};
 use gpui::Context;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -34,6 +34,10 @@ pub enum VaultStatus {
         /// `vault_browser()` cheap on every render frame, which keeps scrolling
         /// smooth on large vaults (3 500+ entries).
         visible_entries: Rc<Vec<VaultEntry>>,
+        /// Real `zxcvbn` score for the currently-selected entry. Computed once
+        /// per selection change so the detail view can render an accurate bar
+        /// without paying the ~1-5 ms zxcvbn cost on every frame.
+        selected_strength: Option<StrengthReport>,
     },
     Error {
         message: String,
@@ -137,6 +141,7 @@ pub struct VaultBrowserModel {
     /// the same allocation.
     pub entries: Rc<Vec<VaultEntry>>,
     pub selected_entry: Option<VaultEntry>,
+    pub selected_strength: Option<StrengthReport>,
     pub search_query: String,
     pub showing_search_results: bool,
 }
@@ -235,6 +240,9 @@ impl AppState {
                     snapshot.root.entries.first().map(|entry| entry.id.clone());
                 let visible_entries =
                     Rc::new(entries_for_selection(snapshot, &selection, ""));
+                let selected_strength = selected_entry_id
+                    .as_deref()
+                    .and_then(|id| document.strength_for_entry(id));
 
                 VaultStatus::Open {
                     path,
@@ -243,6 +251,7 @@ impl AppState {
                     selected_entry_id,
                     search_query: String::new(),
                     visible_entries,
+                    selected_strength,
                 }
             }
             Err(message) => VaultStatus::AwaitingPassword {
@@ -306,6 +315,7 @@ impl AppState {
             selected_entry_id,
             search_query,
             visible_entries,
+            selected_strength,
             ..
         } = &mut self.vault
         else {
@@ -321,6 +331,9 @@ impl AppState {
         search_query.clear();
         let entries = entries_for_selection(snapshot, selection, "");
         *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+        *selected_strength = selected_entry_id
+            .as_deref()
+            .and_then(|id| document.strength_for_entry(id));
         *visible_entries = Rc::new(entries);
         cx.notify();
     }
@@ -332,6 +345,7 @@ impl AppState {
             selected_entry_id,
             search_query,
             visible_entries,
+            selected_strength,
             ..
         } = &mut self.vault
         else {
@@ -344,6 +358,9 @@ impl AppState {
         search_query.clear();
         let entries = entries_for_selection(document.snapshot(), selection, "");
         *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+        *selected_strength = selected_entry_id
+            .as_deref()
+            .and_then(|id| document.strength_for_entry(id));
         *visible_entries = Rc::new(entries);
         cx.notify();
     }
@@ -354,6 +371,7 @@ impl AppState {
         let VaultStatus::Open {
             document,
             selected_entry_id,
+            selected_strength,
             ..
         } = &mut self.vault
         else {
@@ -361,6 +379,7 @@ impl AppState {
         };
 
         if document.snapshot().find_entry(&entry_id).is_some() {
+            *selected_strength = document.strength_for_entry(&entry_id);
             *selected_entry_id = Some(entry_id);
             cx.notify();
         }
@@ -375,6 +394,7 @@ impl AppState {
             selected_entry_id,
             search_query,
             visible_entries,
+            selected_strength,
             ..
         } = &mut self.vault
         else {
@@ -393,6 +413,9 @@ impl AppState {
 
         if !selected_entry_is_visible {
             *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+            *selected_strength = selected_entry_id
+                .as_deref()
+                .and_then(|id| document.strength_for_entry(id));
         }
 
         *visible_entries = Rc::new(entries);
@@ -406,6 +429,7 @@ impl AppState {
             selected_entry_id,
             search_query,
             visible_entries,
+            selected_strength,
             ..
         } = &mut self.vault
         else {
@@ -419,6 +443,9 @@ impl AppState {
         search_query.clear();
         let entries = entries_for_selection(document.snapshot(), selection, "");
         *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+        *selected_strength = selected_entry_id
+            .as_deref()
+            .and_then(|id| document.strength_for_entry(id));
         *visible_entries = Rc::new(entries);
         cx.notify();
     }
@@ -447,6 +474,7 @@ impl AppState {
             selected_entry_id,
             search_query,
             visible_entries,
+            selected_strength,
             ..
         } = &self.vault
         else {
@@ -471,6 +499,7 @@ impl AppState {
             selected_entry_id: selected_entry.as_ref().map(|entry| entry.id.clone()),
             entries: Rc::clone(visible_entries),
             selected_entry,
+            selected_strength: *selected_strength,
             search_query: search_query.clone(),
             showing_search_results,
         })

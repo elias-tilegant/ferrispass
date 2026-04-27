@@ -9,7 +9,11 @@ use crate::ui::palette;
 use crate::ui::widgets::atoms::label;
 
 /// Render the entry-detail "Password health" card.
-pub fn strength_card(strength: Strength, length: usize) -> AnyElement {
+///
+/// `bits` is the real `log2(zxcvbn.guesses())` when available; the legacy callers
+/// that only know length pass `None` and we fall back to a rough length-based
+/// estimate so the card never lies about being "0 bits" for unknown passwords.
+pub fn strength_card(strength: Strength, length: usize, bits: Option<u32>) -> AnyElement {
     let (color, soft, label_text) = match strength {
         Strength::Weak => (palette::RED, palette::SIDEBAR, "Weak"),
         Strength::Fair => (palette::YELLOW, palette::SIDEBAR, "Fair"),
@@ -17,7 +21,9 @@ pub fn strength_card(strength: Strength, length: usize) -> AnyElement {
     };
 
     let segments = strength.fill_segments(10);
-    let bits_estimate = (length as f32 * 6.5) as usize;
+    let bits_display = bits
+        .map(|b| b as usize)
+        .unwrap_or_else(|| (length as f32 * 6.5) as usize);
 
     v_flex()
         .gap_2()
@@ -41,7 +47,7 @@ pub fn strength_card(strength: Strength, length: usize) -> AnyElement {
                     div()
                         .text_xs()
                         .text_color(palette::TEXT_FAINT)
-                        .child(format!("· {length} chars · {bits_estimate} bits")),
+                        .child(format!("· {length} chars · {bits_display} bits")),
                 ),
         )
         .child({
