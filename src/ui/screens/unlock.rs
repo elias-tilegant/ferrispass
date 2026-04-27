@@ -31,9 +31,9 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             v_flex()
                 .w(px(420.))
                 .p_10()
-                .bg(palette::PANEL)
+                .bg(palette::panel())
                 .border_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .rounded(px(12.))
                 .gap_5()
                 .child(
@@ -44,16 +44,16 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                             div()
                                 .size(px(40.))
                                 .rounded(px(8.))
-                                .bg(palette::BLUE_SOFT)
+                                .bg(palette::blue_soft())
                                 .border_1()
-                                .border_color(palette::BLUE_BORDER)
+                                .border_color(palette::blue_border())
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .child(
                                     gpui_component::Icon::from(AppIcon::Lock)
                                         .with_size(gpui_component::Size::Size(px(18.)))
-                                        .text_color(palette::BLUE),
+                                        .text_color(palette::blue()),
                                 ),
                         )
                         .child(
@@ -68,7 +68,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(palette::TEXT_MUTED)
+                                        .text_color(palette::text_muted())
                                         .font_family("JetBrains Mono")
                                         .child("OneDrive · synced 2 minutes ago"),
                                 ),
@@ -90,7 +90,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(palette::TEXT_FAINT)
+                                        .text_color(palette::text_faint())
                                         .child("(optional)"),
                                 ),
                         )
@@ -101,13 +101,13 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .gap_2()
                         .items_center()
                         .text_xs()
-                        .text_color(palette::TEXT_MUTED)
+                        .text_color(palette::text_muted())
                         .child(
                             div()
                                 .size(px(14.))
                                 .rounded(px(3.))
-                                .bg(palette::BLUE)
-                                .text_color(palette::PANEL)
+                                .bg(palette::blue())
+                                .text_color(palette::panel())
                                 .text_xs()
                                 .flex()
                                 .items_center()
@@ -117,7 +117,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .child("Remember in keychain for 8 hours"),
                 )
                 .when_some(prompt.error.clone(), |this, error| {
-                    this.child(div().text_sm().text_color(palette::RED).child(error))
+                    this.child(div().text_sm().text_color(palette::red()).child(error))
                 })
                 .child(
                     div()
@@ -133,18 +133,18 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     div()
                         .pt_4()
                         .border_t_1()
-                        .border_color(palette::BORDER)
+                        .border_color(palette::border())
                         .child(
                             h_flex()
                                 .items_center()
                                 .justify_between()
                                 .text_xs()
-                                .text_color(palette::TEXT_FAINT)
+                                .text_color(palette::text_faint())
                                 .child("Touch ID available")
                                 .child(
                                     div()
                                         .id("cancel-unlock")
-                                        .text_color(palette::BLUE)
+                                        .text_color(palette::blue())
                                         .child("Cancel")
                                         .on_click(cx.listener(
                                             |_: &mut AppShell, _: &ClickEvent, window, cx| {
@@ -171,16 +171,16 @@ fn primary_button(label: &'static str, icon: AppIcon) -> impl gpui::IntoElement 
         .gap_2()
         .items_center()
         .justify_center()
-        .bg(palette::BLUE)
+        .bg(palette::blue())
         .border_1()
-        .border_color(palette::BLUE_HOVER)
-        .text_color(palette::PANEL)
+        .border_color(palette::blue_hover())
+        .text_color(palette::panel())
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .child(
             gpui_component::Icon::from(icon)
                 .with_size(gpui_component::Size::Size(px(14.)))
-                .text_color(palette::PANEL),
+                .text_color(palette::panel()),
         )
         .child(label)
 }

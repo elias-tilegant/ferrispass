@@ -59,7 +59,7 @@ pub fn favicon(letter: &str, palette_index: u8, size: f32) -> AnyElement {
         .size(px(size))
         .rounded(px((size / 4.5).max(6.0)))
         .bg(bg)
-        .text_color(palette::PANEL)
+        .text_color(palette::panel())
         .font_weight(gpui::FontWeight::BOLD)
         .text_sm()
         .flex()

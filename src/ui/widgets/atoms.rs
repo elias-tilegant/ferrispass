@@ -10,7 +10,7 @@ pub fn label(text: impl Into<String>) -> AnyElement {
     div()
         .text_xs()
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(palette::TEXT_MUTED)
+        .text_color(palette::text_muted())
         .child(text.into())
         .into_any_element()
 }
@@ -20,7 +20,7 @@ pub fn section_heading(text: impl Into<String>) -> AnyElement {
     div()
         .text_xs()
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(palette::TEXT_FAINT)
+        .text_color(palette::text_faint())
         .child(text.into())
         .into_any_element()
 }
@@ -36,10 +36,10 @@ pub enum ChipTone {
 impl ChipTone {
     fn colors(self) -> (Hsla, Hsla, Hsla) {
         match self {
-            ChipTone::Blue => (palette::BLUE_SOFT, palette::BLUE, palette::BLUE_BORDER),
-            ChipTone::Orange => (palette::ORANGE_SOFT, palette::ORANGE_DEEP, palette::ORANGE_BORDER),
-            ChipTone::Green => (palette::GREEN_SOFT, palette::GREEN, palette::GREEN_BORDER),
-            ChipTone::Gray => (palette::SIDEBAR, palette::TEXT_MUTED, palette::BORDER),
+            ChipTone::Blue => (palette::blue_soft(), palette::blue(), palette::blue_border()),
+            ChipTone::Orange => (palette::orange_soft(), palette::orange_deep(), palette::orange_border()),
+            ChipTone::Green => (palette::green_soft(), palette::green(), palette::green_border()),
+            ChipTone::Gray => (palette::sidebar(), palette::text_muted(), palette::border()),
         }
     }
 }

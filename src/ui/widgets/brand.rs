@@ -11,14 +11,14 @@ pub fn brand(size: f32) -> AnyElement {
     div()
         .size(px(size))
         .rounded(px((size / 4.5).max(6.0)))
-        .bg(palette::BLUE)
+        .bg(palette::blue())
         .flex()
         .items_center()
         .justify_center()
         .child(
             Icon::from(AppIcon::Key)
                 .with_size(gpui_component::Size::Size(px((size * 0.55).round())))
-                .text_color(palette::ORANGE),
+                .text_color(palette::orange()),
         )
         .into_any_element()
 }

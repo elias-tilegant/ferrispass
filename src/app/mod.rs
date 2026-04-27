@@ -27,7 +27,7 @@ pub fn run() {
         }
 
         gpui_component::init(cx);
-        ui_theme::apply(cx);
+        ui_theme::init_from_system(cx);
         actions::init(cx);
         open_main_window(cx);
     });

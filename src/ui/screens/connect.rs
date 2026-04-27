@@ -22,9 +22,9 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .child(
             v_flex()
                 .w(px(600.))
-                .bg(palette::PANEL)
+                .bg(palette::panel())
                 .border_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .rounded(px(12.))
                 .overflow_hidden()
                 .child(
@@ -50,7 +50,7 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(palette::TEXT_MUTED)
+                                        .text_color(palette::text_muted())
                                         .child(
                                             "Your .kdbx file is encrypted on this device before it ever leaves. The provider only sees ciphertext.",
                                         ),
@@ -67,7 +67,7 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                             name: "OneDrive",
                             meta: "Recommended · Microsoft account",
                             letter: "O",
-                            color: palette::BLUE,
+                            color: palette::blue(),
                             selected: true,
                         }))
                         .child(provider_row(Provider {
@@ -93,19 +93,19 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .items_center()
                         .px_8()
                         .py_4()
-                        .bg(palette::SIDEBAR)
+                        .bg(palette::sidebar())
                         .border_t_1()
-                        .border_color(palette::BORDER)
+                        .border_color(palette::border())
                         .child(
                             gpui_component::Icon::from(AppIcon::Shield)
                                 .with_size(gpui_component::Size::Size(px(14.)))
-                                .text_color(palette::TEXT_MUTED),
+                                .text_color(palette::text_muted()),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child(
                                     "KeePass RS uses the official Microsoft Graph API. We never see your password.",
                                 ),
@@ -116,12 +116,12 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .h(px(30.))
                                 .px(px(12.))
                                 .rounded(px(6.))
-                                .bg(palette::PANEL)
+                                .bg(palette::panel())
                                 .border_1()
-                                .border_color(palette::BORDER_STRONG)
+                                .border_color(palette::border_strong())
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(palette::TEXT)
+                                .text_color(palette::text())
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -138,12 +138,12 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .h(px(30.))
                                 .px(px(14.))
                                 .rounded(px(6.))
-                                .bg(palette::BLUE)
+                                .bg(palette::blue())
                                 .border_1()
-                                .border_color(palette::BLUE_HOVER)
+                                .border_color(palette::blue_hover())
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(palette::PANEL)
+                                .text_color(palette::panel())
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -152,7 +152,7 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .child(
                                     gpui_component::Icon::from(gpui_component::IconName::ArrowRight)
                                         .with_size(gpui_component::Size::Size(px(13.)))
-                                        .text_color(palette::PANEL),
+                                        .text_color(palette::panel()),
                                 )
                                 .on_click(cx.listener(
                                     |_: &mut AppShell, _: &ClickEvent, window, cx| {

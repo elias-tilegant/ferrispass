@@ -83,9 +83,9 @@ fn sidebar(
         .w(px(220.))
         .flex_shrink_0()
         .h_full()
-        .bg(palette::SIDEBAR)
+        .bg(palette::sidebar())
         .border_r_1()
-        .border_color(palette::BORDER)
+        .border_color(palette::border())
         .child(
             h_flex()
                 .gap_2()
@@ -103,7 +103,7 @@ fn sidebar(
                             div()
                                 .text_xs()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(palette::TEXT)
+                                .text_color(palette::text())
                                 .child(summary.title.clone()),
                         )
                         .child(
@@ -111,8 +111,8 @@ fn sidebar(
                                 .gap_1()
                                 .items_center()
                                 .text_xs()
-                                .text_color(palette::GREEN)
-                                .child(dot(palette::GREEN, 6.0))
+                                .text_color(palette::green())
+                                .child(dot(palette::green(), 6.0))
                                 .child(if summary.is_open { "Synced" } else { "Locked" }),
                         ),
                 ),
@@ -141,13 +141,13 @@ fn sidebar(
                 .px_3()
                 .py_2()
                 .border_t_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .text_xs()
-                .text_color(palette::TEXT_MUTED)
+                .text_color(palette::text_muted())
                 .child(
                     gpui_component::Icon::from(AppIcon::Cloud)
                         .with_size(gpui_component::Size::Size(px(13.)))
-                        .text_color(palette::BLUE),
+                        .text_color(palette::blue()),
                 )
                 .child(
                     div()
@@ -160,7 +160,7 @@ fn sidebar(
                         .child(
                             gpui_component::Icon::from(gpui_component::IconName::Settings)
                                 .with_size(gpui_component::Size::Size(px(13.)))
-                                .text_color(palette::TEXT_MUTED),
+                                .text_color(palette::text_muted()),
                         )
                         .on_click(cx.listener(
                             |_: &mut AppShell, _: &ClickEvent, window, cx| {
@@ -190,7 +190,7 @@ fn library_section(
             "All items",
             Some(entry_count),
             selection.is_all_items(),
-            palette::BLUE,
+            palette::blue(),
             state_entity.clone(),
             L::AllItems,
             cx,
@@ -201,7 +201,7 @@ fn library_section(
             "Favorites",
             Some(starred_count),
             selection.is_favorites(),
-            palette::ORANGE,
+            palette::orange(),
             state_entity.clone(),
             L::Favorites,
             cx,
@@ -212,7 +212,7 @@ fn library_section(
             "Recently used",
             None,
             selection.is_recently_used(),
-            palette::TEXT_MUTED,
+            palette::text_muted(),
             state_entity.clone(),
             L::RecentlyUsed,
             cx,
@@ -223,7 +223,7 @@ fn library_section(
             "Trash",
             None,
             selection.is_trash(),
-            palette::TEXT_MUTED,
+            palette::text_muted(),
             state_entity,
             L::Trash,
             cx,
@@ -236,7 +236,7 @@ fn groups_section(
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
-    let palette_colors = [palette::BLUE, palette::ORANGE, palette::GREEN, palette::TEXT_MUTED];
+    let palette_colors = [palette::blue(), palette::orange(), palette::green(), palette::text_muted()];
     let selected_group = selection.group_id().unwrap_or_default().to_string();
 
     let mut col = v_flex()
@@ -288,7 +288,7 @@ fn tags_section(
             "2FA enabled",
             Some(twofa_count),
             selected_tag.eq_ignore_ascii_case("2FA"),
-            palette::BLUE,
+            palette::blue(),
             state_entity.clone(),
             L::Tag("2FA".to_string()),
             cx,
@@ -299,7 +299,7 @@ fn tags_section(
             "Personal",
             None,
             selected_tag.eq_ignore_ascii_case("Personal"),
-            palette::GREEN,
+            palette::green(),
             state_entity.clone(),
             L::Tag("Personal".to_string()),
             cx,
@@ -310,7 +310,7 @@ fn tags_section(
             "Work",
             None,
             selected_tag.eq_ignore_ascii_case("Work"),
-            palette::YELLOW,
+            palette::yellow(),
             state_entity,
             L::Tag("Work".to_string()),
             cx,
@@ -359,13 +359,13 @@ fn nav_pill(
     icon_color: Hsla,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl gpui::IntoElement {
-    let fg = if selected { palette::PANEL } else { palette::TEXT };
+    let fg = if selected { palette::panel() } else { palette::text() };
     let count_color = if selected {
-        palette::PANEL
+        palette::panel()
     } else {
-        palette::TEXT_FAINT
+        palette::text_faint()
     };
-    let icon_resolved = if selected { palette::PANEL } else { icon_color };
+    let icon_resolved = if selected { palette::panel() } else { icon_color };
     let label_owned = label_text.to_string();
 
     h_flex()
@@ -379,7 +379,7 @@ fn nav_pill(
         // Selected: solid blue. Unselected: transparent so the sidebar shows through,
         // letting the hover overlay (BORDER tone) produce a visible state change.
         .bg(if selected {
-            palette::BLUE
+            palette::blue()
         } else {
             gpui::transparent_black()
         })
@@ -391,7 +391,7 @@ fn nav_pill(
             gpui::FontWeight::NORMAL
         })
         .when(!selected, |this| {
-            this.hover(|s| s.bg(palette::BORDER))
+            this.hover(|s| s.bg(palette::border()))
         })
         .on_click(on_click)
         .child(
@@ -456,8 +456,8 @@ fn workspace_toolbar(
         .gap_2()
         .items_center()
         .border_b_1()
-        .border_color(palette::BORDER)
-        .bg(palette::PANEL)
+        .border_color(palette::border())
+        .bg(palette::panel())
         .child(
             div()
                 .id("toolbar-new-entry")
@@ -476,7 +476,7 @@ fn workspace_toolbar(
             div()
                 .w(px(1.))
                 .h(px(18.))
-                .bg(palette::BORDER),
+                .bg(palette::border()),
         )
         .child(div().id("toolbar-group").child(toolbar_button(
             "Group",
@@ -527,9 +527,9 @@ fn toolbar_button(
     primary: bool,
 ) -> impl gpui::IntoElement {
     let (bg, fg, bd) = if primary {
-        (palette::BLUE, palette::PANEL, palette::BLUE_HOVER)
+        (palette::blue(), palette::panel(), palette::blue_hover())
     } else {
-        (palette::PANEL, palette::TEXT, palette::BORDER_STRONG)
+        (palette::panel(), palette::text(), palette::border_strong())
     };
 
     h_flex()
@@ -573,12 +573,12 @@ fn action_button(
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let (bg, fg, bd) = match (style, enabled) {
-        (ActionStyle::Primary, true) => (palette::BLUE, palette::PANEL, palette::BLUE_HOVER),
+        (ActionStyle::Primary, true) => (palette::blue(), palette::panel(), palette::blue_hover()),
         (ActionStyle::Primary, false) => {
-            (palette::SIDEBAR, palette::TEXT_FAINT, palette::BORDER_STRONG)
+            (palette::sidebar(), palette::text_faint(), palette::border_strong())
         }
-        (ActionStyle::Default, true) => (palette::PANEL, palette::TEXT, palette::BORDER_STRONG),
-        (ActionStyle::Default, false) => (palette::SIDEBAR, palette::TEXT_FAINT, palette::BORDER),
+        (ActionStyle::Default, true) => (palette::panel(), palette::text(), palette::border_strong()),
+        (ActionStyle::Default, false) => (palette::sidebar(), palette::text_faint(), palette::border()),
     };
 
     let mut row = div().id(id);
@@ -740,7 +740,7 @@ fn entry_list(
             .items_center()
             .justify_center()
             .text_sm()
-            .text_color(palette::TEXT_MUTED)
+            .text_color(palette::text_muted())
             .child("No entries")
             .into_any_element()
     } else {
@@ -806,15 +806,15 @@ fn entry_list(
         .flex_shrink_0()
         .overflow_hidden()
         .border_r_1()
-        .border_color(palette::BORDER)
-        .bg(palette::PANEL)
+        .border_color(palette::border())
+        .bg(palette::panel())
         .child(
             v_flex()
                 .flex_shrink_0()
                 .gap_2()
                 .p_4()
                 .border_b_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .child(
                     h_flex()
                         .justify_between()
@@ -825,14 +825,14 @@ fn entry_list(
                                 .min_w(px(0.))
                                 .truncate()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(palette::TEXT)
+                                .text_color(palette::text())
                                 .child(group_name.to_string()),
                         )
                         .child(
                             div()
                                 .flex_shrink_0()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child(format!("{} entries", total)),
                         ),
                 )
@@ -841,7 +841,7 @@ fn entry_list(
                         div()
                             .truncate()
                             .text_xs()
-                            .text_color(palette::TEXT_MUTED)
+                            .text_color(palette::text_muted())
                             .child(format!("Across vault for \"{search_query}\"")),
                     )
                 }),
@@ -857,7 +857,7 @@ fn list_section_heading(label: &'static str, count: usize) -> impl gpui::IntoEle
         .pb_1()
         .text_xs()
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(palette::TEXT_FAINT)
+        .text_color(palette::text_faint())
         .child(label)
         .child(
             div()
@@ -882,11 +882,11 @@ fn entry_row(
     let fav_letter = entry.favicon.letter.clone();
     let fav_palette = entry.favicon.palette_index;
 
-    let bg = if selected { palette::BLUE_SOFT } else { palette::PANEL };
+    let bg = if selected { palette::blue_soft() } else { palette::panel() };
     let border = if selected {
-        palette::BLUE_BORDER
+        palette::blue_border()
     } else {
-        palette::PANEL
+        palette::panel()
     };
 
     h_flex()
@@ -906,7 +906,7 @@ fn entry_row(
         .border_1()
         .border_color(border)
         .when(!selected, |this| {
-            this.hover(|s| s.bg(palette::SIDEBAR).border_color(palette::BORDER))
+            this.hover(|s| s.bg(palette::sidebar()).border_color(palette::border()))
         })
         .child(favicon(&fav_letter, fav_palette, 28.))
                 .child(
@@ -927,7 +927,7 @@ fn entry_row(
                                         .truncate()
                                         .text_sm()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(palette::TEXT)
+                                        .text_color(palette::text())
                                         .child(title),
                                 )
                                 .when(starred, |this| {
@@ -936,7 +936,7 @@ fn entry_row(
                                             gpui_component::IconName::StarFill,
                                         )
                                         .with_size(gpui_component::Size::Size(px(11.)))
-                                        .text_color(palette::ORANGE),
+                                        .text_color(palette::orange()),
                                     )
                                 }),
                         )
@@ -944,7 +944,7 @@ fn entry_row(
                             div()
                                 .truncate()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .font_family("JetBrains Mono")
                                 .child(if username.is_empty() {
                                     if url.is_empty() { "—".to_string() } else { url }
@@ -976,7 +976,7 @@ fn entry_row(
                             div()
                                 .text_xs()
                                 .whitespace_nowrap()
-                                .text_color(palette::TEXT_FAINT)
+                                .text_color(palette::text_faint())
                                 .child(updated),
                         ),
                 )
@@ -996,7 +996,7 @@ fn entry_detail(
             .items_center()
             .justify_center()
             .gap_1()
-            .text_color(palette::TEXT_MUTED)
+            .text_color(palette::text_muted())
             .child(
                 div()
                     .text_base()
@@ -1017,9 +1017,9 @@ fn entry_detail(
         .min_h(px(0.))
         .h_full()
         .overflow_hidden()
-        .bg(palette::SIDEBAR)
+        .bg(palette::sidebar())
         .border_l_1()
-        .border_color(palette::BORDER)
+        .border_color(palette::border())
         .child(body)
 }
 
@@ -1068,7 +1068,7 @@ fn entry_detail_body(
         .flex_shrink_0()
         .p_5()
         .border_b_1()
-        .border_color(palette::BORDER)
+        .border_color(palette::border())
         .child(
             h_flex()
                 .gap_3()
@@ -1078,7 +1078,7 @@ fn entry_detail_body(
                         .size(px(44.))
                         .rounded(px(9.))
                         .bg(fav_color)
-                        .text_color(palette::PANEL)
+                        .text_color(palette::panel())
                         .text_lg()
                         .font_weight(gpui::FontWeight::BOLD)
                         .flex()
@@ -1103,7 +1103,7 @@ fn entry_detail_body(
                             div()
                                 .truncate()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child(match updated {
                                     Some(updated) => {
                                         format!("Updated {updated} · in {group}")
@@ -1117,7 +1117,7 @@ fn entry_detail_body(
                     this.child(
                         gpui_component::Icon::from(gpui_component::IconName::StarFill)
                             .with_size(gpui_component::Size::Size(px(16.)))
-                            .text_color(palette::ORANGE),
+                            .text_color(palette::orange()),
                     )
                 }),
         );
@@ -1152,14 +1152,14 @@ fn entry_detail_body(
                         .min_h(px(54.))
                         .p_3()
                         .rounded(px(6.))
-                        .bg(palette::PANEL)
+                        .bg(palette::panel())
                         .border_1()
-                        .border_color(palette::BORDER)
+                        .border_color(palette::border())
                         .text_xs()
                         .text_color(if notes.is_empty() {
-                            palette::TEXT_FAINT
+                            palette::text_faint()
                         } else {
-                            palette::TEXT
+                            palette::text()
                         })
                         .child(if notes.is_empty() {
                             "No notes for this entry.".to_string()
@@ -1178,11 +1178,11 @@ fn entry_detail_body(
                     div()
                         .p_3()
                         .rounded(px(6.))
-                        .bg(palette::PANEL)
+                        .bg(palette::panel())
                         .border_1()
-                        .border_color(palette::BORDER)
+                        .border_color(palette::border())
                         .text_xs()
-                        .text_color(palette::TEXT_FAINT)
+                        .text_color(palette::text_faint())
                         .child("No password stored for this entry.")
                         .into_any_element()
                 }),
@@ -1196,7 +1196,7 @@ fn entry_detail_body(
         .gap_2()
         .p_3()
         .border_t_1()
-        .border_color(palette::BORDER)
+        .border_color(palette::border())
         .child(action_button(
             "detail-copy-password",
             "Copy password",
@@ -1282,13 +1282,13 @@ fn empty_panel(summary: &VaultSummary, cx: &mut Context<AppShell>) -> impl gpui:
             div()
                 .text_xl()
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(palette::TEXT)
+                .text_color(palette::text())
                 .child(summary.title.clone()),
         )
         .child(
             div()
                 .text_sm()
-                .text_color(palette::TEXT_MUTED)
+                .text_color(palette::text_muted())
                 .child(summary.subtitle.clone()),
         )
         .child(
@@ -1319,7 +1319,7 @@ fn opening_panel(summary: &VaultSummary) -> impl gpui::IntoElement {
         .child(
             div()
                 .text_sm()
-                .text_color(palette::TEXT_MUTED)
+                .text_color(palette::text_muted())
                 .child(summary.subtitle.clone()),
         )
 }
@@ -1332,16 +1332,16 @@ fn status_bar(summary: &VaultSummary) -> impl gpui::IntoElement {
         .items_center()
         .px_3()
         .border_t_1()
-        .border_color(palette::BORDER)
-        .bg(palette::SIDEBAR)
+        .border_color(palette::border())
+        .bg(palette::sidebar())
         .text_xs()
-        .text_color(palette::TEXT_MUTED)
+        .text_color(palette::text_muted())
         .font_family("JetBrains Mono")
         .child(
             h_flex()
                 .gap_1()
                 .items_center()
-                .child(dot(palette::GREEN, 6.0))
+                .child(dot(palette::green(), 6.0))
                 .child(if summary.is_open { "Unlocked" } else { "Locked" }),
         )
         .child(format!(

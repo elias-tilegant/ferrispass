@@ -15,9 +15,9 @@ use crate::ui::widgets::atoms::label;
 /// estimate so the card never lies about being "0 bits" for unknown passwords.
 pub fn strength_card(strength: Strength, length: usize, bits: Option<u32>) -> AnyElement {
     let (color, soft, label_text) = match strength {
-        Strength::Weak => (palette::RED, palette::SIDEBAR, "Weak"),
-        Strength::Fair => (palette::YELLOW, palette::SIDEBAR, "Fair"),
-        Strength::Strong => (palette::GREEN, palette::SIDEBAR, "Strong"),
+        Strength::Weak => (palette::red(), palette::sidebar(), "Weak"),
+        Strength::Fair => (palette::yellow(), palette::sidebar(), "Fair"),
+        Strength::Strong => (palette::green(), palette::sidebar(), "Strong"),
     };
 
     let segments = strength.fill_segments(10);
@@ -29,9 +29,9 @@ pub fn strength_card(strength: Strength, length: usize, bits: Option<u32>) -> An
         .gap_2()
         .p_2p5()
         .rounded(px(6.))
-        .bg(palette::PANEL)
+        .bg(palette::panel())
         .border_1()
-        .border_color(palette::BORDER)
+        .border_color(palette::border())
         .child(
             h_flex()
                 .items_center()
@@ -46,7 +46,7 @@ pub fn strength_card(strength: Strength, length: usize, bits: Option<u32>) -> An
                 .child(
                     div()
                         .text_xs()
-                        .text_color(palette::TEXT_FAINT)
+                        .text_color(palette::text_faint())
                         .child(format!("· {length} chars · {bits_display} bits")),
                 ),
         )
@@ -74,15 +74,15 @@ pub fn generator_card(length: usize, strength_label: &'static str, bits: usize) 
         .gap_3()
         .p_3()
         .rounded(px(6.))
-        .bg(palette::SIDEBAR)
+        .bg(palette::sidebar())
         .border_1()
-        .border_color(palette::BORDER)
+        .border_color(palette::border())
         .child(
             h_flex()
                 .items_center()
                 .justify_between()
                 .text_xs()
-                .text_color(palette::TEXT_MUTED)
+                .text_color(palette::text_muted())
                 .child(
                     h_flex()
                         .gap_1()
@@ -90,13 +90,13 @@ pub fn generator_card(length: usize, strength_label: &'static str, bits: usize) 
                         .child(
                             div()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(palette::TEXT)
+                                .text_color(palette::text())
                                 .child(length.to_string()),
                         ),
                 )
                 .child(
                     div()
-                        .text_color(palette::GREEN)
+                        .text_color(palette::green())
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(format!("{strength_label} · {bits} bits")),
                 ),
@@ -107,14 +107,14 @@ pub fn generator_card(length: usize, strength_label: &'static str, bits: usize) 
                 .h(px(4.))
                 .w_full()
                 .rounded(px(2.))
-                .bg(palette::PANEL)
+                .bg(palette::panel())
                 .border_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .child(
                     div()
                         .h_full()
                         .w(gpui::relative(position))
-                        .bg(palette::BLUE)
+                        .bg(palette::blue())
                         .rounded(px(2.)),
                 ),
         )
@@ -130,10 +130,10 @@ pub fn generator_card(length: usize, strength_label: &'static str, bits: usize) 
                             div()
                                 .size(px(13.))
                                 .rounded(px(3.))
-                                .bg(palette::BLUE)
+                                .bg(palette::blue())
                                 .border_1()
-                                .border_color(palette::BLUE)
-                                .text_color(palette::PANEL)
+                                .border_color(palette::blue())
+                                .text_color(palette::panel())
                                 .text_xs()
                                 .flex()
                                 .items_center()
@@ -143,7 +143,7 @@ pub fn generator_card(length: usize, strength_label: &'static str, bits: usize) 
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(palette::TEXT)
+                                .text_color(palette::text())
                                 .child(class),
                         ),
                 );
@@ -157,7 +157,7 @@ pub fn generator_card(length: usize, strength_label: &'static str, bits: usize) 
 pub fn footer_chip(text: impl Into<String>, _cx: &gpui::App) -> AnyElement {
     div()
         .text_xs()
-        .text_color(palette::TEXT_FAINT)
+        .text_color(palette::text_faint())
         .child(text.into())
         .into_any_element()
 }
@@ -185,8 +185,8 @@ pub fn detail_row(
                 .min_w(px(0.))
                 .rounded(px(6.))
                 .border_1()
-                .border_color(palette::BORDER)
-                .bg(palette::SIDEBAR)
+                .border_color(palette::border())
+                .bg(palette::sidebar())
                 .px_3()
                 .py_2()
                 .text_sm()

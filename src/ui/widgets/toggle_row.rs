@@ -11,7 +11,7 @@ pub fn toggle_row(label: &'static str, detail: &'static str, on: bool, last: boo
         .gap_3()
         .items_center()
         .p_3p5()
-        .when(!last, |this| this.border_b_1().border_color(palette::BORDER))
+        .when(!last, |this| this.border_b_1().border_color(palette::border()))
         .child(
             v_flex()
                 .gap_0p5()
@@ -20,13 +20,13 @@ pub fn toggle_row(label: &'static str, detail: &'static str, on: bool, last: boo
                     div()
                         .text_sm()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(palette::TEXT)
+                        .text_color(palette::text())
                         .child(label),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(palette::TEXT_MUTED)
+                        .text_color(palette::text_muted())
                         .child(detail),
                 ),
         )
@@ -40,7 +40,7 @@ fn switch_visual(on: bool) -> AnyElement {
         .w(px(32.))
         .h(px(18.))
         .rounded_full()
-        .bg(if on { palette::BLUE } else { palette::BORDER_STRONG })
+        .bg(if on { palette::blue() } else { palette::border_strong() })
         .child(
             div()
                 .absolute()
@@ -48,7 +48,7 @@ fn switch_visual(on: bool) -> AnyElement {
                 .left(px(if on { 16. } else { 2. }))
                 .size(px(14.))
                 .rounded_full()
-                .bg(palette::PANEL),
+                .bg(palette::panel()),
         )
         .into_any_element()
 }

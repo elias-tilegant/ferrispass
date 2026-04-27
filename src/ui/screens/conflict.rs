@@ -16,12 +16,12 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .h(px(30.))
         .px(px(14.))
         .rounded(px(6.))
-        .bg(palette::BLUE)
+        .bg(palette::blue())
         .border_1()
-        .border_color(palette::BLUE_HOVER)
+        .border_color(palette::blue_hover())
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(palette::PANEL)
+        .text_color(palette::panel())
         .flex()
         .items_center()
         .justify_center()
@@ -29,7 +29,7 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .child(
             gpui_component::Icon::from(gpui_component::IconName::Check)
                 .with_size(gpui_component::Size::Size(px(13.)))
-                .text_color(palette::PANEL),
+                .text_color(palette::panel()),
         )
         .child("Apply resolution")
         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
@@ -49,22 +49,22 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .px_6()
                 .py_3p5()
                 .border_b_1()
-                .border_color(palette::BORDER)
-                .bg(palette::ORANGE_SOFT)
+                .border_color(palette::border())
+                .bg(palette::orange_soft())
                 .child(
                     div()
                         .size(px(32.))
                         .rounded(px(7.))
-                        .bg(palette::PANEL)
+                        .bg(palette::panel())
                         .border_1()
-                        .border_color(palette::ORANGE_BORDER)
+                        .border_color(palette::orange_border())
                         .flex()
                         .items_center()
                         .justify_center()
                         .child(
                             gpui_component::Icon::from(AppIcon::Sync)
                                 .with_size(gpui_component::Size::Size(px(16.)))
-                                .text_color(palette::ORANGE),
+                                .text_color(palette::orange()),
                         ),
                 )
                 .child(
@@ -80,7 +80,7 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child(
                                     "Both this Mac and another device modified GitHub while offline. Pick a version or merge fields.",
                                 ),
@@ -142,8 +142,8 @@ fn fields(side_local: bool) -> Vec<Field> {
 }
 
 fn column(title: &'static str, device: &'static str, time: &'static str, selected: bool) -> AnyElement {
-    let header_bg = if selected { palette::BLUE_SOFT } else { palette::SIDEBAR };
-    let border = if selected { palette::BLUE } else { palette::BORDER };
+    let header_bg = if selected { palette::blue_soft() } else { palette::sidebar() };
+    let border = if selected { palette::blue() } else { palette::border() };
     let highlight_bg = gpui::Hsla {
         h: 0.072464,
         s: 0.851852,
@@ -156,7 +156,7 @@ fn column(title: &'static str, device: &'static str, time: &'static str, selecte
         .rounded(px(10.))
         .border_1()
         .border_color(border)
-        .bg(palette::PANEL)
+        .bg(palette::panel())
         .overflow_hidden()
         .child(
             h_flex()
@@ -164,16 +164,16 @@ fn column(title: &'static str, device: &'static str, time: &'static str, selecte
                 .items_center()
                 .p_3()
                 .border_b_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .bg(header_bg)
                 .child(
                     div()
                         .size(px(24.))
                         .rounded(px(5.))
-                        .bg(if selected { palette::BLUE } else { palette::PANEL })
+                        .bg(if selected { palette::blue() } else { palette::panel() })
                         .border_1()
-                        .border_color(if selected { palette::BLUE } else { palette::BORDER })
-                        .text_color(if selected { palette::PANEL } else { palette::TEXT_MUTED })
+                        .border_color(if selected { palette::blue() } else { palette::border() })
+                        .text_color(if selected { palette::panel() } else { palette::text_muted() })
                         .text_xs()
                         .flex()
                         .items_center()
@@ -193,7 +193,7 @@ fn column(title: &'static str, device: &'static str, time: &'static str, selecte
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .font_family("JetBrains Mono")
                                 .child(format!("{device} · {time}")),
                         ),
@@ -212,7 +212,7 @@ fn column(title: &'static str, device: &'static str, time: &'static str, selecte
             v_flex()
                 .gap_1()
                 .p_3()
-                .when(!last, |this| this.border_b_1().border_color(palette::BORDER))
+                .when(!last, |this| this.border_b_1().border_color(palette::border()))
                 .when(f.differs, |this| this.bg(highlight_bg))
                 .child(
                     h_flex()
@@ -222,7 +222,7 @@ fn column(title: &'static str, device: &'static str, time: &'static str, selecte
                             div()
                                 .text_xs()
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(palette::TEXT_FAINT)
+                                .text_color(palette::text_faint())
                                 .child(f.label),
                         )
                         .when(f.differs, |this| this.child(chip("Differs", ChipTone::Orange)))
@@ -231,7 +231,7 @@ fn column(title: &'static str, device: &'static str, time: &'static str, selecte
                 .child(
                     div()
                         .text_xs()
-                        .text_color(if f.meta { palette::TEXT_MUTED } else { palette::TEXT })
+                        .text_color(if f.meta { palette::text_muted() } else { palette::text() })
                         .font_family(if f.label == "Notes" { "" } else { "JetBrains Mono" })
                         .child(f.value),
                 ),

@@ -25,7 +25,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .right_0()
                 .bottom_0()
                 .left_0()
-                .bg(palette::TRANSPARENT_OVERLAY)
+                .bg(palette::transparent_overlay())
                 .flex()
                 .items_start()
                 .justify_center()
@@ -46,12 +46,12 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .h(px(30.))
         .px(px(12.))
         .rounded(px(6.))
-        .bg(palette::PANEL)
+        .bg(palette::panel())
         .border_1()
-        .border_color(palette::BORDER_STRONG)
+        .border_color(palette::border_strong())
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(palette::TEXT)
+        .text_color(palette::text())
         .flex()
         .items_center()
         .justify_center()
@@ -67,12 +67,12 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .h(px(30.))
         .px(px(14.))
         .rounded(px(6.))
-        .bg(palette::BLUE)
+        .bg(palette::blue())
         .border_1()
-        .border_color(palette::BLUE_HOVER)
+        .border_color(palette::blue_hover())
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(palette::PANEL)
+        .text_color(palette::panel())
         .flex()
         .items_center()
         .justify_center()
@@ -80,7 +80,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .child(
             gpui_component::Icon::from(gpui_component::IconName::Check)
                 .with_size(gpui_component::Size::Size(px(13.)))
-                .text_color(palette::PANEL),
+                .text_color(palette::panel()),
         )
         .child("Save entry")
         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
@@ -92,9 +92,9 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 
     v_flex()
         .w(px(540.))
-        .bg(palette::PANEL)
+        .bg(palette::panel())
         .border_1()
-        .border_color(palette::BORDER)
+        .border_color(palette::border())
         .rounded(px(10.))
         .overflow_hidden()
         .child(
@@ -104,19 +104,19 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .px_5()
                 .py_4()
                 .border_b_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .child(
                     div()
                         .size(px(28.))
                         .rounded(px(6.))
-                        .bg(palette::BLUE_SOFT)
+                        .bg(palette::blue_soft())
                         .flex()
                         .items_center()
                         .justify_center()
                         .child(
                             gpui_component::Icon::from(gpui_component::IconName::Plus)
                                 .with_size(gpui_component::Size::Size(px(14.)))
-                                .text_color(palette::BLUE),
+                                .text_color(palette::blue()),
                         ),
                 )
                 .child(
@@ -132,7 +132,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child("in Work"),
                         ),
                 ),
@@ -179,14 +179,14 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .items_center()
                 .px_5()
                 .py_3()
-                .bg(palette::SIDEBAR)
+                .bg(palette::sidebar())
                 .border_t_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .child(
                     div()
                         .flex_1()
                         .text_xs()
-                        .text_color(palette::TEXT_MUTED)
+                        .text_color(palette::text_muted())
                         .font_family("JetBrains Mono")
                         .child("Saves locally, syncs to OneDrive"),
                 )
@@ -203,16 +203,16 @@ fn generate_button() -> AnyElement {
         .gap_1p5()
         .items_center()
         .rounded(px(6.))
-        .bg(palette::ORANGE)
+        .bg(palette::orange())
         .border_1()
-        .border_color(palette::ORANGE_DEEP)
-        .text_color(palette::PANEL)
+        .border_color(palette::orange_deep())
+        .text_color(palette::panel())
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .child(
             gpui_component::Icon::from(AppIcon::Refresh)
                 .with_size(gpui_component::Size::Size(px(12.)))
-                .text_color(palette::PANEL),
+                .text_color(palette::panel()),
         )
         .child("Generate")
         .into_any_element()

@@ -39,23 +39,23 @@ fn settings_sidebar() -> AnyElement {
         .flex_shrink_0()
         .h_full()
         .pt_4()
-        .bg(palette::SIDEBAR)
+        .bg(palette::sidebar())
         .border_r_1()
-        .border_color(palette::BORDER)
+        .border_color(palette::border())
         .child(
             div()
                 .px_3p5()
                 .pb_2p5()
                 .text_xs()
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(palette::TEXT_FAINT)
+                .text_color(palette::text_faint())
                 .child("SETTINGS"),
         );
 
     for (icon, label, selected) in items {
-        let bg = if selected { palette::BLUE } else { palette::SIDEBAR };
-        let fg = if selected { palette::PANEL } else { palette::TEXT };
-        let icon_color = if selected { palette::PANEL } else { palette::TEXT_MUTED };
+        let bg = if selected { palette::blue() } else { palette::sidebar() };
+        let fg = if selected { palette::panel() } else { palette::text() };
+        let icon_color = if selected { palette::panel() } else { palette::text_muted() };
         col = col.child(
             h_flex()
                 .gap_2()
@@ -92,7 +92,7 @@ fn content_panel(cx: &mut Context<AppShell>) -> AnyElement {
         .flex_1()
         .min_w(px(0.))
         .h_full()
-        .bg(palette::PANEL)
+        .bg(palette::panel())
         .child(
             v_flex()
                 .gap_1()
@@ -100,12 +100,12 @@ fn content_panel(cx: &mut Context<AppShell>) -> AnyElement {
                 .pt_5()
                 .pb_4()
                 .border_b_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .child(
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(palette::TEXT_MUTED)
+                        .text_color(palette::text_muted())
                         .child("SETTINGS"),
                 )
                 .child(
@@ -123,7 +123,7 @@ fn content_panel(cx: &mut Context<AppShell>) -> AnyElement {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(palette::TEXT_MUTED)
+                        .text_color(palette::text_muted())
                         .child(
                             "Keep your encrypted vault in sync across devices via your own cloud storage.",
                         ),
@@ -147,9 +147,9 @@ fn connected_card() -> AnyElement {
         .gap_4()
         .p_4()
         .rounded(px(10.))
-        .bg(palette::BLUE_SOFT)
+        .bg(palette::blue_soft())
         .border_1()
-        .border_color(palette::BLUE_BORDER)
+        .border_color(palette::blue_border())
         .child(
             h_flex()
                 .gap_3p5()
@@ -158,16 +158,16 @@ fn connected_card() -> AnyElement {
                     div()
                         .size(px(44.))
                         .rounded(px(9.))
-                        .bg(palette::PANEL)
+                        .bg(palette::panel())
                         .border_1()
-                        .border_color(palette::BLUE_BORDER)
+                        .border_color(palette::blue_border())
                         .flex()
                         .items_center()
                         .justify_center()
                         .child(
                             gpui_component::Icon::from(AppIcon::Cloud)
                                 .with_size(gpui_component::Size::Size(px(22.)))
-                                .text_color(palette::BLUE),
+                                .text_color(palette::blue()),
                         ),
                 )
                 .child(
@@ -189,7 +189,7 @@ fn connected_card() -> AnyElement {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .font_family("JetBrains Mono")
                                 .child("jonas.ritter@gmx.de · 47.2 GB of 1 TB used"),
                         ),
@@ -199,12 +199,12 @@ fn connected_card() -> AnyElement {
                         .h(px(28.))
                         .px(px(10.))
                         .rounded(px(6.))
-                        .bg(palette::PANEL)
+                        .bg(palette::panel())
                         .border_1()
-                        .border_color(palette::BORDER_STRONG)
+                        .border_color(palette::border_strong())
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(palette::TEXT)
+                        .text_color(palette::text())
                         .flex()
                         .items_center()
                         .justify_center()
@@ -217,21 +217,21 @@ fn connected_card() -> AnyElement {
                 .items_center()
                 .p_3()
                 .rounded(px(7.))
-                .bg(palette::PANEL)
+                .bg(palette::panel())
                 .border_1()
-                .border_color(palette::BLUE_BORDER)
+                .border_color(palette::blue_border())
                 .child(
                     div()
                         .size(px(32.))
                         .rounded(px(6.))
-                        .bg(palette::ORANGE_SOFT)
+                        .bg(palette::orange_soft())
                         .flex()
                         .items_center()
                         .justify_center()
                         .child(
                             gpui_component::Icon::from(AppIcon::Key)
                                 .with_size(gpui_component::Size::Size(px(15.)))
-                                .text_color(palette::ORANGE),
+                                .text_color(palette::orange()),
                         ),
                 )
                 .child(
@@ -248,7 +248,7 @@ fn connected_card() -> AnyElement {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child("4.8 MB · last modified 2 minutes ago"),
                         ),
                 )
@@ -257,12 +257,12 @@ fn connected_card() -> AnyElement {
                         .h(px(24.))
                         .px(px(8.))
                         .rounded(px(4.))
-                        .bg(palette::PANEL)
+                        .bg(palette::panel())
                         .border_1()
-                        .border_color(palette::BORDER_STRONG)
+                        .border_color(palette::border_strong())
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(palette::TEXT)
+                        .text_color(palette::text())
                         .flex()
                         .items_center()
                         .justify_center()
@@ -278,12 +278,12 @@ fn activity_section(cx: &mut Context<AppShell>) -> AnyElement {
         .h(px(24.))
         .px(px(10.))
         .rounded(px(4.))
-        .bg(palette::PANEL)
+        .bg(palette::panel())
         .border_1()
-        .border_color(palette::BORDER_STRONG)
+        .border_color(palette::border_strong())
         .text_xs()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(palette::TEXT)
+        .text_color(palette::text())
         .flex()
         .items_center()
         .justify_center()
@@ -291,7 +291,7 @@ fn activity_section(cx: &mut Context<AppShell>) -> AnyElement {
         .child(
             gpui_component::Icon::from(AppIcon::Sync)
                 .with_size(gpui_component::Size::Size(px(11.)))
-                .text_color(palette::TEXT),
+                .text_color(palette::text()),
         )
         .child("Sync now")
         .on_click(cx.listener(
@@ -317,9 +317,9 @@ fn activity_section(cx: &mut Context<AppShell>) -> AnyElement {
         .child(
             v_flex()
                 .border_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .rounded(px(8.))
-                .bg(palette::PANEL)
+                .bg(palette::panel())
                 .overflow_hidden()
                 .child(sync_row(
                     SyncOutcome::Success,
@@ -372,9 +372,9 @@ fn behavior_section() -> AnyElement {
         .child(
             v_flex()
                 .border_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .rounded(px(8.))
-                .bg(palette::PANEL)
+                .bg(palette::panel())
                 .child(toggle_row(
                     "Sync automatically",
                     "Push changes within 30 seconds, pull on focus",
@@ -409,12 +409,12 @@ fn close_button(cx: &mut Context<AppShell>) -> AnyElement {
         .h(px(28.))
         .px(px(10.))
         .rounded(px(6.))
-        .bg(palette::PANEL)
+        .bg(palette::panel())
         .border_1()
-        .border_color(palette::BORDER_STRONG)
+        .border_color(palette::border_strong())
         .text_xs()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(palette::TEXT)
+        .text_color(palette::text())
         .flex()
         .items_center()
         .justify_center()

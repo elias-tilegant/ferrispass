@@ -14,7 +14,7 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let theme = cx.theme();
     let bg_overlay = format!(
         "background:radial-gradient(ellipse at 30% 20%,{} 0%, transparent 60%)," ,
-        css_color(palette::BLUE_SOFT)
+        css_color(palette::blue_soft())
     );
     let _ = bg_overlay;
 
@@ -28,9 +28,9 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             v_flex()
                 .w(px(460.))
                 .p_10()
-                .bg(palette::PANEL)
+                .bg(palette::panel())
                 .border_1()
-                .border_color(palette::BORDER)
+                .border_color(palette::border())
                 .rounded(px(12.))
                 .gap_5()
                 .child(brand(48.))
@@ -46,7 +46,7 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child(
                                     "A native, Rust-built password manager. Your vault is encrypted locally and synced through your own cloud.",
                                 ),
@@ -90,13 +90,13 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     div()
                         .pt_4()
                         .border_t_1()
-                        .border_color(palette::BORDER)
+                        .border_color(palette::border())
                         .child(
                             h_flex()
                                 .items_center()
                                 .justify_between()
                                 .text_xs()
-                                .text_color(palette::TEXT_FAINT)
+                                .text_color(palette::text_faint())
                                 .child("v0.4.2 · KDBX 4.1")
                                 .child(
                                     h_flex()
@@ -105,7 +105,7 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                         .child(
                                             gpui_component::Icon::from(AppIcon::Shield)
                                                 .with_size(gpui_component::Size::Size(px(12.)))
-                                                .text_color(palette::TEXT_FAINT),
+                                                .text_color(palette::text_faint()),
                                         )
                                         .child("AES-256 · Argon2id"),
                                 ),
@@ -126,11 +126,11 @@ fn choice_row<F>(
 where
     F: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 {
-    let bg = if accent { palette::BLUE_SOFT } else { palette::SIDEBAR };
-    let border = if accent { palette::BLUE_BORDER } else { palette::BORDER };
-    let icon_bg = if accent { palette::BLUE } else { palette::PANEL };
-    let icon_color = if accent { palette::PANEL } else { palette::TEXT };
-    let title_color = if accent { palette::BLUE_HOVER } else { palette::TEXT };
+    let bg = if accent { palette::blue_soft() } else { palette::sidebar() };
+    let border = if accent { palette::blue_border() } else { palette::border() };
+    let icon_bg = if accent { palette::blue() } else { palette::panel() };
+    let icon_color = if accent { palette::panel() } else { palette::text() };
+    let title_color = if accent { palette::blue_hover() } else { palette::text() };
 
     div()
         .id(id)
@@ -151,7 +151,7 @@ where
                         .bg(icon_bg)
                         .text_color(icon_color)
                         .border_1()
-                        .border_color(if accent { palette::BLUE } else { palette::BORDER })
+                        .border_color(if accent { palette::blue() } else { palette::border() })
                         .flex()
                         .items_center()
                         .justify_center()
@@ -174,14 +174,14 @@ where
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child(meta),
                         ),
                 )
                 .child(
                     gpui_component::Icon::from(gpui_component::IconName::ChevronRight)
                         .with_size(gpui_component::Size::Size(px(14.)))
-                        .text_color(palette::TEXT_FAINT),
+                        .text_color(palette::text_faint()),
                 ),
         )
 }

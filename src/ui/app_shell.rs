@@ -2,7 +2,7 @@ use crate::{
     app::{
         AppState, CopyValueKind, Overlay,
         actions::{
-            APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
+            APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault, ToggleTheme,
             FocusSearch, LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSyncSettings,
             OpenVault, SubmitPassword,
         },
@@ -249,6 +249,15 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         window.push_notification("Create-vault flow is coming soon.", cx);
+    }
+
+    fn on_action_toggle_theme(
+        &mut self,
+        _: &ToggleTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::ui::theme::toggle(window, cx);
     }
 
     fn on_password_input_event(
@@ -517,6 +526,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_new_entry))
             .on_action(cx.listener(Self::on_action_open_conflict_demo))
             .on_action(cx.listener(Self::on_action_create_vault))
+            .on_action(cx.listener(Self::on_action_toggle_theme))
             .size_full()
             .relative()
             .overflow_hidden()

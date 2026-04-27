@@ -21,10 +21,10 @@ pub fn accent_button(id: impl Into<ElementId>, label: impl Into<String>) -> AnyE
         .items_center()
         .justify_center()
         .gap_1p5()
-        .bg(palette::ORANGE)
-        .text_color(palette::PANEL)
+        .bg(palette::orange())
+        .text_color(palette::panel())
         .border_1()
-        .border_color(palette::ORANGE_DEEP)
+        .border_color(palette::orange_deep())
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .child(label)
@@ -57,14 +57,14 @@ pub fn step_indicator<'a>(steps: &'a [(usize, &'a str)], active: usize, cx: &gpu
     for (i, (number, label)) in steps.iter().enumerate() {
         let is_active = *number == active;
         let bullet_bg = if is_active {
-            palette::BLUE
+            palette::blue()
         } else {
-            palette::BORDER_STRONG
+            palette::border_strong()
         };
         let label_color = if is_active {
-            palette::BLUE
+            palette::blue()
         } else {
-            palette::TEXT_MUTED
+            palette::text_muted()
         };
 
         row = row.child(
@@ -76,7 +76,7 @@ pub fn step_indicator<'a>(steps: &'a [(usize, &'a str)], active: usize, cx: &gpu
                         .size(px(16.))
                         .rounded_full()
                         .bg(bullet_bg)
-                        .text_color(palette::PANEL)
+                        .text_color(palette::panel())
                         .text_xs()
                         .font_weight(gpui::FontWeight::BOLD)
                         .flex()

@@ -24,8 +24,8 @@ pub fn provider_row(provider: Provider) -> AnyElement {
         color,
         selected,
     } = provider;
-    let bg = if selected { palette::BLUE_SOFT } else { palette::PANEL };
-    let border = if selected { palette::BLUE } else { palette::BORDER };
+    let bg = if selected { palette::blue_soft() } else { palette::panel() };
+    let border = if selected { palette::blue() } else { palette::border() };
 
     div()
         .id(id)
@@ -43,7 +43,7 @@ pub fn provider_row(provider: Provider) -> AnyElement {
                         .size(px(36.))
                         .rounded(px(7.))
                         .bg(color)
-                        .text_color(palette::PANEL)
+                        .text_color(palette::panel())
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_lg()
                         .flex()
@@ -59,13 +59,13 @@ pub fn provider_row(provider: Provider) -> AnyElement {
                             div()
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(palette::TEXT)
+                                .text_color(palette::text())
                                 .child(name),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(palette::TEXT_MUTED)
+                                .text_color(palette::text_muted())
                                 .child(meta),
                         ),
                 )
@@ -74,9 +74,9 @@ pub fn provider_row(provider: Provider) -> AnyElement {
                         .size(px(18.))
                         .rounded_full()
                         .border_1()
-                        .border_color(if selected { palette::BLUE } else { palette::BORDER_STRONG })
-                        .bg(if selected { palette::BLUE } else { palette::PANEL })
-                        .text_color(palette::PANEL)
+                        .border_color(if selected { palette::blue() } else { palette::border_strong() })
+                        .bg(if selected { palette::blue() } else { palette::panel() })
+                        .text_color(palette::panel())
                         .flex()
                         .items_center()
                         .justify_center()

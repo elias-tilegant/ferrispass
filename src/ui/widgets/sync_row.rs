@@ -15,9 +15,9 @@ pub enum SyncOutcome {
 impl SyncOutcome {
     fn colors(&self) -> (Hsla, Hsla, &'static str) {
         match self {
-            SyncOutcome::Success => (palette::GREEN_SOFT, palette::GREEN, "✓"),
-            SyncOutcome::Merge => (palette::ORANGE_SOFT, palette::ORANGE, "↻"),
-            SyncOutcome::Error => (palette::SIDEBAR, palette::RED, "!"),
+            SyncOutcome::Success => (palette::green_soft(), palette::green(), "✓"),
+            SyncOutcome::Merge => (palette::orange_soft(), palette::orange(), "↻"),
+            SyncOutcome::Error => (palette::sidebar(), palette::red(), "!"),
         }
     }
 }
@@ -35,7 +35,7 @@ pub fn sync_row(
         .items_center()
         .p_3()
         .when(!last, |this| {
-            this.border_b_1().border_color(palette::BORDER)
+            this.border_b_1().border_color(palette::border())
         })
         .child(
             div()
@@ -58,20 +58,20 @@ pub fn sync_row(
                     div()
                         .text_sm()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(palette::TEXT)
+                        .text_color(palette::text())
                         .child(title),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(palette::TEXT_MUTED)
+                        .text_color(palette::text_muted())
                         .child(detail),
                 ),
         )
         .child(
             div()
                 .text_xs()
-                .text_color(palette::TEXT_FAINT)
+                .text_color(palette::text_faint())
                 .font_family("JetBrains Mono")
                 .child(time),
         )
