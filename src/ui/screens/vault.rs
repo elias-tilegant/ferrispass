@@ -895,6 +895,12 @@ fn entry_row(
             let id = entry_id.clone();
             state_entity.update(cx, |state, cx| state.select_entry(id, cx));
         }))
+        // `w_full` is essential here: without it the entry row sizes to its
+        // *content* (favicon + title + tags) and the tag/time column ends up
+        // snuggled against the title instead of pinned to the panel edge.
+        // The virtual list passes us a `Definite` available width but a Div
+        // without explicit width defaults to `auto` (content size).
+        .w_full()
         .gap_2p5()
         .items_center()
         .h(px(56.))
