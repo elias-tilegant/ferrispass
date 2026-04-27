@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Default)]
 pub struct AppState {
     vault: VaultStatus,
+    overlay: Overlay,
 }
 
 #[derive(Debug, Default)]
@@ -14,6 +15,7 @@ pub enum VaultStatus {
     Empty,
     AwaitingPassword {
         path: PathBuf,
+        keyfile: Option<PathBuf>,
         error: Option<String>,
     },
     Opening {
@@ -32,11 +34,32 @@ pub enum VaultStatus {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overlay {
+    #[default]
+    None,
+    /// Cloud provider picker (welcome → connect flow).
+    Connect,
+    /// Sync settings — full window over vault.
+    SyncSettings,
+    /// New entry modal — appears over the vault.
+    AddEntry,
+    /// Three-way conflict resolution.
+    Conflict,
+}
+
+impl Overlay {
+    pub fn is_active(self) -> bool {
+        !matches!(self, Overlay::None)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnlockPrompt {
     pub path: PathBuf,
     pub file_name: String,
     pub display_path: String,
+    pub keyfile: Option<PathBuf>,
     pub error: Option<String>,
 }
 
@@ -49,6 +72,10 @@ pub struct VaultSummary {
     pub groups: usize,
     pub is_open: bool,
     pub is_busy: bool,
+    /// Demo provider name; in this build always `Some("OneDrive")` once a vault is open.
+    pub provider: Option<&'static str>,
+    /// Demo "synced" timestamp string; static for the demo.
+    pub synced_at: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +88,7 @@ pub struct VaultBrowserModel {
     pub selected_entry: Option<VaultEntry>,
     pub search_query: String,
     pub showing_search_results: bool,
+    pub starred: Vec<VaultEntry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,9 +103,56 @@ impl AppState {
         &self.vault
     }
 
-    pub fn request_password(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.vault = VaultStatus::AwaitingPassword { path, error: None };
+    pub fn overlay(&self) -> Overlay {
+        self.overlay
+    }
+
+    pub fn open_overlay(&mut self, overlay: Overlay, cx: &mut Context<Self>) {
+        if self.overlay == overlay {
+            return;
+        }
+        self.overlay = overlay;
         cx.notify();
+    }
+
+    pub fn close_overlay(&mut self, cx: &mut Context<Self>) -> bool {
+        if matches!(self.overlay, Overlay::None) {
+            return false;
+        }
+        self.overlay = Overlay::None;
+        cx.notify();
+        true
+    }
+
+    pub fn request_password(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let keyfile = crate::keepass::KeePassRepository::suggested_keyfile(&path);
+        self.vault = VaultStatus::AwaitingPassword {
+            path,
+            keyfile,
+            error: None,
+        };
+        self.overlay = Overlay::None;
+        cx.notify();
+    }
+
+    pub fn set_unlock_keyfile(&mut self, keyfile: Option<PathBuf>, cx: &mut Context<Self>) {
+        if let VaultStatus::AwaitingPassword {
+            keyfile: existing,
+            error,
+            ..
+        } = &mut self.vault
+        {
+            *existing = keyfile;
+            *error = None;
+            cx.notify();
+        }
+    }
+
+    pub fn pending_unlock_keyfile(&self) -> Option<PathBuf> {
+        match &self.vault {
+            VaultStatus::AwaitingPassword { keyfile, .. } => keyfile.clone(),
+            _ => None,
+        }
     }
 
     pub fn set_unlock_error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -117,7 +192,8 @@ impl AppState {
                 }
             }
             Err(message) => VaultStatus::AwaitingPassword {
-                path,
+                path: path.clone(),
+                keyfile: crate::keepass::KeePassRepository::suggested_keyfile(&path),
                 error: Some(message),
             },
         };
@@ -139,6 +215,7 @@ impl AppState {
 
     pub fn lock_vault(&mut self, cx: &mut Context<Self>) {
         self.vault = VaultStatus::Empty;
+        self.overlay = Overlay::None;
         cx.notify();
     }
 
@@ -151,10 +228,15 @@ impl AppState {
 
     pub fn unlock_prompt(&self) -> Option<UnlockPrompt> {
         match &self.vault {
-            VaultStatus::AwaitingPassword { path, error } => Some(UnlockPrompt {
+            VaultStatus::AwaitingPassword {
+                path,
+                keyfile,
+                error,
+            } => Some(UnlockPrompt {
                 path: path.clone(),
                 file_name: file_name(path),
                 display_path: path.display().to_string(),
+                keyfile: keyfile.clone(),
                 error: error.clone(),
             }),
             _ => None,
@@ -307,6 +389,12 @@ impl AppState {
             .cloned()
             .or_else(|| entries.first().cloned());
 
+        let starred = snapshot
+            .entries_starred()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
         Some(VaultBrowserModel {
             root: snapshot.root.clone(),
             selected_group_id: selected_group.id.clone(),
@@ -316,6 +404,7 @@ impl AppState {
             selected_entry,
             search_query: search_query.clone(),
             showing_search_results,
+            starred,
         })
     }
 
@@ -329,6 +418,8 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: false,
+                provider: None,
+                synced_at: None,
             },
             VaultStatus::AwaitingPassword { path, .. } => VaultSummary {
                 title: file_name(path),
@@ -338,24 +429,30 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: false,
+                provider: Some("OneDrive"),
+                synced_at: Some("2 minutes ago"),
             },
             VaultStatus::Opening { path } => VaultSummary {
                 title: file_name(path),
-                subtitle: "Decrypting database...".to_string(),
+                subtitle: "Decrypting database…".to_string(),
                 status: "Opening".to_string(),
                 entries: 0,
                 groups: 0,
                 is_open: false,
                 is_busy: true,
+                provider: Some("OneDrive"),
+                synced_at: Some("2 minutes ago"),
             },
             VaultStatus::Open { path, document, .. } => VaultSummary {
-                title: document.snapshot().root.name.clone(),
+                title: file_name(path),
                 subtitle: path.display().to_string(),
-                status: "Open".to_string(),
+                status: "Synced".to_string(),
                 entries: document.snapshot().entry_count,
-                groups: document.snapshot().group_count,
+                groups: document.snapshot().group_count.saturating_sub(1),
                 is_open: true,
                 is_busy: false,
+                provider: Some("OneDrive"),
+                synced_at: Some("2 minutes ago"),
             },
             VaultStatus::Error { message, path } => VaultSummary {
                 title: "Could not open vault".to_string(),
@@ -367,6 +464,8 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: false,
+                provider: None,
+                synced_at: None,
             },
         }
     }
@@ -399,6 +498,10 @@ fn entry_matches_query(entry: &VaultEntry, query: &str) -> bool {
     entry.title.to_lowercase().contains(query)
         || entry.username.to_lowercase().contains(query)
         || entry.url.to_lowercase().contains(query)
+        || entry
+            .tags
+            .iter()
+            .any(|tag| tag.to_lowercase().contains(query))
 }
 
 fn non_empty_copy(value: String) -> Option<String> {

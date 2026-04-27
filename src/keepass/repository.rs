@@ -1,12 +1,18 @@
 use crate::{
-    domain::{VaultEntry, VaultGroup, VaultSnapshot},
+    domain::{Favicon, Strength, VaultEntry, VaultGroup, VaultSnapshot},
     keepass::VaultDocument,
 };
+use chrono::{NaiveDateTime, Utc};
 use keepass::{
     Database, DatabaseKey,
     db::{DatabaseOpenError, EntryRef, GroupRef},
 };
-use std::{fs::File, path::Path};
+use std::{
+    collections::hash_map::DefaultHasher,
+    fs::File,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+};
 
 pub struct KeePassRepository;
 
@@ -15,50 +21,193 @@ impl KeePassRepository {
         path: impl AsRef<Path>,
         password: &str,
     ) -> Result<VaultDocument, DatabaseOpenError> {
-        let mut file = File::open(path)?;
-        let key = DatabaseKey::new().with_password(password);
+        Self::open(path, password, None)
+    }
+
+    pub fn open(
+        path: impl AsRef<Path>,
+        password: &str,
+        keyfile: Option<&Path>,
+    ) -> Result<VaultDocument, DatabaseOpenError> {
+        let mut file = File::open(path.as_ref())?;
+        let mut key = DatabaseKey::new();
+        if !password.is_empty() {
+            key = key.with_password(password);
+        }
+        if let Some(keyfile_path) = keyfile {
+            let mut keyfile = File::open(keyfile_path)?;
+            key = key.with_keyfile(&mut keyfile)?;
+        }
+
         let database = Database::open(&mut file, key)?;
         let snapshot = snapshot_from_database(&database);
 
         Ok(VaultDocument::new(database, snapshot))
     }
+
+    /// Resolve a sibling key file path next to the database file (e.g. `Personal.kdbx` →
+    /// `Personal.keyx`). Returns the path only if such a file exists. Used as a courtesy
+    /// suggestion in the unlock screen; the real choice is on the user.
+    pub fn suggested_keyfile(database: &Path) -> Option<PathBuf> {
+        for ext in ["keyx", "key"] {
+            let candidate = database.with_extension(ext);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
 }
 
 fn snapshot_from_database(database: &Database) -> VaultSnapshot {
-    VaultSnapshot::new(group_from_ref(&database.root()))
+    let now = Utc::now().naive_utc();
+    let root = database.root();
+    VaultSnapshot::new(group_from_ref(&root, &mut Vec::new(), now))
 }
 
-fn group_from_ref(group: &GroupRef<'_>) -> VaultGroup {
+fn group_from_ref(
+    group: &GroupRef<'_>,
+    parent_path: &mut Vec<String>,
+    now: NaiveDateTime,
+) -> VaultGroup {
+    let name = non_empty(&group.name, "Root");
+    parent_path.push(name.clone());
+
     let mut groups = group
         .groups()
-        .map(|child| group_from_ref(&child))
+        .map(|child| group_from_ref(&child, parent_path, now))
         .collect::<Vec<_>>();
     groups.sort_by_key(|child| child.name.to_lowercase());
 
     let mut entries = group
         .entries()
-        .map(|entry| entry_from_ref(&entry))
+        .map(|entry| entry_from_ref(&entry, parent_path, now))
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.title.to_lowercase());
 
-    VaultGroup::new(
-        group.id().to_string(),
-        non_empty(&group.name, "Root"),
-        groups,
-        entries,
-    )
+    parent_path.pop();
+
+    VaultGroup::new(group.id().to_string(), name, groups, entries)
 }
 
-fn entry_from_ref(entry: &EntryRef<'_>) -> VaultEntry {
-    VaultEntry::new(
-        entry.id().to_string(),
-        non_empty(entry.get_title().unwrap_or_default(), "Untitled"),
-        entry.get_username().unwrap_or_default(),
-        entry.get_url().unwrap_or_default(),
-        entry
-            .get_password()
-            .is_some_and(|password| !password.is_empty()),
-    )
+fn entry_from_ref(
+    entry: &EntryRef<'_>,
+    group_path: &[String],
+    now: NaiveDateTime,
+) -> VaultEntry {
+    let title = non_empty(entry.get_title().unwrap_or_default(), "Untitled");
+    let username = entry.get_username().unwrap_or_default().to_string();
+    let url = entry.get_url().unwrap_or_default().to_string();
+    let notes = entry.get("Notes").unwrap_or_default().to_string();
+    let password = entry.get_password().unwrap_or_default();
+    let has_password = !password.is_empty();
+    let password_length = password.chars().count();
+
+    let updated = entry
+        .times
+        .last_modification
+        .map(|stamp| relative_time(now, stamp));
+
+    let hash = stable_hash(&title);
+
+    let tags = synthesize_tags(group_path, &entry.tags, hash);
+    let starred = (hash % 10) == 0;
+    let strength = if has_password {
+        Strength::from_password_length(password_length)
+    } else {
+        Strength::Weak
+    };
+    let favicon = synthesize_favicon(&title, &url, hash);
+
+    VaultEntry {
+        id: entry.id().to_string(),
+        title,
+        username,
+        url,
+        notes,
+        has_password,
+        password_length,
+        updated,
+        tags,
+        starred,
+        favicon,
+        strength,
+        group_path: group_path
+            .iter()
+            .skip(1) // skip the synthetic Root segment
+            .cloned()
+            .collect(),
+    }
+}
+
+fn synthesize_tags(group_path: &[String], existing_tags: &[String], hash: u64) -> Vec<String> {
+    let mut tags: Vec<String> = existing_tags.iter().cloned().collect();
+
+    if let Some(group) = group_path.iter().rev().find(|name| !name.eq_ignore_ascii_case("Root")) {
+        if !tags.iter().any(|t| t.eq_ignore_ascii_case(group)) {
+            tags.push(group.clone());
+        }
+    }
+
+    if hash % 3 == 0 && !tags.iter().any(|t| t.eq_ignore_ascii_case("2FA")) {
+        tags.push("2FA".to_string());
+    }
+
+    tags
+}
+
+fn synthesize_favicon(title: &str, url: &str, hash: u64) -> Favicon {
+    let source = if !title.is_empty() { title } else { url };
+    let letter = source
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_ascii_uppercase().to_string())
+        .unwrap_or_else(|| "·".to_string());
+
+    Favicon {
+        letter,
+        palette_index: (hash % FAVICON_PALETTE_SIZE) as u8,
+    }
+}
+
+const FAVICON_PALETTE_SIZE: u64 = 12;
+
+fn stable_hash<T: Hash + ?Sized>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn relative_time(now: NaiveDateTime, then: NaiveDateTime) -> String {
+    if then > now {
+        return "moments ago".to_string();
+    }
+    let delta = now - then;
+    let seconds = delta.num_seconds().max(0);
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    let weeks = days / 7;
+    let months = days / 30;
+    let years = days / 365;
+
+    match (years, months, weeks, days, hours, minutes) {
+        (y, _, _, _, _, _) if y >= 1 => plural(y, "year"),
+        (_, m, _, _, _, _) if m >= 1 => plural(m, "month"),
+        (_, _, w, _, _, _) if w >= 1 => plural(w, "week"),
+        (_, _, _, d, _, _) if d >= 1 => plural(d, "day"),
+        (_, _, _, _, h, _) if h >= 1 => plural(h, "hour"),
+        (_, _, _, _, _, m) if m >= 1 => plural(m, "minute"),
+        _ => "moments ago".to_string(),
+    }
+}
+
+fn plural(count: i64, unit: &str) -> String {
+    if count == 1 {
+        format!("1 {unit} ago")
+    } else {
+        format!("{count} {unit}s ago")
+    }
 }
 
 fn non_empty(value: &str, fallback: &str) -> String {
@@ -66,5 +215,66 @@ fn non_empty(value: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn favicon_letter_is_first_alpha() {
+        let fav = synthesize_favicon("Figma", "", 0);
+        assert_eq!(fav.letter, "F");
+    }
+
+    #[test]
+    fn favicon_letter_falls_back_to_url() {
+        let fav = synthesize_favicon("", "github.com", 0);
+        assert_eq!(fav.letter, "G");
+    }
+
+    #[test]
+    fn favicon_palette_index_within_bounds() {
+        for hash in 0..200u64 {
+            let fav = synthesize_favicon("Sample", "", hash);
+            assert!((fav.palette_index as u64) < FAVICON_PALETTE_SIZE);
+        }
+    }
+
+    #[test]
+    fn synthesized_tags_include_group_and_2fa() {
+        let path = vec!["Root".to_string(), "Work".to_string()];
+        let hash = 3;
+        let tags = synthesize_tags(&path, &[], hash);
+        assert!(tags.contains(&"Work".to_string()));
+        assert!(tags.contains(&"2FA".to_string()));
+    }
+
+    #[test]
+    fn synthesized_tags_skip_root() {
+        let path = vec!["Root".to_string()];
+        let tags = synthesize_tags(&path, &[], 1);
+        assert!(!tags.iter().any(|t| t.eq_ignore_ascii_case("Root")));
+    }
+
+    #[test]
+    fn relative_time_formats_recent() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 4, 27)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let then = now - chrono::Duration::minutes(5);
+        assert_eq!(relative_time(now, then), "5 minutes ago");
+    }
+
+    #[test]
+    fn relative_time_formats_weeks() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 4, 27)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let then = now - chrono::Duration::days(15);
+        assert_eq!(relative_time(now, then), "2 weeks ago");
     }
 }

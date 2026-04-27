@@ -1,3 +1,3 @@
 mod vault;
 
-pub use vault::{VaultEntry, VaultGroup, VaultSnapshot};
+pub use vault::{Favicon, Strength, VaultEntry, VaultGroup, VaultSnapshot};

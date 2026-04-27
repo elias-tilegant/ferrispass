@@ -1,23 +1,32 @@
 pub mod actions;
+pub mod assets;
 
 mod state;
 
 pub use state::{
-    AppState, CopyValueKind, UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary,
+    AppState, CopyValueKind, Overlay, UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary,
 };
 
-use crate::ui::AppShell;
+use crate::ui::{AppShell, theme as ui_theme};
 use gpui::{
     App, AppContext as _, Context, SharedString, Styled as _, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
 };
 use gpui_component::{ActiveTheme as _, Root};
 
-const WINDOW_TITLE: &str = "STC KeePass";
+const WINDOW_TITLE: &str = "KeePass RS";
 
 pub fn run() {
-    gpui_platform::application().run(|cx| {
+    let application = gpui_platform::application().with_assets(assets::AppAssets::new());
+
+    application.run(|cx| {
+        let fonts = assets::font_bytes();
+        if !fonts.is_empty() {
+            let _ = cx.text_system().add_fonts(fonts);
+        }
+
         gpui_component::init(cx);
+        ui_theme::apply(cx);
         actions::init(cx);
         open_main_window(cx);
     });
@@ -43,7 +52,7 @@ fn open_main_window(cx: &mut App) {
 
             cx.new(|cx: &mut Context<Root>| Root::new(shell, window, cx).bg(cx.theme().background))
         })
-        .expect("failed to open STC KeePass window");
+        .expect("failed to open KeePass RS window");
     })
     .detach();
 }

@@ -12,7 +12,12 @@ actions!(
         FocusSearch,
         CopyUsername,
         CopyUrl,
-        CopyPassword
+        CopyPassword,
+        OpenConnect,
+        OpenSyncSettings,
+        NewEntry,
+        OpenConflictDemo,
+        CreateVault,
     ]
 );
 
@@ -26,5 +31,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-u", CopyUsername, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-shift-l", CopyUrl, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-shift-p", CopyPassword, Some(APP_CONTEXT)),
+        KeyBinding::new("cmd-,", OpenSyncSettings, Some(APP_CONTEXT)),
+        KeyBinding::new("cmd-n", NewEntry, Some(APP_CONTEXT)),
     ]);
 }

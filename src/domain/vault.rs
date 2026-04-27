@@ -19,7 +19,64 @@ pub struct VaultEntry {
     pub title: String,
     pub username: String,
     pub url: String,
+    pub notes: String,
     pub has_password: bool,
+    pub password_length: usize,
+    pub updated: Option<String>,
+    pub tags: Vec<String>,
+    pub starred: bool,
+    pub favicon: Favicon,
+    pub strength: Strength,
+    pub group_path: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Favicon {
+    pub letter: String,
+    pub palette_index: u8,
+}
+
+impl Default for Favicon {
+    fn default() -> Self {
+        Self {
+            letter: "·".to_string(),
+            palette_index: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Strength {
+    Weak,
+    Fair,
+    #[default]
+    Strong,
+}
+
+impl Strength {
+    pub fn label(self) -> &'static str {
+        match self {
+            Strength::Weak => "Weak",
+            Strength::Fair => "Fair",
+            Strength::Strong => "Strong",
+        }
+    }
+
+    pub fn fill_segments(self, total: usize) -> usize {
+        match self {
+            Strength::Weak => (total / 3).max(1),
+            Strength::Fair => (total * 2 / 3).max(2),
+            Strength::Strong => total.saturating_sub(1).max(1),
+        }
+    }
+
+    pub fn from_password_length(length: usize) -> Self {
+        match length {
+            0..=7 => Strength::Weak,
+            8..=11 => Strength::Fair,
+            _ => Strength::Strong,
+        }
+    }
 }
 
 impl VaultSnapshot {
@@ -41,6 +98,20 @@ impl VaultSnapshot {
 
     pub fn entries_recursive(&self) -> Vec<&VaultEntry> {
         self.root.entries_recursive()
+    }
+
+    pub fn entries_starred(&self) -> Vec<&VaultEntry> {
+        self.entries_recursive()
+            .into_iter()
+            .filter(|entry| entry.starred)
+            .collect()
+    }
+
+    pub fn entries_with_tag(&self, tag: &str) -> Vec<&VaultEntry> {
+        self.entries_recursive()
+            .into_iter()
+            .filter(|entry| entry.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+            .collect()
     }
 }
 
@@ -119,14 +190,26 @@ impl VaultEntry {
             title: title.into(),
             username: username.into(),
             url: url.into(),
+            notes: String::new(),
             has_password,
+            password_length: 0,
+            updated: None,
+            tags: Vec::new(),
+            starred: false,
+            favicon: Favicon::default(),
+            strength: Strength::default(),
+            group_path: Vec::new(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{VaultEntry, VaultGroup, VaultSnapshot};
+    use super::{Favicon, Strength, VaultEntry, VaultGroup, VaultSnapshot};
+
+    fn entry(id: &str, title: &str) -> VaultEntry {
+        VaultEntry::new(id, title, "elias", "", true)
+    }
 
     #[test]
     fn snapshot_counts_nested_entries_and_groups() {
@@ -137,9 +220,9 @@ mod tests {
                 "work",
                 "Work",
                 Vec::new(),
-                vec![VaultEntry::new("entry-2", "Git", "elias", "", true)],
+                vec![entry("entry-2", "Git")],
             )],
-            vec![VaultEntry::new("entry-1", "Mail", "elias", "", true)],
+            vec![entry("entry-1", "Mail")],
         );
 
         let snapshot = VaultSnapshot::new(root);
@@ -157,9 +240,9 @@ mod tests {
                 "work",
                 "Work",
                 Vec::new(),
-                vec![VaultEntry::new("entry-2", "Git", "elias", "", true)],
+                vec![entry("entry-2", "Git")],
             )],
-            vec![VaultEntry::new("entry-1", "Mail", "elias", "", true)],
+            vec![entry("entry-1", "Mail")],
         );
 
         let snapshot = VaultSnapshot::new(root);
@@ -175,5 +258,35 @@ mod tests {
             Some("Git")
         );
         assert_eq!(snapshot.entries_recursive().len(), 2);
+    }
+
+    #[test]
+    fn starred_entries_collected() {
+        let mut starred = entry("entry-1", "Mail");
+        starred.starred = true;
+        let root = VaultGroup::new(
+            "root",
+            "Root",
+            Vec::new(),
+            vec![starred, entry("entry-2", "Git")],
+        );
+        let snapshot = VaultSnapshot::new(root);
+
+        let pinned = snapshot.entries_starred();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].title, "Mail");
+    }
+
+    #[test]
+    fn strength_thresholds() {
+        assert_eq!(Strength::from_password_length(0), Strength::Weak);
+        assert_eq!(Strength::from_password_length(8), Strength::Fair);
+        assert_eq!(Strength::from_password_length(20), Strength::Strong);
+    }
+
+    #[test]
+    fn favicon_default_letter_is_dot() {
+        let e = entry("e", "Mail");
+        assert_eq!(e.favicon, Favicon::default());
     }
 }
