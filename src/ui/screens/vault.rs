@@ -621,6 +621,7 @@ fn vault_split(
             browser.selected_entry_id.clone(),
             shell.search_input(),
             shell.state().clone(),
+            shell.entry_list_scroll().clone(),
             cx,
         ))
         .child(entry_detail(selected_entry, shell.state().clone(), cx))
@@ -638,6 +639,7 @@ const ROW_HEIGHT: f32 = 56.0;
 const ROW_GAP: f32 = 2.0;
 const HEADER_HEIGHT: f32 = 28.0;
 
+#[allow(clippy::too_many_arguments)]
 fn entry_list(
     entries: std::rc::Rc<Vec<VaultEntry>>,
     group_name: &str,
@@ -646,6 +648,7 @@ fn entry_list(
     selected_entry_id: Option<String>,
     _search_input: &gpui::Entity<InputState>,
     state_entity: gpui::Entity<AppState>,
+    scroll_handle_for_virtual: gpui_component::VirtualListScrollHandle,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let total = entries.len();
@@ -717,6 +720,7 @@ fn entry_list(
             .child("No entries")
             .into_any_element()
     } else {
+        let scroll_handle = scroll_handle_for_virtual.clone();
         let virtual_list = gpui_component::v_virtual_list(
             cx.entity().clone(),
             "entry-list-virtual",
@@ -751,11 +755,21 @@ fn entry_list(
                     })
                     .collect()
             },
-        );
+        )
+        .track_scroll(&scroll_handle);
 
-        div()
+        // Pattern lifted from gpui-component's virtual_list_story: the virtual list
+        // needs a definite-height parent (`flex_1 + min_h:0` provides that inside the
+        // panel column) AND a `relative + size_full` immediate parent so its internal
+        // `size_full + overflow_scroll` resolves to a real scroll viewport. Without
+        // the inner wrapper, flex layout can leave the list's height ambiguous and
+        // mouse-wheel events don't bind to a scrollable bounds.
+        v_flex()
+            .id("entry-list-viewport")
             .flex_1()
             .min_h(px(0.))
+            .relative()
+            .size_full()
             .px_2()
             .child(virtual_list)
             .into_any_element()

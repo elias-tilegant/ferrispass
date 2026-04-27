@@ -14,7 +14,7 @@ use gpui::{
     ParentElement as _, PathPromptOptions, Render, Styled as _, Subscription, Window, div,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, WindowExt as _,
+    ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
     input::{InputEvent, InputState},
 };
 use std::path::PathBuf;
@@ -28,6 +28,10 @@ pub struct AppShell {
     new_entry_username_input: Entity<InputState>,
     new_entry_password_input: Entity<InputState>,
     new_entry_url_input: Entity<InputState>,
+    /// Persistent scroll position for the entry virtual list. Must outlive a single
+    /// render — without it the list resets to the top on every re-render and
+    /// mouse-wheel events appear to do nothing.
+    entry_list_scroll: VirtualListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -64,12 +68,17 @@ impl AppShell {
             new_entry_username_input,
             new_entry_password_input,
             new_entry_url_input,
+            entry_list_scroll: VirtualListScrollHandle::new(),
             _subscriptions,
         }
     }
 
     pub fn state(&self) -> &Entity<AppState> {
         &self.state
+    }
+
+    pub fn entry_list_scroll(&self) -> &VirtualListScrollHandle {
+        &self.entry_list_scroll
     }
 
     pub fn password_input(&self) -> &Entity<InputState> {
