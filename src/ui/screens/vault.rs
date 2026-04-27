@@ -251,23 +251,20 @@ fn groups_section(
         let count = group.entry_count();
         let state_for_click = state_entity.clone();
 
-        col = col.child(
-            div()
-                .id(gpui::SharedString::from(format!("group-{}", group.id)))
-                .child(nav_pill_visual(
-                    AppIcon::Note,
-                    &group.name,
-                    Some(count),
-                    is_selected,
-                    color,
-                ))
-                .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
-                    let id = group_id.clone();
-                    state_for_click.update(cx, |state, cx| {
-                        state.select_group(id, cx);
-                    });
-                })),
-        );
+        col = col.child(nav_pill(
+            gpui::SharedString::from(format!("group-{}", group.id)),
+            AppIcon::Note,
+            &group.name,
+            Some(count),
+            is_selected,
+            color,
+            cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+                let id = group_id.clone();
+                state_for_click.update(cx, |state, cx| {
+                    state.select_group(id, cx);
+                });
+            }),
+        ));
     }
     col
 }
@@ -332,25 +329,36 @@ fn nav_row(
     target: crate::app::LibrarySelection,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
-    div()
-        .id(id)
-        .child(nav_pill_visual(icon, label_text, count, selected, icon_color))
-        .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+    nav_pill(
+        gpui::SharedString::from(id),
+        icon,
+        label_text,
+        count,
+        selected,
+        icon_color,
+        cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
             let target = target.clone();
             state_entity.update(cx, |state, cx| {
                 state.select_library(target, cx);
             });
-        }))
+        }),
+    )
 }
 
-fn nav_pill_visual(
+/// Stateful nav row with hover state baked in. The element owns its `id`,
+/// `on_click` handler, and `hover` style so we don't need a separate wrapper
+/// (which would either swallow the inner background or create a click-vs-hover
+/// region mismatch).
+#[allow(clippy::too_many_arguments)]
+fn nav_pill(
+    id: gpui::SharedString,
     icon: AppIcon,
     label_text: &str,
     count: Option<usize>,
     selected: bool,
     icon_color: Hsla,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl gpui::IntoElement {
-    let bg = if selected { palette::BLUE } else { palette::SIDEBAR };
     let fg = if selected { palette::PANEL } else { palette::TEXT };
     let count_color = if selected {
         palette::PANEL
@@ -361,13 +369,20 @@ fn nav_pill_visual(
     let label_owned = label_text.to_string();
 
     h_flex()
+        .id(id)
         .gap_2()
         .items_center()
         .h(px(26.))
         .mx(px(6.))
         .px_3()
         .rounded(px(5.))
-        .bg(bg)
+        // Selected: solid blue. Unselected: transparent so the sidebar shows through,
+        // letting the hover overlay (BORDER tone) produce a visible state change.
+        .bg(if selected {
+            palette::BLUE
+        } else {
+            gpui::transparent_black()
+        })
         .text_color(fg)
         .text_sm()
         .font_weight(if selected {
@@ -375,6 +390,10 @@ fn nav_pill_visual(
         } else {
             gpui::FontWeight::NORMAL
         })
+        .when(!selected, |this| {
+            this.hover(|s| s.bg(palette::BORDER))
+        })
+        .on_click(on_click)
         .child(
             gpui_component::Icon::from(icon)
                 .with_size(gpui_component::Size::Size(px(13.)))
@@ -870,25 +889,26 @@ fn entry_row(
         palette::PANEL
     };
 
-    div()
+    h_flex()
         .id(gpui::SharedString::from(format!("entry-{entry_id}")))
         .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
             let id = entry_id.clone();
             state_entity.update(cx, |state, cx| state.select_entry(id, cx));
         }))
-        .child(
-            h_flex()
-                .gap_2p5()
-                .items_center()
-                .h(px(56.))
-                .flex_shrink_0()
-                .p_2p5()
-                .overflow_hidden()
-                .rounded(px(6.))
-                .bg(bg)
-                .border_1()
-                .border_color(border)
-                .child(favicon(&fav_letter, fav_palette, 28.))
+        .gap_2p5()
+        .items_center()
+        .h(px(56.))
+        .flex_shrink_0()
+        .p_2p5()
+        .overflow_hidden()
+        .rounded(px(6.))
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .when(!selected, |this| {
+            this.hover(|s| s.bg(palette::SIDEBAR).border_color(palette::BORDER))
+        })
+        .child(favicon(&fav_letter, fav_palette, 28.))
                 .child(
                     v_flex()
                         .gap_0p5()
@@ -959,8 +979,7 @@ fn entry_row(
                                 .text_color(palette::TEXT_FAINT)
                                 .child(updated),
                         ),
-                ),
-        )
+                )
 }
 
 fn entry_detail(
