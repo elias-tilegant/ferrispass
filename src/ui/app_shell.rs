@@ -10,9 +10,9 @@ use crate::{
     keepass::KeePassRepository,
 };
 use gpui::{
-    AppContext as _, ClickEvent, ClipboardItem, Context, Entity, InteractiveElement as _,
-    ParentElement as _, PathPromptOptions, Render, ScrollStrategy, Styled as _, Subscription,
-    Task, Window, div,
+    AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, ParentElement as _, PathPromptOptions, Render, ScrollStrategy,
+    Styled as _, Subscription, Task, Window, div,
 };
 use std::time::Duration;
 use gpui_component::{
@@ -34,6 +34,11 @@ pub struct AppShell {
     /// render — without it the list resets to the top on every re-render and
     /// mouse-wheel events appear to do nothing.
     entry_list_scroll: VirtualListScrollHandle,
+    /// The shell's own focus handle. We `track_focus` it on the root div so the
+    /// app always has a focused element in the dispatch path — without this,
+    /// GPUI has nothing to walk and `cmd-f`-style key bindings never fire when
+    /// the user hasn't clicked into a specific input yet.
+    focus_handle: FocusHandle,
     /// Held debounce task for the search input. Replacing it cancels the prior task
     /// (GPUI cancels tasks on drop unless `.detach()`-ed), so only the latest
     /// keystroke gets to fire the actual filter rebuild.
@@ -58,6 +63,12 @@ impl AppShell {
             cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
         let new_entry_url_input = cx.new(|cx| InputState::new(window, cx).placeholder("URL"));
 
+        let focus_handle = cx.focus_handle();
+        // Grab focus immediately so cmd-f / cmd-l / cmd-, fire on the very first
+        // keystroke. Without this the window has no focused element until the
+        // user clicks something, and key dispatch has no path to walk.
+        window.focus(&focus_handle, cx);
+
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&password_input, window, Self::on_password_input_event),
@@ -75,6 +86,7 @@ impl AppShell {
             new_entry_password_input,
             new_entry_url_input,
             entry_list_scroll: VirtualListScrollHandle::new(),
+            focus_handle,
             search_debounce: None,
             _subscriptions,
         }
@@ -507,12 +519,19 @@ impl AppShell {
     }
 }
 
+impl Focusable for AppShell {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for AppShell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let body = AppShell::render_body(self, cx);
 
         div()
             .key_context(APP_CONTEXT)
+            .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_action_open_vault))
             .on_action(cx.listener(Self::on_action_submit_password))
             .on_action(cx.listener(Self::on_action_cancel_unlock))
