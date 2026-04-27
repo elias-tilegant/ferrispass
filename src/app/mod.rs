@@ -1,6 +1,8 @@
+pub mod actions;
+
 mod state;
 
-pub use state::{AppState, VaultStatus, VaultSummary};
+pub use state::{AppState, UnlockPrompt, VaultStatus, VaultSummary};
 
 use crate::ui::AppShell;
 use gpui::{
@@ -14,6 +16,7 @@ const WINDOW_TITLE: &str = "STC KeePass";
 pub fn run() {
     gpui_platform::application().run(|cx| {
         gpui_component::init(cx);
+        actions::init(cx);
         open_main_window(cx);
     });
 }
@@ -34,7 +37,7 @@ fn open_main_window(cx: &mut App) {
 
         cx.open_window(window_options, |window, cx| {
             let app_state = cx.new(|_| AppState::default());
-            let shell = cx.new(|_| AppShell::new(app_state));
+            let shell = cx.new(|cx| AppShell::new(app_state, window, cx));
 
             cx.new(|cx: &mut Context<Root>| Root::new(shell, window, cx).bg(cx.theme().background))
         })
