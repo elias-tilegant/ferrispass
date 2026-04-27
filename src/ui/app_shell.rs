@@ -4,6 +4,7 @@ use crate::{
         actions::{APP_CONTEXT, CancelUnlock, LockVault, OpenVault, SubmitPassword},
     },
     keepass::KeePassRepository,
+    ui::vault_browser::{render_group_tree, render_vault_browser},
 };
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _,
@@ -179,6 +180,7 @@ impl Render for AppShell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let summary = self.state.read(cx).summary();
         let unlock_prompt = self.state.read(cx).unlock_prompt();
+        let browser = self.state.read(cx).vault_browser();
 
         let base = div()
             .key_context(APP_CONTEXT)
@@ -194,8 +196,8 @@ impl Render for AppShell {
             .child(
                 h_flex()
                     .size_full()
-                    .child(render_sidebar(&summary, cx))
-                    .child(render_workspace(&summary, cx)),
+                    .child(render_sidebar(&summary, browser.as_ref(), &self.state, cx))
+                    .child(render_workspace(&summary, browser, &self.state, cx)),
             );
 
         if let Some(prompt) = unlock_prompt {
@@ -206,7 +208,12 @@ impl Render for AppShell {
     }
 }
 
-fn render_sidebar(summary: &VaultSummary, cx: &mut Context<AppShell>) -> AnyElement {
+fn render_sidebar(
+    summary: &VaultSummary,
+    browser: Option<&crate::app::VaultBrowserModel>,
+    state: &Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
     v_flex()
         .h_full()
         .w(px(286.))
@@ -237,14 +244,10 @@ fn render_sidebar(summary: &VaultSummary, cx: &mut Context<AppShell>) -> AnyElem
                         .child(summary.subtitle.clone()),
                 ),
         )
-        .child(
-            v_flex()
-                .gap_1()
-                .p_3()
-                .child(nav_item("All entries", summary.is_open, cx))
-                .child(nav_item("Groups", false, cx))
-                .child(nav_item("Favorites", false, cx)),
-        )
+        .child(match browser {
+            Some(browser) => render_group_tree(browser, state, cx),
+            None => render_default_navigation(summary, cx),
+        })
         .child(div().flex_1())
         .child(
             v_flex()
@@ -258,9 +261,14 @@ fn render_sidebar(summary: &VaultSummary, cx: &mut Context<AppShell>) -> AnyElem
         .into_any_element()
 }
 
-fn render_workspace(summary: &VaultSummary, cx: &mut Context<AppShell>) -> AnyElement {
-    let content = if summary.is_open {
-        render_vault_overview(summary, cx)
+fn render_workspace(
+    summary: &VaultSummary,
+    browser: Option<crate::app::VaultBrowserModel>,
+    state: &Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    let content = if let Some(browser) = browser {
+        render_vault_browser(browser, state, cx)
     } else if summary.is_busy {
         render_opening_state(summary, cx)
     } else {
@@ -296,6 +304,16 @@ fn render_workspace(summary: &VaultSummary, cx: &mut Context<AppShell>) -> AnyEl
                 }),
         )
         .child(content)
+        .into_any_element()
+}
+
+fn render_default_navigation(summary: &VaultSummary, cx: &mut Context<AppShell>) -> AnyElement {
+    v_flex()
+        .gap_1()
+        .p_3()
+        .child(nav_item("All entries", summary.is_open, cx))
+        .child(nav_item("Groups", false, cx))
+        .child(nav_item("Favorites", false, cx))
         .into_any_element()
 }
 
@@ -345,26 +363,6 @@ fn render_opening_state(summary: &VaultSummary, cx: &mut Context<AppShell>) -> A
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(summary.subtitle.clone()),
-        )
-        .into_any_element()
-}
-
-fn render_vault_overview(summary: &VaultSummary, cx: &mut Context<AppShell>) -> AnyElement {
-    v_flex()
-        .flex_1()
-        .gap_4()
-        .p_5()
-        .child(
-            div()
-                .text_2xl()
-                .font_semibold()
-                .child(summary.title.clone()),
-        )
-        .child(
-            h_flex()
-                .gap_3()
-                .child(metric_tile("Entries", summary.entries, cx))
-                .child(metric_tile("Groups", summary.groups, cx)),
         )
         .into_any_element()
 }
@@ -425,25 +423,6 @@ fn stat_row(label: &'static str, value: usize, cx: &mut Context<AppShell>) -> An
         .text_sm()
         .child(div().text_color(cx.theme().muted_foreground).child(label))
         .child(div().font_medium().child(value.to_string()))
-        .into_any_element()
-}
-
-fn metric_tile(label: &'static str, value: usize, cx: &mut Context<AppShell>) -> AnyElement {
-    v_flex()
-        .w(px(156.))
-        .gap_1()
-        .rounded(px(8.))
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().secondary)
-        .p_4()
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(label),
-        )
-        .child(div().text_2xl().font_semibold().child(value.to_string()))
         .into_any_element()
 }
 
