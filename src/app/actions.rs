@@ -4,7 +4,16 @@ pub const APP_CONTEXT: &str = "StcKeepass";
 
 actions!(
     stc_keepass,
-    [OpenVault, SubmitPassword, CancelUnlock, LockVault]
+    [
+        OpenVault,
+        SubmitPassword,
+        CancelUnlock,
+        LockVault,
+        FocusSearch,
+        CopyUsername,
+        CopyUrl,
+        CopyPassword
+    ]
 );
 
 pub fn init(cx: &mut App) {
@@ -13,5 +22,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("enter", SubmitPassword, Some(APP_CONTEXT)),
         KeyBinding::new("escape", CancelUnlock, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-l", LockVault, Some(APP_CONTEXT)),
+        KeyBinding::new("cmd-f", FocusSearch, Some(APP_CONTEXT)),
+        KeyBinding::new("cmd-shift-u", CopyUsername, Some(APP_CONTEXT)),
+        KeyBinding::new("cmd-shift-l", CopyUrl, Some(APP_CONTEXT)),
+        KeyBinding::new("cmd-shift-p", CopyPassword, Some(APP_CONTEXT)),
     ]);
 }

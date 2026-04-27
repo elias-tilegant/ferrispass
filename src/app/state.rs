@@ -1,4 +1,5 @@
 use crate::domain::{VaultEntry, VaultGroup, VaultSnapshot};
+use crate::keepass::VaultDocument;
 use gpui::Context;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,7 @@ pub enum VaultStatus {
     },
     Open {
         path: PathBuf,
-        snapshot: VaultSnapshot,
+        document: Box<VaultDocument>,
         selected_group_id: String,
         selected_entry_id: Option<String>,
         search_query: String,
@@ -62,6 +63,13 @@ pub struct VaultBrowserModel {
     pub showing_search_results: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyValueKind {
+    Username,
+    Url,
+    Password,
+}
+
 impl AppState {
     pub fn vault_status(&self) -> &VaultStatus {
         &self.vault
@@ -87,7 +95,7 @@ impl AppState {
     pub fn finish_open_attempt(
         &mut self,
         path: PathBuf,
-        result: Result<VaultSnapshot, String>,
+        result: Result<VaultDocument, String>,
         cx: &mut Context<Self>,
     ) {
         if !matches!(&self.vault, VaultStatus::Opening { path: active } if active == &path) {
@@ -95,13 +103,14 @@ impl AppState {
         }
 
         self.vault = match result {
-            Ok(snapshot) => {
+            Ok(document) => {
+                let snapshot = document.snapshot();
                 let selected_group_id = snapshot.root.id.clone();
                 let selected_entry_id = snapshot.root.entries.first().map(|entry| entry.id.clone());
 
                 VaultStatus::Open {
                     path,
-                    snapshot,
+                    document: Box::new(document),
                     selected_group_id,
                     selected_entry_id,
                     search_query: String::new(),
@@ -156,7 +165,7 @@ impl AppState {
         let group_id = group_id.into();
 
         let VaultStatus::Open {
-            snapshot,
+            document,
             selected_group_id,
             selected_entry_id,
             search_query,
@@ -166,12 +175,14 @@ impl AppState {
             return;
         };
 
+        let snapshot = document.snapshot();
         let Some(group) = snapshot.find_group(&group_id) else {
             return;
         };
+        let selected_entry_id_for_group = group.entries.first().map(|entry| entry.id.clone());
 
         *selected_group_id = group_id;
-        *selected_entry_id = group.entries.first().map(|entry| entry.id.clone());
+        *selected_entry_id = selected_entry_id_for_group;
         search_query.clear();
         cx.notify();
     }
@@ -180,7 +191,7 @@ impl AppState {
         let entry_id = entry_id.into();
 
         let VaultStatus::Open {
-            snapshot,
+            document,
             selected_entry_id,
             ..
         } = &mut self.vault
@@ -188,15 +199,92 @@ impl AppState {
             return;
         };
 
-        if snapshot.find_entry(&entry_id).is_some() {
+        if document.snapshot().find_entry(&entry_id).is_some() {
             *selected_entry_id = Some(entry_id);
             cx.notify();
         }
     }
 
+    pub fn set_search_query(&mut self, query: impl Into<String>, cx: &mut Context<Self>) {
+        let query = query.into();
+
+        let VaultStatus::Open {
+            document,
+            selected_group_id,
+            selected_entry_id,
+            search_query,
+            ..
+        } = &mut self.vault
+        else {
+            return;
+        };
+
+        if *search_query == query {
+            return;
+        }
+
+        *search_query = query;
+        let entries = visible_entries(document.snapshot(), selected_group_id, search_query);
+        let selected_entry_is_visible = selected_entry_id
+            .as_deref()
+            .is_some_and(|id| entries.iter().any(|entry| entry.id == id));
+
+        if !selected_entry_is_visible {
+            *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+        }
+
+        cx.notify();
+    }
+
+    pub fn clear_search(&mut self, cx: &mut Context<Self>) {
+        let VaultStatus::Open {
+            document,
+            selected_group_id,
+            selected_entry_id,
+            search_query,
+            ..
+        } = &mut self.vault
+        else {
+            return;
+        };
+
+        if search_query.is_empty() {
+            return;
+        }
+
+        let selected_entry_id_for_group = document
+            .snapshot()
+            .find_group(selected_group_id)
+            .unwrap_or(&document.snapshot().root)
+            .entries
+            .first()
+            .map(|entry| entry.id.clone());
+
+        search_query.clear();
+        *selected_entry_id = selected_entry_id_for_group;
+        cx.notify();
+    }
+
+    pub fn copy_selected_value(&self, kind: CopyValueKind) -> Option<String> {
+        let model = self.vault_browser()?;
+        let entry = model.selected_entry?;
+
+        match kind {
+            CopyValueKind::Username => non_empty_copy(entry.username),
+            CopyValueKind::Url => non_empty_copy(entry.url),
+            CopyValueKind::Password => {
+                let VaultStatus::Open { document, .. } = &self.vault else {
+                    return None;
+                };
+
+                document.password_for_entry(&entry.id)
+            }
+        }
+    }
+
     pub fn vault_browser(&self) -> Option<VaultBrowserModel> {
         let VaultStatus::Open {
-            snapshot,
+            document,
             selected_group_id,
             selected_entry_id,
             search_query,
@@ -206,30 +294,16 @@ impl AppState {
             return None;
         };
 
+        let snapshot = document.snapshot();
         let selected_group = snapshot
             .find_group(selected_group_id)
             .unwrap_or(&snapshot.root);
         let showing_search_results = !search_query.trim().is_empty();
-
-        let entries = if showing_search_results {
-            let query = search_query.to_lowercase();
-            snapshot
-                .entries_recursive()
-                .into_iter()
-                .filter(|entry| {
-                    entry.title.to_lowercase().contains(&query)
-                        || entry.username.to_lowercase().contains(&query)
-                        || entry.url.to_lowercase().contains(&query)
-                })
-                .cloned()
-                .collect()
-        } else {
-            selected_group.entries.clone()
-        };
+        let entries = visible_entries(snapshot, selected_group_id, search_query);
 
         let selected_entry = selected_entry_id
             .as_deref()
-            .and_then(|id| snapshot.find_entry(id))
+            .and_then(|id| entries.iter().find(|entry| entry.id == id))
             .cloned()
             .or_else(|| entries.first().cloned());
 
@@ -274,12 +348,12 @@ impl AppState {
                 is_open: false,
                 is_busy: true,
             },
-            VaultStatus::Open { path, snapshot, .. } => VaultSummary {
-                title: snapshot.root.name.clone(),
+            VaultStatus::Open { path, document, .. } => VaultSummary {
+                title: document.snapshot().root.name.clone(),
                 subtitle: path.display().to_string(),
                 status: "Open".to_string(),
-                entries: snapshot.entry_count,
-                groups: snapshot.group_count,
+                entries: document.snapshot().entry_count,
+                groups: document.snapshot().group_count,
                 is_open: true,
                 is_busy: false,
             },
@@ -296,6 +370,39 @@ impl AppState {
             },
         }
     }
+}
+
+fn visible_entries(
+    snapshot: &VaultSnapshot,
+    selected_group_id: &str,
+    search_query: &str,
+) -> Vec<VaultEntry> {
+    let query = search_query.trim().to_lowercase();
+
+    if !query.is_empty() {
+        return snapshot
+            .entries_recursive()
+            .into_iter()
+            .filter(|entry| entry_matches_query(entry, &query))
+            .cloned()
+            .collect();
+    }
+
+    snapshot
+        .find_group(selected_group_id)
+        .unwrap_or(&snapshot.root)
+        .entries
+        .clone()
+}
+
+fn entry_matches_query(entry: &VaultEntry, query: &str) -> bool {
+    entry.title.to_lowercase().contains(query)
+        || entry.username.to_lowercase().contains(query)
+        || entry.url.to_lowercase().contains(query)
+}
+
+fn non_empty_copy(value: String) -> Option<String> {
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn file_name(path: &Path) -> String {

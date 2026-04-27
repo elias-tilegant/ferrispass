@@ -1,18 +1,21 @@
 use crate::{
     app::{
-        AppState, UnlockPrompt, VaultSummary,
-        actions::{APP_CONTEXT, CancelUnlock, LockVault, OpenVault, SubmitPassword},
+        AppState, CopyValueKind, UnlockPrompt, VaultSummary,
+        actions::{
+            APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, FocusSearch, LockVault,
+            OpenVault, SubmitPassword,
+        },
     },
     keepass::KeePassRepository,
     ui::vault_browser::{render_group_tree, render_vault_browser},
 };
 use gpui::{
-    AnyElement, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, PathPromptOptions, Render, Styled as _, Subscription,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
+    InteractiveElement as _, IntoElement as _, ParentElement as _, PathPromptOptions, Render,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -23,6 +26,7 @@ use std::path::{Path, PathBuf};
 pub struct AppShell {
     state: Entity<AppState>,
     password_input: Entity<InputState>,
+    search_input: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -33,15 +37,18 @@ impl AppShell {
                 .masked(true)
                 .placeholder("Master password")
         });
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search entries"));
 
         let _subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&password_input, window, Self::on_password_input_event),
+            cx.subscribe_in(&search_input, window, Self::on_search_input_event),
         ];
 
         Self {
             state,
             password_input,
+            search_input,
             _subscriptions,
         }
     }
@@ -68,8 +75,39 @@ impl AppShell {
         self.cancel_unlock(window, cx);
     }
 
-    fn on_action_lock_vault(&mut self, _: &LockVault, _: &mut Window, cx: &mut Context<Self>) {
-        self.state.update(cx, |state, cx| state.lock_vault(cx));
+    fn on_action_lock_vault(&mut self, _: &LockVault, window: &mut Window, cx: &mut Context<Self>) {
+        self.lock_vault(window, cx);
+    }
+
+    fn on_action_focus_search(
+        &mut self,
+        _: &FocusSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_search(window, cx);
+    }
+
+    fn on_action_copy_username(
+        &mut self,
+        _: &CopyUsername,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_selected_value(CopyValueKind::Username, window, cx);
+    }
+
+    fn on_action_copy_url(&mut self, _: &CopyUrl, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected_value(CopyValueKind::Url, window, cx);
+    }
+
+    fn on_action_copy_password(
+        &mut self,
+        _: &CopyPassword,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_selected_value(CopyValueKind::Password, window, cx);
     }
 
     fn on_password_input_event(
@@ -81,6 +119,20 @@ impl AppShell {
     ) {
         if matches!(event, InputEvent::PressEnter { .. }) {
             self.submit_password(window, cx);
+        }
+    }
+
+    fn on_search_input_event(
+        &mut self,
+        search_input: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::Change) {
+            let query = search_input.read(cx).value().to_string();
+            self.state
+                .update(cx, |state, cx| state.set_search_query(query, cx));
         }
     }
 
@@ -123,6 +175,7 @@ impl AppShell {
             input.set_value("", window, cx);
             input.focus(window, cx);
         });
+        self.clear_search(window, cx);
 
         self.state
             .update(cx, |state, cx| state.request_password(path, cx));
@@ -167,12 +220,48 @@ impl AppShell {
 
     fn cancel_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.read(cx).pending_unlock_path().is_none() {
+            self.clear_search(window, cx);
             return;
         }
 
         self.password_input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        self.lock_vault(window, cx);
+    }
+
+    fn lock_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.password_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.state.update(cx, |state, cx| state.lock_vault(cx));
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).vault_browser().is_some() {
+            self.search_input
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
+    }
+
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.state.update(cx, |state, cx| state.clear_search(cx));
+    }
+
+    fn copy_selected_value(
+        &mut self,
+        kind: CopyValueKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(value) = self.state.read(cx).copy_selected_value(kind) {
+            cx.write_to_clipboard(ClipboardItem::new_string(value));
+            window.push_notification(format!("{} copied.", copy_value_label(kind)), cx);
+        } else {
+            window.push_notification(format!("No {} to copy.", copy_value_label(kind)), cx);
+        }
     }
 }
 
@@ -188,6 +277,10 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_submit_password))
             .on_action(cx.listener(Self::on_action_cancel_unlock))
             .on_action(cx.listener(Self::on_action_lock_vault))
+            .on_action(cx.listener(Self::on_action_focus_search))
+            .on_action(cx.listener(Self::on_action_copy_username))
+            .on_action(cx.listener(Self::on_action_copy_url))
+            .on_action(cx.listener(Self::on_action_copy_password))
             .size_full()
             .relative()
             .overflow_hidden()
@@ -196,8 +289,20 @@ impl Render for AppShell {
             .child(
                 h_flex()
                     .size_full()
-                    .child(render_sidebar(&summary, browser.as_ref(), &self.state, cx))
-                    .child(render_workspace(&summary, browser, &self.state, cx)),
+                    .child(render_sidebar(
+                        &summary,
+                        browser.as_ref(),
+                        &self.state,
+                        &self.search_input,
+                        cx,
+                    ))
+                    .child(render_workspace(
+                        &summary,
+                        browser,
+                        &self.state,
+                        &self.search_input,
+                        cx,
+                    )),
             );
 
         if let Some(prompt) = unlock_prompt {
@@ -212,6 +317,7 @@ fn render_sidebar(
     summary: &VaultSummary,
     browser: Option<&crate::app::VaultBrowserModel>,
     state: &Entity<AppState>,
+    search_input: &Entity<InputState>,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     v_flex()
@@ -245,7 +351,7 @@ fn render_sidebar(
                 ),
         )
         .child(match browser {
-            Some(browser) => render_group_tree(browser, state, cx),
+            Some(browser) => render_group_tree(browser, state, search_input, cx),
             None => render_default_navigation(summary, cx),
         })
         .child(div().flex_1())
@@ -265,10 +371,11 @@ fn render_workspace(
     summary: &VaultSummary,
     browser: Option<crate::app::VaultBrowserModel>,
     state: &Entity<AppState>,
+    search_input: &Entity<InputState>,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     let content = if let Some(browser) = browser {
-        render_vault_browser(browser, state, cx)
+        render_vault_browser(browser, state, search_input, cx)
     } else if summary.is_busy {
         render_opening_state(summary, cx)
     } else {
@@ -381,8 +488,8 @@ fn lock_button(id: &'static str, cx: &mut Context<AppShell>) -> Button {
     Button::new(id)
         .outline()
         .label("Lock vault")
-        .on_click(cx.listener(|shell, _: &ClickEvent, _, cx| {
-            shell.state.update(cx, |state, cx| state.lock_vault(cx));
+        .on_click(cx.listener(|shell, _: &ClickEvent, window, cx| {
+            shell.lock_vault(window, cx);
         }))
 }
 
@@ -509,4 +616,12 @@ fn is_kdbx_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("kdbx"))
+}
+
+fn copy_value_label(kind: CopyValueKind) -> &'static str {
+    match kind {
+        CopyValueKind::Username => "Username",
+        CopyValueKind::Url => "URL",
+        CopyValueKind::Password => "Password",
+    }
 }

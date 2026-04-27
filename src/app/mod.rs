@@ -2,7 +2,9 @@ pub mod actions;
 
 mod state;
 
-pub use state::{AppState, UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary};
+pub use state::{
+    AppState, CopyValueKind, UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary,
+};
 
 use crate::ui::AppShell;
 use gpui::{

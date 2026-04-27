@@ -1,17 +1,25 @@
 use crate::{
-    app::{AppState, VaultBrowserModel},
+    app::{AppState, CopyValueKind, VaultBrowserModel},
     domain::{VaultEntry, VaultGroup},
     ui::AppShell,
 };
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, IntoElement as _, ParentElement as _, Styled as _,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, ClickEvent, ClipboardItem, Context, Entity, IntoElement as _, ParentElement as _,
+    Styled as _, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{ActiveTheme as _, StyledExt as _, h_flex, list::ListItem, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    button::Button,
+    h_flex,
+    input::{Input, InputState},
+    list::ListItem,
+    v_flex,
+};
 
 pub fn render_group_tree(
     model: &VaultBrowserModel,
     state: &Entity<AppState>,
+    search_input: &Entity<InputState>,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     v_flex()
@@ -30,6 +38,7 @@ pub fn render_group_tree(
             &model.root,
             &model.selected_group_id,
             state,
+            search_input,
             0,
             cx,
         ))
@@ -39,14 +48,15 @@ pub fn render_group_tree(
 pub fn render_vault_browser(
     model: VaultBrowserModel,
     state: &Entity<AppState>,
+    search_input: &Entity<InputState>,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     h_flex()
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
-        .child(render_entry_list(&model, state, cx))
-        .child(render_entry_detail(&model, cx))
+        .child(render_entry_list(&model, state, search_input, cx))
+        .child(render_entry_detail(&model, state, cx))
         .into_any_element()
 }
 
@@ -54,12 +64,14 @@ fn render_group_row(
     group: &VaultGroup,
     selected_group_id: &str,
     state: &Entity<AppState>,
+    search_input: &Entity<InputState>,
     depth: usize,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     let selected = group.id == selected_group_id;
     let group_id = group.id.clone();
     let state_for_click = state.clone();
+    let search_input_for_click = search_input.clone();
 
     v_flex()
         .gap_1()
@@ -80,7 +92,10 @@ fn render_group_row(
                 .when(!selected, |this| {
                     this.text_color(cx.theme().sidebar_foreground.opacity(0.82))
                 })
-                .on_click(move |_: &ClickEvent, _, cx| {
+                .on_click(move |_: &ClickEvent, window, cx| {
+                    search_input_for_click.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                    });
                     state_for_click.update(cx, |state, cx| {
                         state.select_group(group_id.clone(), cx);
                     });
@@ -99,18 +114,16 @@ fn render_group_row(
                         .child(group.entries.len().to_string()),
                 ),
         )
-        .children(
-            group
-                .groups
-                .iter()
-                .map(|group| render_group_row(group, selected_group_id, state, depth + 1, cx)),
-        )
+        .children(group.groups.iter().map(|group| {
+            render_group_row(group, selected_group_id, state, search_input, depth + 1, cx)
+        }))
         .into_any_element()
 }
 
 fn render_entry_list(
     model: &VaultBrowserModel,
     state: &Entity<AppState>,
+    search_input: &Entity<InputState>,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     v_flex()
@@ -130,12 +143,13 @@ fn render_entry_list(
                     h_flex()
                         .justify_between()
                         .gap_2()
-                        .child(
-                            div()
-                                .font_semibold()
-                                .overflow_hidden()
-                                .child(model.selected_group_name.clone()),
-                        )
+                        .child(div().font_semibold().overflow_hidden().child(
+                            if model.showing_search_results {
+                                "Search results".to_string()
+                            } else {
+                                model.selected_group_name.clone()
+                            },
+                        ))
                         .child(
                             div()
                                 .text_sm()
@@ -143,12 +157,17 @@ fn render_entry_list(
                                 .child(format!("{} entries", model.entries.len())),
                         ),
                 )
+                .child(
+                    Input::new(search_input)
+                        .prefix(IconName::Search)
+                        .cleanable(true),
+                )
                 .when(model.showing_search_results, |this| {
                     this.child(
                         div()
-                            .text_sm()
+                            .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("Search: {}", model.search_query)),
+                            .child(format!("Across vault for \"{}\"", model.search_query)),
                     )
                 }),
         )
@@ -239,20 +258,28 @@ fn render_entry_row(
         .into_any_element()
 }
 
-fn render_entry_detail(model: &VaultBrowserModel, cx: &mut Context<AppShell>) -> AnyElement {
+fn render_entry_detail(
+    model: &VaultBrowserModel,
+    state: &Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
     v_flex()
         .flex_1()
         .min_w(px(0.))
         .h_full()
         .bg(cx.theme().background)
         .child(match &model.selected_entry {
-            Some(entry) => render_selected_entry(entry, cx),
+            Some(entry) => render_selected_entry(entry, state, cx),
             None => render_no_entry(cx),
         })
         .into_any_element()
 }
 
-fn render_selected_entry(entry: &VaultEntry, cx: &mut Context<AppShell>) -> AnyElement {
+fn render_selected_entry(
+    entry: &VaultEntry,
+    state: &Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
     v_flex()
         .flex_1()
         .gap_5()
@@ -271,6 +298,31 @@ fn render_selected_entry(entry: &VaultEntry, cx: &mut Context<AppShell>) -> AnyE
                             entry.url.clone()
                         }),
                 ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(copy_button(
+                    "copy-entry-username",
+                    "Username",
+                    CopyValueKind::Username,
+                    entry.username.is_empty(),
+                    state,
+                ))
+                .child(copy_button(
+                    "copy-entry-url",
+                    "URL",
+                    CopyValueKind::Url,
+                    entry.url.is_empty(),
+                    state,
+                ))
+                .child(copy_button(
+                    "copy-entry-password",
+                    "Password",
+                    CopyValueKind::Password,
+                    !entry.has_password,
+                    state,
+                )),
         )
         .child(
             v_flex()
@@ -293,6 +345,32 @@ fn render_selected_entry(entry: &VaultEntry, cx: &mut Context<AppShell>) -> AnyE
                 )),
         )
         .into_any_element()
+}
+
+fn copy_button(
+    id: &'static str,
+    label: &'static str,
+    kind: CopyValueKind,
+    disabled: bool,
+    state: &Entity<AppState>,
+) -> Button {
+    let state_for_click = state.clone();
+
+    Button::new(id)
+        .outline()
+        .small()
+        .icon(IconName::Copy)
+        .label(label)
+        .tooltip(format!("Copy {}", label))
+        .disabled(disabled)
+        .on_click(move |_: &ClickEvent, window, cx| {
+            if let Some(value) = state_for_click.read(cx).copy_selected_value(kind) {
+                cx.write_to_clipboard(ClipboardItem::new_string(value));
+                window.push_notification(format!("{} copied.", copy_value_label(kind)), cx);
+            } else {
+                window.push_notification(format!("No {} to copy.", copy_value_label(kind)), cx);
+            }
+        })
 }
 
 fn render_no_entry(cx: &mut Context<AppShell>) -> AnyElement {
@@ -339,5 +417,13 @@ fn display_or_empty(value: &str) -> String {
         "Not set".to_string()
     } else {
         value.to_string()
+    }
+}
+
+fn copy_value_label(kind: CopyValueKind) -> &'static str {
+    match kind {
+        CopyValueKind::Username => "Username",
+        CopyValueKind::Url => "URL",
+        CopyValueKind::Password => "Password",
     }
 }

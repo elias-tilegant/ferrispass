@@ -1,4 +1,7 @@
-use crate::domain::{VaultEntry, VaultGroup, VaultSnapshot};
+use crate::{
+    domain::{VaultEntry, VaultGroup, VaultSnapshot},
+    keepass::VaultDocument,
+};
 use keepass::{
     Database, DatabaseKey,
     db::{DatabaseOpenError, EntryRef, GroupRef},
@@ -11,12 +14,13 @@ impl KeePassRepository {
     pub fn open_with_password(
         path: impl AsRef<Path>,
         password: &str,
-    ) -> Result<VaultSnapshot, DatabaseOpenError> {
+    ) -> Result<VaultDocument, DatabaseOpenError> {
         let mut file = File::open(path)?;
         let key = DatabaseKey::new().with_password(password);
         let database = Database::open(&mut file, key)?;
+        let snapshot = snapshot_from_database(&database);
 
-        Ok(snapshot_from_database(&database))
+        Ok(VaultDocument::new(database, snapshot))
     }
 }
 
