@@ -1,7 +1,9 @@
-use crate::domain::{VaultEntry, VaultGroup, VaultSnapshot};
+use crate::domain::{VaultEntry, VaultSnapshot};
 use crate::keepass::VaultDocument;
 use gpui::Context;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Debug, Default)]
 pub struct AppState {
@@ -27,6 +29,11 @@ pub enum VaultStatus {
         selection: LibrarySelection,
         selected_entry_id: Option<String>,
         search_query: String,
+        /// Pre-computed result of `entries_for_selection(selection, search_query)`,
+        /// rebuilt only when selection / search changes. Sharing via `Rc` makes
+        /// `vault_browser()` cheap on every render frame, which keeps scrolling
+        /// smooth on large vaults (3 500+ entries).
+        visible_entries: Rc<Vec<VaultEntry>>,
     },
     Error {
         message: String,
@@ -117,17 +124,21 @@ pub struct VaultSummary {
     pub synced_at: Option<&'static str>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct VaultBrowserModel {
-    pub root: VaultGroup,
+    /// Cheap `Arc` clone of the current snapshot — held so renderers can read
+    /// the group tree, recently-used count, etc. without re-cloning.
+    pub snapshot: Arc<VaultSnapshot>,
     pub selection: LibrarySelection,
     pub selection_label: String,
     pub selected_entry_id: Option<String>,
-    pub entries: Vec<VaultEntry>,
+    /// Currently-visible entries (after selection + search filter), shared by
+    /// `Rc` so the virtual list, scroll handler, and detail-pane all read from
+    /// the same allocation.
+    pub entries: Rc<Vec<VaultEntry>>,
     pub selected_entry: Option<VaultEntry>,
     pub search_query: String,
     pub showing_search_results: bool,
-    pub starred: Vec<VaultEntry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +233,8 @@ impl AppState {
                 let selection = LibrarySelection::Group(snapshot.root.id.clone());
                 let selected_entry_id =
                     snapshot.root.entries.first().map(|entry| entry.id.clone());
+                let visible_entries =
+                    Rc::new(entries_for_selection(snapshot, &selection, ""));
 
                 VaultStatus::Open {
                     path,
@@ -229,6 +242,7 @@ impl AppState {
                     selection,
                     selected_entry_id,
                     search_query: String::new(),
+                    visible_entries,
                 }
             }
             Err(message) => VaultStatus::AwaitingPassword {
@@ -291,6 +305,7 @@ impl AppState {
             selection,
             selected_entry_id,
             search_query,
+            visible_entries,
             ..
         } = &mut self.vault
         else {
@@ -298,14 +313,15 @@ impl AppState {
         };
 
         let snapshot = document.snapshot();
-        let Some(group) = snapshot.find_group(&group_id) else {
+        if snapshot.find_group(&group_id).is_none() {
             return;
-        };
-        let selected_entry_id_for_group = group.entries.first().map(|entry| entry.id.clone());
+        }
 
         *selection = LibrarySelection::Group(group_id);
-        *selected_entry_id = selected_entry_id_for_group;
         search_query.clear();
+        let entries = entries_for_selection(snapshot, selection, "");
+        *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+        *visible_entries = Rc::new(entries);
         cx.notify();
     }
 
@@ -315,6 +331,7 @@ impl AppState {
             selection,
             selected_entry_id,
             search_query,
+            visible_entries,
             ..
         } = &mut self.vault
         else {
@@ -327,6 +344,7 @@ impl AppState {
         search_query.clear();
         let entries = entries_for_selection(document.snapshot(), selection, "");
         *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+        *visible_entries = Rc::new(entries);
         cx.notify();
     }
 
@@ -356,6 +374,7 @@ impl AppState {
             selection,
             selected_entry_id,
             search_query,
+            visible_entries,
             ..
         } = &mut self.vault
         else {
@@ -376,6 +395,7 @@ impl AppState {
             *selected_entry_id = entries.first().map(|entry| entry.id.clone());
         }
 
+        *visible_entries = Rc::new(entries);
         cx.notify();
     }
 
@@ -385,6 +405,7 @@ impl AppState {
             selection,
             selected_entry_id,
             search_query,
+            visible_entries,
             ..
         } = &mut self.vault
         else {
@@ -398,6 +419,7 @@ impl AppState {
         search_query.clear();
         let entries = entries_for_selection(document.snapshot(), selection, "");
         *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+        *visible_entries = Rc::new(entries);
         cx.notify();
     }
 
@@ -424,40 +446,33 @@ impl AppState {
             selection,
             selected_entry_id,
             search_query,
+            visible_entries,
             ..
         } = &self.vault
         else {
             return None;
         };
 
-        let snapshot = document.snapshot();
+        let snapshot = document.snapshot_rc();
         let showing_search_results = !search_query.trim().is_empty();
-        let entries = entries_for_selection(snapshot, selection, search_query);
 
         let selected_entry = selected_entry_id
             .as_deref()
-            .and_then(|id| entries.iter().find(|entry| entry.id == id))
+            .and_then(|id| visible_entries.iter().find(|entry| entry.id == id))
             .cloned()
-            .or_else(|| entries.first().cloned());
+            .or_else(|| visible_entries.first().cloned());
 
-        let starred = snapshot
-            .entries_starred()
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-
-        let selection_label = selection_label_for(selection, snapshot);
+        let selection_label = selection_label_for(selection, &snapshot);
 
         Some(VaultBrowserModel {
-            root: snapshot.root.clone(),
+            snapshot,
             selection: selection.clone(),
             selection_label,
             selected_entry_id: selected_entry.as_ref().map(|entry| entry.id.clone()),
-            entries,
+            entries: Rc::clone(visible_entries),
             selected_entry,
             search_query: search_query.clone(),
             showing_search_results,
-            starred,
         })
     }
 

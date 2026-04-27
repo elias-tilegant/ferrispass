@@ -23,19 +23,18 @@ use crate::ui::widgets::entry_chrome::{favicon, favicon_color};
 use crate::ui::widgets::password::{detail_row, strength_card};
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
-    let summary = shell.state().read(cx).summary();
-
-    let vault_status = shell.state().read(cx).vault_status();
-    let snapshot_owned = match vault_status {
-        VaultStatus::Open { document, .. } => Some(document.snapshot().clone()),
-        _ => None,
-    };
-
-    let browser = shell.state().read(cx).vault_browser();
+    let state = shell.state().read(cx);
+    let summary = state.summary();
+    let vault_status = state.vault_status();
     let is_busy = matches!(vault_status, VaultStatus::Opening { .. });
     let is_open = matches!(vault_status, VaultStatus::Open { .. });
 
-    let snapshot_for_sidebar = snapshot_owned.clone();
+    // O(1) snapshot share — keeps render off the deep-clone path.
+    let snapshot = match vault_status {
+        VaultStatus::Open { document, .. } => Some(document.snapshot_rc()),
+        _ => None,
+    };
+    let browser = state.vault_browser();
 
     let selection = browser
         .as_ref()
@@ -43,7 +42,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .unwrap_or(crate::app::LibrarySelection::AllItems);
     let sidebar_el = sidebar(
         &summary,
-        snapshot_for_sidebar.as_ref(),
+        snapshot.as_deref(),
         &selection,
         shell.state().clone(),
         cx,
@@ -601,7 +600,7 @@ fn vault_split(
     shell: &AppShell,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
-    let entries = browser.entries.clone();
+    let entries = std::rc::Rc::clone(&browser.entries);
     let selected_entry = browser.selected_entry.clone();
     let group_name = if browser.showing_search_results {
         "Search results".to_string()
@@ -615,7 +614,7 @@ fn vault_split(
         .min_w(px(0.))
         .overflow_hidden()
         .child(entry_list(
-            &entries,
+            entries,
             &group_name,
             browser.search_query.clone(),
             browser.showing_search_results,
@@ -627,8 +626,20 @@ fn vault_split(
         .child(entry_detail(selected_entry, shell.state().clone(), cx))
 }
 
+/// One row in the virtual entry list — either a section heading or an index
+/// into the shared `Rc<Vec<VaultEntry>>` (avoids cloning entries per frame).
+#[derive(Clone, Copy)]
+enum ListRow {
+    Header { label: &'static str, count: usize },
+    Entry(usize),
+}
+
+const ROW_HEIGHT: f32 = 56.0;
+const ROW_GAP: f32 = 2.0;
+const HEADER_HEIGHT: f32 = 28.0;
+
 fn entry_list(
-    entries: &[VaultEntry],
+    entries: std::rc::Rc<Vec<VaultEntry>>,
     group_name: &str,
     search_query: String,
     showing_search: bool,
@@ -637,57 +648,118 @@ fn entry_list(
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
-    let entries_owned: Vec<VaultEntry> = entries.iter().cloned().collect();
-    let total = entries_owned.len();
-    let mut list = v_flex()
-        .id("entry-list-scroll")
-        .flex_1()
-        .min_h(px(0.))
-        .overflow_y_scroll()
-        .gap_0p5()
-        .p_2();
+    let total = entries.len();
 
-    if total == 0 {
-        list = list.child(
-            v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(palette::TEXT_MUTED)
-                .child("No entries"),
-        );
-    } else {
-        let starred: Vec<VaultEntry> = entries_owned.iter().filter(|e| e.starred).cloned().collect();
-        let rest: Vec<VaultEntry> = entries_owned.iter().filter(|e| !e.starred).cloned().collect();
-
-        if !starred.is_empty() {
-            list = list.child(list_section_heading("Pinned", starred.len()));
-            for entry in &starred {
-                list = list.child(entry_row(
-                    entry.clone(),
-                    selected_entry_id.as_deref() == Some(entry.id.as_str()),
-                    state_entity.clone(),
-                    cx,
-                ));
-            }
-        }
-
-        if !rest.is_empty() {
-            list = list.child(list_section_heading(
-                if showing_search { "Results" } else { "All entries" },
-                rest.len(),
-            ));
-            for entry in &rest {
-                list = list.child(entry_row(
-                    entry.clone(),
-                    selected_entry_id.as_deref() == Some(entry.id.as_str()),
-                    state_entity.clone(),
-                    cx,
-                ));
-            }
+    // Build the flat virtual-row list once per render. We store INDEX into the shared
+    // Rc<Vec<VaultEntry>> rather than cloning each entry — keeps per-frame allocation
+    // proportional to the number of rows, not the size of each entry's strings.
+    let mut rows: Vec<ListRow> = Vec::with_capacity(total + 2);
+    let mut starred_count = 0;
+    let mut rest_count = 0;
+    for entry in entries.iter() {
+        if entry.starred {
+            starred_count += 1;
+        } else {
+            rest_count += 1;
         }
     }
+
+    if starred_count > 0 {
+        rows.push(ListRow::Header {
+            label: "Pinned",
+            count: starred_count,
+        });
+        rows.extend(
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.starred)
+                .map(|(ix, _)| ListRow::Entry(ix)),
+        );
+    }
+    if rest_count > 0 {
+        rows.push(ListRow::Header {
+            label: if showing_search { "Results" } else { "All entries" },
+            count: rest_count,
+        });
+        rows.extend(
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| !e.starred)
+                .map(|(ix, _)| ListRow::Entry(ix)),
+        );
+    }
+
+    let item_sizes: std::rc::Rc<Vec<gpui::Size<gpui::Pixels>>> = std::rc::Rc::new(
+        rows.iter()
+            .map(|row| match row {
+                ListRow::Header { .. } => gpui::size(px(0.), px(HEADER_HEIGHT)),
+                ListRow::Entry(_) => gpui::size(px(0.), px(ROW_HEIGHT + ROW_GAP)),
+            })
+            .collect(),
+    );
+
+    let rows_rc: std::rc::Rc<Vec<ListRow>> = std::rc::Rc::new(rows);
+    let entries_for_render = std::rc::Rc::clone(&entries);
+    let selected_id_for_render = selected_entry_id.clone();
+    let state_for_render = state_entity.clone();
+
+    let body: gpui::AnyElement = if total == 0 {
+        v_flex()
+            .id("entry-list-empty")
+            .flex_1()
+            .min_h(px(0.))
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(palette::TEXT_MUTED)
+            .child("No entries")
+            .into_any_element()
+    } else {
+        let virtual_list = gpui_component::v_virtual_list(
+            cx.entity().clone(),
+            "entry-list-virtual",
+            item_sizes,
+            move |_shell: &mut AppShell, range, _window, cx| {
+                let rows = rows_rc.clone();
+                let entries = std::rc::Rc::clone(&entries_for_render);
+                let selected_id = selected_id_for_render.clone();
+                let state_entity = state_for_render.clone();
+                range
+                    .map(|ix| -> gpui::AnyElement {
+                        match rows.get(ix).copied() {
+                            Some(ListRow::Header { label, count }) => {
+                                list_section_heading(label, count).into_any_element()
+                            }
+                            Some(ListRow::Entry(entry_ix)) => {
+                                let Some(entry) = entries.get(entry_ix) else {
+                                    return div().into_any_element();
+                                };
+                                let is_selected =
+                                    selected_id.as_deref() == Some(entry.id.as_str());
+                                entry_row(
+                                    entry.clone(),
+                                    is_selected,
+                                    state_entity.clone(),
+                                    cx,
+                                )
+                                .into_any_element()
+                            }
+                            None => div().into_any_element(),
+                        }
+                    })
+                    .collect()
+            },
+        );
+
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .px_2()
+            .child(virtual_list)
+            .into_any_element()
+    };
 
     v_flex()
         .h_full()
@@ -736,7 +808,7 @@ fn entry_list(
                     )
                 }),
         )
-        .child(list)
+        .child(body)
 }
 
 fn list_section_heading(label: &'static str, count: usize) -> impl gpui::IntoElement {
