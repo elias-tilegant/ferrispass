@@ -1249,119 +1249,132 @@ fn entry_detail_body(
     let entry_id_for_actions = entry.id.clone();
     let perma_armed = pending_perma_delete.as_deref() == Some(entry.id.as_str());
 
-    // Action triplet on the trailing side of the footer changes shape based on
-    // where the entry lives:
-    //   - normal entry: [Edit] [Delete (to trash)]
-    //   - trashed entry: [Restore] [Delete forever] (or, if armed, [Confirm forever] [Cancel])
-    let trailing_actions = if in_trash {
-        let restore_id = entry_id_for_actions.clone();
-        let restore_btn = footer_button(
-            "detail-restore-entry",
-            "Restore",
-            FooterStyle::Default,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                let _ = restore_id;
-                shell.restore_selected_entry(window, cx);
-            }),
-        );
-
-        if perma_armed {
-            let confirm_id = entry_id_for_actions.clone();
-            let confirm_btn = footer_button(
-                "detail-perma-confirm",
-                "Delete forever?",
-                FooterStyle::Danger,
-                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                    shell.confirm_perma_delete(confirm_id.clone(), window, cx);
-                }),
-            );
-            let cancel_btn = footer_button(
+    // When the user has armed "Delete forever", we replace the entire footer
+    // with a destructive confirmation strip — same height as the normal
+    // footer, but only Cancel + the destructive primary remain. Hiding the
+    // copy/restore actions has two benefits:
+    //   1. Removes any chance of accidentally clicking the wrong button mid-
+    //      confirmation.
+    //   2. Avoids the 6-button layout that overflowed the panel and clipped
+    //      the trailing buttons on narrow widths.
+    let footer = if perma_armed {
+        let confirm_id = entry_id_for_actions.clone();
+        h_flex()
+            .flex_shrink_0()
+            .gap_2()
+            .p_3()
+            .items_center()
+            .border_t_1()
+            .border_color(palette::border())
+            .bg(palette::orange_soft())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .text_xs()
+                    .text_color(palette::text())
+                    .child("Permanently delete this entry?"),
+            )
+            .child(footer_button(
                 "detail-perma-cancel",
                 "Cancel",
                 FooterStyle::Default,
                 cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
                     shell.clear_perma_delete(cx);
                 }),
-            );
-            (restore_btn, Some(confirm_btn), Some(cancel_btn))
+            ))
+            .child(footer_button(
+                "detail-perma-confirm",
+                "Delete forever",
+                FooterStyle::Danger,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.confirm_perma_delete(confirm_id.clone(), window, cx);
+                }),
+            ))
+    } else {
+        // Normal footer: trailing pair depends on trash vs. live entry.
+        let trailing_primary = if in_trash {
+            footer_button(
+                "detail-restore-entry",
+                "Restore",
+                FooterStyle::Default,
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.restore_selected_entry(window, cx);
+                }),
+            )
         } else {
+            footer_button(
+                "detail-edit-entry",
+                "Edit",
+                FooterStyle::Default,
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.begin_edit_selected_entry(window, cx);
+                }),
+            )
+        };
+        let trailing_secondary = if in_trash {
             let arm_id = entry_id_for_actions.clone();
-            let perma_btn = footer_button(
+            footer_button(
                 "detail-perma-arm",
                 "Delete forever",
                 FooterStyle::Danger,
                 cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                     shell.arm_perma_delete(arm_id.clone(), cx);
                 }),
-            );
-            (restore_btn, Some(perma_btn), None)
-        }
-    } else {
-        let edit_btn = footer_button(
-            "detail-edit-entry",
-            "Edit",
-            FooterStyle::Default,
-            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                shell.begin_edit_selected_entry(window, cx);
-            }),
-        );
-        let delete_btn = footer_button(
-            "detail-delete-entry",
-            "Delete",
-            FooterStyle::Default,
-            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                shell.delete_selected_entry(window, cx);
-            }),
-        );
-        (edit_btn, Some(delete_btn), None)
-    };
+            )
+        } else {
+            footer_button(
+                "detail-delete-entry",
+                "Delete",
+                FooterStyle::Default,
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.delete_selected_entry(window, cx);
+                }),
+            )
+        };
 
-    let mut footer = h_flex()
-        .flex_shrink_0()
-        .gap_2()
-        .p_3()
-        .border_t_1()
-        .border_color(palette::border())
-        .child(action_button(
-            "detail-copy-password",
-            "Copy password",
-            AppIcon::Key,
-            ActionStyle::Primary,
-            has_password,
-            true,
-            CopyValueKind::Password,
-            state_entity.clone(),
-            cx,
-        ))
-        .child(action_button(
-            "detail-copy-username",
-            "User",
-            AppIcon::Note,
-            ActionStyle::Default,
-            username_present,
-            false,
-            CopyValueKind::Username,
-            state_entity.clone(),
-            cx,
-        ))
-        .child(action_button(
-            "detail-copy-url",
-            "URL",
-            AppIcon::Cloud,
-            ActionStyle::Default,
-            url_present,
-            false,
-            CopyValueKind::Url,
-            state_entity.clone(),
-            cx,
-        ))
-        .child(trailing_actions.0);
-    if let Some(b) = trailing_actions.1 {
-        footer = footer.child(b);
-    }
-    if let Some(b) = trailing_actions.2 {
-        footer = footer.child(b);
-    }
+        h_flex()
+            .flex_shrink_0()
+            .gap_2()
+            .p_3()
+            .border_t_1()
+            .border_color(palette::border())
+            .child(action_button(
+                "detail-copy-password",
+                "Copy password",
+                AppIcon::Key,
+                ActionStyle::Primary,
+                has_password,
+                true,
+                CopyValueKind::Password,
+                state_entity.clone(),
+                cx,
+            ))
+            .child(action_button(
+                "detail-copy-username",
+                "User",
+                AppIcon::Note,
+                ActionStyle::Default,
+                username_present,
+                false,
+                CopyValueKind::Username,
+                state_entity.clone(),
+                cx,
+            ))
+            .child(action_button(
+                "detail-copy-url",
+                "URL",
+                AppIcon::Cloud,
+                ActionStyle::Default,
+                url_present,
+                false,
+                CopyValueKind::Url,
+                state_entity.clone(),
+                cx,
+            ))
+            .child(trailing_primary)
+            .child(trailing_secondary)
+    };
 
     v_flex()
         .h_full()
