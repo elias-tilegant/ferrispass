@@ -41,6 +41,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let password_input = shell.new_entry_password_input().clone();
     let url_input = shell.new_entry_url_input().clone();
     let notes_input = shell.new_entry_notes_input().clone();
+    let otp_input = shell.new_entry_otp_input().clone();
 
     // Are we editing an existing entry, or adding a new one? The overlay
     // variant carries the entry id when in edit mode.
@@ -277,6 +278,23 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .gap_2()
                         .child(label("Notes"))
                         .child(Input::new(&notes_input)),
+                )
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_baseline()
+                                .child(label("2FA / TOTP"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(palette::text_faint())
+                                        .child("(otpauth URL or secret)"),
+                                ),
+                        )
+                        .child(Input::new(&otp_input)),
                 ),
         )
         .child(

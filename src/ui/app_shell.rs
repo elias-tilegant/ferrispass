@@ -29,6 +29,7 @@ struct EditPrefill {
     url: String,
     notes: String,
     password: String,
+    otp: String,
 }
 
 pub struct AppShell {
@@ -41,6 +42,7 @@ pub struct AppShell {
     new_entry_password_input: Entity<InputState>,
     new_entry_url_input: Entity<InputState>,
     new_entry_notes_input: Entity<InputState>,
+    new_entry_otp_input: Entity<InputState>,
     /// Persistent scroll position for the entry virtual list. Must outlive a single
     /// render — without it the list resets to the top on every re-render and
     /// mouse-wheel events appear to do nothing.
@@ -86,6 +88,10 @@ impl AppShell {
         let new_entry_url_input = cx.new(|cx| InputState::new(window, cx).placeholder("URL"));
         let new_entry_notes_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Notes (optional)"));
+        let new_entry_otp_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("otpauth://… or base32 secret")
+        });
 
         let focus_handle = cx.focus_handle();
         // Grab focus immediately so cmd-f / cmd-l / cmd-, fire on the very first
@@ -115,6 +121,7 @@ impl AppShell {
             new_entry_password_input,
             new_entry_url_input,
             new_entry_notes_input,
+            new_entry_otp_input,
             entry_list_scroll: VirtualListScrollHandle::new(),
             focus_handle,
             search_debounce: None,
@@ -220,6 +227,10 @@ impl AppShell {
         &self.new_entry_notes_input
     }
 
+    pub fn new_entry_otp_input(&self) -> &Entity<InputState> {
+        &self.new_entry_otp_input
+    }
+
     /// Snapshot the AddEntry form into an `EntryDraft`. Tags aren't editable
     /// in the modal yet; we leave them empty so create_entry doesn't accidentally
     /// add ghost tags.
@@ -231,6 +242,7 @@ impl AppShell {
             url: self.new_entry_url_input.read(cx).value().to_string(),
             notes: self.new_entry_notes_input.read(cx).value().to_string(),
             tags: Vec::new(),
+            otp: self.new_entry_otp_input.read(cx).value().to_string(),
         }
     }
 
@@ -243,6 +255,7 @@ impl AppShell {
             &self.new_entry_password_input,
             &self.new_entry_url_input,
             &self.new_entry_notes_input,
+            &self.new_entry_otp_input,
         ] {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
@@ -518,13 +531,13 @@ impl AppShell {
             let state = self.state.read(cx);
             let browser = state.vault_browser();
             let entry = browser.as_ref().and_then(|b| b.selected_entry.clone());
-            let password = entry.as_ref().and_then(|e| {
-                if let crate::app::VaultStatus::Open { document, .. } = state.vault_status() {
-                    document.password_for_entry(&e.id)
-                } else {
-                    None
-                }
-            });
+            let (password, otp) = match (&entry, state.vault_status()) {
+                (Some(e), crate::app::VaultStatus::Open { document, .. }) => (
+                    document.password_for_entry(&e.id),
+                    document.otp_url_for_entry(&e.id),
+                ),
+                _ => (None, None),
+            };
             entry.map(|e| EditPrefill {
                 id: e.id.clone(),
                 title: e.title.clone(),
@@ -532,6 +545,7 @@ impl AppShell {
                 url: e.url.clone(),
                 notes: e.notes.clone(),
                 password: password.unwrap_or_default(),
+                otp: otp.unwrap_or_default(),
             })
         };
 
@@ -550,6 +564,8 @@ impl AppShell {
             .update(cx, |s, cx| s.set_value(&p.url, window, cx));
         self.new_entry_notes_input
             .update(cx, |s, cx| s.set_value(&p.notes, window, cx));
+        self.new_entry_otp_input
+            .update(cx, |s, cx| s.set_value(&p.otp, window, cx));
 
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::EditEntry { entry_id: p.id }, cx);

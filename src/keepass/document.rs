@@ -82,6 +82,20 @@ impl VaultDocument {
         })
     }
 
+    /// Raw `otp` field of an entry — `otpauth://...` URL or bare secret.
+    /// Used to prefill the Edit modal so the user can change/remove it.
+    /// Returns `None` if the entry has no OTP set.
+    pub fn otp_url_for_entry(&self, entry_id: &str) -> Option<String> {
+        let entry = self
+            .database
+            .iter_all_entries()
+            .find(|e| e.id().to_string() == entry_id)?;
+        entry
+            .get_raw_otp_value()
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+    }
+
     /// Compute the current TOTP code for an entry, if one is configured.
     /// Returns `None` when the entry has no `otp` field, the field is malformed,
     /// or the system clock is unreadable. Cheap (~microseconds), so we call it
@@ -241,6 +255,11 @@ pub struct EntryDraft {
     pub url: String,
     pub notes: String,
     pub tags: Vec<String>,
+    /// 2FA secret. Either a raw `otpauth://...` URL (preferred — keeps
+    /// algorithm/digits/period/issuer config) or just the base32 secret. Empty
+    /// = no OTP. Stored as a *protected* field because the value is the seed
+    /// that generates every future code.
+    pub otp: String,
 }
 
 fn apply_draft_to_entry<E>(entry: &mut E, draft: &EntryDraft)
@@ -256,6 +275,12 @@ where
         entry.set_protected(fields::PASSWORD, "");
     } else {
         entry.set_protected(fields::PASSWORD, draft.password.clone());
+    }
+    if draft.otp.trim().is_empty() {
+        entry.set_protected(fields::OTP, "");
+    } else {
+        // Store as protected — the value contains the TOTP seed.
+        entry.set_protected(fields::OTP, draft.otp.trim().to_string());
     }
     entry.tags = draft.tags.clone();
     entry.times.last_modification = Some(keepass::db::Times::now());
@@ -470,6 +495,7 @@ mod tests {
             url: "github.com".to_string(),
             notes: "Personal account".to_string(),
             tags: vec!["Work".to_string(), "2FA".to_string()],
+            otp: String::new(),
         };
         let new_id = doc
             .create_entry(&root_id, &draft)
@@ -624,6 +650,82 @@ mod tests {
             let bin = doc.snapshot().find_group(bin_id).expect("bin");
             assert!(!bin.entries.iter().any(|e| e.id == id));
         }
+    }
+
+    #[test]
+    /// EntryDraft.otp is persisted into the entry's OTP field, can be
+    /// retrieved via `otp_url_for_entry`, and immediately yields a valid
+    /// `OtpDisplay` from the same `totp_for_entry` path the UI uses.
+    /// Catches regressions in either set/get plumbing or in keepass-rs's
+    /// otpauth URL parser.
+    #[test]
+    fn create_entry_with_otp_round_trips() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+
+        let root_id = doc.database.root().id().to_string();
+        let url = "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&issuer=Example";
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "WithOtp".into(),
+                    otp: url.into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        // Round-trip the URL itself for the Edit-prefill path.
+        assert_eq!(doc.otp_url_for_entry(&id).as_deref(), Some(url));
+
+        // Live code path. Without a `digits=` URL param keepass-rs defaults
+        // to 8 digits — most real services pin `digits=6` in the QR code, but
+        // either value is valid TOTP. We just assert it's non-empty digits in
+        // the expected formatted shape.
+        let otp = doc.totp_for_entry(&id).expect("totp computes");
+        assert!(otp.code.contains(' '), "code is formatted: {}", otp.code);
+        let raw: String = otp.code.chars().filter(|c| c.is_ascii_digit()).collect();
+        assert!(
+            raw.len() == 6 || raw.len() == 8,
+            "expected 6 or 8 digits, got: {}",
+            otp.code
+        );
+        assert!(otp.remaining_secs <= otp.period_secs);
+    }
+
+    #[test]
+    fn update_entry_clears_otp_when_field_empty() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Cleared".into(),
+                    otp: "otpauth://totp/X?secret=JBSWY3DPEHPK3PXP".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+        assert!(doc.otp_url_for_entry(&id).is_some());
+
+        doc.update_entry(
+            &id,
+            &EntryDraft {
+                title: "Cleared".into(),
+                otp: String::new(),
+                ..Default::default()
+            },
+        )
+        .expect("update");
+
+        assert!(doc.otp_url_for_entry(&id).is_none(), "otp removed");
+        assert!(doc.totp_for_entry(&id).is_none(), "no live code");
     }
 
     #[test]
