@@ -10,7 +10,7 @@ use gpui_component::{
 };
 
 use crate::app::{
-    AppState, CopyValueKind, VaultBrowserModel, VaultStatus, VaultSummary,
+    AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{LockVault, NewEntry, OpenSyncSettings, OpenVault},
 };
 use crate::domain::{VaultEntry, VaultGroup, VaultSnapshot};
@@ -25,6 +25,7 @@ use crate::ui::widgets::password::{detail_row, strength_card};
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let state = shell.state().read(cx);
     let summary = state.summary();
+    let save_status = state.save_status().clone();
     let vault_status = state.vault_status();
     let is_busy = matches!(vault_status, VaultStatus::Opening { .. });
     let is_open = matches!(vault_status, VaultStatus::Open { .. });
@@ -48,8 +49,16 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         cx,
     )
     .into_any_element();
-    let workspace_el =
-        workspace(&summary, browser, shell, cx, is_busy, is_open).into_any_element();
+    let workspace_el = workspace(
+        &summary,
+        save_status,
+        browser,
+        shell,
+        cx,
+        is_busy,
+        is_open,
+    )
+    .into_any_element();
 
     h_flex()
         .size_full()
@@ -413,6 +422,7 @@ fn nav_pill(
 
 fn workspace(
     summary: &VaultSummary,
+    save_status: SaveStatus,
     browser: Option<VaultBrowserModel>,
     shell: &AppShell,
     cx: &mut Context<AppShell>,
@@ -429,7 +439,7 @@ fn workspace(
         empty_panel(summary, cx).into_any_element()
     };
 
-    let status = status_bar(summary).into_any_element();
+    let status = status_bar(summary, &save_status, cx).into_any_element();
 
     v_flex()
         .flex_1()
@@ -1469,7 +1479,11 @@ fn opening_panel(summary: &VaultSummary) -> impl gpui::IntoElement {
         )
 }
 
-fn status_bar(summary: &VaultSummary) -> impl gpui::IntoElement {
+fn status_bar(
+    summary: &VaultSummary,
+    save_status: &SaveStatus,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
     h_flex()
         .h(px(24.))
         .flex_shrink_0()
@@ -1494,7 +1508,85 @@ fn status_bar(summary: &VaultSummary) -> impl gpui::IntoElement {
             summary.entries, summary.groups
         ))
         .child(div().flex_1())
-        .child("auto-lock in 14:23")
+        .child(save_status_pill(save_status, cx))
+}
+
+/// Right-aligned save indicator. Three visual modes:
+///
+/// * **Idle / Saved** → green dot + "Saved". The Idle and Saved cases collapse
+///   visually because for the user they mean the same thing: the on-disk file
+///   matches the in-memory state. Distinguishing them would just be noise.
+/// * **Saving** → muted dot + "Saving…". Auto-save runs in the background, so
+///   this state is usually visible only for the ~500 ms Argon2 KDF window.
+/// * **Failed** → red dot + truncated error + clickable "Retry" chip. Retry
+///   re-fires the same `SaveVault` action that `cmd-s` triggers.
+fn save_status_pill(
+    status: &SaveStatus,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    match status {
+        SaveStatus::Idle | SaveStatus::Saved => h_flex()
+            .gap_1()
+            .items_center()
+            .child(dot(palette::green(), 6.0))
+            .child("Saved")
+            .into_any_element(),
+        SaveStatus::Saving => h_flex()
+            .gap_1()
+            .items_center()
+            .child(dot(palette::text_faint(), 6.0))
+            .child("Saving…")
+            .into_any_element(),
+        SaveStatus::Failed(msg) => {
+            // Truncate long error messages so they don't push the Retry pill
+            // off-screen. The full text could go in a tooltip later.
+            let short = if msg.chars().count() > 48 {
+                let mut s: String = msg.chars().take(45).collect();
+                s.push('…');
+                s
+            } else {
+                msg.to_string()
+            };
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(dot(palette::red(), 6.0))
+                        .child(
+                            div()
+                                .text_color(palette::red())
+                                .child(format!("Save failed: {short}")),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("status-save-retry")
+                        .h(px(18.))
+                        .px(px(8.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(palette::border_strong())
+                        .bg(palette::panel())
+                        .text_color(palette::text())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("Retry")
+                        .on_click(cx.listener(
+                            |_: &mut AppShell, _: &ClickEvent, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(crate::app::actions::SaveVault),
+                                    cx,
+                                );
+                            },
+                        )),
+                )
+                .into_any_element()
+        }
+    }
 }
 
 #[allow(dead_code)]
