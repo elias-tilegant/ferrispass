@@ -1197,6 +1197,31 @@ fn entry_detail_body(
     let username_present = !entry.username.is_empty();
     let url_present = !entry.url.is_empty();
 
+    let edit_button = div()
+        .id("detail-edit-entry")
+        .h(px(28.))
+        .px(px(12.))
+        .gap_1p5()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(palette::panel())
+        .border_1()
+        .border_color(palette::border_strong())
+        .text_color(palette::text())
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .flex()
+        .child(
+            gpui_component::Icon::from(gpui_component::IconName::Settings)
+                .with_size(gpui_component::Size::Size(px(12.)))
+                .text_color(palette::text()),
+        )
+        .child("Edit")
+        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+            shell.begin_edit_selected_entry(window, cx);
+        }));
+
     let footer = h_flex()
         .flex_shrink_0()
         .gap_2()
@@ -1235,7 +1260,8 @@ fn entry_detail_body(
             CopyValueKind::Url,
             state_entity.clone(),
             cx,
-        ));
+        ))
+        .child(edit_button);
 
     v_flex()
         .h_full()

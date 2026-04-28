@@ -3,7 +3,7 @@ use crate::{
         AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
-            SaveVault, ToggleTheme,
+            EditEntry, SaveVault, ToggleTheme,
             FocusSearch, LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSyncSettings,
             OpenVault, SubmitPassword,
         },
@@ -21,6 +21,15 @@ use gpui_component::{
     input::{InputEvent, InputState},
 };
 use std::path::PathBuf;
+
+struct EditPrefill {
+    id: String,
+    title: String,
+    username: String,
+    url: String,
+    notes: String,
+    password: String,
+}
 
 pub struct AppShell {
     state: Entity<AppState>,
@@ -333,6 +342,69 @@ impl AppShell {
             .update(cx, |state, cx| state.save_async(cx));
     }
 
+    fn on_action_edit_entry(
+        &mut self,
+        _: &EditEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_edit_selected_entry(window, cx);
+    }
+
+    /// Resolve the currently-selected entry, prefill the form with its values
+    /// (incl. the live decrypted password from `VaultDocument`), and switch
+    /// the overlay into Edit mode. Called from both the `cmd-e` action and
+    /// the Edit button on the detail panel.
+    pub fn begin_edit_selected_entry(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Pull the snapshot view of the selected entry + its actual password
+        // out of state in one borrow, then drop the borrow before mutating
+        // the inputs / overlay.
+        let prefill = {
+            let state = self.state.read(cx);
+            let browser = state.vault_browser();
+            let entry = browser.as_ref().and_then(|b| b.selected_entry.clone());
+            let password = entry.as_ref().and_then(|e| {
+                if let crate::app::VaultStatus::Open { document, .. } = state.vault_status() {
+                    document.password_for_entry(&e.id)
+                } else {
+                    None
+                }
+            });
+            entry.map(|e| EditPrefill {
+                id: e.id.clone(),
+                title: e.title.clone(),
+                username: e.username.clone(),
+                url: e.url.clone(),
+                notes: e.notes.clone(),
+                password: password.unwrap_or_default(),
+            })
+        };
+
+        let Some(p) = prefill else {
+            window.push_notification("Select an entry to edit first.", cx);
+            return;
+        };
+
+        self.new_entry_title_input
+            .update(cx, |s, cx| s.set_value(&p.title, window, cx));
+        self.new_entry_username_input
+            .update(cx, |s, cx| s.set_value(&p.username, window, cx));
+        self.new_entry_password_input
+            .update(cx, |s, cx| s.set_value(&p.password, window, cx));
+        self.new_entry_url_input
+            .update(cx, |s, cx| s.set_value(&p.url, window, cx));
+        self.new_entry_notes_input
+            .update(cx, |s, cx| s.set_value(&p.notes, window, cx));
+
+        self.state.update(cx, |state, cx| {
+            state.open_overlay(Overlay::EditEntry { entry_id: p.id }, cx);
+        });
+    }
+
     fn on_password_input_event(
         &mut self,
         _: &Entity<InputState>,
@@ -572,7 +644,11 @@ impl AppShell {
             crate::app::VaultStatus::Open { .. } => match overlay {
                 Overlay::SyncSettings => crate::ui::screens::sync_settings::render(self, cx),
                 Overlay::Conflict => crate::ui::screens::conflict::render(self, cx),
-                Overlay::AddEntry => crate::ui::screens::add_entry::render(self, cx),
+                Overlay::AddEntry | Overlay::EditEntry { .. } => {
+                    // The same modal renders both Add and Edit; the variant
+                    // tells the inner save handler which AppState method to call.
+                    crate::ui::screens::add_entry::render(self, cx)
+                }
                 _ => crate::ui::screens::vault::render(self, cx),
             },
             crate::app::VaultStatus::Error { .. } => crate::ui::screens::vault::render(self, cx),
@@ -608,6 +684,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_create_vault))
             .on_action(cx.listener(Self::on_action_toggle_theme))
             .on_action(cx.listener(Self::on_action_save_vault))
+            .on_action(cx.listener(Self::on_action_edit_entry))
             .size_full()
             .relative()
             .overflow_hidden()

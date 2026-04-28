@@ -42,9 +42,17 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let url_input = shell.new_entry_url_input().clone();
     let notes_input = shell.new_entry_notes_input().clone();
 
-    // Resolve the destination group: prefer the user's currently-selected
-    // group; fall back to the vault root if they're viewing a tag/library
-    // filter (no specific group context).
+    // Are we editing an existing entry, or adding a new one? The overlay
+    // variant carries the entry id when in edit mode.
+    let editing_id: Option<String> = match shell.state().read(cx).overlay() {
+        crate::app::Overlay::EditEntry { entry_id } => Some(entry_id.clone()),
+        _ => None,
+    };
+    let is_edit = editing_id.is_some();
+
+    // Resolve the destination group (only relevant for Add): prefer the user's
+    // currently-selected group; fall back to the vault root if they're viewing
+    // a tag/library filter (no specific group context).
     let target_group_id = {
         let state = shell.state().read(cx);
         state.vault_browser().and_then(|b| match b.selection {
@@ -52,15 +60,30 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             _ => Some(b.snapshot.root.id.clone()),
         })
     };
-    let target_group_label = target_group_id
-        .as_ref()
-        .and_then(|id| {
-            let state = shell.state().read(cx);
-            state
-                .vault_browser()
-                .and_then(|b| b.snapshot.find_group(id).map(|g| g.name.clone()))
-        })
-        .unwrap_or_else(|| "Vault root".to_string());
+    let target_group_label = if is_edit {
+        // For edits, show the entry's current parent group instead of where a
+        // new entry would land.
+        editing_id
+            .as_ref()
+            .and_then(|id| {
+                let state = shell.state().read(cx);
+                state
+                    .vault_browser()
+                    .and_then(|b| b.snapshot.find_entry(id).cloned())
+                    .and_then(|e| e.group_path.last().cloned())
+            })
+            .unwrap_or_else(|| "Vault root".to_string())
+    } else {
+        target_group_id
+            .as_ref()
+            .and_then(|id| {
+                let state = shell.state().read(cx);
+                state
+                    .vault_browser()
+                    .and_then(|b| b.snapshot.find_group(id).map(|g| g.name.clone()))
+            })
+            .unwrap_or_else(|| "Vault root".to_string())
+    };
 
     let cancel_button = div()
         .id("add-cancel")
@@ -85,6 +108,8 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         }));
 
     let save_target_group_id = target_group_id.clone();
+    let save_editing_id = editing_id.clone();
+    let save_label = if is_edit { "Save changes" } else { "Save entry" };
     let save_button = div()
         .id("add-save")
         .h(px(30.))
@@ -105,7 +130,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .with_size(gpui_component::Size::Size(px(13.)))
                 .text_color(palette::panel()),
         )
-        .child("Save entry")
+        .child(save_label)
         .on_click(cx.listener(
             move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 let draft = shell.collect_entry_draft(cx);
@@ -116,24 +141,37 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     );
                     return;
                 }
-                let Some(group_id) = save_target_group_id.clone() else {
-                    window.push_notification(
-                        "No destination group is selected.",
-                        cx,
-                    );
-                    return;
-                };
                 let state = shell.state().clone();
-                let result = state.update(cx, |state, cx| {
-                    state.create_entry(&group_id, draft, cx)
-                });
+                let result: Result<(), String> = match save_editing_id.as_ref() {
+                    Some(entry_id) => state
+                        .update(cx, |state, cx| state.update_entry(entry_id, draft, cx))
+                        .map_err(|e| e.to_string()),
+                    None => {
+                        let Some(group_id) = save_target_group_id.clone() else {
+                            window.push_notification(
+                                "No destination group is selected.",
+                                cx,
+                            );
+                            return;
+                        };
+                        state
+                            .update(cx, |state, cx| state.create_entry(&group_id, draft, cx))
+                            .map(|_id| ())
+                            .map_err(|e| e.to_string())
+                    }
+                };
                 match result {
-                    Ok(_id) => {
+                    Ok(()) => {
                         shell.clear_entry_form(window, cx);
                         shell.state().clone().update(cx, |state, cx| {
                             let _ = state.close_overlay(cx);
                         });
-                        window.push_notification("Entry saved.", cx);
+                        let toast = if save_editing_id.is_some() {
+                            "Changes saved."
+                        } else {
+                            "Entry saved."
+                        };
+                        window.push_notification(toast, cx);
                     }
                     Err(error) => {
                         window.push_notification(
@@ -189,7 +227,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                             div()
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .child("New entry"),
+                                .child(if is_edit { "Edit entry" } else { "New entry" }),
                         )
                         .child(
                             div()

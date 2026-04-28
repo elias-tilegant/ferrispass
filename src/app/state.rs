@@ -101,7 +101,7 @@ impl LibrarySelection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Overlay {
     #[default]
     None,
@@ -111,12 +111,16 @@ pub enum Overlay {
     SyncSettings,
     /// New entry modal — appears over the vault.
     AddEntry,
+    /// Edit existing entry. Carries the entry id so the Save handler knows
+    /// what to update; same modal layout as `AddEntry`, just a different
+    /// header + save action.
+    EditEntry { entry_id: String },
     /// Three-way conflict resolution.
     Conflict,
 }
 
 impl Overlay {
-    pub fn is_active(self) -> bool {
+    pub fn is_active(&self) -> bool {
         !matches!(self, Overlay::None)
     }
 }
@@ -175,8 +179,8 @@ impl AppState {
         &self.vault
     }
 
-    pub fn overlay(&self) -> Overlay {
-        self.overlay
+    pub fn overlay(&self) -> &Overlay {
+        &self.overlay
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay, cx: &mut Context<Self>) {
