@@ -3289,7 +3289,7 @@ dependencies = [
 [[package]]
 name = "keepass"
 version = "0.0.0-placeholder-version"
-source = "git+https://github.com/elias-tilegant/keepass-rs?branch=master#d0fb98f6ba16708d0c500e2c26fa52ca96b88f2b"
+source = "git+https://github.com/elias-tilegant/keepass-rs?rev=63f1748#63f17487c080f6b37ace2b6bc045c1e2bac8d6e6"
 dependencies = [
  "aes 0.9.0",
  "base32",

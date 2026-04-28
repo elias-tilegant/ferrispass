@@ -652,7 +652,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// EntryDraft.otp is persisted into the entry's OTP field, can be
     /// retrieved via `otp_url_for_entry`, and immediately yields a valid
     /// `OtpDisplay` from the same `totp_for_entry` path the UI uses.
@@ -726,6 +725,44 @@ mod tests {
 
         assert!(doc.otp_url_for_entry(&id).is_none(), "otp removed");
         assert!(doc.totp_for_entry(&id).is_none(), "no live code");
+    }
+
+    /// AES-KDF round-trip — proves the patched `keepass-rs` actually emits
+    /// a UUID readable by other clients, *and* that our own re-open path
+    /// accepts what we just wrote. Combined with the unit test inside
+    /// `keepass-rs::config::kdf_dump_tests`, this is end-to-end coverage of
+    /// the fix.
+    #[test]
+    fn save_aes_kdf_round_trip() {
+        use keepass::config::{DatabaseConfig, KdfConfig};
+
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("aes.kdbx");
+
+        let mut config = DatabaseConfig::default();
+        // Modest rounds — enough to exercise the path without slowing the
+        // test suite (real-world AES-KDF vaults use 60_000+).
+        config.kdf_config = KdfConfig::Aes { rounds: 1_000 };
+
+        let mut db = Database::with_config(config);
+        let mut root = db.root_mut();
+        let mut entry = root.add_entry();
+        entry.set_unprotected(fields::TITLE, "AES roundtrip");
+        entry.set_protected(fields::PASSWORD, "p4ss");
+        let entry_id = entry.id().to_string();
+
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let doc = VaultDocument::new(db, snapshot, "vault-pw".into(), None);
+        doc.save_payload().save_to(&path).expect("save");
+
+        // Re-open via our own repository — uses the same parse path the UI
+        // path takes, so success here means a real user could re-open too.
+        let reopened = crate::keepass::KeePassRepository::open(&path, "vault-pw", None)
+            .expect("reopen");
+        assert_eq!(
+            reopened.password_for_entry(&entry_id).as_deref(),
+            Some("p4ss"),
+        );
     }
 
     #[test]
