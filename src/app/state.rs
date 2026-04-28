@@ -424,6 +424,40 @@ impl AppState {
         entry_id: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), MutationError> {
+        self.run_entry_mutation(cx, |doc| doc.delete_entry(entry_id), entry_id)
+    }
+
+    /// Permanent (unrecoverable) delete. Use only after a confirmation step in
+    /// the UI — `save_async` flushes the result to disk and the entry is gone.
+    pub fn delete_entry_permanent(
+        &mut self,
+        entry_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        self.run_entry_mutation(cx, |doc| doc.delete_entry_permanent(entry_id), entry_id)
+    }
+
+    /// Restore an entry from the recycle bin to the vault root.
+    pub fn restore_entry(
+        &mut self,
+        entry_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        self.run_entry_mutation(cx, |doc| doc.restore_entry(entry_id), entry_id)
+    }
+
+    /// Shared post-mutation bookkeeping for delete / restore / permanent-delete:
+    /// run the mutation, refresh the visible entry list, repoint the selection
+    /// if the affected entry was selected, then schedule the autosave.
+    fn run_entry_mutation<F>(
+        &mut self,
+        cx: &mut Context<Self>,
+        mutate: F,
+        entry_id: &str,
+    ) -> Result<(), MutationError>
+    where
+        F: FnOnce(&mut VaultDocument) -> Result<(), MutationError>,
+    {
         {
             let VaultStatus::Open {
                 document,
@@ -438,10 +472,9 @@ impl AppState {
                 return Err(MutationError::EntryNotFound);
             };
 
-            document.delete_entry(entry_id)?;
+            mutate(document)?;
 
             let entries = entries_for_selection(document.snapshot(), selection, search_query);
-            // If the deleted entry was selected, fall back to the first visible.
             if selected_entry_id.as_deref() == Some(entry_id) {
                 *selected_entry_id = entries.first().map(|e| e.id.clone());
                 *selected_strength = selected_entry_id
@@ -778,7 +811,12 @@ fn entries_for_selection(
             entries.truncate(50);
             entries
         }
-        LibrarySelection::Trash => Vec::new(),
+        LibrarySelection::Trash => snapshot
+            .recycle_bin_id
+            .as_deref()
+            .and_then(|bin_id| snapshot.find_group(bin_id))
+            .map(|bin| bin.entries.clone())
+            .unwrap_or_default(),
         LibrarySelection::Tag(name) => snapshot
             .entries_with_tag(name)
             .into_iter()

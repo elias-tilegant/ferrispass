@@ -3,7 +3,7 @@ use crate::{
         AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
-            EditEntry, SaveVault, ToggleTheme,
+            DeleteEntry, EditEntry, SaveVault, ToggleTheme,
             FocusSearch, LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSyncSettings,
             OpenVault, SubmitPassword,
         },
@@ -54,6 +54,11 @@ pub struct AppShell {
     /// (GPUI cancels tasks on drop unless `.detach()`-ed), so only the latest
     /// keystroke gets to fire the actual filter rebuild.
     search_debounce: Option<Task<()>>,
+    /// Inline confirmation state for "Delete forever". When set to an entry id,
+    /// the detail-panel button group renders a red "Confirm delete forever"
+    /// chip instead of the plain delete button. Click outside / different
+    /// entry / Escape clears it.
+    pending_perma_delete: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -102,7 +107,23 @@ impl AppShell {
             entry_list_scroll: VirtualListScrollHandle::new(),
             focus_handle,
             search_debounce: None,
+            pending_perma_delete: None,
             _subscriptions,
+        }
+    }
+
+    pub fn pending_perma_delete(&self) -> Option<&str> {
+        self.pending_perma_delete.as_deref()
+    }
+
+    pub fn arm_perma_delete(&mut self, entry_id: String, cx: &mut Context<Self>) {
+        self.pending_perma_delete = Some(entry_id);
+        cx.notify();
+    }
+
+    pub fn clear_perma_delete(&mut self, cx: &mut Context<Self>) {
+        if self.pending_perma_delete.take().is_some() {
+            cx.notify();
         }
     }
 
@@ -204,6 +225,13 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Escape unwinds in priority order: armed perma-delete → open overlay
+        // → unlock prompt. Each layer eats the keystroke so a single Escape
+        // never collapses two layers at once.
+        if self.pending_perma_delete.is_some() {
+            self.clear_perma_delete(cx);
+            return;
+        }
         let closed = self
             .state
             .update(cx, |state, cx| state.close_overlay(cx));
@@ -349,6 +377,76 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         self.begin_edit_selected_entry(window, cx);
+    }
+
+    fn on_action_delete_entry(
+        &mut self,
+        _: &DeleteEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_selected_entry(window, cx);
+    }
+
+    /// Move the currently-selected entry to the Recycle Bin. No confirmation
+    /// (it's recoverable from Trash). Toasts on success/failure.
+    pub fn delete_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_entry_id(cx) else {
+            window.push_notification("Select an entry to delete first.", cx);
+            return;
+        };
+        let result = self
+            .state
+            .clone()
+            .update(cx, |state, cx| state.delete_entry(&id, cx));
+        match result {
+            Ok(()) => window.push_notification("Moved to Trash.", cx),
+            Err(e) => window.push_notification(format!("Could not delete entry: {e}"), cx),
+        }
+    }
+
+    pub fn restore_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_entry_id(cx) else {
+            return;
+        };
+        let result = self
+            .state
+            .clone()
+            .update(cx, |state, cx| state.restore_entry(&id, cx));
+        match result {
+            Ok(()) => window.push_notification("Entry restored.", cx),
+            Err(e) => window.push_notification(format!("Could not restore: {e}"), cx),
+        }
+    }
+
+    /// Permanently delete an entry (id passed in so the call site can match
+    /// against the pending-confirm state precisely). Clears the pending flag
+    /// on completion regardless of outcome.
+    pub fn confirm_perma_delete(
+        &mut self,
+        entry_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self
+            .state
+            .clone()
+            .update(cx, |state, cx| state.delete_entry_permanent(&entry_id, cx));
+        self.pending_perma_delete = None;
+        match result {
+            Ok(()) => window.push_notification("Entry permanently deleted.", cx),
+            Err(e) => {
+                window.push_notification(format!("Could not delete: {e}"), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn selected_entry_id(&self, cx: &gpui::App) -> Option<String> {
+        self.state
+            .read(cx)
+            .vault_browser()
+            .and_then(|b| b.selected_entry_id)
     }
 
     /// Resolve the currently-selected entry, prefill the form with its values
@@ -685,6 +783,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_toggle_theme))
             .on_action(cx.listener(Self::on_action_save_vault))
             .on_action(cx.listener(Self::on_action_edit_entry))
+            .on_action(cx.listener(Self::on_action_delete_entry))
             .size_full()
             .relative()
             .overflow_hidden()

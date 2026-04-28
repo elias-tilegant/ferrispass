@@ -67,7 +67,16 @@ impl KeePassRepository {
 pub(crate) fn snapshot_from_database(database: &Database) -> VaultSnapshot {
     let now = Utc::now().naive_utc();
     let root = database.root();
-    VaultSnapshot::new(group_from_ref(&root, &mut Vec::new(), now))
+    let recycle_bin_id = database.recycle_bin().map(|g| g.id().to_string());
+    let recycle_bin_id_for_traversal = recycle_bin_id.clone();
+    let mut snap = VaultSnapshot::new(group_from_ref(
+        &root,
+        &mut Vec::new(),
+        now,
+        recycle_bin_id_for_traversal.as_deref(),
+    ));
+    snap.recycle_bin_id = recycle_bin_id;
+    snap
 }
 
 /// Walk every group in `database` and return the one whose stringified id
@@ -93,31 +102,36 @@ fn group_from_ref(
     group: &GroupRef<'_>,
     parent_path: &mut Vec<String>,
     now: NaiveDateTime,
+    recycle_bin_id: Option<&str>,
 ) -> VaultGroup {
     let name = non_empty(&group.name, "Root");
     parent_path.push(name.clone());
 
+    let group_id_str = group.id().to_string();
+    let in_bin = recycle_bin_id.is_some_and(|bin| bin == group_id_str);
+
     let mut groups = group
         .groups()
-        .map(|child| group_from_ref(&child, parent_path, now))
+        .map(|child| group_from_ref(&child, parent_path, now, recycle_bin_id))
         .collect::<Vec<_>>();
     groups.sort_by_key(|child| child.name.to_lowercase());
 
     let mut entries = group
         .entries()
-        .map(|entry| entry_from_ref(&entry, parent_path, now))
+        .map(|entry| entry_from_ref(&entry, parent_path, now, in_bin))
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.title.to_lowercase());
 
     parent_path.pop();
 
-    VaultGroup::new(group.id().to_string(), name, groups, entries)
+    VaultGroup::new(group_id_str, name, groups, entries)
 }
 
 fn entry_from_ref(
     entry: &EntryRef<'_>,
     group_path: &[String],
     now: NaiveDateTime,
+    in_recycle_bin: bool,
 ) -> VaultEntry {
     let title = non_empty(entry.get_title().unwrap_or_default(), "Untitled");
     let username = entry.get_username().unwrap_or_default().to_string();
@@ -165,6 +179,7 @@ fn entry_from_ref(
             .skip(1) // skip the synthetic Root segment
             .cloned()
             .collect(),
+        in_recycle_bin,
     }
 }
 

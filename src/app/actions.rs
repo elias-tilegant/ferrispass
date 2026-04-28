@@ -22,6 +22,7 @@ actions!(
         Quit,
         SaveVault,
         EditEntry,
+        DeleteEntry,
     ]
 );
 
@@ -44,6 +45,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-d", ToggleTheme, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-s", SaveVault, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-e", EditEntry, Some(APP_CONTEXT)),
+        KeyBinding::new("cmd-backspace", DeleteEntry, Some(APP_CONTEXT)),
         // No context filter — cmd-q should always quit, even if focus is in
         // some weird state (e.g. inside a modal or before the shell is wired).
         KeyBinding::new("cmd-q", Quit, None),

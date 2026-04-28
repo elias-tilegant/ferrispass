@@ -3,6 +3,10 @@ pub struct VaultSnapshot {
     pub root: VaultGroup,
     pub entry_count: usize,
     pub group_count: usize,
+    /// Group id of the database's Recycle Bin, if one exists. Used by the
+    /// Trash sidebar to surface deleted entries and by the detail panel to
+    /// branch the action footer (Restore / Delete forever vs. Edit / Delete).
+    pub recycle_bin_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -29,6 +33,10 @@ pub struct VaultEntry {
     pub favicon: Favicon,
     pub strength: Strength,
     pub group_path: Vec<String>,
+    /// `true` when this entry sits inside the Recycle Bin group. Lets the UI
+    /// swap the action footer (Restore + Delete forever) without having to
+    /// re-walk the group tree per render.
+    pub in_recycle_bin: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +94,7 @@ impl VaultSnapshot {
             entry_count: root.entry_count(),
             group_count: root.group_count(),
             root,
+            recycle_bin_id: None,
         }
     }
 
@@ -201,6 +210,7 @@ impl VaultEntry {
             favicon: Favicon::default(),
             strength: Strength::default(),
             group_path: Vec::new(),
+            in_recycle_bin: false,
         }
     }
 }

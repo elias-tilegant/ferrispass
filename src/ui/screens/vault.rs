@@ -560,6 +560,45 @@ enum ActionStyle {
     Default,
 }
 
+#[derive(Clone, Copy)]
+enum FooterStyle {
+    Default,
+    Danger,
+}
+
+/// Compact footer button (Edit / Delete / Restore / Confirm forever / Cancel)
+/// — same dimensions as `action_button`'s default style but with an
+/// `on_click` handler injected directly so the call site can control what
+/// happens (no copy-to-clipboard wiring like `action_button`).
+fn footer_button(
+    id: &'static str,
+    text: &'static str,
+    style: FooterStyle,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    let (bg, fg, bd) = match style {
+        FooterStyle::Default => (palette::panel(), palette::text(), palette::border_strong()),
+        FooterStyle::Danger => (palette::red(), palette::panel(), palette::red()),
+    };
+    div()
+        .id(id)
+        .h(px(28.))
+        .px(px(12.))
+        .rounded(px(6.))
+        .bg(bg)
+        .border_1()
+        .border_color(bd)
+        .text_color(fg)
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(text)
+        .on_click(on_click)
+        .into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn action_button(
     id: &'static str,
@@ -646,6 +685,7 @@ fn vault_split(
         .child(entry_detail(
             selected_entry,
             browser.selected_strength,
+            shell.pending_perma_delete().map(|s| s.to_string()),
             shell.state().clone(),
             cx,
         ))
@@ -991,12 +1031,19 @@ fn entry_row(
 fn entry_detail(
     selected: Option<VaultEntry>,
     selected_strength: Option<crate::keepass::StrengthReport>,
+    pending_perma_delete: Option<String>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let body: AnyElement = match selected {
-        Some(entry) => entry_detail_body(entry, selected_strength, state_entity, cx)
-            .into_any_element(),
+        Some(entry) => entry_detail_body(
+            entry,
+            selected_strength,
+            pending_perma_delete,
+            state_entity,
+            cx,
+        )
+        .into_any_element(),
         None => v_flex()
             .flex_1()
             .items_center()
@@ -1032,6 +1079,7 @@ fn entry_detail(
 fn entry_detail_body(
     entry: VaultEntry,
     selected_strength: Option<crate::keepass::StrengthReport>,
+    pending_perma_delete: Option<String>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
@@ -1197,32 +1245,78 @@ fn entry_detail_body(
     let username_present = !entry.username.is_empty();
     let url_present = !entry.url.is_empty();
 
-    let edit_button = div()
-        .id("detail-edit-entry")
-        .h(px(28.))
-        .px(px(12.))
-        .gap_1p5()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.))
-        .bg(palette::panel())
-        .border_1()
-        .border_color(palette::border_strong())
-        .text_color(palette::text())
-        .text_xs()
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .flex()
-        .child(
-            gpui_component::Icon::from(gpui_component::IconName::Settings)
-                .with_size(gpui_component::Size::Size(px(12.)))
-                .text_color(palette::text()),
-        )
-        .child("Edit")
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-            shell.begin_edit_selected_entry(window, cx);
-        }));
+    let in_trash = entry.in_recycle_bin;
+    let entry_id_for_actions = entry.id.clone();
+    let perma_armed = pending_perma_delete.as_deref() == Some(entry.id.as_str());
 
-    let footer = h_flex()
+    // Action triplet on the trailing side of the footer changes shape based on
+    // where the entry lives:
+    //   - normal entry: [Edit] [Delete (to trash)]
+    //   - trashed entry: [Restore] [Delete forever] (or, if armed, [Confirm forever] [Cancel])
+    let trailing_actions = if in_trash {
+        let restore_id = entry_id_for_actions.clone();
+        let restore_btn = footer_button(
+            "detail-restore-entry",
+            "Restore",
+            FooterStyle::Default,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                let _ = restore_id;
+                shell.restore_selected_entry(window, cx);
+            }),
+        );
+
+        if perma_armed {
+            let confirm_id = entry_id_for_actions.clone();
+            let confirm_btn = footer_button(
+                "detail-perma-confirm",
+                "Delete forever?",
+                FooterStyle::Danger,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.confirm_perma_delete(confirm_id.clone(), window, cx);
+                }),
+            );
+            let cancel_btn = footer_button(
+                "detail-perma-cancel",
+                "Cancel",
+                FooterStyle::Default,
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.clear_perma_delete(cx);
+                }),
+            );
+            (restore_btn, Some(confirm_btn), Some(cancel_btn))
+        } else {
+            let arm_id = entry_id_for_actions.clone();
+            let perma_btn = footer_button(
+                "detail-perma-arm",
+                "Delete forever",
+                FooterStyle::Danger,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.arm_perma_delete(arm_id.clone(), cx);
+                }),
+            );
+            (restore_btn, Some(perma_btn), None)
+        }
+    } else {
+        let edit_btn = footer_button(
+            "detail-edit-entry",
+            "Edit",
+            FooterStyle::Default,
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.begin_edit_selected_entry(window, cx);
+            }),
+        );
+        let delete_btn = footer_button(
+            "detail-delete-entry",
+            "Delete",
+            FooterStyle::Default,
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.delete_selected_entry(window, cx);
+            }),
+        );
+        (edit_btn, Some(delete_btn), None)
+    };
+
+    let mut footer = h_flex()
         .flex_shrink_0()
         .gap_2()
         .p_3()
@@ -1261,7 +1355,13 @@ fn entry_detail_body(
             state_entity.clone(),
             cx,
         ))
-        .child(edit_button);
+        .child(trailing_actions.0);
+    if let Some(b) = trailing_actions.1 {
+        footer = footer.child(b);
+    }
+    if let Some(b) = trailing_actions.2 {
+        footer = footer.child(b);
+    }
 
     v_flex()
         .h_full()

@@ -154,6 +154,41 @@ impl VaultDocument {
         Ok(())
     }
 
+    /// Permanently remove an entry from the database. Bypasses the Recycle
+    /// Bin — call this only after explicit user confirmation; the data is
+    /// unrecoverable once `save_async` flushes the result to disk.
+    pub fn delete_entry_permanent(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
+        let entry_id = find_entry_id(&self.database, entry_id_str)
+            .ok_or(MutationError::EntryNotFound)?;
+        let entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        entry.remove();
+        self.refresh_snapshot();
+        Ok(())
+    }
+
+    /// Move an entry out of the Recycle Bin back to the database root. We
+    /// don't track the entry's previous parent group on delete (KeePass
+    /// doesn't preserve that), so root is the standard place to dump
+    /// restored items — the user can re-organise from there.
+    pub fn restore_entry(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
+        let entry_id = find_entry_id(&self.database, entry_id_str)
+            .ok_or(MutationError::EntryNotFound)?;
+        let root_id = self.database.root().id();
+        let mut entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        entry
+            .move_to(root_id)
+            .map_err(|_| MutationError::RecycleBinUnavailable)?;
+        drop(entry);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
     /// Returns the recycle-bin group id, creating one under the root if the
     /// database doesn't already have one set in `meta.recyclebin_uuid`.
     fn ensure_recycle_bin(&mut self) -> keepass::db::GroupId {
@@ -479,6 +514,72 @@ mod tests {
         let entry = doc.snapshot().find_entry(&id).expect("entry exists");
         assert_eq!(entry.title, "Renamed");
         assert_eq!(doc.password_for_entry(&id).as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn restore_entry_returns_to_root() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Recoverable".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        doc.delete_entry(&id).expect("trash");
+        let bin_id = doc.database.recycle_bin().expect("bin").id().to_string();
+        // Sanity: entry is in the bin.
+        assert!(
+            doc.snapshot()
+                .find_group(&bin_id)
+                .map(|g| g.entries.iter().any(|e| e.id == id))
+                .unwrap_or(false)
+        );
+
+        doc.restore_entry(&id).expect("restore");
+        // Now in root, no longer in bin.
+        assert!(doc.snapshot().root.entries.iter().any(|e| e.id == id));
+        assert!(
+            !doc.snapshot()
+                .find_group(&bin_id)
+                .map(|g| g.entries.iter().any(|e| e.id == id))
+                .unwrap_or(false),
+            "restored entry should leave the recycle bin"
+        );
+    }
+
+    #[test]
+    fn delete_entry_permanent_actually_removes_it() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Goner".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        doc.delete_entry_permanent(&id).expect("perma delete");
+
+        // Gone from snapshot AND not in recycle bin (perma-delete bypasses it).
+        assert!(doc.snapshot().find_entry(&id).is_none());
+        if let Some(bin_id) = &doc.snapshot().recycle_bin_id {
+            let bin = doc.snapshot().find_group(bin_id).expect("bin");
+            assert!(!bin.entries.iter().any(|e| e.id == id));
+        }
     }
 
     #[test]
