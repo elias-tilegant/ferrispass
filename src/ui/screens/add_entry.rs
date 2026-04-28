@@ -40,6 +40,27 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let username_input = shell.new_entry_username_input().clone();
     let password_input = shell.new_entry_password_input().clone();
     let url_input = shell.new_entry_url_input().clone();
+    let notes_input = shell.new_entry_notes_input().clone();
+
+    // Resolve the destination group: prefer the user's currently-selected
+    // group; fall back to the vault root if they're viewing a tag/library
+    // filter (no specific group context).
+    let target_group_id = {
+        let state = shell.state().read(cx);
+        state.vault_browser().and_then(|b| match b.selection {
+            crate::app::LibrarySelection::Group(id) => Some(id),
+            _ => Some(b.snapshot.root.id.clone()),
+        })
+    };
+    let target_group_label = target_group_id
+        .as_ref()
+        .and_then(|id| {
+            let state = shell.state().read(cx);
+            state
+                .vault_browser()
+                .and_then(|b| b.snapshot.find_group(id).map(|g| g.name.clone()))
+        })
+        .unwrap_or_else(|| "Vault root".to_string());
 
     let cancel_button = div()
         .id("add-cancel")
@@ -56,12 +77,14 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .items_center()
         .justify_center()
         .child("Cancel")
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+            shell.clear_entry_form(window, cx);
             shell.state().clone().update(cx, |state, cx| {
                 let _ = state.close_overlay(cx);
             });
         }));
 
+    let save_target_group_id = target_group_id.clone();
     let save_button = div()
         .id("add-save")
         .h(px(30.))
@@ -83,11 +106,50 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::panel()),
         )
         .child("Save entry")
+        .on_click(cx.listener(
+            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                let draft = shell.collect_entry_draft(cx);
+                if draft.title.trim().is_empty() {
+                    window.push_notification(
+                        "Title is required to save the entry.",
+                        cx,
+                    );
+                    return;
+                }
+                let Some(group_id) = save_target_group_id.clone() else {
+                    window.push_notification(
+                        "No destination group is selected.",
+                        cx,
+                    );
+                    return;
+                };
+                let state = shell.state().clone();
+                let result = state.update(cx, |state, cx| {
+                    state.create_entry(&group_id, draft, cx)
+                });
+                match result {
+                    Ok(_id) => {
+                        shell.clear_entry_form(window, cx);
+                        shell.state().clone().update(cx, |state, cx| {
+                            let _ = state.close_overlay(cx);
+                        });
+                        window.push_notification("Entry saved.", cx);
+                    }
+                    Err(error) => {
+                        window.push_notification(
+                            format!("Could not save entry: {error}"),
+                            cx,
+                        );
+                    }
+                }
+            },
+        ));
+
+    let generate_button_el = div()
+        .id("add-generate")
+        .child(generate_button_visual())
         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-            window.push_notification("Saving entries isn't wired up yet — coming soon.", cx);
-            shell.state().clone().update(cx, |state, cx| {
-                let _ = state.close_overlay(cx);
-            });
+            shell.generate_password(window, cx);
         }));
 
     v_flex()
@@ -133,7 +195,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                             div()
                                 .text_xs()
                                 .text_color(palette::text_muted())
-                                .child("in Work"),
+                                .child(format!("in {target_group_label}")),
                         ),
                 ),
         )
@@ -162,7 +224,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                             h_flex()
                                 .gap_1p5()
                                 .child(div().flex_1().child(Input::new(&password_input)))
-                                .child(generate_button()),
+                                .child(generate_button_el),
                         )
                         .child(generator_card(18, "Strong", 118)),
                 )
@@ -171,6 +233,12 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .gap_2()
                         .child(label("URL"))
                         .child(Input::new(&url_input)),
+                )
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(label("Notes"))
+                        .child(Input::new(&notes_input)),
                 ),
         )
         .child(
@@ -196,7 +264,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .into_any_element()
 }
 
-fn generate_button() -> AnyElement {
+fn generate_button_visual() -> AnyElement {
     h_flex()
         .h(px(32.))
         .px(px(12.))

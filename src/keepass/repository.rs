@@ -5,7 +5,7 @@ use crate::{
 use chrono::{NaiveDateTime, Utc};
 use keepass::{
     Database, DatabaseKey,
-    db::{DatabaseOpenError, EntryRef, GroupRef},
+    db::{DatabaseOpenError, EntryId, EntryRef, GroupId, GroupRef},
 };
 use std::{
     collections::hash_map::DefaultHasher,
@@ -42,7 +42,12 @@ impl KeePassRepository {
         let database = Database::open(&mut file, key)?;
         let snapshot = snapshot_from_database(&database);
 
-        Ok(VaultDocument::new(database, snapshot))
+        Ok(VaultDocument::new(
+            database,
+            snapshot,
+            password.to_string(),
+            keyfile.map(PathBuf::from),
+        ))
     }
 
     /// Resolve a sibling key file path next to the database file (e.g. `Personal.kdbx` →
@@ -59,10 +64,29 @@ impl KeePassRepository {
     }
 }
 
-fn snapshot_from_database(database: &Database) -> VaultSnapshot {
+pub(crate) fn snapshot_from_database(database: &Database) -> VaultSnapshot {
     let now = Utc::now().naive_utc();
     let root = database.root();
     VaultSnapshot::new(group_from_ref(&root, &mut Vec::new(), now))
+}
+
+/// Walk every group in `database` and return the one whose stringified id
+/// matches `id_string`. O(N) over groups; fine for N ≤ a few hundred. Used
+/// when round-tripping a domain `String` id back into keepass-rs's typed
+/// `GroupId` (`from_uuid` is `pub(crate)` upstream so we can't construct
+/// directly).
+pub(crate) fn find_group_id(database: &Database, id_string: &str) -> Option<GroupId> {
+    database
+        .iter_all_groups()
+        .find(|g| g.id().to_string() == id_string)
+        .map(|g| g.id())
+}
+
+pub(crate) fn find_entry_id(database: &Database, id_string: &str) -> Option<EntryId> {
+    database
+        .iter_all_entries()
+        .find(|e| e.id().to_string() == id_string)
+        .map(|e| e.id())
 }
 
 fn group_from_ref(

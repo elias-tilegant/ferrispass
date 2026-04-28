@@ -1,6 +1,6 @@
 use crate::domain::{VaultEntry, VaultSnapshot};
-use crate::keepass::{StrengthReport, VaultDocument};
-use gpui::Context;
+use crate::keepass::{EntryDraft, MutationError, StrengthReport, VaultDocument};
+use gpui::{AppContext as _, Context};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -9,6 +9,23 @@ use std::sync::Arc;
 pub struct AppState {
     vault: VaultStatus,
     overlay: Overlay,
+    /// Background-save lifecycle of the open vault. Drives the status indicator
+    /// and gates retry / explicit-save UX.
+    save_status: SaveStatus,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SaveStatus {
+    /// No save has happened since the vault was opened (the on-disk file is
+    /// authoritative and equal to the in-memory state).
+    #[default]
+    Idle,
+    /// A background save is in flight.
+    Saving,
+    /// The most recent save succeeded.
+    Saved,
+    /// The most recent save failed; message is suitable for a toast.
+    Failed(String),
 }
 
 #[derive(Debug, Default)]
@@ -279,7 +296,159 @@ impl AppState {
     pub fn lock_vault(&mut self, cx: &mut Context<Self>) {
         self.vault = VaultStatus::Empty;
         self.overlay = Overlay::None;
+        self.save_status = SaveStatus::Idle;
         cx.notify();
+    }
+
+    pub fn save_status(&self) -> &SaveStatus {
+        &self.save_status
+    }
+
+    /// Spawn an atomic save of the open vault on a background thread.
+    ///
+    /// Concurrency model: snapshots the live `Database` once on the foreground
+    /// (cheap memcpy) and ships the clone + key material to a worker. The UI
+    /// thread is free during the ~500 ms Argon2 KDF. If a save is already in
+    /// flight we deliberately let the new one queue behind it — the latest
+    /// state always wins, but we don't drop user changes.
+    pub fn save_async(&mut self, cx: &mut Context<Self>) {
+        let VaultStatus::Open { document, path, .. } = &self.vault else {
+            return;
+        };
+        let payload = document.save_payload();
+        let target = path.clone();
+
+        self.save_status = SaveStatus::Saving;
+        cx.notify();
+
+        let task = cx.background_spawn(async move { payload.save_to(&target) });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| {
+                state.save_status = match result {
+                    Ok(()) => SaveStatus::Saved,
+                    Err(error) => SaveStatus::Failed(error.to_string()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Create an entry inside the given group, refresh the snapshot-derived
+    /// caches, focus the new entry, and trigger a background save. Returns the
+    /// new entry's id on success.
+    pub fn create_entry(
+        &mut self,
+        group_id: &str,
+        draft: EntryDraft,
+        cx: &mut Context<Self>,
+    ) -> Result<String, MutationError> {
+        let new_id = {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            let new_id = document.create_entry(group_id, &draft)?;
+
+            // Snap the user to the entry's group so they can see what they
+            // just created — otherwise creating from inside "Favorites" or a
+            // tag filter would silently land the entry off-screen.
+            *selection = LibrarySelection::Group(group_id.to_string());
+            search_query.clear();
+
+            let entries = entries_for_selection(document.snapshot(), selection, "");
+            *selected_entry_id = Some(new_id.clone());
+            *visible_entries = Rc::new(entries);
+            *selected_strength = document.strength_for_entry(&new_id);
+
+            new_id
+        };
+        cx.notify();
+        self.save_async(cx);
+        Ok(new_id)
+    }
+
+    pub fn update_entry(
+        &mut self,
+        entry_id: &str,
+        draft: EntryDraft,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            document.update_entry(entry_id, &draft)?;
+
+            *visible_entries =
+                Rc::new(entries_for_selection(document.snapshot(), selection, search_query));
+            // Re-score; the password may have changed.
+            if selected_entry_id.as_deref() == Some(entry_id) {
+                *selected_strength = document.strength_for_entry(entry_id);
+            }
+        }
+        cx.notify();
+        self.save_async(cx);
+        Ok(())
+    }
+
+    /// Move an entry to the recycle bin (creating one if necessary). Selection
+    /// jumps to the next visible entry so the detail pane stays populated.
+    pub fn delete_entry(
+        &mut self,
+        entry_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            document.delete_entry(entry_id)?;
+
+            let entries = entries_for_selection(document.snapshot(), selection, search_query);
+            // If the deleted entry was selected, fall back to the first visible.
+            if selected_entry_id.as_deref() == Some(entry_id) {
+                *selected_entry_id = entries.first().map(|e| e.id.clone());
+                *selected_strength = selected_entry_id
+                    .as_deref()
+                    .and_then(|id| document.strength_for_entry(id));
+            }
+            *visible_entries = Rc::new(entries);
+        }
+        cx.notify();
+        self.save_async(cx);
+        Ok(())
     }
 
     pub fn pending_unlock_path(&self) -> Option<PathBuf> {

@@ -2,7 +2,8 @@ use crate::{
     app::{
         AppState, CopyValueKind, Overlay,
         actions::{
-            APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault, ToggleTheme,
+            APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
+            SaveVault, ToggleTheme,
             FocusSearch, LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSyncSettings,
             OpenVault, SubmitPassword,
         },
@@ -30,6 +31,7 @@ pub struct AppShell {
     new_entry_username_input: Entity<InputState>,
     new_entry_password_input: Entity<InputState>,
     new_entry_url_input: Entity<InputState>,
+    new_entry_notes_input: Entity<InputState>,
     /// Persistent scroll position for the entry virtual list. Must outlive a single
     /// render — without it the list resets to the top on every re-render and
     /// mouse-wheel events appear to do nothing.
@@ -62,6 +64,8 @@ impl AppShell {
         let new_entry_password_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
         let new_entry_url_input = cx.new(|cx| InputState::new(window, cx).placeholder("URL"));
+        let new_entry_notes_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Notes (optional)"));
 
         let focus_handle = cx.focus_handle();
         // Grab focus immediately so cmd-f / cmd-l / cmd-, fire on the very first
@@ -85,6 +89,7 @@ impl AppShell {
             new_entry_username_input,
             new_entry_password_input,
             new_entry_url_input,
+            new_entry_notes_input,
             entry_list_scroll: VirtualListScrollHandle::new(),
             focus_handle,
             search_debounce: None,
@@ -126,6 +131,49 @@ impl AppShell {
 
     pub fn new_entry_url_input(&self) -> &Entity<InputState> {
         &self.new_entry_url_input
+    }
+
+    pub fn new_entry_notes_input(&self) -> &Entity<InputState> {
+        &self.new_entry_notes_input
+    }
+
+    /// Snapshot the AddEntry form into an `EntryDraft`. Tags aren't editable
+    /// in the modal yet; we leave them empty so create_entry doesn't accidentally
+    /// add ghost tags.
+    pub fn collect_entry_draft(&self, cx: &gpui::App) -> crate::keepass::EntryDraft {
+        crate::keepass::EntryDraft {
+            title: self.new_entry_title_input.read(cx).value().to_string(),
+            username: self.new_entry_username_input.read(cx).value().to_string(),
+            password: self.new_entry_password_input.read(cx).value().to_string(),
+            url: self.new_entry_url_input.read(cx).value().to_string(),
+            notes: self.new_entry_notes_input.read(cx).value().to_string(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// Clear every AddEntry input. Called after a successful save and on
+    /// Cancel so the next "New entry" opens with a blank form.
+    pub fn clear_entry_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for input in [
+            &self.new_entry_title_input,
+            &self.new_entry_username_input,
+            &self.new_entry_password_input,
+            &self.new_entry_url_input,
+            &self.new_entry_notes_input,
+        ] {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+    }
+
+    /// Generate a fresh strong password (18 chars, all 4 char classes) and
+    /// drop it into the AddEntry password field.
+    pub fn generate_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pw = crate::keepass::password_gen::generate(
+            18,
+            crate::keepass::password_gen::CharClasses::default(),
+        );
+        self.new_entry_password_input
+            .update(cx, |state, cx| state.set_value(pw, window, cx));
     }
 
     fn on_action_open_vault(&mut self, _: &OpenVault, window: &mut Window, cx: &mut Context<Self>) {
@@ -225,7 +273,7 @@ impl AppShell {
     fn on_action_new_entry(
         &mut self,
         _: &NewEntry,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let is_open = matches!(
@@ -233,6 +281,9 @@ impl AppShell {
             crate::app::VaultStatus::Open { .. }
         );
         if is_open {
+            // Reset the form before showing it — otherwise reopening the modal
+            // after a previous Save/Cancel would carry the prior values.
+            self.clear_entry_form(window, cx);
             self.state
                 .update(cx, |state, cx| state.open_overlay(Overlay::AddEntry, cx));
         }
@@ -270,6 +321,16 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         crate::ui::theme::toggle(window, cx);
+    }
+
+    fn on_action_save_vault(
+        &mut self,
+        _: &SaveVault,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |state, cx| state.save_async(cx));
     }
 
     fn on_password_input_event(
@@ -546,6 +607,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_open_conflict_demo))
             .on_action(cx.listener(Self::on_action_create_vault))
             .on_action(cx.listener(Self::on_action_toggle_theme))
+            .on_action(cx.listener(Self::on_action_save_vault))
             .size_full()
             .relative()
             .overflow_hidden()
