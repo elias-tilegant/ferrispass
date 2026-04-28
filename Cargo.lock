@@ -488,6 +488,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base32"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "022dfe9eb35f19ebbcb51e0b40a5ab759f46ad60cadf7297e0bd085afb50e076"
+
+[[package]]
 name = "base62"
 version = "2.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3286,6 +3292,7 @@ version = "0.0.0-placeholder-version"
 source = "git+https://github.com/elias-tilegant/keepass-rs?branch=master#d0fb98f6ba16708d0c500e2c26fa52ca96b88f2b"
 dependencies = [
  "aes 0.9.0",
+ "base32",
  "base64",
  "block-modes",
  "byteorder",
@@ -3307,7 +3314,9 @@ dependencies = [
  "serde",
  "sha2 0.11.0",
  "thiserror 2.0.18",
+ "totp-lite",
  "twofish",
+ "url",
  "uuid",
  "zeroize",
 ]
@@ -5624,6 +5633,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6484,6 +6504,18 @@ name = "toml_writer"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
+
+[[package]]
+name = "totp-lite"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8e43134db17199f7f721803383ac5854edd0d3d523cc34dba321d6acfbe76c3"
+dependencies = [
+ "digest 0.10.7",
+ "hmac 0.12.1",
+ "sha1",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "tower"

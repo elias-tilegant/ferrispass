@@ -1203,7 +1203,77 @@ fn entry_detail_body(
         .child(detail_row("URL", value_or_dash(&url), false, false));
 
     if has_otp {
-        body_col = body_col.child(detail_row("TOTP", "—".to_string(), true, false));
+        // Pull the live code each render — the AppShell tick fires `cx.notify`
+        // on AppState every second, which causes this re-render with a fresh
+        // value + countdown. Read once to avoid borrowing state twice.
+        let otp = state_entity.read(cx).totp_for_selected_entry();
+        let label_text = match &otp {
+            Some(o) => format!("TOTP · {}s", o.remaining_secs),
+            None => "TOTP".to_string(),
+        };
+        let display = otp
+            .as_ref()
+            .map(|o| o.code.clone())
+            .unwrap_or_else(|| "—".to_string());
+
+        // Warn the user when the code is about to rotate. The thresholds
+        // mirror KeePassXC: <=5s = orange (about to expire), then back to
+        // neutral once a fresh code lands. The 30s window is short enough
+        // that visual warning is more reliable than reading the countdown.
+        let warning = otp.as_ref().is_some_and(|o| o.remaining_secs <= 5);
+        let (border_color, text_color) = if warning {
+            (palette::orange(), palette::orange_deep())
+        } else {
+            (palette::border(), palette::text())
+        };
+
+        // Raw digits (without the thin space we insert for readability) for
+        // clipboard. Closure captures by move into the click handler.
+        let raw_for_clipboard = otp
+            .as_ref()
+            .map(|o| o.code.replace(' ', ""))
+            .unwrap_or_default();
+        let copyable = !raw_for_clipboard.is_empty();
+
+        body_col = body_col.child(
+            v_flex()
+                .gap_1()
+                .min_w(px(0.))
+                .child(label(label_text))
+                .child({
+                    // Single-line mono code box. Click → copy raw digits +
+                    // toast. Cursor stays the default pointer-style; if we
+                    // want a hand cursor later we can wire `.cursor_pointer()`
+                    // on the stateful div.
+                    let mut row = div()
+                        .id("detail-totp-code")
+                        .h(px(34.))
+                        .w_full()
+                        .min_w(px(0.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(border_color)
+                        .bg(palette::sidebar())
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .text_color(text_color)
+                        .truncate()
+                        .font_family("JetBrains Mono")
+                        .child(display);
+                    if copyable {
+                        row = row.on_click(cx.listener(
+                            move |_: &mut AppShell, _: &ClickEvent, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    raw_for_clipboard.clone(),
+                                ));
+                                window.push_notification("TOTP copied.", cx);
+                            },
+                        ));
+                    }
+                    row
+                }),
+        );
     }
 
     body_col = body_col

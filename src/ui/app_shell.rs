@@ -59,6 +59,12 @@ pub struct AppShell {
     /// chip instead of the plain delete button. Click outside / different
     /// entry / Escape clears it.
     pending_perma_delete: Option<String>,
+    /// 1 Hz tick task that drives the live TOTP countdown in the detail panel.
+    /// Started after a vault opens and dropped (= cancelled) on lock. We only
+    /// need this for the seconds-resolution countdown; the actual TOTP code
+    /// changes every 30 s so a coarser tick would also work, but 1 Hz keeps
+    /// the "valid for Xs" text moving smoothly.
+    totp_tick: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -88,7 +94,12 @@ impl AppShell {
         window.focus(&focus_handle, cx);
 
         let _subscriptions = vec![
-            cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.observe(&state, |shell: &mut AppShell, _, cx| {
+                // Re-render whenever AppState notifies AND keep the TOTP tick
+                // task in sync with whether a vault is currently open.
+                shell.sync_totp_tick(cx);
+                cx.notify();
+            }),
             cx.subscribe_in(&password_input, window, Self::on_password_input_event),
             cx.subscribe_in(&keyfile_input, window, Self::on_keyfile_input_event),
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
@@ -108,12 +119,54 @@ impl AppShell {
             focus_handle,
             search_debounce: None,
             pending_perma_delete: None,
+            totp_tick: None,
             _subscriptions,
         }
     }
 
     pub fn pending_perma_delete(&self) -> Option<&str> {
         self.pending_perma_delete.as_deref()
+    }
+
+    /// Start the per-second TOTP refresh loop only when the currently-selected
+    /// entry has an OTP field; cancel it otherwise. Called from the state
+    /// observer so it follows both open/lock transitions and selection changes
+    /// — moving away from a TOTP entry stops the tick, moving onto one starts
+    /// it. Saves the wasted 1 Hz re-renders for the (common) case where the
+    /// user isn't looking at a TOTP entry.
+    fn sync_totp_tick(&mut self, cx: &mut Context<Self>) {
+        let needs_tick = self
+            .state
+            .read(cx)
+            .vault_browser()
+            .and_then(|b| b.selected_entry)
+            .map(|e| e.has_otp)
+            .unwrap_or(false);
+
+        match (needs_tick, self.totp_tick.is_some()) {
+            (true, false) => {
+                let state = self.state.downgrade();
+                self.totp_tick = Some(cx.spawn(async move |_, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(1))
+                            .await;
+                        // Notify the AppState entity so anything observing it
+                        // (notably the detail panel via the AppShell observer
+                        // above) re-renders and recomputes the live TOTP code.
+                        // If the entity is gone we exit cleanly.
+                        if state.update(cx, |_, cx| cx.notify()).is_err() {
+                            break;
+                        }
+                    }
+                }));
+            }
+            (false, true) => {
+                // Drop the task — GPUI cancels it.
+                self.totp_tick = None;
+            }
+            _ => {}
+        }
     }
 
     pub fn arm_perma_delete(&mut self, entry_id: String, cx: &mut Context<Self>) {

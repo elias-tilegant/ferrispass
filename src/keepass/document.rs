@@ -82,6 +82,27 @@ impl VaultDocument {
         })
     }
 
+    /// Compute the current TOTP code for an entry, if one is configured.
+    /// Returns `None` when the entry has no `otp` field, the field is malformed,
+    /// or the system clock is unreadable. Cheap (~microseconds), so we call it
+    /// from the per-second UI tick rather than caching.
+    pub fn totp_for_entry(&self, entry_id: &str) -> Option<OtpDisplay> {
+        let entry = self
+            .database
+            .iter_all_entries()
+            .find(|e| e.id().to_string() == entry_id)?;
+        let totp = entry.get_otp().ok()?;
+        let code = totp.value_now().ok()?;
+        // The spec uses 6 digits in 99% of issuers; insert a thin space mid-code
+        // for readability (`123 456`) when we get an even count.
+        let display_code = format_code(&code.code);
+        Some(OtpDisplay {
+            code: display_code,
+            remaining_secs: code.valid_for.as_secs() as u32,
+            period_secs: code.period.as_secs() as u32,
+        })
+    }
+
     /// Build a self-contained payload that can be sent to a background thread
     /// for an atomic save. We clone the database here (cheap relative to the
     /// Argon2 KDF that runs inside `Database::save`) so the foreground keeps
@@ -267,6 +288,29 @@ pub struct StrengthReport {
     pub length: usize,
     pub bits: u32,
     pub score: u8,
+}
+
+/// A formatted, ready-to-display TOTP code with its remaining validity window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OtpDisplay {
+    pub code: String,
+    pub remaining_secs: u32,
+    pub period_secs: u32,
+}
+
+/// Inserts a thin space in the middle of even-length codes (`123456` → `123 456`).
+/// Improves readability for the common 6/8-digit cases without breaking parsers
+/// that strip whitespace; copy-to-clipboard should pass the raw digits.
+fn format_code(raw: &str) -> String {
+    let n = raw.chars().count();
+    if n % 2 == 0 && (4..=10).contains(&n) {
+        let half = n / 2;
+        let first: String = raw.chars().take(half).collect();
+        let second: String = raw.chars().skip(half).collect();
+        format!("{first} {second}")
+    } else {
+        raw.to_string()
+    }
 }
 
 /// A snapshot of the document's state suitable for an off-thread save.

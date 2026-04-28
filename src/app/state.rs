@@ -1,5 +1,5 @@
 use crate::domain::{VaultEntry, VaultSnapshot};
-use crate::keepass::{EntryDraft, MutationError, StrengthReport, VaultDocument};
+use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
 use gpui::{AppContext as _, Context};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -306,6 +306,22 @@ impl AppState {
 
     pub fn save_status(&self) -> &SaveStatus {
         &self.save_status
+    }
+
+    /// Compute the live TOTP code for the currently-selected entry, if any.
+    /// Recomputed on every render (cheap, ~µs); the per-second AppShell tick
+    /// triggers `cx.notify` which causes the detail panel to re-call this.
+    pub fn totp_for_selected_entry(&self) -> Option<OtpDisplay> {
+        let VaultStatus::Open {
+            document,
+            selected_entry_id,
+            ..
+        } = &self.vault
+        else {
+            return None;
+        };
+        let id = selected_entry_id.as_deref()?;
+        document.totp_for_entry(id)
     }
 
     /// Spawn an atomic save of the open vault on a background thread.
