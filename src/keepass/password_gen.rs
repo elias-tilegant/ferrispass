@@ -10,6 +10,8 @@
 use rand::Rng;
 use rand::seq::IndexedRandom;
 
+use crate::domain::Strength;
+
 const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 const DIGITS: &[u8] = b"0123456789";
@@ -90,6 +92,55 @@ fn pick_one(class: &[u8]) -> u8 {
     *class.choose(&mut rand::rng()).expect("non-empty class")
 }
 
+/// Size of the alphabet drawn from when sampling with `classes`. Mirrors
+/// `generate`'s union-of-classes rule, including the lowercase-fallback when
+/// every class is disabled. Used by the entropy estimate.
+pub fn alphabet_size(classes: CharClasses) -> usize {
+    let mut size = 0;
+    if classes.upper {
+        size += UPPER.len();
+    }
+    if classes.lower {
+        size += LOWER.len();
+    }
+    if classes.digits {
+        size += DIGITS.len();
+    }
+    if classes.symbols {
+        size += SYMBOLS.len();
+    }
+    if size == 0 {
+        size = LOWER.len();
+    }
+    size
+}
+
+/// Shannon-style entropy estimate for a uniformly-sampled password of
+/// `length` chars over the union of the enabled classes:
+/// `bits = length * log2(|alphabet|)`. This is an *upper bound* on real
+/// entropy (it ignores user-visible patterns like dictionary words), so
+/// `generate`'s output should hit it almost exactly while user-typed
+/// passwords often score lower under zxcvbn.
+pub fn estimate_bits(length: usize, classes: CharClasses) -> u32 {
+    let size = alphabet_size(classes) as f32;
+    (length as f32 * size.log2()) as u32
+}
+
+/// Bucket entropy bits into the same three-band Strength enum used elsewhere
+/// in the UI (so the generator card and the entry-detail health bar use one
+/// vocabulary). Thresholds chosen to match common guidance: <40 bits is
+/// brute-forceable, 40–60 bits is online-attack-resistant, ≥60 bits is
+/// offline-attack-resistant.
+pub fn strength_from_bits(bits: u32) -> Strength {
+    if bits < 40 {
+        Strength::Weak
+    } else if bits < 60 {
+        Strength::Fair
+    } else {
+        Strength::Strong
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +175,50 @@ mod tests {
             assert!(bytes.iter().any(|b| DIGITS.contains(b)), "no digit: {pw}");
             assert!(bytes.iter().any(|b| SYMBOLS.contains(b)), "no symbol: {pw}");
         }
+    }
+
+    #[test]
+    fn alphabet_sizes_match_class_lengths() {
+        // Sanity-check that the byte-string constants above are still 26/26/10/21
+        // — the entropy estimate hard-depends on these magnitudes.
+        assert_eq!(UPPER.len(), 26);
+        assert_eq!(LOWER.len(), 26);
+        assert_eq!(DIGITS.len(), 10);
+        assert_eq!(SYMBOLS.len(), 21);
+
+        assert_eq!(alphabet_size(CharClasses::default()), 26 + 26 + 10 + 21);
+        assert_eq!(
+            alphabet_size(CharClasses { upper: false, lower: true, digits: false, symbols: false }),
+            26
+        );
+    }
+
+    #[test]
+    fn estimate_bits_scales_with_length_and_classes() {
+        let lower_only = CharClasses { upper: false, lower: true, digits: false, symbols: false };
+        // 18 chars * log2(26) ≈ 18 * 4.7 = 84
+        let b = estimate_bits(18, lower_only);
+        assert!((83..=85).contains(&b), "bits={b}");
+
+        // Adding upper doubles the alphabet (52) → log2 grows by 1 → +18 bits.
+        let with_upper = CharClasses { upper: true, ..lower_only };
+        let b2 = estimate_bits(18, with_upper);
+        assert!(b2 >= b + 17 && b2 <= b + 19, "bits={b2} expected ~{}", b + 18);
+
+        // Length scales linearly: doubling length doubles bits.
+        let half = estimate_bits(9, CharClasses::default());
+        let full = estimate_bits(18, CharClasses::default());
+        assert!(full >= 2 * half - 1 && full <= 2 * half + 1, "half={half} full={full}");
+    }
+
+    #[test]
+    fn strength_buckets_match_thresholds() {
+        assert_eq!(strength_from_bits(0), crate::domain::Strength::Weak);
+        assert_eq!(strength_from_bits(39), crate::domain::Strength::Weak);
+        assert_eq!(strength_from_bits(40), crate::domain::Strength::Fair);
+        assert_eq!(strength_from_bits(59), crate::domain::Strength::Fair);
+        assert_eq!(strength_from_bits(60), crate::domain::Strength::Strong);
+        assert_eq!(strength_from_bits(200), crate::domain::Strength::Strong);
     }
 
     #[test]

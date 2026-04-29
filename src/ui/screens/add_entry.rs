@@ -2,13 +2,15 @@ use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use gpui_component::{Sizable as _, WindowExt as _, h_flex, input::Input, v_flex};
+use gpui_component::{
+    Sizable as _, WindowExt as _, checkbox::Checkbox, h_flex, input::Input,
+    slider::Slider, v_flex,
+};
 
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::label;
-use crate::ui::widgets::password::generator_card;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let underlay = crate::ui::screens::vault::render(shell, cx);
@@ -19,6 +21,10 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .relative()
         .child(underlay)
         .child(
+            // Center the modal on both axes; on tall windows it sits ~natural
+            // size near the middle, on short ones it caps at viewport height
+            // and the form body inside scrolls. The 16 px padding around the
+            // edges prevents the chrome from kissing the window border.
             div()
                 .absolute()
                 .top_0()
@@ -27,9 +33,9 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .left_0()
                 .bg(palette::transparent_overlay())
                 .flex()
-                .items_start()
+                .items_center()
                 .justify_center()
-                .pt(px(60.))
+                .p(px(16.))
                 .child(modal),
         )
         .into_any_element()
@@ -193,6 +199,11 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 
     v_flex()
         .w(px(540.))
+        // Cap at viewport height so the modal can't overflow the window on
+        // short displays. `min_h(0)` lets the inner flex-1 body actually
+        // shrink instead of forcing the modal to grow to its content size.
+        .max_h_full()
+        .min_h(px(0.))
         .bg(palette::panel())
         .border_1()
         .border_color(palette::border())
@@ -239,7 +250,14 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 ),
         )
         .child(
+            // Form body claims the remaining vertical space and scrolls
+            // internally — header (above) and footer (below) stay pinned so
+            // Cancel/Save are always reachable, even on a short window.
             v_flex()
+                .id("add-entry-form-scroll")
+                .flex_1()
+                .min_h(px(0.))
+                .overflow_y_scroll()
                 .gap_3p5()
                 .px_5()
                 .py_4()
@@ -265,7 +283,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .child(div().flex_1().child(Input::new(&password_input)))
                                 .child(generate_button_el),
                         )
-                        .child(generator_card(18, "Strong", 118)),
+                        .child(generator_card(shell, cx)),
                 )
                 .child(
                     v_flex()
@@ -298,6 +316,9 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 ),
         )
         .child(
+            // Match the parent modal's `rounded(10)` on the bottom edge so
+            // the footer's own background paints inside the same curve;
+            // otherwise the gray fill peeks past the rounded corners.
             h_flex()
                 .gap_2()
                 .items_center()
@@ -306,6 +327,8 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .bg(palette::sidebar())
                 .border_t_1()
                 .border_color(palette::border())
+                .rounded_bl(px(10.))
+                .rounded_br(px(10.))
                 .child(
                     div()
                         .flex_1()
@@ -317,6 +340,78 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .child(cancel_button)
                 .child(save_button),
         )
+        .into_any_element()
+}
+
+/// Live generator card: draggable length slider + four class checkboxes,
+/// both wired to `AppShell` state. Strength label and bits update on every
+/// drag/toggle (driven by `AppShell::observe(&gen_length_state)` for slider
+/// moves and `cx.notify()` inside `toggle_gen_class` for checkbox clicks).
+fn generator_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
+    let length = shell.gen_length(cx);
+    let classes = shell.gen_classes();
+    let bits = crate::keepass::password_gen::estimate_bits(length, classes);
+    let strength = crate::keepass::password_gen::strength_from_bits(bits);
+    let strength_label = strength.label();
+    let strength_color = match strength {
+        crate::domain::Strength::Weak => palette::red(),
+        crate::domain::Strength::Fair => palette::yellow(),
+        crate::domain::Strength::Strong => palette::green(),
+    };
+
+    let class_row = {
+        let entries = [
+            ("gen-class-upper", "A-Z", classes.upper, 0usize),
+            ("gen-class-lower", "a-z", classes.lower, 1),
+            ("gen-class-digits", "0-9", classes.digits, 2),
+            ("gen-class-symbols", "!@#", classes.symbols, 3),
+        ];
+        let mut row = h_flex().gap_3p5();
+        for (id, label_text, checked, idx) in entries {
+            row = row.child(
+                Checkbox::new(id)
+                    .checked(checked)
+                    .label(label_text)
+                    .on_click(cx.listener(
+                        move |shell: &mut AppShell, _: &bool, _, cx| {
+                            shell.toggle_gen_class(idx, cx);
+                        },
+                    )),
+            );
+        }
+        row
+    };
+
+    v_flex()
+        .gap_3()
+        .p_3()
+        .rounded(px(6.))
+        .bg(palette::sidebar())
+        .border_1()
+        .border_color(palette::border())
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(
+                    h_flex().gap_1().child("Length:").child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(palette::text())
+                            .child(length.to_string()),
+                    ),
+                )
+                .child(
+                    div()
+                        .text_color(strength_color)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(format!("{strength_label} · {bits} bits")),
+                ),
+        )
+        .child(Slider::new(shell.gen_length_state()))
+        .child(class_row)
         .into_any_element()
 }
 

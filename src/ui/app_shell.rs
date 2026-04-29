@@ -19,6 +19,7 @@ use std::time::Duration;
 use gpui_component::{
     ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
     input::{InputEvent, InputState},
+    slider::{SliderState, SliderValue},
 };
 use std::path::PathBuf;
 
@@ -43,6 +44,16 @@ pub struct AppShell {
     new_entry_url_input: Entity<InputState>,
     new_entry_notes_input: Entity<InputState>,
     new_entry_otp_input: Entity<InputState>,
+    /// Length slider state for the AddEntry generator card. Range 4..64,
+    /// default 18 (matches the prior hardcoded value the card used to display).
+    /// We hold the entity so both the Slider widget and `generate_password`
+    /// can read the same source of truth.
+    gen_length_state: Entity<SliderState>,
+    /// Toggle state for the four character classes shown next to the slider.
+    /// Mutated by `toggle_gen_class` with a min-one-active guard so the user
+    /// can't disable every class (which would silently fall back to lowercase
+    /// inside the generator and surprise them).
+    gen_classes: crate::keepass::password_gen::CharClasses,
     /// Persistent scroll position for the entry virtual list. Must outlive a single
     /// render — without it the list resets to the top on every re-render and
     /// mouse-wheel events appear to do nothing.
@@ -93,6 +104,14 @@ impl AppShell {
                 .placeholder("otpauth://… or base32 secret")
         });
 
+        let gen_length_state = cx.new(|_| {
+            SliderState::new()
+                .min(4.0)
+                .max(64.0)
+                .step(1.0)
+                .default_value(SliderValue::Single(18.0))
+        });
+
         let focus_handle = cx.focus_handle();
         // Grab focus immediately so cmd-f / cmd-l / cmd-, fire on the very first
         // keystroke. Without this the window has no focused element until the
@@ -109,6 +128,11 @@ impl AppShell {
             cx.subscribe_in(&password_input, window, Self::on_password_input_event),
             cx.subscribe_in(&keyfile_input, window, Self::on_keyfile_input_event),
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
+            // Re-render on slider drag so the "Length: N" label and the
+            // strength preview update live alongside the thumb.
+            cx.observe(&gen_length_state, |_shell: &mut AppShell, _, cx| {
+                cx.notify();
+            }),
         ];
 
         Self {
@@ -122,6 +146,8 @@ impl AppShell {
             new_entry_url_input,
             new_entry_notes_input,
             new_entry_otp_input,
+            gen_length_state,
+            gen_classes: crate::keepass::password_gen::CharClasses::default(),
             entry_list_scroll: VirtualListScrollHandle::new(),
             focus_handle,
             search_debounce: None,
@@ -261,13 +287,49 @@ impl AppShell {
         }
     }
 
-    /// Generate a fresh strong password (18 chars, all 4 char classes) and
-    /// drop it into the AddEntry password field.
+    /// Read the current generator length from the slider state. Centralised so
+    /// `generate_password` and the AddEntry card render code stay in sync on
+    /// rounding rules.
+    pub fn gen_length(&self, cx: &gpui::App) -> usize {
+        self.gen_length_state.read(cx).value().start().round() as usize
+    }
+
+    pub fn gen_length_state(&self) -> &Entity<SliderState> {
+        &self.gen_length_state
+    }
+
+    pub fn gen_classes(&self) -> crate::keepass::password_gen::CharClasses {
+        self.gen_classes
+    }
+
+    /// Toggle one of the four character classes by index (0=upper, 1=lower,
+    /// 2=digits, 3=symbols). Refuses the toggle if it would leave zero classes
+    /// enabled — without this the generator silently falls back to lowercase
+    /// and the user's "all unchecked" state would produce passwords that
+    /// disagree with the disabled chips.
+    pub fn toggle_gen_class(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let mut next = self.gen_classes;
+        let slot = match idx {
+            0 => &mut next.upper,
+            1 => &mut next.lower,
+            2 => &mut next.digits,
+            3 => &mut next.symbols,
+            _ => return,
+        };
+        *slot = !*slot;
+        let any_enabled = next.upper || next.lower || next.digits || next.symbols;
+        if !any_enabled {
+            return;
+        }
+        self.gen_classes = next;
+        cx.notify();
+    }
+
+    /// Generate a fresh password using the current slider length and class
+    /// toggles, then drop the result into the AddEntry password field.
     pub fn generate_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let pw = crate::keepass::password_gen::generate(
-            18,
-            crate::keepass::password_gen::CharClasses::default(),
-        );
+        let length = self.gen_length(cx);
+        let pw = crate::keepass::password_gen::generate(length, self.gen_classes);
         self.new_entry_password_input
             .update(cx, |state, cx| state.set_value(pw, window, cx));
     }
