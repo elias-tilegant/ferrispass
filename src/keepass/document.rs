@@ -44,6 +44,27 @@ impl VaultDocument {
         &self.snapshot
     }
 
+    /// The master password used to unlock this vault. Required by the sync
+    /// flow when a 412 conflict happens — we need to decrypt the remote
+    /// bytes against the same key, then re-encrypt the merged result.
+    /// Lifetime-bound to `&self` so callers don't accidentally store it
+    /// outside the document's scope.
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+
+    /// Optional keyfile path — same reason as `password()`. `None` for
+    /// password-only vaults.
+    pub fn keyfile_path(&self) -> Option<&Path> {
+        self.keyfile_path.as_deref()
+    }
+
+    /// Borrow the live `Database` for diff / read-only operations (e.g. by
+    /// the sync conflict-resolution path).
+    pub fn database(&self) -> &Database {
+        &self.database
+    }
+
     /// Cheap O(1) clone of the snapshot — used by hot render paths to avoid the
     /// expensive deep-clone of the group tree + every entry. `Arc` (not `Rc`) so
     /// the document can be built on a background thread before being handed to UI.
@@ -348,6 +369,17 @@ pub struct SavePayload {
 }
 
 impl SavePayload {
+    /// Build a payload from arbitrary inputs — used by the sync conflict
+    /// flow to encrypt a freshly-merged Database without going through the
+    /// live VaultDocument (which already holds the *un*-merged state).
+    pub fn for_merged(
+        database: Database,
+        password: String,
+        keyfile_path: Option<PathBuf>,
+    ) -> Self {
+        SavePayload { database, password, keyfile_path }
+    }
+
     /// Atomically write the database to `target_path`. Writes to `<target>.tmp`,
     /// fsyncs, then renames over the target so a crash mid-write can never
     /// leave a half-written `.kdbx`.

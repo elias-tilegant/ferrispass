@@ -1,30 +1,52 @@
+//! Sync settings overlay — data-driven from `AppState::sync` +
+//! `AppState::sync_status`.
+//!
+//! Three top-level shapes:
+//! - **Connected**: shows account / file / last-sync, with Sync now + Disconnect.
+//! - **Reconnect required**: refresh token expired; offers Reconnect button.
+//! - **Disconnected**: vault is local-only; offers Connect button (sends
+//!   user back through the Connect overlay).
+//!
+//! The activity log + behavior-toggles sections from the original mockup
+//! were removed because they were 100% static demo data — re-introducing
+//! them as live data is a future job (would need a sync-event log).
+
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 
-use crate::app::actions::OpenConflictDemo;
+use crate::app::actions::OpenConnect;
+use crate::app::{SyncBinding, SyncStatus};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip};
-use crate::ui::widgets::sync_row::{SyncOutcome, sync_row};
-use crate::ui::widgets::toggle_row::toggle_row;
 
-pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
-    let sidebar = settings_sidebar();
-    let panel = content_panel(cx);
+pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
+    let state_handle = shell.state().clone();
+    let snapshot = state_handle.read(cx);
+    let binding = snapshot.sync_binding().cloned_for_render();
+    let status = snapshot.sync_status().clone();
+
+    let body = match (&binding, &status) {
+        (_, SyncStatus::Reconnect) => render_reconnect(cx),
+        (Some(b), _) => render_connected(b, &status, cx),
+        (None, _) => render_disconnected(cx),
+    };
 
     h_flex()
         .size_full()
         .bg(cx.theme().background)
-        .child(sidebar)
-        .child(panel)
+        .child(sidebar())
+        .child(content_panel(body, cx))
         .into_any_element()
 }
 
-fn settings_sidebar() -> AnyElement {
+// --------------- chrome ---------------
+
+fn sidebar() -> AnyElement {
     let items = [
         (AppIcon::Key, "General", false),
         (AppIcon::Shield, "Security", false),
@@ -67,11 +89,6 @@ fn settings_sidebar() -> AnyElement {
                 .bg(bg)
                 .text_color(fg)
                 .text_sm()
-                .font_weight(if selected {
-                    gpui::FontWeight::MEDIUM
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
                 .child(
                     gpui_component::Icon::from(icon)
                         .with_size(gpui_component::Size::Size(px(13.)))
@@ -84,10 +101,7 @@ fn settings_sidebar() -> AnyElement {
     col.into_any_element()
 }
 
-fn content_panel(cx: &mut Context<AppShell>) -> AnyElement {
-    let close = close_button(cx);
-    let activity = activity_section(cx);
-
+fn content_panel(body: AnyElement, cx: &mut Context<AppShell>) -> AnyElement {
     v_flex()
         .flex_1()
         .min_w(px(0.))
@@ -118,7 +132,7 @@ fn content_panel(cx: &mut Context<AppShell>) -> AnyElement {
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child("Cloud sync"),
                         )
-                        .child(close),
+                        .child(close_button(cx)),
                 )
                 .child(
                     div()
@@ -135,149 +149,17 @@ fn content_panel(cx: &mut Context<AppShell>) -> AnyElement {
                 .min_h(px(0.))
                 .gap_6()
                 .p_8()
-                .child(connected_card())
-                .child(activity)
-                .child(behavior_section()),
+                .child(body),
         )
         .into_any_element()
 }
 
-fn connected_card() -> AnyElement {
-    v_flex()
-        .gap_4()
-        .p_4()
-        .rounded(px(10.))
-        .bg(palette::blue_soft())
-        .border_1()
-        .border_color(palette::blue_border())
-        .child(
-            h_flex()
-                .gap_3p5()
-                .items_center()
-                .child(
-                    div()
-                        .size(px(44.))
-                        .rounded(px(9.))
-                        .bg(palette::panel())
-                        .border_1()
-                        .border_color(palette::blue_border())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            gpui_component::Icon::from(AppIcon::Cloud)
-                                .with_size(gpui_component::Size::Size(px(22.)))
-                                .text_color(palette::blue()),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .gap_0p5()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child("OneDrive"),
-                                )
-                                .child(chip("Connected", ChipTone::Green)),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(palette::text_muted())
-                                .font_family("JetBrains Mono")
-                                .child("jonas.ritter@gmx.de · 47.2 GB of 1 TB used"),
-                        ),
-                )
-                .child(
-                    div()
-                        .h(px(28.))
-                        .px(px(10.))
-                        .rounded(px(6.))
-                        .bg(palette::panel())
-                        .border_1()
-                        .border_color(palette::border_strong())
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(palette::text())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child("Disconnect"),
-                ),
-        )
-        .child(
-            h_flex()
-                .gap_3()
-                .items_center()
-                .p_3()
-                .rounded(px(7.))
-                .bg(palette::panel())
-                .border_1()
-                .border_color(palette::blue_border())
-                .child(
-                    div()
-                        .size(px(32.))
-                        .rounded(px(6.))
-                        .bg(palette::orange_soft())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            gpui_component::Icon::from(AppIcon::Key)
-                                .with_size(gpui_component::Size::Size(px(15.)))
-                                .text_color(palette::orange()),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .font_family("JetBrains Mono")
-                                .child("/Apps/KeePassRS/Personal.kdbx"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(palette::text_muted())
-                                .child("4.8 MB · last modified 2 minutes ago"),
-                        ),
-                )
-                .child(
-                    div()
-                        .h(px(24.))
-                        .px(px(8.))
-                        .rounded(px(4.))
-                        .bg(palette::panel())
-                        .border_1()
-                        .border_color(palette::border_strong())
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(palette::text())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child("Change…"),
-                ),
-        )
-        .into_any_element()
-}
-
-fn activity_section(cx: &mut Context<AppShell>) -> AnyElement {
-    let sync_now_button = div()
-        .id("sync-now")
-        .h(px(24.))
+fn close_button(cx: &mut Context<AppShell>) -> AnyElement {
+    div()
+        .id("close-sync-settings")
+        .h(px(28.))
         .px(px(10.))
-        .rounded(px(4.))
+        .rounded(px(5.))
         .bg(palette::panel())
         .border_1()
         .border_color(palette::border_strong())
@@ -287,125 +169,279 @@ fn activity_section(cx: &mut Context<AppShell>) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .gap_1()
+        .child("Close")
+        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            shell.state().clone().update(cx, |state, cx| {
+                let _ = state.close_overlay(cx);
+            });
+        }))
+        .into_any_element()
+}
+
+// --------------- bodies ---------------
+
+fn render_connected(
+    binding: &BindingSnapshot,
+    status: &SyncStatus,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    let provider_name = match binding.provider {
+        crate::sync::config::SyncProvider::SharePoint => "SharePoint",
+    };
+    let status_chip = match status {
+        SyncStatus::Idle => chip("Idle", ChipTone::Gray),
+        SyncStatus::Synced { .. } => chip("Synced", ChipTone::Green),
+        SyncStatus::Syncing => chip("Syncing", ChipTone::Blue),
+        SyncStatus::Failed(_) => chip("Failed", ChipTone::Orange),
+        SyncStatus::Conflict(_) => chip("Conflict", ChipTone::Orange),
+        SyncStatus::Connecting => chip("Connecting", ChipTone::Blue),
+        SyncStatus::Disconnected | SyncStatus::Reconnect => chip("Off", ChipTone::Gray),
+    };
+    let last_sync = match status {
+        SyncStatus::Synced { at } => format!("Last synced at {}", at.format("%H:%M:%S")),
+        SyncStatus::Failed(msg) => format!("Last attempt failed: {msg}"),
+        SyncStatus::Syncing => "Syncing now…".into(),
+        SyncStatus::Connecting => "Connecting…".into(),
+        SyncStatus::Conflict(_) => "Awaiting conflict resolution".into(),
+        _ => "—".into(),
+    };
+
+    v_flex()
+        .gap_4()
+        .child(
+            v_flex()
+                .gap_4()
+                .p_4()
+                .rounded(px(10.))
+                .bg(palette::blue_soft())
+                .border_1()
+                .border_color(palette::blue_border())
+                .child(
+                    h_flex()
+                        .gap_3p5()
+                        .items_center()
+                        .child(
+                            div()
+                                .size(px(44.))
+                                .rounded(px(9.))
+                                .bg(palette::panel())
+                                .border_1()
+                                .border_color(palette::blue_border())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    gpui_component::Icon::from(AppIcon::Cloud)
+                                        .with_size(gpui_component::Size::Size(px(22.)))
+                                        .text_color(palette::blue()),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .gap_0p5()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .child(provider_name),
+                                        )
+                                        .child(status_chip),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(palette::text_muted())
+                                        .font_family("JetBrains Mono")
+                                        .child(binding.account_email.clone()),
+                                ),
+                        )
+                        .child(disconnect_button(cx)),
+                )
+                .child(file_card(binding))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(palette::text_muted())
+                                .child(last_sync),
+                        )
+                        .child(sync_now_button(cx)),
+                ),
+        )
+        .into_any_element()
+}
+
+fn file_card(binding: &BindingSnapshot) -> AnyElement {
+    h_flex()
+        .gap_3()
+        .items_center()
+        .p_3()
+        .rounded(px(7.))
+        .bg(palette::panel())
+        .border_1()
+        .border_color(palette::blue_border())
+        .child(
+            div()
+                .size(px(32.))
+                .rounded(px(6.))
+                .bg(palette::orange_soft())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    gpui_component::Icon::from(AppIcon::Key)
+                        .with_size(gpui_component::Size::Size(px(15.)))
+                        .text_color(palette::orange()),
+                ),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_family("JetBrains Mono")
+                        .truncate()
+                        .child(binding.local_path_display.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(palette::text_muted())
+                        .truncate()
+                        .child(binding.remote_url.clone()),
+                ),
+        )
+        .into_any_element()
+}
+
+fn render_disconnected(cx: &mut Context<AppShell>) -> AnyElement {
+    v_flex()
+        .gap_4()
+        .child(
+            div()
+                .p_4()
+                .rounded(px(10.))
+                .bg(palette::sidebar())
+                .border_1()
+                .border_color(palette::border())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(palette::text())
+                        .child("This vault is local-only — no cloud sync configured."),
+                ),
+        )
+        .child(
+            div()
+                .id("connect-button")
+                .h(px(32.))
+                .px(px(14.))
+                .rounded(px(6.))
+                .bg(palette::blue())
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(palette::panel())
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    gpui_component::Icon::from(AppIcon::Cloud)
+                        .with_size(gpui_component::Size::Size(px(13.)))
+                        .text_color(palette::panel()),
+                )
+                .child("Connect to SharePoint")
+                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(OpenConnect), cx);
+                })),
+        )
+        .into_any_element()
+}
+
+fn render_reconnect(cx: &mut Context<AppShell>) -> AnyElement {
+    v_flex()
+        .gap_4()
+        .child(
+            div()
+                .p_4()
+                .rounded(px(10.))
+                .bg(palette::orange_soft())
+                .border_1()
+                .border_color(palette::orange_border())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(palette::text())
+                        .child("Your Microsoft sign-in has expired — reconnect to keep syncing."),
+                ),
+        )
+        .child(
+            div()
+                .id("reconnect-button")
+                .h(px(32.))
+                .px(px(14.))
+                .rounded(px(6.))
+                .bg(palette::blue())
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(palette::panel())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("Reconnect")
+                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(OpenConnect), cx);
+                })),
+        )
+        .into_any_element()
+}
+
+// --------------- buttons ---------------
+
+fn sync_now_button(cx: &mut Context<AppShell>) -> AnyElement {
+    div()
+        .id("sync-now")
+        .h(px(28.))
+        .px(px(12.))
+        .rounded(px(5.))
+        .bg(palette::panel())
+        .border_1()
+        .border_color(palette::border_strong())
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(palette::text())
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1p5()
         .child(
             gpui_component::Icon::from(AppIcon::Sync)
                 .with_size(gpui_component::Size::Size(px(11.)))
                 .text_color(palette::text()),
         )
         .child("Sync now")
-        .on_click(cx.listener(
-            |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                window.dispatch_action(Box::new(OpenConflictDemo), cx);
-            },
-        ));
-
-    v_flex()
-        .gap_2p5()
-        .child(
-            h_flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .child("Sync activity"),
-                )
-                .child(sync_now_button),
-        )
-        .child(
-            v_flex()
-                .border_1()
-                .border_color(palette::border())
-                .rounded(px(8.))
-                .bg(palette::panel())
-                .overflow_hidden()
-                .child(sync_row(
-                    SyncOutcome::Success,
-                    "Pulled 2 changes",
-                    "Added: Linear · Modified: AWS Console",
-                    "2 min ago",
-                    false,
-                ))
-                .child(sync_row(
-                    SyncOutcome::Success,
-                    "Push complete",
-                    "1 entry uploaded",
-                    "14 min ago",
-                    false,
-                ))
-                .child(sync_row(
-                    SyncOutcome::Merge,
-                    "Conflict resolved",
-                    "Kept local version of 'GitHub'",
-                    "3 hours ago",
-                    false,
-                ))
-                .child(sync_row(
-                    SyncOutcome::Success,
-                    "Pulled 5 changes",
-                    "From iPhone · 12.4.0",
-                    "Yesterday, 18:42",
-                    false,
-                ))
-                .child(sync_row(
-                    SyncOutcome::Success,
-                    "Initial sync",
-                    "142 entries · 4.8 MB",
-                    "3 days ago",
-                    true,
-                )),
-        )
+        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            shell.state().clone().update(cx, |state, cx| state.sync_now(cx));
+        }))
         .into_any_element()
 }
 
-fn behavior_section() -> AnyElement {
-    v_flex()
-        .gap_2p5()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::BOLD)
-                .child("Behavior"),
-        )
-        .child(
-            v_flex()
-                .border_1()
-                .border_color(palette::border())
-                .rounded(px(8.))
-                .bg(palette::panel())
-                .child(toggle_row(
-                    "Sync automatically",
-                    "Push changes within 30 seconds, pull on focus",
-                    true,
-                    false,
-                ))
-                .child(toggle_row(
-                    "Sync on unlock",
-                    "Pull latest version when you unlock the vault",
-                    true,
-                    false,
-                ))
-                .child(toggle_row(
-                    "Background sync when locked",
-                    "Periodic checks every 15 minutes",
-                    false,
-                    false,
-                ))
-                .child(toggle_row(
-                    "Conflict resolution",
-                    "Three-way merge with manual review",
-                    true,
-                    true,
-                )),
-        )
-        .into_any_element()
-}
-
-fn close_button(cx: &mut Context<AppShell>) -> AnyElement {
+fn disconnect_button(cx: &mut Context<AppShell>) -> AnyElement {
     div()
-        .id("settings-close")
+        .id("disconnect-button")
         .h(px(28.))
         .px(px(10.))
         .rounded(px(6.))
@@ -418,12 +454,40 @@ fn close_button(cx: &mut Context<AppShell>) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .child("Close")
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            let state = shell.state().clone();
-            state.update(cx, |state, cx| {
+        .child("Disconnect")
+        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+            shell.state().clone().update(cx, |state, cx| {
+                state.disconnect_sync(cx);
                 let _ = state.close_overlay(cx);
             });
+            window.push_notification("Cloud sync disconnected.", cx);
         }))
         .into_any_element()
+}
+
+// --------------- helpers ---------------
+
+/// Plain-old-data snapshot of SyncBinding for renderers — `AppState::sync`
+/// is held as `Option<SyncBinding>` and `SyncBinding` isn't `Clone` (it
+/// owns an `AccessToken` which we deliberately keep non-Clone). This
+/// snapshot only carries the bits the UI displays.
+struct BindingSnapshot {
+    provider: crate::sync::config::SyncProvider,
+    account_email: String,
+    local_path_display: String,
+    remote_url: String,
+}
+
+trait BindingForRender {
+    fn cloned_for_render(self) -> Option<BindingSnapshot>;
+}
+impl BindingForRender for Option<&SyncBinding> {
+    fn cloned_for_render(self) -> Option<BindingSnapshot> {
+        self.map(|b| BindingSnapshot {
+            provider: b.config.provider,
+            account_email: b.config.account_email.clone(),
+            local_path_display: b.config.local_path.display().to_string(),
+            remote_url: b.config.remote_url.clone(),
+        })
+    }
 }

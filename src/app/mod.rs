@@ -4,8 +4,9 @@ pub mod assets;
 mod state;
 
 pub use state::{
-    AppState, CopyValueKind, LibrarySelection, Overlay, SaveStatus, UnlockPrompt,
-    VaultBrowserModel, VaultStatus, VaultSummary,
+    AppState, ConflictState, ConnectFlow, CopyValueKind, LibrarySelection, Overlay,
+    SaveStatus, SyncBinding, SyncStatus, UnlockPrompt, VaultBrowserModel, VaultStatus,
+    VaultSummary,
 };
 
 use crate::ui::{AppShell, theme as ui_theme};

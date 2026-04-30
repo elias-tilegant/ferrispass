@@ -44,6 +44,10 @@ pub struct AppShell {
     new_entry_url_input: Entity<InputState>,
     new_entry_notes_input: Entity<InputState>,
     new_entry_otp_input: Entity<InputState>,
+    /// Live filter for the Connect overlay's "Pick a file" step. We
+    /// subscribe to `Change` events and forward the value to AppState
+    /// (which keeps the filtered list in `connect_flow.Picking.query`).
+    picker_query_input: Entity<InputState>,
     /// Length slider state for the AddEntry generator card. Range 4..64,
     /// default 18 (matches the prior hardcoded value the card used to display).
     /// We hold the entity so both the Slider widget and `generate_password`
@@ -103,6 +107,9 @@ impl AppShell {
             InputState::new(window, cx)
                 .placeholder("otpauth://… or base32 secret")
         });
+        let picker_query_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Filter by name or folder…")
+        });
 
         let gen_length_state = cx.new(|_| {
             SliderState::new()
@@ -128,6 +135,7 @@ impl AppShell {
             cx.subscribe_in(&password_input, window, Self::on_password_input_event),
             cx.subscribe_in(&keyfile_input, window, Self::on_keyfile_input_event),
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
+            cx.subscribe_in(&picker_query_input, window, Self::on_picker_query_event),
             // Re-render on slider drag so the "Length: N" label and the
             // strength preview update live alongside the thumb.
             cx.observe(&gen_length_state, |_shell: &mut AppShell, _, cx| {
@@ -146,6 +154,7 @@ impl AppShell {
             new_entry_url_input,
             new_entry_notes_input,
             new_entry_otp_input,
+            picker_query_input,
             gen_length_state,
             gen_classes: crate::keepass::password_gen::CharClasses::default(),
             entry_list_scroll: VirtualListScrollHandle::new(),
@@ -255,6 +264,51 @@ impl AppShell {
 
     pub fn new_entry_otp_input(&self) -> &Entity<InputState> {
         &self.new_entry_otp_input
+    }
+
+    pub fn picker_query_input(&self) -> &Entity<InputState> {
+        &self.picker_query_input
+    }
+
+    /// Open a save-file picker prefilled with the picked file's name, then
+    /// trigger the download once the user confirms. If they cancel, leave
+    /// the connect flow in the Picking step so they can pick something else.
+    pub fn start_pick_kdbx_file(
+        &mut self,
+        hit: crate::sync::graph::DriveItemHit,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let suggested_name = hit.name.clone();
+        let initial_dir = std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Documents"))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let picker = cx.prompt_for_new_path(&initial_dir, Some(&suggested_name));
+
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(path))) = picker.await else {
+                return;
+            };
+            let _ = state.update(cx, |state, cx| {
+                state.pick_kdbx_file(hit, path, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Open a URL in the user's default browser. Used by the device-code
+    /// step's "Open in browser" button — opens https://microsoft.com/devicelogin
+    /// (or whatever the server gave us) so the user doesn't have to copy/paste.
+    pub fn open_browser(url: &str) {
+        // macOS only for now (matches the rest of the MVP scope). On other
+        // platforms this is a no-op; the user can copy the URL manually.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(url).spawn();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = url;
     }
 
     /// Snapshot the AddEntry form into an `EntryDraft`. Tags aren't editable
@@ -415,8 +469,10 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state
-            .update(cx, |state, cx| state.open_overlay(Overlay::Connect, cx));
+        self.state.update(cx, |state, cx| {
+            state.open_overlay(Overlay::Connect, cx);
+            state.begin_connect_flow(cx);
+        });
     }
 
     fn on_action_open_sync_settings(
@@ -663,6 +719,23 @@ impl AppShell {
             };
             self.state
                 .update(cx, |state, cx| state.set_unlock_keyfile(keyfile, cx));
+        }
+    }
+
+    fn on_picker_query_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::Change) {
+            // Filter is purely client-side over the already-fetched list, so
+            // no debounce — every keystroke updates instantly without an
+            // API call.
+            let q = input.read(cx).value().to_string();
+            self.state
+                .update(cx, |state, cx| state.set_picker_query(q, cx));
         }
     }
 

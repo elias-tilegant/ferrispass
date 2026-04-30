@@ -50,6 +50,33 @@ impl KeePassRepository {
         ))
     }
 
+    /// Decrypt a kdbx blob held entirely in memory. Used by the sync flow
+    /// when we get conflict bytes from SharePoint and need to diff them
+    /// against the in-memory local database — no temp file required.
+    pub fn open_bytes(
+        bytes: &[u8],
+        password: &str,
+        keyfile: Option<&Path>,
+    ) -> Result<VaultDocument, DatabaseOpenError> {
+        let mut cursor = std::io::Cursor::new(bytes);
+        let mut key = DatabaseKey::new();
+        if !password.is_empty() {
+            key = key.with_password(password);
+        }
+        if let Some(keyfile_path) = keyfile {
+            let mut keyfile = File::open(keyfile_path)?;
+            key = key.with_keyfile(&mut keyfile)?;
+        }
+        let database = Database::open(&mut cursor, key)?;
+        let snapshot = snapshot_from_database(&database);
+        Ok(VaultDocument::new(
+            database,
+            snapshot,
+            password.to_string(),
+            keyfile.map(PathBuf::from),
+        ))
+    }
+
     /// Resolve a sibling key file path next to the database file (e.g. `Personal.kdbx` →
     /// `Personal.keyx`). Returns the path only if such a file exists. Used as a courtesy
     /// suggestion in the unlock screen; the real choice is on the user.

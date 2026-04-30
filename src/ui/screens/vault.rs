@@ -74,8 +74,11 @@ fn sidebar(
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
-    let provider = summary.provider.unwrap_or("OneDrive");
-    let synced_at = summary.synced_at.unwrap_or("just now");
+    // Header chip text. `provider` is None when the vault is local-only;
+    // `synced_at` is None in that case too. Fall back to a neutral "Local"
+    // / "—" pair rather than showing stale OneDrive copy.
+    let provider = summary.provider.clone().unwrap_or_else(|| "Local".into());
+    let synced_at = summary.synced_at.clone().unwrap_or_else(|| "—".into());
     let entry_count = summary.entries;
     let starred_count = snapshot
         .map(|s| s.entries_starred().len())

@@ -1,6 +1,12 @@
 use crate::domain::{VaultEntry, VaultSnapshot};
 use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
+use crate::keepass::merge::{ConflictReport, Side};
+use crate::sync::auth::{AccessToken, DeviceCodeChallenge};
+use crate::sync::config::SyncConfig;
+use crate::sync::graph::DriveItemHit;
 use gpui::{AppContext as _, Context};
+use keepass::db::Database;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,6 +18,16 @@ pub struct AppState {
     /// Background-save lifecycle of the open vault. Drives the status indicator
     /// and gates retry / explicit-save UX.
     save_status: SaveStatus,
+    /// Cloud-sync binding for the currently-open vault. `Some` while a synced
+    /// vault is open; `None` while in Welcome / unlocked-but-not-synced state.
+    /// Holds the in-memory access token alongside the persisted SyncConfig.
+    sync: Option<SyncBinding>,
+    /// User-facing sync state. Drives the status pill, the SyncSettings card
+    /// content, and whether the Conflict overlay opens.
+    sync_status: SyncStatus,
+    /// Active during the multi-step Connect overlay (provider pick → URL →
+    /// device code → download). `None` when overlay isn't Connect.
+    connect_flow: Option<ConnectFlow>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -25,6 +41,83 @@ pub enum SaveStatus {
     /// The most recent save succeeded.
     Saved,
     /// The most recent save failed; message is suitable for a toast.
+    Failed(String),
+}
+
+/// Live sync binding for an open synced vault. Owns the access token in
+/// memory; the refresh token lives in the keychain (loaded on demand by
+/// `service::refresh_access_token`).
+#[derive(Debug)]
+pub struct SyncBinding {
+    pub config: SyncConfig,
+    pub access_token: AccessToken,
+}
+
+/// User-facing sync lifecycle. Mirrors the SaveStatus shape so the UI
+/// status pill can read both with the same vocabulary.
+#[derive(Clone, Debug, Default)]
+pub enum SyncStatus {
+    /// No sync configured for this vault, or no vault open.
+    #[default]
+    Disconnected,
+    /// Synced, idle. Equivalent to "everything's good".
+    Idle,
+    /// Initial connect in progress (multi-step — see `ConnectFlow` for which step).
+    Connecting,
+    /// Push or pull in flight.
+    Syncing,
+    /// Last operation succeeded at the given time. `chrono::Local` for the
+    /// "Synced 2 minutes ago" UI string.
+    Synced { at: chrono::DateTime<chrono::Local> },
+    /// Server returned 412 — local + remote diverged. UI opens the Conflict
+    /// overlay; resolution clears this back to Synced.
+    Conflict(Box<ConflictState>),
+    /// Last operation failed. Caller (UI) decides whether to retry.
+    Failed(String),
+    /// Refresh token is gone or revoked — user must re-run Connect.
+    Reconnect,
+}
+
+/// Heavy state owned by `SyncStatus::Conflict`. Holds both decrypted
+/// databases, the report computed by `keepass::merge::diff`, the user's
+/// per-entry picks, and the remote ETag we need to send back when uploading
+/// the merged result.
+///
+/// Clone-ability is required because `SyncStatus` is `Clone` (the renderer
+/// snapshots it). The two `Database` clones inside aren't free but they're
+/// the same memcpy `save_payload` already does on every save — acceptable.
+#[derive(Clone, Debug)]
+pub struct ConflictState {
+    pub local_db: Database,
+    pub remote_db: Database,
+    pub remote_etag: String,
+    pub report: ConflictReport,
+    pub picks: HashMap<String, Side>,
+}
+
+/// Step machine for the Connect overlay. The Connect screen renders a
+/// stepper (Choose provider → Authorize → Pick vault) keyed off this.
+#[derive(Clone, Debug)]
+pub enum ConnectFlow {
+    /// Initial: three provider buttons (only SharePoint is wired in this MVP).
+    PickProvider,
+    /// Device code shown; background task is polling for token. No file
+    /// has been chosen yet — that comes after sign-in completes.
+    SigningIn { challenge: DeviceCodeChallenge },
+    /// Token in hand. Initial state shows a loading spinner while we fetch
+    /// the user's `.kdbx` files; once `results` is populated the picker
+    /// renders. `query` is the live filter the user types into the picker.
+    Picking {
+        token: AccessToken,
+        results: Vec<DriveItemHit>,
+        query: String,
+        loading: bool,
+        error: Option<String>,
+    },
+    /// User picked a file; downloading + persisting config.
+    Downloading,
+    /// Anything went wrong before we hit the unlock screen. Carries a
+    /// human-readable message for the UI.
     Failed(String),
 }
 
@@ -143,10 +236,12 @@ pub struct VaultSummary {
     pub groups: usize,
     pub is_open: bool,
     pub is_busy: bool,
-    /// Demo provider name; in this build always `Some("OneDrive")` once a vault is open.
-    pub provider: Option<&'static str>,
-    /// Demo "synced" timestamp string; static for the demo.
-    pub synced_at: Option<&'static str>,
+    /// Provider name from the active SyncBinding. `None` when the open vault
+    /// is local-only.
+    pub provider: Option<String>,
+    /// Human-readable last-synced indicator (e.g. "just now", "2 minutes ago",
+    /// "Failed", "Connecting…"). Derived from `SyncStatus`.
+    pub synced_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -195,7 +290,22 @@ impl AppState {
         if matches!(self.overlay, Overlay::None) {
             return false;
         }
+        let was_connect = matches!(self.overlay, Overlay::Connect);
         self.overlay = Overlay::None;
+        // Closing the Connect overlay also unwinds its flow state; otherwise
+        // the next "Connect SharePoint" click would re-open into whichever
+        // sub-step the user left it on (e.g., a stale "Failed" message).
+        if was_connect {
+            self.connect_flow = None;
+            // Cancel any in-flight Connecting status; if it's still mid-poll
+            // the polling loop will notice connect_flow is None and exit.
+            if matches!(self.sync_status, SyncStatus::Connecting | SyncStatus::Failed(_)) {
+                self.sync_status = match &self.sync {
+                    Some(_) => SyncStatus::Idle,
+                    None => SyncStatus::Disconnected,
+                };
+            }
+        }
         cx.notify();
         true
     }
@@ -308,6 +418,41 @@ impl AppState {
         &self.save_status
     }
 
+    pub fn sync_status(&self) -> &SyncStatus {
+        &self.sync_status
+    }
+
+    pub fn sync_binding(&self) -> Option<&SyncBinding> {
+        self.sync.as_ref()
+    }
+
+    pub fn connect_flow(&self) -> Option<&ConnectFlow> {
+        self.connect_flow.as_ref()
+    }
+
+    /// Reset the Connect overlay to its initial step. Called when the user
+    /// opens Connect from Welcome.
+    pub fn begin_connect_flow(&mut self, cx: &mut Context<Self>) {
+        self.connect_flow = Some(ConnectFlow::PickProvider);
+        cx.notify();
+    }
+
+    /// Drop any in-progress Connect flow state. Called by Cancel + on
+    /// successful completion.
+    pub fn clear_connect_flow(&mut self, cx: &mut Context<Self>) {
+        if self.connect_flow.is_some() {
+            self.connect_flow = None;
+            cx.notify();
+        }
+    }
+
+    /// Replace the current connect flow step. Used by the Connect overlay's
+    /// Back / provider-pick buttons.
+    pub fn connect_flow_set(&mut self, flow: ConnectFlow, cx: &mut Context<Self>) {
+        self.connect_flow = Some(flow);
+        cx.notify();
+    }
+
     /// Compute the live TOTP code for the currently-selected entry, if any.
     /// Recomputed on every render (cheap, ~µs); the per-second AppShell tick
     /// triggers `cx.notify` which causes the detail panel to re-call this.
@@ -346,11 +491,18 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
+                let succeeded = result.is_ok();
                 state.save_status = match result {
                     Ok(()) => SaveStatus::Saved,
                     Err(error) => SaveStatus::Failed(error.to_string()),
                 };
                 cx.notify();
+                // Chain into sync if we have a binding. `sync_now` is a
+                // no-op when sync is None or when the vault isn't Open, so
+                // it's safe to call unconditionally on success.
+                if succeeded && state.sync.is_some() {
+                    state.sync_now(cx);
+                }
             });
         })
         .detach();
@@ -728,6 +880,11 @@ impl AppState {
     }
 
     pub fn summary(&self) -> VaultSummary {
+        let provider = self.sync.as_ref().map(|b| match b.config.provider {
+            crate::sync::config::SyncProvider::SharePoint => "SharePoint".to_string(),
+        });
+        let synced_at = sync_status_label(&self.sync_status);
+
         match &self.vault {
             VaultStatus::Empty => VaultSummary {
                 title: "No vault open".to_string(),
@@ -748,8 +905,8 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: false,
-                provider: Some("OneDrive"),
-                synced_at: Some("2 minutes ago"),
+                provider: provider.clone(),
+                synced_at: synced_at.clone(),
             },
             VaultStatus::Opening { path } => VaultSummary {
                 title: file_name(path),
@@ -759,8 +916,8 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: true,
-                provider: Some("OneDrive"),
-                synced_at: Some("2 minutes ago"),
+                provider: provider.clone(),
+                synced_at: synced_at.clone(),
             },
             VaultStatus::Open { path, document, .. } => VaultSummary {
                 title: file_name(path),
@@ -770,8 +927,8 @@ impl AppState {
                 groups: document.snapshot().group_count.saturating_sub(1),
                 is_open: true,
                 is_busy: false,
-                provider: Some("OneDrive"),
-                synced_at: Some("2 minutes ago"),
+                provider,
+                synced_at,
             },
             VaultStatus::Error { message, path } => VaultSummary {
                 title: "Could not open vault".to_string(),
@@ -787,6 +944,512 @@ impl AppState {
                 synced_at: None,
             },
         }
+    }
+
+    // ============== Sync actions ==============
+
+    /// Tear down the current sync binding: drop the in-memory token, mark
+    /// status as Disconnected, then in the background remove the keychain
+    /// entry + sync-config file. UI updates immediately; cleanup is fire-
+    /// and-forget (failures here just leave a stale config we'll happily
+    /// overwrite next Connect).
+    pub fn disconnect_sync(&mut self, cx: &mut Context<Self>) {
+        let Some(binding) = self.sync.take() else {
+            return;
+        };
+        self.sync_status = SyncStatus::Disconnected;
+        cx.notify();
+        cx.background_spawn(async move {
+            let _ = crate::sync::service::disconnect(&binding.config);
+        })
+        .detach();
+    }
+
+    /// Drop the Connect overlay's transient state. Wired to the Cancel
+    /// button + the Escape key.
+    pub fn cancel_connect(&mut self, cx: &mut Context<Self>) {
+        self.connect_flow = None;
+        self.sync_status = match &self.sync {
+            Some(_) => SyncStatus::Idle,
+            None => SyncStatus::Disconnected,
+        };
+        cx.notify();
+    }
+
+    /// Step 1 of Connect: request a device code and kick off the polling
+    /// loop. UI should observe `connect_flow` transitioning to
+    /// `Some(SigningIn { .. })` and switch to the device-code screen.
+    /// No URL/path is needed up front — the user picks a file *after*
+    /// signing in (see `Picking`).
+    pub fn start_sharepoint_connect(&mut self, cx: &mut Context<Self>) {
+        self.sync_status = SyncStatus::Connecting;
+        cx.notify();
+
+        let task = cx.background_spawn(async move {
+            crate::sync::service::request_device_code()
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok(challenge) => {
+                    state.connect_flow = Some(ConnectFlow::SigningIn {
+                        challenge: challenge.clone(),
+                    });
+                    cx.notify();
+                    state.start_token_polling(challenge, cx);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    state.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
+                    state.sync_status = SyncStatus::Failed(msg);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Background polling loop. Runs until token received, code expired,
+    /// auth declined, or the user cancels (we observe `connect_flow`
+    /// transitioning out of `SigningIn` between iterations).
+    fn start_token_polling(
+        &mut self,
+        challenge: DeviceCodeChallenge,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let mut interval = challenge.interval;
+            loop {
+                // Cooperative cancel: if the user closed Connect (or moved
+                // past SigningIn for any other reason), stop polling.
+                let still_signing_in = this
+                    .update(cx, |s, _| {
+                        matches!(s.connect_flow, Some(ConnectFlow::SigningIn { .. }))
+                    })
+                    .unwrap_or(false);
+                if !still_signing_in {
+                    return;
+                }
+
+                // Hard timeout: if the device-code expiry passed, give up.
+                if std::time::SystemTime::now() > challenge.expires_at {
+                    let _ = this.update(cx, |s, cx| {
+                        let msg = "Device code expired before sign-in.".to_string();
+                        s.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
+                        s.sync_status = SyncStatus::Failed(msg);
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                cx.background_executor().timer(interval).await;
+
+                let challenge_clone = challenge.clone();
+                let outcome = cx
+                    .background_spawn(async move {
+                        crate::sync::auth::poll_token(&challenge_clone)
+                    })
+                    .await;
+
+                use crate::sync::auth::PollOutcome;
+                match outcome {
+                    PollOutcome::Pending => continue,
+                    PollOutcome::SlowDown => {
+                        // Server asked us to back off; double the interval as
+                        // suggested by the OAuth device-code spec.
+                        interval = interval.saturating_mul(2);
+                        continue;
+                    }
+                    PollOutcome::Token(token) => {
+                        let _ = this.update(cx, |s, cx| {
+                            // Transition to picker (loading state); spawn the
+                            // file-list fetch.
+                            s.connect_flow = Some(ConnectFlow::Picking {
+                                token: token.clone(),
+                                results: Vec::new(),
+                                query: String::new(),
+                                loading: true,
+                                error: None,
+                            });
+                            cx.notify();
+                            s.start_kdbx_search(token, cx);
+                        });
+                        return;
+                    }
+                    PollOutcome::Failed(e) => {
+                        let msg = e.to_string();
+                        let _ = this.update(cx, |s, cx| {
+                            s.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
+                            s.sync_status = SyncStatus::Failed(msg);
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Step 2 of Connect: fetch the user's `.kdbx` files. Cheap (one
+    /// search call); results are filtered client-side as the user types.
+    fn start_kdbx_search(&mut self, token: AccessToken, cx: &mut Context<Self>) {
+        let token_for_task = token.clone();
+        let task = cx.background_spawn(async move {
+            crate::sync::service::list_kdbx_files(&token_for_task)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| {
+                if let Some(ConnectFlow::Picking { results, loading, error, .. }) =
+                    &mut state.connect_flow
+                {
+                    *loading = false;
+                    match result {
+                        Ok(hits) => {
+                            *results = hits;
+                            *error = None;
+                        }
+                        Err(e) => {
+                            *error = Some(e.to_string());
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Live-filter the picker as the user types. Cheap — runs against the
+    /// already-fetched list, no API calls.
+    pub fn set_picker_query(&mut self, query: String, cx: &mut Context<Self>) {
+        if let Some(ConnectFlow::Picking { query: q, .. }) = &mut self.connect_flow {
+            *q = query;
+            cx.notify();
+        }
+    }
+
+    /// Step 3 of Connect: user picked one of the search results. Download
+    /// the file, write it locally, persist SyncConfig + keychain token,
+    /// then transition the vault into AwaitingPassword so the unlock flow
+    /// takes over.
+    pub fn pick_kdbx_file(
+        &mut self,
+        hit: DriveItemHit,
+        local_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        // The picker holds the access token; capture it before transitioning
+        // out of Picking (which drops the token).
+        let token = match &self.connect_flow {
+            Some(ConnectFlow::Picking { token, .. }) => token.clone(),
+            _ => return,
+        };
+        self.connect_flow = Some(ConnectFlow::Downloading);
+        cx.notify();
+
+        let path_for_task = local_path.clone();
+        let task = cx.background_spawn(async move {
+            let result = crate::sync::service::complete_connect_picked(
+                &hit,
+                token,
+                &path_for_task,
+            )?;
+            // Write bytes to disk before returning so the unlock flow's
+            // `KeePassRepository::open` finds them.
+            std::fs::write(&path_for_task, &result.remote_bytes).map_err(|e| {
+                crate::sync::service::ServiceError::Io {
+                    path: path_for_task.clone(),
+                    source: e,
+                }
+            })?;
+            Ok::<_, crate::sync::service::ServiceError>(result)
+        });
+        let final_path = local_path;
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok(connect_result) => {
+                    state.sync = Some(SyncBinding {
+                        config: connect_result.config,
+                        access_token: connect_result.access_token,
+                    });
+                    state.sync_status =
+                        SyncStatus::Synced { at: chrono::Local::now() };
+                    state.connect_flow = None;
+                    state.overlay = Overlay::None;
+                    state.request_password(final_path, cx);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    state.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
+                    state.sync_status = SyncStatus::Failed(msg);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Push the current local file to SharePoint. Used both as the chain
+    /// after a local save (auto) and as the SyncSettings → Sync now button
+    /// (manual). No-op when the vault is local-only.
+    pub fn sync_now(&mut self, cx: &mut Context<Self>) {
+        let Some(binding) = self.sync.as_ref() else {
+            return;
+        };
+        let VaultStatus::Open { path, document, .. } = &self.vault else {
+            return;
+        };
+
+        // Snapshot everything the background task needs. The master password
+        // is captured up front because we need it later to decrypt remote
+        // bytes if the upload returns 412.
+        let config = binding.config.clone();
+        let token = binding.access_token.clone();
+        let local_path = path.clone();
+        let master_password = document.password().to_string();
+
+        self.sync_status = SyncStatus::Syncing;
+        cx.notify();
+
+        let task = cx.background_spawn(async move {
+            let token = crate::sync::service::ensure_fresh(token, &config.account_email)?;
+            let bytes = crate::sync::service::read_local(&local_path)?;
+            let outcome =
+                crate::sync::service::upload_after_save(&config, &token, &bytes)?;
+            Ok::<_, crate::sync::service::ServiceError>((outcome, token))
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok((outcome, fresh_token)) => {
+                    if let Some(b) = state.sync.as_mut() {
+                        b.access_token = fresh_token;
+                    }
+                    use crate::sync::service::UploadAfterSave;
+                    match outcome {
+                        UploadAfterSave::Synced { new_etag, item: _ } => {
+                            if let Some(b) = state.sync.as_mut() {
+                                b.config.last_etag = new_etag;
+                                // Persist updated etag — best effort; if the
+                                // disk write fails we'll just re-detect a
+                                // conflict next push (and re-resolve).
+                                let _ = crate::sync::config::save(&b.config);
+                            }
+                            state.sync_status =
+                                SyncStatus::Synced { at: chrono::Local::now() };
+                            cx.notify();
+                        }
+                        UploadAfterSave::Conflict { remote_bytes, remote_etag } => {
+                            state.handle_remote_conflict(
+                                remote_bytes,
+                                remote_etag,
+                                master_password,
+                                cx,
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.sync_status = match &e {
+                        crate::sync::service::ServiceError::Auth(
+                            crate::sync::auth::AuthError::InvalidGrant,
+                        ) => SyncStatus::Reconnect,
+                        _ => SyncStatus::Failed(e.to_string()),
+                    };
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Decrypt remote bytes with the master password, build a `ConflictReport`
+    /// against the in-memory local DB, and open the Conflict overlay.
+    fn handle_remote_conflict(
+        &mut self,
+        remote_bytes: Vec<u8>,
+        remote_etag: String,
+        master_password: String,
+        cx: &mut Context<Self>,
+    ) {
+        let VaultStatus::Open { document, .. } = &self.vault else {
+            return;
+        };
+        let local_db = document.database().clone();
+
+        match crate::keepass::KeePassRepository::open_bytes(
+            &remote_bytes,
+            &master_password,
+            None,
+        ) {
+            Ok(remote_doc) => {
+                let remote_db = remote_doc.database().clone();
+                let report = crate::keepass::merge::diff(&local_db, &remote_db);
+                let mut picks: HashMap<String, Side> = HashMap::new();
+                for c in &report.conflicts {
+                    // Prefill every conflict with Local (last writer wins —
+                    // we just hit save here, so local was the user's intent).
+                    picks.insert(c.id.clone(), Side::Local);
+                }
+                self.sync_status = SyncStatus::Conflict(Box::new(ConflictState {
+                    local_db,
+                    remote_db,
+                    remote_etag,
+                    report,
+                    picks,
+                }));
+                self.overlay = Overlay::Conflict;
+                cx.notify();
+            }
+            Err(_) => {
+                // Master password mismatch on remote (or remote is corrupt).
+                // Surface as a failure; user can manually resolve via
+                // SyncSettings (force-overwrite isn't wired yet).
+                self.sync_status = SyncStatus::Failed(
+                    "Remote file uses a different master password — \
+                     cannot merge automatically."
+                        .to_string(),
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    /// Mutate one user pick. Called by the Conflict overlay when the user
+    /// clicks "Keep this" on either side. Idempotent.
+    pub fn set_conflict_pick(&mut self, entry_id: &str, side: Side, cx: &mut Context<Self>) {
+        let SyncStatus::Conflict(state) = &mut self.sync_status else {
+            return;
+        };
+        state.picks.insert(entry_id.to_string(), side);
+        cx.notify();
+    }
+
+    /// Finalise the conflict: build the merged DB from picks, save it
+    /// locally, force-upload to SharePoint, dismiss the overlay.
+    ///
+    /// Concurrency note: we send `If-Match: conflict.remote_etag` so a
+    /// third device that wrote during the user's resolution surfaces as a
+    /// fresh 412 → re-decrypt → re-diff → re-prompt. That's safer than
+    /// blind force-overwrite, at the cost of one extra round trip in the
+    /// rare race case.
+    pub fn apply_conflict_resolution(&mut self, cx: &mut Context<Self>) {
+        let SyncStatus::Conflict(state) = &self.sync_status else {
+            return;
+        };
+        let VaultStatus::Open { document, path, .. } = &self.vault else {
+            return;
+        };
+        let Some(binding) = self.sync.as_ref() else {
+            return;
+        };
+
+        let merged = crate::keepass::merge::apply_picks(
+            &state.local_db,
+            &state.remote_db,
+            &state.picks,
+            &state.report,
+        );
+
+        // Encrypt + save locally first. Re-uses the existing save path so
+        // crash-safety semantics match a normal save.
+        let payload = crate::keepass::SavePayload::for_merged(
+            merged.clone(),
+            document.password().to_string(),
+            document.keyfile_path().map(std::path::Path::to_path_buf),
+        );
+        let local_path = path.clone();
+        let config = binding.config.clone();
+        let token = binding.access_token.clone();
+        let if_match = state.remote_etag.clone();
+        let master_password = document.password().to_string();
+
+        self.sync_status = SyncStatus::Syncing;
+        cx.notify();
+
+        let task = cx.background_spawn(async move {
+            payload.save_to(&local_path).map_err(|e| {
+                crate::sync::service::ServiceError::Io {
+                    path: local_path.clone(),
+                    source: std::io::Error::other(e.to_string()),
+                }
+            })?;
+            let token = crate::sync::service::ensure_fresh(token, &config.account_email)?;
+            let bytes = crate::sync::service::read_local(&local_path)?;
+            let outcome = crate::sync::graph::upload_content(
+                &config.drive_id,
+                &config.item_id,
+                &bytes,
+                Some(&if_match),
+                &token,
+            )?;
+            Ok::<_, crate::sync::service::ServiceError>((
+                outcome,
+                token,
+                local_path,
+            ))
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok((outcome, fresh_token, local_path)) => {
+                    if let Some(b) = state.sync.as_mut() {
+                        b.access_token = fresh_token;
+                    }
+                    use crate::sync::graph::UploadOutcome;
+                    match outcome {
+                        UploadOutcome::Ok { new_etag, .. } => {
+                            if let Some(b) = state.sync.as_mut() {
+                                b.config.last_etag = new_etag;
+                                let _ = crate::sync::config::save(&b.config);
+                            }
+                            // Reload the document from the merged file so the
+                            // in-memory snapshot matches what's now on disk.
+                            match crate::keepass::KeePassRepository::open_bytes(
+                                &std::fs::read(&local_path).unwrap_or_default(),
+                                &master_password,
+                                None,
+                            ) {
+                                Ok(reloaded) => {
+                                    if let VaultStatus::Open { document, .. } =
+                                        &mut state.vault
+                                    {
+                                        *document = Box::new(reloaded);
+                                    }
+                                }
+                                Err(_) => {
+                                    // Shouldn't happen — we just wrote it.
+                                    // Surface a warning and let the user
+                                    // re-open manually.
+                                }
+                            }
+                            state.sync_status =
+                                SyncStatus::Synced { at: chrono::Local::now() };
+                            state.overlay = Overlay::None;
+                            cx.notify();
+                        }
+                        UploadOutcome::Conflict => {
+                            // Third device wrote during resolution. Re-trigger
+                            // the conflict flow against the freshly merged
+                            // local + the new remote.
+                            state.sync_status = SyncStatus::Syncing;
+                            cx.notify();
+                            state.sync_now(cx);
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.sync_status = SyncStatus::Failed(e.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 }
 
@@ -873,4 +1536,43 @@ fn file_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
         .map_or_else(|| path.display().to_string(), ToString::to_string)
+}
+
+/// Map `SyncStatus` to a short, user-facing string for the header / status pill.
+/// `None` means "no sync indicator at all" — used when the vault is local-only.
+fn sync_status_label(status: &SyncStatus) -> Option<String> {
+    use chrono::Local;
+    match status {
+        SyncStatus::Disconnected => None,
+        SyncStatus::Idle => Some("Synced".into()),
+        SyncStatus::Connecting => Some("Connecting…".into()),
+        SyncStatus::Syncing => Some("Syncing…".into()),
+        SyncStatus::Synced { at } => Some(relative_time_label(*at, Local::now())),
+        SyncStatus::Conflict(_) => Some("Conflict".into()),
+        SyncStatus::Failed(_) => Some("Sync failed".into()),
+        SyncStatus::Reconnect => Some("Sign-in expired".into()),
+    }
+}
+
+/// "just now" / "N seconds ago" / "N minutes ago" / "N hours ago" — same
+/// granularity as KeePass2's last-sync indicator. Past-only; future
+/// timestamps clip to "just now".
+fn relative_time_label(
+    when: chrono::DateTime<chrono::Local>,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let secs = (now - when).num_seconds().max(0);
+    if secs < 10 {
+        "just now".into()
+    } else if secs < 60 {
+        format!("{secs} seconds ago")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        if m == 1 { "1 minute ago".into() } else { format!("{m} minutes ago") }
+    } else if secs < 86_400 {
+        let h = secs / 3600;
+        if h == 1 { "1 hour ago".into() } else { format!("{h} hours ago") }
+    } else {
+        when.format("%Y-%m-%d %H:%M").to_string()
+    }
 }

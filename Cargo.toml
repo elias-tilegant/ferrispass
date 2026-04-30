@@ -10,7 +10,7 @@ publish = false
 # base64 timestamps). The upstream crate's `save_kdbx4` path produces files
 # unreadable by KeePass2 / KeePassXC without these patches. Re-evaluate the
 # pin if those fixes land upstream.
-keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "63f1748", features = ["save_kdbx4", "totp"] }
+keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "cc6845a", features = ["save_kdbx4", "totp"] }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
@@ -21,6 +21,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zxcvbn = { version = "3", default-features = false }
 thiserror = "2"
 rand = "0.9"
+# SharePoint sync stack. ureq stays sync (runs cleanly inside cx.background_spawn
+# without dragging tokio in). keyring uses the macOS Keychain on Darwin.
+ureq = { version = "2", features = ["json", "tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `apple-native` enables the macOS Keychain backend (the only platform we
+# verify in this MVP). Linux/Windows users can build with their own feature
+# flags but those code paths aren't tested.
+keyring = { version = "3", features = ["apple-native"] }
+url = "2"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
