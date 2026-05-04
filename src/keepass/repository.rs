@@ -210,17 +210,18 @@ fn entry_from_ref(
     }
 }
 
-fn synthesize_tags(group_path: &[String], existing_tags: &[String], hash: u64) -> Vec<String> {
+/// Surface the entry's parent group name as a tag so the sidebar's "Tags"
+/// section has something to filter on for vaults that don't otherwise use
+/// tags. Note: this is a UI-only enrichment — the synthesised entries
+/// don't get written back to disk (the edit form sends `tags: vec![]` on
+/// save, which clears them). KeePassXC won't show these tags.
+fn synthesize_tags(group_path: &[String], existing_tags: &[String], _hash: u64) -> Vec<String> {
     let mut tags: Vec<String> = existing_tags.iter().cloned().collect();
 
     if let Some(group) = group_path.iter().rev().find(|name| !name.eq_ignore_ascii_case("Root")) {
         if !tags.iter().any(|t| t.eq_ignore_ascii_case(group)) {
             tags.push(group.clone());
         }
-    }
-
-    if hash % 3 == 0 && !tags.iter().any(|t| t.eq_ignore_ascii_case("2FA")) {
-        tags.push("2FA".to_string());
     }
 
     tags
@@ -313,12 +314,25 @@ mod tests {
     }
 
     #[test]
-    fn synthesized_tags_include_group_and_2fa() {
+    fn synthesized_tags_include_group_name() {
         let path = vec!["Root".to_string(), "Work".to_string()];
-        let hash = 3;
-        let tags = synthesize_tags(&path, &[], hash);
+        let tags = synthesize_tags(&path, &[], 0);
         assert!(tags.contains(&"Work".to_string()));
-        assert!(tags.contains(&"2FA".to_string()));
+    }
+
+    #[test]
+    fn synthesized_tags_no_longer_inject_fake_2fa() {
+        // Any hash, any path — TOTP presence is now signalled via the
+        // dedicated `has_otp` bit + LibrarySelection::TotpEnabled, not by
+        // a synthesised "2FA" tag. Belt-and-braces against re-introduction.
+        for hash in 0..20u64 {
+            let path = vec!["Root".to_string(), "Personal".to_string()];
+            let tags = synthesize_tags(&path, &[], hash);
+            assert!(
+                !tags.iter().any(|t| t.eq_ignore_ascii_case("2FA")),
+                "hash {hash} produced a synthesised 2FA tag"
+            );
+        }
     }
 
     #[test]

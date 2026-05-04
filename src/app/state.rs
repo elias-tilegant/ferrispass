@@ -173,6 +173,11 @@ pub enum LibrarySelection {
     RecentlyUsed,
     Trash,
     Tag(String),
+    /// Entries with a TOTP secret configured. Decoupled from the tag
+    /// system on purpose — used to be a synthetic "2FA" tag, but that
+    /// lied to users (and disagreed with KeePassXC). Driven by the real
+    /// `has_otp` bit on each entry.
+    TotpEnabled,
 }
 
 impl LibrarySelection {
@@ -201,6 +206,9 @@ impl LibrarySelection {
     }
     pub fn is_trash(&self) -> bool {
         matches!(self, LibrarySelection::Trash)
+    }
+    pub fn is_totp_enabled(&self) -> bool {
+        matches!(self, LibrarySelection::TotpEnabled)
     }
 }
 
@@ -1631,6 +1639,11 @@ fn entries_for_selection(
             .into_iter()
             .cloned()
             .collect(),
+        LibrarySelection::TotpEnabled => snapshot
+            .entries_with_otp()
+            .into_iter()
+            .cloned()
+            .collect(),
     }
 }
 
@@ -1645,6 +1658,7 @@ fn selection_label_for(selection: &LibrarySelection, snapshot: &VaultSnapshot) -
         LibrarySelection::RecentlyUsed => "Recently used".to_string(),
         LibrarySelection::Trash => "Trash".to_string(),
         LibrarySelection::Tag(name) => format!("Tag · {name}"),
+        LibrarySelection::TotpEnabled => "2FA enabled".to_string(),
     }
 }
 

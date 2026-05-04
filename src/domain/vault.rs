@@ -123,6 +123,17 @@ impl VaultSnapshot {
             .filter(|entry| entry.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
             .collect()
     }
+
+    /// Entries that have a TOTP secret configured. Drives the sidebar's
+    /// "2FA enabled" filter — derived from the real `has_otp` bit, not
+    /// from a tag, so it stays accurate regardless of how the user
+    /// (or another KeePass client) labels their entries.
+    pub fn entries_with_otp(&self) -> Vec<&VaultEntry> {
+        self.entries_recursive()
+            .into_iter()
+            .filter(|entry| entry.has_otp)
+            .collect()
+    }
 }
 
 impl VaultGroup {

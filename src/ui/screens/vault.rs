@@ -84,7 +84,7 @@ fn sidebar(
         .map(|s| s.entries_starred().len())
         .unwrap_or(0);
     let twofa_count = snapshot
-        .map(|s| s.entries_with_tag("2FA").len())
+        .map(|s| s.entries_with_otp().len())
         .unwrap_or(0);
 
     let groups = snapshot
@@ -299,10 +299,10 @@ fn tags_section(
             AppIcon::Dot,
             "2FA enabled",
             Some(twofa_count),
-            selected_tag.eq_ignore_ascii_case("2FA"),
+            selection.is_totp_enabled(),
             palette::blue(),
             state_entity.clone(),
-            L::Tag("2FA".to_string()),
+            L::TotpEnabled,
             cx,
         ))
         .child(nav_row(
