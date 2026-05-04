@@ -82,8 +82,26 @@ pub struct AppShell {
     /// changes every 30 s so a coarser tick would also work, but 1 Hz keeps
     /// the "valid for Xs" text moving smoothly.
     totp_tick: Option<Task<()>>,
+    /// Background timer that wipes the clipboard `CLIPBOARD_CLEAR_SECS` after
+    /// a copy. Holding the `Task` here means a new copy replaces (= cancels)
+    /// the previous timer — only the latest copy's clear fires.
+    clipboard_clear_task: Option<Task<()>>,
+    /// Last value we wrote to the clipboard. Compared against the live
+    /// clipboard contents before clearing — protects user-pasted content
+    /// (e.g. an unrelated string they copied from another app in the
+    /// meantime) from being clobbered by our timer.
+    last_clipboard_value: Option<String>,
+    /// Id of the entry whose password is currently revealed in the
+    /// detail panel. `None` = masked. Compared against the live selection
+    /// in the state observer so switching entries (or locking) auto-masks.
+    revealed_entry_id: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
+
+/// Seconds the clipboard auto-clear timer waits before wiping a copied
+/// secret. KeePassXC's default is 10s; long enough to paste once,
+/// short enough that an unattended laptop doesn't leak the password.
+pub const CLIPBOARD_CLEAR_SECS: u64 = 10;
 
 impl AppShell {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -126,10 +144,23 @@ impl AppShell {
         window.focus(&focus_handle, cx);
 
         let _subscriptions = vec![
-            cx.observe(&state, |shell: &mut AppShell, _, cx| {
+            cx.observe(&state, |shell: &mut AppShell, state, cx| {
                 // Re-render whenever AppState notifies AND keep the TOTP tick
                 // task in sync with whether a vault is currently open.
                 shell.sync_totp_tick(cx);
+                // Auto-mask: if the user moves to a different entry (or
+                // locks the vault), drop any reveal we held. Compared by
+                // id so re-renders against the same entry don't trigger.
+                let current_id = state
+                    .read(cx)
+                    .vault_browser()
+                    .and_then(|b| b.selected_entry)
+                    .map(|e| e.id);
+                if shell.revealed_entry_id.is_some()
+                    && shell.revealed_entry_id != current_id
+                {
+                    shell.revealed_entry_id = None;
+                }
                 cx.notify();
             }),
             cx.subscribe_in(&password_input, window, Self::on_password_input_event),
@@ -162,6 +193,9 @@ impl AppShell {
             search_debounce: None,
             pending_perma_delete: None,
             totp_tick: None,
+            clipboard_clear_task: None,
+            last_clipboard_value: None,
+            revealed_entry_id: None,
             _subscriptions,
         }
     }
@@ -923,11 +957,80 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         if let Some(value) = self.state.read(cx).copy_selected_value(kind) {
-            cx.write_to_clipboard(ClipboardItem::new_string(value));
-            window.push_notification(format!("{} copied.", copy_value_label(kind)), cx);
+            self.copy_with_auto_clear(value, copy_value_label(kind), window, cx);
         } else {
             window.push_notification(format!("No {} to copy.", copy_value_label(kind)), cx);
         }
+    }
+
+    /// Single source of truth for "put this on the clipboard, tell the
+    /// user, schedule a clear". Used by the saved-fields copy path
+    /// (`copy_selected_value`) and the live-TOTP copy in the detail
+    /// panel. Replaces any in-flight clear so the latest copy always
+    /// wins — older timers would otherwise wipe the new value early.
+    pub fn copy_with_auto_clear(
+        &mut self,
+        value: String,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+        window.push_notification(
+            format!(
+                "{label} copied. Clipboard clears in {CLIPBOARD_CLEAR_SECS} s."
+            ),
+            cx,
+        );
+        self.schedule_clipboard_clear(value, cx);
+    }
+
+    fn schedule_clipboard_clear(&mut self, value: String, cx: &mut Context<Self>) {
+        self.last_clipboard_value = Some(value);
+        // Drop any prior timer by replacing the slot. GPUI tasks cancel
+        // on drop (same pattern as `totp_tick`).
+        self.clipboard_clear_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(CLIPBOARD_CLEAR_SECS))
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                // Only clear when the clipboard still holds *our* value.
+                // If the user copied something else in between, leave
+                // their content alone.
+                let still_ours = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref()
+                    == shell.last_clipboard_value.as_deref();
+                if still_ours {
+                    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                }
+                shell.last_clipboard_value = None;
+                shell.clipboard_clear_task = None;
+            });
+        }));
+    }
+
+    /// True iff `entry_id`'s password is currently revealed in the
+    /// detail panel. Driven by `revealed_entry_id` — see the state
+    /// observer for the auto-mask-on-switch logic.
+    pub fn is_password_revealed(&self, entry_id: &str) -> bool {
+        self.revealed_entry_id.as_deref() == Some(entry_id)
+    }
+
+    /// Toggle the masked password into / out of view for `entry_id`.
+    /// Idempotent — clicking twice ends up where you started.
+    pub fn toggle_password_reveal(
+        &mut self,
+        entry_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.revealed_entry_id.as_deref() == Some(&entry_id) {
+            self.revealed_entry_id = None;
+        } else {
+            self.revealed_entry_id = Some(entry_id);
+        }
+        cx.notify();
     }
 
     pub fn click_open_vault(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {

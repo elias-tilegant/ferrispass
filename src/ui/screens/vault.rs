@@ -1,10 +1,10 @@
 use gpui::{
-    AnyElement, ClickEvent, ClipboardItem, Context, Hsla, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Sizable as _, WindowExt as _, h_flex,
+    Sizable as _, h_flex,
     input::{Input, InputState},
     v_flex,
 };
@@ -20,7 +20,7 @@ use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, section_heading, status_badge};
 use crate::ui::widgets::brand::brand;
 use crate::ui::widgets::entry_chrome::{favicon, favicon_color};
-use crate::ui::widgets::password::{detail_row, strength_card};
+use crate::ui::widgets::password::strength_card;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let state = shell.state().read(cx);
@@ -660,9 +660,13 @@ fn action_button(
             .child(text),
     )
     .when(enabled, move |this| {
-        this.on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, window, cx| {
-            copy_value(kind, &state_entity, window, cx);
-        }))
+        let _ = state_entity; // routed through AppShell now; keeping the
+        // parameter avoids churn at the four call sites below.
+        this.on_click(cx.listener(
+            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.copy_selected_value(kind, window, cx);
+            },
+        ))
     })
 }
 
@@ -696,9 +700,21 @@ fn vault_split(
             cx,
         ))
         .child(entry_detail(
-            selected_entry,
+            selected_entry.clone(),
             browser.selected_strength,
             shell.pending_perma_delete().map(|s| s.to_string()),
+            // When the user has the password reveal toggled, fetch the
+            // decrypted value so the detail row can render it. Otherwise
+            // pass `None` and the row stays masked.
+            selected_entry.as_ref().and_then(|e| {
+                if shell.is_password_revealed(&e.id) {
+                    shell.state().read(cx).copy_selected_value(
+                        crate::app::CopyValueKind::Password,
+                    )
+                } else {
+                    None
+                }
+            }),
             shell.state().clone(),
             cx,
         ))
@@ -1045,6 +1061,7 @@ fn entry_detail(
     selected: Option<VaultEntry>,
     selected_strength: Option<crate::keepass::StrengthReport>,
     pending_perma_delete: Option<String>,
+    revealed_password: Option<String>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
@@ -1053,6 +1070,7 @@ fn entry_detail(
             entry,
             selected_strength,
             pending_perma_delete,
+            revealed_password,
             state_entity,
             cx,
         )
@@ -1093,6 +1111,7 @@ fn entry_detail_body(
     entry: VaultEntry,
     selected_strength: Option<crate::keepass::StrengthReport>,
     pending_perma_delete: Option<String>,
+    revealed_password: Option<String>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
@@ -1213,6 +1232,11 @@ fn entry_detail_body(
                 ),
         );
 
+    let username_for_row = username.clone();
+    let url_for_row = url.clone();
+    let entry_id_for_password = entry.id.clone();
+    let entry_id_for_reveal = entry.id.clone();
+
     let mut body_col = v_flex()
         .id("entry-detail-scroll")
         .flex_1()
@@ -1221,13 +1245,56 @@ fn entry_detail_body(
         .overflow_y_scroll()
         .gap_3p5()
         .p_5()
-        .child(detail_row("Username", value_or_dash(&username), true, false))
-        .child(if has_password {
-            detail_row("Password", String::new(), true, true)
-        } else {
-            detail_row("Password", "Not set".to_string(), false, false)
-        })
-        .child(detail_row("URL", value_or_dash(&url), false, false));
+        .child(clickable_field_row(
+            "detail-row-username",
+            "Username",
+            value_or_dash(&username_for_row),
+            true,
+            !username.is_empty(),
+            cx.listener(
+                move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.copy_selected_value(
+                        crate::app::CopyValueKind::Username,
+                        window,
+                        cx,
+                    );
+                },
+            ),
+        ))
+        .child(password_row(
+            has_password,
+            revealed_password.clone(),
+            cx.listener(
+                move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    let _ = entry_id_for_password;
+                    shell.copy_selected_value(
+                        crate::app::CopyValueKind::Password,
+                        window,
+                        cx,
+                    );
+                },
+            ),
+            cx.listener(
+                move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.toggle_password_reveal(
+                        entry_id_for_reveal.clone(),
+                        cx,
+                    );
+                },
+            ),
+        ))
+        .child(clickable_field_row(
+            "detail-row-url",
+            "URL",
+            value_or_dash(&url_for_row),
+            false,
+            !url.is_empty(),
+            cx.listener(
+                move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+                    cx.open_url(&ensure_scheme(&url_for_row));
+                },
+            ),
+        ));
 
     if has_otp {
         // Pull the live code each render — the AppShell tick fires `cx.notify`
@@ -1290,11 +1357,13 @@ fn entry_detail_body(
                         .child(display);
                     if copyable {
                         row = row.on_click(cx.listener(
-                            move |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
+                            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                                shell.copy_with_auto_clear(
                                     raw_for_clipboard.clone(),
-                                ));
-                                window.push_notification("TOTP copied.", cx);
+                                    "TOTP",
+                                    window,
+                                    cx,
+                                );
                             },
                         ));
                     }
@@ -1493,33 +1562,181 @@ fn entry_detail_body(
         .child(footer)
 }
 
+/// Click-to-act detail row used for username (copy) and URL (open in
+/// browser). Visual shape matches the old `detail_row` widget so swapping
+/// between row kinds in `entry_detail_body` doesn't shift the layout.
+/// `enabled = false` paints the row in a muted style and skips the
+/// click handler — used when the field is empty (`"—"`).
+fn clickable_field_row<F>(
+    id: &'static str,
+    label_text: &'static str,
+    display: String,
+    mono: bool,
+    enabled: bool,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+{
+    let inner = div()
+        .h(px(34.))
+        .w_full()
+        .min_w(px(0.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(palette::border())
+        .bg(palette::sidebar())
+        .px_3()
+        .py_2()
+        .text_sm()
+        .text_color(if enabled {
+            palette::text()
+        } else {
+            palette::text_faint()
+        })
+        .truncate()
+        .when(mono, |this| this.font_family("JetBrains Mono"))
+        .child(display);
+
+    let mut row = div().id(id).child(label_widget(label_text));
+    if enabled {
+        row = row.child(
+            div()
+                .id(gpui::SharedString::from(format!("{id}-inner")))
+                .cursor_pointer()
+                .hover(|s| s.bg(palette::panel()))
+                .rounded(px(6.))
+                .on_click(on_click)
+                .child(inner),
+        );
+    } else {
+        row = row.child(inner);
+    }
+    v_flex().gap_1().min_w(px(0.)).child(row).into_any_element()
+}
+
+/// Password detail row: masked or revealed value with a click-to-copy
+/// area on the left and an eye-icon reveal toggle on the right. Click
+/// targets are siblings (not nested), so neither bubbles into the
+/// other — we don't have to manage `stop_propagation`.
+fn password_row<F1, F2>(
+    has_password: bool,
+    revealed_value: Option<String>,
+    on_click_copy: F1,
+    on_click_reveal: F2,
+) -> AnyElement
+where
+    F1: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    F2: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+{
+    if !has_password {
+        // Mirror the old "Not set" presentation — non-clickable, faint.
+        return clickable_field_row(
+            "detail-row-password",
+            "Password",
+            "Not set".to_string(),
+            false,
+            false,
+            |_, _, _| {},
+        );
+    }
+
+    let revealed = revealed_value.is_some();
+    let display = revealed_value.unwrap_or_else(|| "••••••••••••••••".to_string());
+
+    let value_box = div()
+        .id("detail-row-password-value")
+        .flex_1()
+        .min_w(px(0.))
+        .h(px(34.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(palette::border())
+        .bg(palette::sidebar())
+        .px_3()
+        .py_2()
+        .text_sm()
+        .truncate()
+        .font_family("JetBrains Mono")
+        .cursor_pointer()
+        .hover(|s| s.bg(palette::panel()))
+        .on_click(on_click_copy)
+        .child(display);
+
+    let reveal_button = div()
+        .id("detail-row-password-reveal")
+        .flex_shrink_0()
+        .h(px(34.))
+        .w(px(34.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(palette::border())
+        .bg(palette::sidebar())
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(palette::panel()))
+        .on_click(on_click_reveal)
+        .child(
+            gpui_component::Icon::from(if revealed {
+                gpui_component::IconName::EyeOff
+            } else {
+                gpui_component::IconName::Eye
+            })
+            .with_size(gpui_component::Size::Size(px(14.)))
+            .text_color(if revealed {
+                palette::blue()
+            } else {
+                palette::text_muted()
+            }),
+        );
+
+    v_flex()
+        .gap_1()
+        .min_w(px(0.))
+        .child(label_widget("Password"))
+        .child(
+            h_flex()
+                .gap_2()
+                .min_w(px(0.))
+                .child(value_box)
+                .child(reveal_button),
+        )
+        .into_any_element()
+}
+
+/// Inline copy of `widgets::password::label` (private over there) so
+/// the click-row helpers can render the same caption style without
+/// re-exporting it.
+fn label_widget(text: &'static str) -> AnyElement {
+    div()
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(palette::text_muted())
+        .child(text)
+        .into_any_element()
+}
+
+/// Prepend `https://` to bare URLs so `cx.open_url` doesn't fail on
+/// `github.com`-style entries. Schemes already present (`http://`,
+/// `https://`) are left untouched. Other schemes (`mailto:`, `ftp:`,
+/// …) get rewritten — KeePass URL fields almost always hold web URLs,
+/// and the user can always add the scheme explicitly if needed.
+fn ensure_scheme(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    }
+}
+
 fn value_or_dash(value: &str) -> String {
     if value.is_empty() {
         "—".to_string()
     } else {
         value.to_string()
-    }
-}
-
-fn copy_value(
-    kind: CopyValueKind,
-    state_entity: &gpui::Entity<AppState>,
-    window: &mut Window,
-    cx: &mut gpui::App,
-) {
-    if let Some(value) = state_entity.read(cx).copy_selected_value(kind) {
-        cx.write_to_clipboard(ClipboardItem::new_string(value));
-        window.push_notification(format!("{} copied.", kind_label(kind)), cx);
-    } else {
-        window.push_notification(format!("No {} to copy.", kind_label(kind)), cx);
-    }
-}
-
-fn kind_label(kind: CopyValueKind) -> &'static str {
-    match kind {
-        CopyValueKind::Username => "Username",
-        CopyValueKind::Url => "URL",
-        CopyValueKind::Password => "Password",
     }
 }
 
