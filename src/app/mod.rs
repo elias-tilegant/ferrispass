@@ -1,8 +1,11 @@
 pub mod actions;
 pub mod assets;
 
+mod recents;
 mod state;
+pub(crate) mod time;
 
+pub use recents::{RecentEntry, RecentsError};
 pub use state::{
     AppState, ConflictState, ConnectFlow, CopyValueKind, LibrarySelection, Overlay,
     SaveStatus, SyncBinding, SyncStatus, UnlockPrompt, VaultBrowserModel, VaultStatus,
@@ -49,7 +52,7 @@ fn open_main_window(cx: &mut App) {
         };
 
         cx.open_window(window_options, |window, cx| {
-            let app_state = cx.new(|_| AppState::default());
+            let app_state = cx.new(|_| AppState::with_resume());
             let shell = cx.new(|cx| AppShell::new(app_state, window, cx));
 
             cx.new(|cx: &mut Context<Root>| Root::new(shell, window, cx).bg(cx.theme().background))

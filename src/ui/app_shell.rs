@@ -800,6 +800,16 @@ impl AppShell {
         .detach();
     }
 
+    /// Open a vault from the Welcome screen's Recents list. Same effect
+    /// as picking it through the file dialog — clears the unlock inputs
+    /// and lands the user on the password prompt for `path`. The path
+    /// has already been validated as a .kdbx by virtue of having been
+    /// successfully opened before, so we go straight through
+    /// `select_vault_path`.
+    pub fn open_recent(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_vault_path(path, window, cx);
+    }
+
     fn select_vault_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if !is_kdbx_path(&path) {
             self.state.update(cx, |state, cx| {

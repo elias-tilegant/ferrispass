@@ -194,7 +194,7 @@ fn render_connected(
         SyncStatus::Syncing => chip("Syncing", ChipTone::Blue),
         SyncStatus::Failed(_) => chip("Failed", ChipTone::Orange),
         SyncStatus::Conflict(_) => chip("Conflict", ChipTone::Orange),
-        SyncStatus::Connecting => chip("Connecting", ChipTone::Blue),
+        SyncStatus::Connecting | SyncStatus::Restoring => chip("Connecting", ChipTone::Blue),
         SyncStatus::Disconnected | SyncStatus::Reconnect => chip("Off", ChipTone::Gray),
     };
     let last_sync = match status {

@@ -1,3 +1,5 @@
+use crate::app::recents::{self, RecentEntry};
+use crate::app::time::relative_time_label;
 use crate::domain::{VaultEntry, VaultSnapshot};
 use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
 use crate::keepass::merge::{ConflictReport, Side};
@@ -28,6 +30,10 @@ pub struct AppState {
     /// Active during the multi-step Connect overlay (provider pick → URL →
     /// device code → download). `None` when overlay isn't Connect.
     connect_flow: Option<ConnectFlow>,
+    /// In-memory mirror of the on-disk recents list. Loaded once at
+    /// construction (`with_resume`), prepended on every successful unlock,
+    /// persisted async. Most-recent first.
+    recents: Vec<RecentEntry>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -64,6 +70,10 @@ pub enum SyncStatus {
     Idle,
     /// Initial connect in progress (multi-step — see `ConnectFlow` for which step).
     Connecting,
+    /// Restoring an existing sync binding from `sync/<hash>.json` + the
+    /// keychain refresh token. Distinct from `Connecting` (which is the
+    /// device-code OAuth dance). Renders the same "Connecting…" pill.
+    Restoring,
     /// Push or pull in flight.
     Syncing,
     /// Last operation succeeded at the given time. `chrono::Local` for the
@@ -270,8 +280,40 @@ pub enum CopyValueKind {
 }
 
 impl AppState {
+    /// Construct an AppState that auto-resumes the most recently opened
+    /// vault. Reads the recents file synchronously (a few hundred bytes
+    /// of JSON — cheap), prunes entries whose file no longer exists, and
+    /// pre-populates the unlock screen with the head of the list.
+    ///
+    /// Falls back to an empty AppState (Welcome screen) when the list is
+    /// empty or the file isn't readable.
+    pub fn with_resume() -> Self {
+        let recents = recents::load_pruned();
+        let initial_vault = recents
+            .entries
+            .first()
+            .map(|entry| VaultStatus::AwaitingPassword {
+                path: entry.path.clone(),
+                keyfile: crate::keepass::KeePassRepository::suggested_keyfile(&entry.path),
+                error: None,
+            })
+            .unwrap_or_default();
+
+        Self {
+            vault: initial_vault,
+            recents: recents.entries,
+            ..Self::default()
+        }
+    }
+
     pub fn vault_status(&self) -> &VaultStatus {
         &self.vault
+    }
+
+    /// Recently opened vaults, most recent first. Drives the Welcome
+    /// screen's "Recent" section.
+    pub fn recents(&self) -> &[RecentEntry] {
+        &self.recents
     }
 
     pub fn overlay(&self) -> &Overlay {
@@ -363,6 +405,10 @@ impl AppState {
             return;
         }
 
+        // Track whether the unlock succeeded so we can fire post-open
+        // side-effects (recents push, sync rebind) below — they need a
+        // `&mut self` borrow that conflicts with the match arm.
+        let mut opened_path: Option<PathBuf> = None;
         self.vault = match result {
             Ok(document) => {
                 let snapshot = document.snapshot();
@@ -375,6 +421,7 @@ impl AppState {
                     .as_deref()
                     .and_then(|id| document.strength_for_entry(id));
 
+                opened_path = Some(path.clone());
                 VaultStatus::Open {
                     path,
                     document: Box::new(document),
@@ -392,6 +439,89 @@ impl AppState {
             },
         };
         cx.notify();
+
+        if let Some(opened) = opened_path {
+            // Remember the vault for next launch's auto-resume + the
+            // Welcome screen's Recents list.
+            self.push_recent(opened.clone(), cx);
+            // If a sync config exists for this path, rebuild the
+            // SyncBinding using the keychain refresh token. No-op for
+            // local-only vaults.
+            self.try_restore_sync_binding(opened, cx);
+        }
+    }
+
+    /// Prepend `path` to the in-memory recents list (dedup + truncate),
+    /// then schedule an atomic write to disk in the background. Failures
+    /// are intentionally swallowed — the next successful open will retry,
+    /// and we don't want a transient disk error to surface as a UI toast.
+    fn push_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        recents::push_front_in(&mut self.recents, path, recents::MAX_RECENTS);
+        let snapshot = recents::RecentVaults {
+            entries: self.recents.clone(),
+        };
+        cx.background_spawn(async move {
+            let _ = recents::save(&snapshot);
+        })
+        .detach();
+    }
+
+    /// Try to rebuild a `SyncBinding` for the just-opened vault from the
+    /// on-disk sync config + the keychain refresh token. Runs in the
+    /// background and is a no-op for local-only vaults. On
+    /// `InvalidGrant` (refresh token revoked), surfaces
+    /// `SyncStatus::Reconnect` so the user is prompted to re-authenticate
+    /// via SyncSettings — we don't auto-disconnect, since that would
+    /// silently delete their config.
+    fn try_restore_sync_binding(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // Bail when there's no config on disk for this path — the common
+        // case for local-only vaults.
+        let config = match crate::sync::config::load(&path) {
+            Ok(Some(c)) => c,
+            _ => return,
+        };
+
+        // Defensive: if Connect just established a binding (during the
+        // pick_kdbx_file → request_password → unlock flow), don't trash it.
+        if self.sync.is_some() {
+            return;
+        }
+
+        self.sync_status = SyncStatus::Restoring;
+        cx.notify();
+
+        let email = config.account_email.clone();
+        let task = cx.background_spawn(async move {
+            crate::sync::service::refresh_access_token(&email).map(|token| (config, token))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok((config, access_token)) => {
+                    state.sync = Some(SyncBinding {
+                        config,
+                        access_token,
+                    });
+                    state.sync_status = SyncStatus::Synced {
+                        at: chrono::Local::now(),
+                    };
+                    cx.notify();
+                }
+                Err(crate::sync::service::ServiceError::Auth(
+                    crate::sync::auth::AuthError::InvalidGrant,
+                )) => {
+                    state.sync_status = SyncStatus::Reconnect;
+                    cx.notify();
+                }
+                Err(e) => {
+                    // Transient (network, etc.) — leave the user in
+                    // Failed; the next save's sync_now will retry.
+                    state.sync_status = SyncStatus::Failed(e.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn fail_vault_selection(
@@ -1546,6 +1676,7 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
         SyncStatus::Disconnected => None,
         SyncStatus::Idle => Some("Synced".into()),
         SyncStatus::Connecting => Some("Connecting…".into()),
+        SyncStatus::Restoring => Some("Connecting…".into()),
         SyncStatus::Syncing => Some("Syncing…".into()),
         SyncStatus::Synced { at } => Some(relative_time_label(*at, Local::now())),
         SyncStatus::Conflict(_) => Some("Conflict".into()),
@@ -1554,25 +1685,3 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
     }
 }
 
-/// "just now" / "N seconds ago" / "N minutes ago" / "N hours ago" — same
-/// granularity as KeePass2's last-sync indicator. Past-only; future
-/// timestamps clip to "just now".
-fn relative_time_label(
-    when: chrono::DateTime<chrono::Local>,
-    now: chrono::DateTime<chrono::Local>,
-) -> String {
-    let secs = (now - when).num_seconds().max(0);
-    if secs < 10 {
-        "just now".into()
-    } else if secs < 60 {
-        format!("{secs} seconds ago")
-    } else if secs < 3600 {
-        let m = secs / 60;
-        if m == 1 { "1 minute ago".into() } else { format!("{m} minutes ago") }
-    } else if secs < 86_400 {
-        let h = secs / 3600;
-        if h == 1 { "1 hour ago".into() } else { format!("{h} hours ago") }
-    } else {
-        when.format("%Y-%m-%d %H:%M").to_string()
-    }
-}

@@ -172,7 +172,7 @@ fn sync_dir() -> Result<PathBuf, ConfigError> {
     Ok(app_support_dir()?.join("sync"))
 }
 
-fn app_support_dir() -> Result<PathBuf, ConfigError> {
+pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
     let home = env::var_os("HOME")
         .ok_or_else(|| ConfigError::NoSupportDir("$HOME not set".into()))?;
     let mut p = PathBuf::from(home);

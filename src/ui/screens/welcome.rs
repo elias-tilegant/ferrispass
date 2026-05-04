@@ -1,22 +1,29 @@
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use crate::app::actions::{CreateVault, OpenConnect};
+use crate::app::time::relative_time_label;
+use crate::app::RecentEntry;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::brand::brand;
 
-pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
+pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let theme = cx.theme();
     let bg_overlay = format!(
         "background:radial-gradient(ellipse at 30% 20%,{} 0%, transparent 60%)," ,
         css_color(palette::blue_soft())
     );
     let _ = bg_overlay;
+
+    // Snapshot recents up front so the listener closures can move clones
+    // of each path without re-borrowing `shell` inside the render tree.
+    let recents: Vec<RecentEntry> = shell.state().read(cx).recents().to_vec();
 
     div()
         .size_full()
@@ -52,6 +59,9 @@ pub fn render(_shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 ),
                         ),
                 )
+                .when(!recents.is_empty(), |this| {
+                    this.child(recents_section(&recents, cx))
+                })
                 .child(
                     v_flex()
                         .gap_2()
@@ -184,6 +194,112 @@ where
                         .text_color(palette::text_faint()),
                 ),
         )
+}
+
+/// "Recent" section above the three choice rows. Hidden when the
+/// recents list is empty (`render` skips this whole subtree via `.when`).
+/// Caps the visible list at 5 — enough to give a useful shortcut without
+/// dwarfing the primary actions.
+fn recents_section(
+    recents: &[RecentEntry],
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let now = chrono::Local::now();
+    v_flex()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(palette::text_muted())
+                .child("Recent"),
+        )
+        .children(recents.iter().take(5).enumerate().map(|(idx, entry)| {
+            let path_for_listener = entry.path.clone();
+            let on_click = cx.listener(
+                move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.open_recent(path_for_listener.clone(), window, cx);
+                },
+            );
+            recent_row(idx, entry, now, on_click)
+        }))
+}
+
+fn recent_row<F>(
+    idx: usize,
+    entry: &RecentEntry,
+    now: chrono::DateTime<chrono::Local>,
+    on_click: F,
+) -> impl gpui::IntoElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let file_name: SharedString = entry
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "(unknown)".into())
+        .into();
+    let parent: SharedString = entry
+        .path
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+        .into();
+    let elapsed: SharedString = relative_time_label(entry.last_opened_at, now).into();
+    let id = SharedString::from(format!("welcome-recent-{idx}"));
+
+    div().id(id).on_click(on_click).child(
+        h_flex()
+            .gap_3()
+            .items_center()
+            .p_3()
+            .rounded(px(8.))
+            .bg(palette::sidebar())
+            .border_1()
+            .border_color(palette::border())
+            .child(
+                div()
+                    .size(px(28.))
+                    .rounded(px(6.))
+                    .bg(palette::panel())
+                    .border_1()
+                    .border_color(palette::border())
+                    .text_color(palette::text_muted())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        gpui_component::Icon::from(AppIcon::Note)
+                            .with_size(gpui_component::Size::Size(px(13.))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(palette::text())
+                            .child(file_name),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette::text_faint())
+                            .child(parent),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette::text_faint())
+                    .child(elapsed),
+            ),
+    )
 }
 
 fn css_color(c: gpui::Hsla) -> String {
