@@ -752,6 +752,37 @@ impl AppState {
         self.run_entry_mutation(cx, |doc| doc.restore_entry(entry_id), entry_id)
     }
 
+    /// Toggle the favourite-marker on an entry. Mutates the underlying
+    /// `Favorite` tag through `VaultDocument`, refreshes the visible
+    /// snapshot caches so the star icon updates immediately, and
+    /// schedules a background save (which chains into sync if connected).
+    pub fn toggle_starred(
+        &mut self,
+        entry_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        {
+            let VaultStatus::Open {
+                document,
+                selection,
+                search_query,
+                visible_entries,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            document.toggle_starred(entry_id)?;
+
+            *visible_entries =
+                Rc::new(entries_for_selection(document.snapshot(), selection, search_query));
+        }
+        cx.notify();
+        self.save_async(cx);
+        Ok(())
+    }
+
     /// Shared post-mutation bookkeeping for delete / restore / permanent-delete:
     /// run the mutation, refresh the visible entry list, repoint the selection
     /// if the affected entry was selected, then schedule the autosave.

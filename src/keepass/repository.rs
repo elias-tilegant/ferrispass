@@ -178,8 +178,14 @@ fn entry_from_ref(
 
     let hash = stable_hash(&title);
 
-    let tags = synthesize_tags(group_path, &entry.tags, hash);
-    let starred = (hash % 10) == 0;
+    let tags = entry.tags.clone();
+    // Favorites are surfaced as a tag so the state round-trips through
+    // any KeePass client. Recognised case-insensitively so vaults that
+    // already use "favorite" / "Favorites" / etc. just work; canonical
+    // casing on write lives in `keepass::document::FAVORITE_TAG`.
+    let starred = tags
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(crate::keepass::document::FAVORITE_TAG));
     let strength = if has_password {
         Strength::from_password_length(password_length)
     } else {
@@ -208,23 +214,6 @@ fn entry_from_ref(
             .collect(),
         in_recycle_bin,
     }
-}
-
-/// Surface the entry's parent group name as a tag so the sidebar's "Tags"
-/// section has something to filter on for vaults that don't otherwise use
-/// tags. Note: this is a UI-only enrichment — the synthesised entries
-/// don't get written back to disk (the edit form sends `tags: vec![]` on
-/// save, which clears them). KeePassXC won't show these tags.
-fn synthesize_tags(group_path: &[String], existing_tags: &[String], _hash: u64) -> Vec<String> {
-    let mut tags: Vec<String> = existing_tags.iter().cloned().collect();
-
-    if let Some(group) = group_path.iter().rev().find(|name| !name.eq_ignore_ascii_case("Root")) {
-        if !tags.iter().any(|t| t.eq_ignore_ascii_case(group)) {
-            tags.push(group.clone());
-        }
-    }
-
-    tags
 }
 
 fn synthesize_favicon(title: &str, url: &str, hash: u64) -> Favicon {
@@ -311,35 +300,6 @@ mod tests {
             let fav = synthesize_favicon("Sample", "", hash);
             assert!((fav.palette_index as u64) < FAVICON_PALETTE_SIZE);
         }
-    }
-
-    #[test]
-    fn synthesized_tags_include_group_name() {
-        let path = vec!["Root".to_string(), "Work".to_string()];
-        let tags = synthesize_tags(&path, &[], 0);
-        assert!(tags.contains(&"Work".to_string()));
-    }
-
-    #[test]
-    fn synthesized_tags_no_longer_inject_fake_2fa() {
-        // Any hash, any path — TOTP presence is now signalled via the
-        // dedicated `has_otp` bit + LibrarySelection::TotpEnabled, not by
-        // a synthesised "2FA" tag. Belt-and-braces against re-introduction.
-        for hash in 0..20u64 {
-            let path = vec!["Root".to_string(), "Personal".to_string()];
-            let tags = synthesize_tags(&path, &[], hash);
-            assert!(
-                !tags.iter().any(|t| t.eq_ignore_ascii_case("2FA")),
-                "hash {hash} produced a synthesised 2FA tag"
-            );
-        }
-    }
-
-    #[test]
-    fn synthesized_tags_skip_root() {
-        let path = vec!["Root".to_string()];
-        let tags = synthesize_tags(&path, &[], 1);
-        assert!(!tags.iter().any(|t| t.eq_ignore_ascii_case("Root")));
     }
 
     #[test]

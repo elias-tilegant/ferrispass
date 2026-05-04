@@ -1113,6 +1113,8 @@ fn entry_detail_body(
         .unwrap_or_else(|| "Vault root".into());
     let updated = entry.updated.clone();
     let starred = entry.starred;
+    let entry_id_for_star = entry.id.clone();
+    let state_for_star = state_entity.clone();
     let fav_color = favicon_color(entry.favicon.palette_index);
     let fav_letter = entry.favicon.letter.clone();
     let has_password = entry.has_password;
@@ -1180,13 +1182,35 @@ fn entry_detail_body(
                         )
                         .when(!tags.is_empty(), |this| this.child(chips_row)),
                 )
-                .when(starred, |this| {
-                    this.child(
-                        gpui_component::Icon::from(gpui_component::IconName::StarFill)
+                .child(
+                    div()
+                        .id("entry-detail-star")
+                        .flex_shrink_0()
+                        .p_1p5()
+                        .rounded(px(6.))
+                        .hover(|s| s.bg(palette::panel()))
+                        .on_click(cx.listener(
+                            move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+                                let id = entry_id_for_star.clone();
+                                state_for_star.update(cx, |state, cx| {
+                                    let _ = state.toggle_starred(&id, cx);
+                                });
+                            },
+                        ))
+                        .child(
+                            gpui_component::Icon::from(if starred {
+                                gpui_component::IconName::StarFill
+                            } else {
+                                gpui_component::IconName::Star
+                            })
                             .with_size(gpui_component::Size::Size(px(16.)))
-                            .text_color(palette::orange()),
-                    )
-                }),
+                            .text_color(if starred {
+                                palette::orange()
+                            } else {
+                                palette::text_faint()
+                            }),
+                        ),
+                ),
         );
 
     let mut body_col = v_flex()

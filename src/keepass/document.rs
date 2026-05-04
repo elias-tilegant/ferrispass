@@ -12,6 +12,11 @@ use std::{
 };
 use thiserror::Error;
 
+/// Tag we use to mark favourites. Compared case-insensitively on read so
+/// vaults that already use "favorite" / "FAVORITE" / etc. just work.
+/// Single canonical casing on write keeps the database tidy.
+pub(crate) const FAVORITE_TAG: &str = "Favorite";
+
 pub struct VaultDocument {
     database: Database,
     snapshot: Arc<VaultSnapshot>,
@@ -166,12 +171,47 @@ impl VaultDocument {
             .ok_or(MutationError::GroupNotFound)?;
         let mut entry = group.add_entry();
         apply_draft_to_entry(&mut entry, draft);
+        // Tags are an *initial* set on create — `apply_draft_to_entry`
+        // intentionally leaves them alone so updates don't wipe out
+        // tags the user entered in another KeePass client.
+        entry.tags = draft.tags.clone();
         let id = entry.id().to_string();
         // Force the borrows to drop before we touch `self` again.
         drop(entry);
         drop(group);
         self.refresh_snapshot();
         Ok(id)
+    }
+
+    /// Add or remove the favorite-marker tag on an entry. The convention
+    /// is a single tag named `Favorite` (case-insensitive on read), which
+    /// KeePassXC users already commonly use to flag favourites — this
+    /// keeps our "Favorites" view in sync with what the user sees in
+    /// other clients. Returns the new starred state. Caller is expected
+    /// to schedule a background save.
+    pub fn toggle_starred(&mut self, entry_id_str: &str) -> Result<bool, MutationError> {
+        let entry_id = find_entry_id(&self.database, entry_id_str)
+            .ok_or(MutationError::EntryNotFound)?;
+        let mut entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+
+        let was_starred = entry
+            .tags
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG));
+        if was_starred {
+            entry
+                .tags
+                .retain(|t| !t.eq_ignore_ascii_case(FAVORITE_TAG));
+        } else {
+            entry.tags.push(FAVORITE_TAG.to_string());
+        }
+        entry.times.last_modification = Some(keepass::db::Times::now());
+        drop(entry);
+        self.refresh_snapshot();
+        Ok(!was_starred)
     }
 
     pub fn update_entry(
@@ -303,7 +343,11 @@ where
         // Store as protected — the value contains the TOTP seed.
         entry.set_protected(fields::OTP, draft.otp.trim().to_string());
     }
-    entry.tags = draft.tags.clone();
+    // Tags deliberately not assigned here. The edit form doesn't expose a
+    // tag input, so doing `entry.tags = draft.tags` would silently wipe
+    // tags the user maintains in KeePassXC every time they re-saved an
+    // entry. `create_entry` initialises tags explicitly; updates leave
+    // them untouched.
     entry.times.last_modification = Some(keepass::db::Times::now());
 }
 
@@ -616,6 +660,110 @@ mod tests {
         let entry = doc.snapshot().find_entry(&id).expect("entry exists");
         assert_eq!(entry.title, "Renamed");
         assert_eq!(doc.password_for_entry(&id).as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn toggle_starred_round_trips_via_favorite_tag() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Mail".into(),
+                    tags: vec!["Personal".into()],
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        // Initially: not starred. Snapshot agrees.
+        assert!(!doc.snapshot().find_entry(&id).unwrap().starred);
+
+        // Toggle on: returns true, tag added, other tags untouched.
+        let now_starred = doc.toggle_starred(&id).expect("toggle on");
+        assert!(now_starred);
+        let entry = doc.snapshot().find_entry(&id).unwrap();
+        assert!(entry.starred);
+        assert!(entry.tags.iter().any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG)));
+        assert!(entry.tags.contains(&"Personal".to_string()));
+
+        // Toggle off: returns false, tag removed, other tags still there.
+        let now_unstarred = doc.toggle_starred(&id).expect("toggle off");
+        assert!(!now_unstarred);
+        let entry = doc.snapshot().find_entry(&id).unwrap();
+        assert!(!entry.starred);
+        assert!(!entry.tags.iter().any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG)));
+        assert!(entry.tags.contains(&"Personal".to_string()));
+    }
+
+    #[test]
+    fn pre_existing_favorite_tag_is_recognised_case_insensitively() {
+        // Cross-client compatibility: a vault opened from KeePassXC where
+        // the user typed "favorite" or "FAVORITE" should still light up
+        // our star without us silently rewriting their tag casing on read.
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "External".into(),
+                    tags: vec!["favorite".into()], // lowercase!
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        assert!(doc.snapshot().find_entry(&id).unwrap().starred);
+    }
+
+    #[test]
+    fn update_entry_preserves_existing_tags() {
+        // Regression: previously every update wiped `entry.tags` because
+        // `apply_draft_to_entry` did `entry.tags = draft.tags.clone()`
+        // and the edit form sends an empty tags vec. That silently
+        // destroyed tags maintained in another KeePass client.
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Tagged".into(),
+                    tags: vec!["Personal".into(), "Mail".into()],
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        // Update with an empty draft.tags — what the edit form sends today.
+        doc.update_entry(
+            &id,
+            &EntryDraft {
+                title: "Tagged (renamed)".into(),
+                tags: Vec::new(),
+                ..Default::default()
+            },
+        )
+        .expect("update");
+
+        let entry = doc.snapshot().find_entry(&id).expect("entry exists");
+        assert_eq!(entry.title, "Tagged (renamed)");
+        assert_eq!(
+            entry.tags,
+            vec!["Personal".to_string(), "Mail".to_string()],
+            "edit must not wipe tags it doesn't manage"
+        );
     }
 
     #[test]
