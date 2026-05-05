@@ -1,5 +1,9 @@
-use gpui::{AnyElement, Hsla, IntoElement as _, ParentElement as _, Styled as _, div, px};
+use gpui::{
+    AnyElement, Hsla, InteractiveElement as _, IntoElement as _, ObjectFit, ParentElement as _,
+    Styled as _, StyledImage as _, div, img, px,
+};
 
+use crate::domain::Favicon;
 use crate::ui::palette;
 
 /// Color palette used by the synthesized entry favicons.
@@ -52,8 +56,38 @@ pub fn favicon_color(palette_index: u8) -> Hsla {
     rgb_to_hsla(r, g, b)
 }
 
-/// Square colored favicon with a single letter, like the design's `<Fav letter="G" />`.
-pub fn favicon(letter: &str, palette_index: u8, size: f32) -> AnyElement {
+/// Square favicon. Renders the entry's custom-icon image (extracted from
+/// the KeePass `custom_icons` table) when present, otherwise falls back to
+/// the synthesized colored letter. If the cached image bytes turn out to be
+/// undecodable (corrupt blob, format we sniffed wrong), GPUI's image loader
+/// hits `with_fallback` and we render the letter view there too.
+pub fn favicon(fav: &Favicon, size: f32) -> AnyElement {
+    let radius = px((size / 4.5).max(6.0));
+    if let Some(image) = fav.image.as_ref() {
+        // Snapshot the letter bits up-front so the fallback closure (which
+        // must be `'static`) doesn't need to capture `&Favicon`.
+        let letter = fav.letter.clone();
+        let palette_index = fav.palette_index;
+        return div()
+            .id("favicon-img")
+            .size(px(size))
+            .rounded(radius)
+            .overflow_hidden()
+            .bg(palette::panel())
+            .child(
+                img(image.0.clone())
+                    .object_fit(ObjectFit::Cover)
+                    .size(px(size))
+                    .with_fallback(move || {
+                        letter_favicon(&letter, palette_index, size).into_any_element()
+                    }),
+            )
+            .into_any_element();
+    }
+    letter_favicon(&fav.letter, fav.palette_index, size)
+}
+
+fn letter_favicon(letter: &str, palette_index: u8, size: f32) -> AnyElement {
     let bg = favicon_color(palette_index);
     div()
         .size(px(size))

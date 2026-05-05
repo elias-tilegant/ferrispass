@@ -1,7 +1,6 @@
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, h_flex,
@@ -91,15 +90,12 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     v_flex()
                         .gap_2()
                         .child(
-                            h_flex()
-                                .gap_1()
-                                .child(label("Key file"))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(palette::text_faint())
-                                        .child("(optional)"),
-                                ),
+                            h_flex().gap_1().child(label("Key file")).child(
+                                div()
+                                    .text_xs()
+                                    .text_color(palette::text_faint())
+                                    .child("(optional)"),
+                            ),
                         )
                         .child(input_box(shell.keyfile_input())),
                 )
@@ -129,11 +125,9 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .child(
                     div()
                         .id("unlock-submit")
-                        .on_click(cx.listener(
-                            |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                                window.dispatch_action(Box::new(SubmitPassword), cx);
-                            },
-                        ))
+                        .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                            window.dispatch_action(Box::new(SubmitPassword), cx);
+                        }))
                         .child(primary_button("Unlock vault", AppIcon::Unlock)),
                 )
                 .child(

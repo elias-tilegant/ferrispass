@@ -43,13 +43,34 @@ pub struct VaultEntry {
 pub struct Favicon {
     pub letter: String,
     pub palette_index: u8,
+    /// Custom icon bytes pulled from the KeePass database's
+    /// `custom_icons` table when the entry has `Icon::Custom(_)`. The
+    /// renderer prefers this over the synthesized letter when present.
+    pub image: Option<FaviconImage>,
 }
+
+/// Decoded, format-tagged custom icon ready to hand to GPUI's `img()`.
+/// Wrapped in `Arc` so cloning a `VaultEntry` (visible-list cache, drag
+/// previews, render snapshots) is a refcount bump, and so the GPUI image
+/// cache — keyed off the inner `Image::id` (hash of bytes) — can dedupe
+/// across re-renders without us rebuilding the wrapper each frame.
+#[derive(Clone, Debug)]
+pub struct FaviconImage(pub std::sync::Arc<gpui::Image>);
+
+impl PartialEq for FaviconImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id() == other.0.id()
+    }
+}
+
+impl Eq for FaviconImage {}
 
 impl Default for Favicon {
     fn default() -> Self {
         Self {
             letter: "·".to_string(),
             palette_index: 0,
+            image: None,
         }
     }
 }

@@ -1,8 +1,9 @@
 use crate::{
-    domain::{Favicon, Strength, VaultEntry, VaultGroup, VaultSnapshot},
+    domain::{Favicon, FaviconImage, Strength, VaultEntry, VaultGroup, VaultSnapshot},
     keepass::VaultDocument,
 };
 use chrono::{NaiveDateTime, Utc};
+use gpui::{Image, ImageFormat};
 use keepass::{
     Database, DatabaseKey,
     db::{DatabaseOpenError, EntryId, EntryRef, GroupId, GroupRef},
@@ -12,6 +13,7 @@ use std::{
     fs::File,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub struct KeePassRepository;
@@ -191,7 +193,12 @@ fn entry_from_ref(
     } else {
         Strength::Weak
     };
-    let favicon = synthesize_favicon(&title, &url, hash);
+    let mut favicon = synthesize_favicon(&title, &url, hash);
+    if let Some(custom) = entry.custom_icon()
+        && let Some(image) = favicon_image_from_bytes(&custom.data)
+    {
+        favicon.image = Some(image);
+    }
 
     VaultEntry {
         id: entry.id().to_string(),
@@ -227,7 +234,37 @@ fn synthesize_favicon(title: &str, url: &str, hash: u64) -> Favicon {
     Favicon {
         letter,
         palette_index: (hash % FAVICON_PALETTE_SIZE) as u8,
+        image: None,
     }
+}
+
+/// Sniff a custom-icon blob's format from its leading magic bytes and decode
+/// it eagerly into a renderable `gpui::Image`. KeePass stores the bytes
+/// verbatim — clients put PNG, JPEG, ICO, etc. in there with no metadata —
+/// so we sniff once at DB-load time and cache the `Arc<Image>`; later
+/// renders just bump the refcount. Returns `None` when the buffer is empty
+/// or the format can't be identified (the renderer falls back to the
+/// synthesized letter favicon).
+fn favicon_image_from_bytes(bytes: &[u8]) -> Option<FaviconImage> {
+    let format = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        ImageFormat::Png
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        ImageFormat::Jpeg
+    } else if bytes.starts_with(b"GIF8") {
+        ImageFormat::Gif
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        ImageFormat::Webp
+    } else if bytes.starts_with(b"BM") {
+        ImageFormat::Bmp
+    } else if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        ImageFormat::Ico
+    } else {
+        return None;
+    };
+    Some(FaviconImage(Arc::new(Image::from_bytes(
+        format,
+        bytes.to_vec(),
+    ))))
 }
 
 const FAVICON_PALETTE_SIZE: u64 = 12;

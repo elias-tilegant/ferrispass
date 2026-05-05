@@ -3,9 +3,9 @@ use crate::{
         AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
-            DeleteEntry, EditEntry, SaveVault, ToggleTheme,
-            FocusSearch, LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSettings,
-            OpenSyncSettings, OpenVault, SubmitPassword, SyncNow,
+            DeleteEntry, EditEntry, FocusSearch, LockVault, NewEntry, OpenConflictDemo,
+            OpenConnect, OpenSettings, OpenSyncSettings, OpenVault, SaveVault, SubmitPassword,
+            SyncNow, ToggleTheme,
         },
     },
     keepass::KeePassRepository,
@@ -24,13 +24,13 @@ use gpui::{
     InteractiveElement as _, ParentElement as _, PathPromptOptions, Render, ScrollStrategy,
     Styled as _, Subscription, Task, Window, div, px,
 };
-use std::time::{Duration, Instant};
 use gpui_component::{
     ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
     input::{InputEvent, InputState},
     slider::{SliderState, SliderValue},
 };
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 struct EditPrefill {
     id: String,
@@ -147,7 +147,8 @@ impl AppShell {
                 .masked(true)
                 .placeholder("Master password")
         });
-        let keyfile_input = cx.new(|cx| InputState::new(window, cx).placeholder("Optional key file path"));
+        let keyfile_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Optional key file path"));
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search vault…  ⌘F"));
         let new_entry_title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
@@ -158,13 +159,10 @@ impl AppShell {
         let new_entry_url_input = cx.new(|cx| InputState::new(window, cx).placeholder("URL"));
         let new_entry_notes_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Notes (optional)"));
-        let new_entry_otp_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("otpauth://… or base32 secret")
-        });
-        let picker_query_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Filter by name or folder…")
-        });
+        let new_entry_otp_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("otpauth://… or base32 secret"));
+        let picker_query_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name or folder…"));
 
         let gen_length_state = cx.new(|_| {
             SliderState::new()
@@ -195,9 +193,7 @@ impl AppShell {
                     .vault_browser()
                     .and_then(|b| b.selected_entry)
                     .map(|e| e.id);
-                if shell.revealed_entry_id.is_some()
-                    && shell.revealed_entry_id != current_id
-                {
+                if shell.revealed_entry_id.is_some() && shell.revealed_entry_id != current_id {
                     shell.revealed_entry_id = None;
                 }
                 cx.notify();
@@ -333,9 +329,7 @@ impl AppShell {
                             let Some(threshold) = shell.settings.auto_lock_secs else {
                                 return true; // settings disabled — exit.
                             };
-                            if shell.last_activity.elapsed()
-                                >= Duration::from_secs(threshold)
-                            {
+                            if shell.last_activity.elapsed() >= Duration::from_secs(threshold) {
                                 shell.auto_lock_now(cx);
                                 true
                             } else {
@@ -592,21 +586,14 @@ impl AppShell {
             self.clear_perma_delete(cx);
             return;
         }
-        let closed = self
-            .state
-            .update(cx, |state, cx| state.close_overlay(cx));
+        let closed = self.state.update(cx, |state, cx| state.close_overlay(cx));
         if closed {
             return;
         }
         self.cancel_unlock(window, cx);
     }
 
-    fn on_action_lock_vault(
-        &mut self,
-        _: &LockVault,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_action_lock_vault(&mut self, _: &LockVault, window: &mut Window, cx: &mut Context<Self>) {
         self.lock_vault(window, cx);
     }
 
@@ -679,12 +666,7 @@ impl AppShell {
             .update(cx, |state, cx| state.open_overlay(Overlay::Settings, cx));
     }
 
-    fn on_action_sync_now(
-        &mut self,
-        _: &SyncNow,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_action_sync_now(&mut self, _: &SyncNow, window: &mut Window, cx: &mut Context<Self>) {
         use crate::app::SyncStatus;
 
         let status = self.state.read(cx).sync_status().clone();
@@ -700,18 +682,12 @@ impl AppShell {
             | SyncStatus::Restoring
             | SyncStatus::Conflict(_) => {}
             SyncStatus::Idle | SyncStatus::Synced { .. } | SyncStatus::Failed(_) => {
-                self.state
-                    .update(cx, |state, cx| state.sync_now(cx));
+                self.state.update(cx, |state, cx| state.sync_now(cx));
             }
         }
     }
 
-    fn on_action_new_entry(
-        &mut self,
-        _: &NewEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_action_new_entry(&mut self, _: &NewEntry, window: &mut Window, cx: &mut Context<Self>) {
         let is_open = matches!(
             self.state.read(cx).vault_status(),
             crate::app::VaultStatus::Open { .. }
@@ -765,16 +741,10 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state
-            .update(cx, |state, cx| state.save_async(cx));
+        self.state.update(cx, |state, cx| state.save_async(cx));
     }
 
-    fn on_action_edit_entry(
-        &mut self,
-        _: &EditEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_action_edit_entry(&mut self, _: &EditEntry, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_edit_selected_entry(window, cx);
     }
 
@@ -852,11 +822,7 @@ impl AppShell {
     /// (incl. the live decrypted password from `VaultDocument`), and switch
     /// the overlay into Edit mode. Called from both the `cmd-e` action and
     /// the Edit button on the detail panel.
-    pub fn begin_edit_selected_entry(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn begin_edit_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Pull the snapshot view of the selected entry + its actual password
         // out of state in one borrow, then drop the borrow before mutating
         // the inputs / overlay.
@@ -1080,12 +1046,9 @@ impl AppShell {
         let path_for_task = path.clone();
         let keyfile_for_task = keyfile.clone();
         let open_task = cx.background_spawn(async move {
-            let result = KeePassRepository::open(
-                &path_for_task,
-                &password,
-                keyfile_for_task.as_deref(),
-            )
-            .map_err(|error| error.to_string());
+            let result =
+                KeePassRepository::open(&path_for_task, &password, keyfile_for_task.as_deref())
+                    .map_err(|error| error.to_string());
 
             (path_for_task, result)
         });
@@ -1185,13 +1148,10 @@ impl AppShell {
         // Track the deadline so the countdown pill can render
         // `clears in N s…`. Re-rendering at 1 Hz comes from
         // `clipboard_pill_tick` below.
-        self.clipboard_clear_deadline =
-            Some(Instant::now() + Duration::from_secs(secs));
+        self.clipboard_clear_deadline = Some(Instant::now() + Duration::from_secs(secs));
         self.clipboard_pill_tick = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_secs(1))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 let keep_ticking = this
                     .update(cx, |shell, cx| {
                         if shell.clipboard_clear_deadline.is_none() {
@@ -1241,11 +1201,7 @@ impl AppShell {
 
     /// Toggle the masked password into / out of view for `entry_id`.
     /// Idempotent — clicking twice ends up where you started.
-    pub fn toggle_password_reveal(
-        &mut self,
-        entry_id: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn toggle_password_reveal(&mut self, entry_id: String, cx: &mut Context<Self>) {
         if self.revealed_entry_id.as_deref() == Some(&entry_id) {
             self.revealed_entry_id = None;
         } else {
@@ -1263,11 +1219,7 @@ impl AppShell {
     /// settings still apply for this session) and re-runs
     /// `sync_auto_lock_task` so a freshly-disabled timer is cancelled
     /// or a freshly-enabled one starts immediately.
-    pub fn update_settings(
-        &mut self,
-        new_settings: AppSettings,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn update_settings(&mut self, new_settings: AppSettings, cx: &mut Context<Self>) {
         if self.settings == new_settings {
             return;
         }
@@ -1283,11 +1235,21 @@ impl AppShell {
         cx.notify();
     }
 
-    pub fn click_open_vault(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn click_open_vault(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.prompt_for_vault_path(window, cx);
     }
 
-    pub fn click_lock_vault(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn click_lock_vault(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.lock_vault(window, cx);
     }
 
@@ -1310,9 +1272,7 @@ impl AppShell {
             crate::app::VaultStatus::AwaitingPassword { .. } => {
                 crate::ui::screens::unlock::render(self, cx)
             }
-            crate::app::VaultStatus::Opening { .. } => {
-                crate::ui::screens::vault::render(self, cx)
-            }
+            crate::app::VaultStatus::Opening { .. } => crate::ui::screens::vault::render(self, cx),
             crate::app::VaultStatus::Open { .. } => match overlay {
                 Overlay::Conflict => crate::ui::screens::conflict::render(self, cx),
                 Overlay::AddEntry | Overlay::EditEntry { .. } => {
@@ -1346,25 +1306,21 @@ impl AppShell {
             return None;
         }
         Some(
-            div()
-                .absolute()
-                .bottom_4()
-                .right_4()
-                .child(
-                    gpui::div()
-                        .h(px(28.))
-                        .px(px(12.))
-                        .rounded(px(14.))
-                        .bg(crate::ui::palette::panel())
-                        .border_1()
-                        .border_color(crate::ui::palette::border_strong())
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(crate::ui::palette::text_muted())
-                        .flex()
-                        .items_center()
-                        .child(format!("Clipboard clears in {secs} s")),
-                ),
+            div().absolute().bottom_4().right_4().child(
+                gpui::div()
+                    .h(px(28.))
+                    .px(px(12.))
+                    .rounded(px(14.))
+                    .bg(crate::ui::palette::panel())
+                    .border_1()
+                    .border_color(crate::ui::palette::border_strong())
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(crate::ui::palette::text_muted())
+                    .flex()
+                    .items_center()
+                    .child(format!("Clipboard clears in {secs} s")),
+            ),
         )
     }
 }

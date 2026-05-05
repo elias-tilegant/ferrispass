@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, Render, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement as _, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Sizable as _, h_flex,
@@ -19,7 +19,7 @@ use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, section_heading, status_badge};
 use crate::ui::widgets::brand::brand;
-use crate::ui::widgets::entry_chrome::{favicon, favicon_color};
+use crate::ui::widgets::entry_chrome::favicon;
 use crate::ui::widgets::password::strength_card;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
@@ -49,16 +49,8 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         cx,
     )
     .into_any_element();
-    let workspace_el = workspace(
-        &summary,
-        save_status,
-        browser,
-        shell,
-        cx,
-        is_busy,
-        is_open,
-    )
-    .into_any_element();
+    let workspace_el =
+        workspace(&summary, save_status, browser, shell, cx, is_busy, is_open).into_any_element();
 
     h_flex()
         .size_full()
@@ -80,16 +72,10 @@ fn sidebar(
     let provider = summary.provider.clone().unwrap_or_else(|| "Local".into());
     let synced_at = summary.synced_at.clone().unwrap_or_else(|| "—".into());
     let entry_count = summary.entries;
-    let starred_count = snapshot
-        .map(|s| s.entries_starred().len())
-        .unwrap_or(0);
-    let twofa_count = snapshot
-        .map(|s| s.entries_with_otp().len())
-        .unwrap_or(0);
+    let starred_count = snapshot.map(|s| s.entries_starred().len()).unwrap_or(0);
+    let twofa_count = snapshot.map(|s| s.entries_with_otp().len()).unwrap_or(0);
 
-    let groups = snapshot
-        .map(|s| s.root.groups.clone())
-        .unwrap_or_default();
+    let groups = snapshot.map(|s| s.root.groups.clone()).unwrap_or_default();
 
     v_flex()
         .w(px(220.))
@@ -144,7 +130,12 @@ fn sidebar(
                     cx,
                 ))
                 .child(groups_section(&groups, selection, state_entity.clone(), cx))
-                .child(tags_section(twofa_count, selection, state_entity.clone(), cx)),
+                .child(tags_section(
+                    twofa_count,
+                    selection,
+                    state_entity.clone(),
+                    cx,
+                )),
         )
         .child(
             h_flex()
@@ -161,11 +152,7 @@ fn sidebar(
                         .with_size(gpui_component::Size::Size(px(13.)))
                         .text_color(palette::blue()),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .child(format!("{provider} · {synced_at}")),
-                )
+                .child(div().flex_1().child(format!("{provider} · {synced_at}")))
                 .child(
                     div()
                         .id("sidebar-settings")
@@ -174,11 +161,9 @@ fn sidebar(
                                 .with_size(gpui_component::Size::Size(px(13.)))
                                 .text_color(palette::text_muted()),
                         )
-                        .on_click(cx.listener(
-                            |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                                window.dispatch_action(Box::new(OpenSyncSettings), cx);
-                            },
-                        )),
+                        .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                            window.dispatch_action(Box::new(OpenSyncSettings), cx);
+                        })),
                 ),
         )
 }
@@ -237,14 +222,12 @@ fn library_section(
             // calling nav_row so the two cx borrows don't overlap (in
             // edition 2024 the `impl IntoElement` return captures cx).
             let state_for_drop = state_entity.clone();
-            let drop_listener = cx.listener(
-                move |_: &mut AppShell, drag: &EntryDrag, _, cx| {
-                    let entry_id = drag.entry_id.clone();
-                    state_for_drop.update(cx, |state, cx| {
-                        let _ = state.delete_entry(&entry_id, cx);
-                    });
-                },
-            );
+            let drop_listener = cx.listener(move |_: &mut AppShell, drag: &EntryDrag, _, cx| {
+                let entry_id = drag.entry_id.clone();
+                state_for_drop.update(cx, |state, cx| {
+                    let _ = state.delete_entry(&entry_id, cx);
+                });
+            });
             let trash_row = nav_row(
                 "lib-trash",
                 AppIcon::Note,
@@ -275,7 +258,12 @@ fn groups_section(
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
-    let palette_colors = [palette::blue(), palette::orange(), palette::green(), palette::text_muted()];
+    let palette_colors = [
+        palette::blue(),
+        palette::orange(),
+        palette::green(),
+        palette::text_muted(),
+    ];
     let selected_group = selection.group_id().unwrap_or_default().to_string();
 
     let mut col = v_flex()
@@ -309,15 +297,15 @@ fn groups_section(
                         .border_1()
                         .border_color(palette::blue())
                 })
-                .on_drop(cx.listener(
-                    move |_: &mut AppShell, drag: &EntryDrag, _, cx| {
+                .on_drop(
+                    cx.listener(move |_: &mut AppShell, drag: &EntryDrag, _, cx| {
                         let target = group_id_for_drop.clone();
                         let entry_id = drag.entry_id.clone();
                         state_for_drop.update(cx, |state, cx| {
                             let _ = state.move_entry(&entry_id, &target, cx);
                         });
-                    },
-                ))
+                    }),
+                )
                 .child(nav_pill(
                     gpui::SharedString::from(format!("group-{}", group.id)),
                     AppIcon::Note,
@@ -427,13 +415,21 @@ fn nav_pill(
     icon_color: Hsla,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl gpui::IntoElement {
-    let fg = if selected { palette::panel() } else { palette::text() };
+    let fg = if selected {
+        palette::panel()
+    } else {
+        palette::text()
+    };
     let count_color = if selected {
         palette::panel()
     } else {
         palette::text_faint()
     };
-    let icon_resolved = if selected { palette::panel() } else { icon_color };
+    let icon_resolved = if selected {
+        palette::panel()
+    } else {
+        icon_color
+    };
     let label_owned = label_text.to_string();
 
     h_flex()
@@ -458,9 +454,7 @@ fn nav_pill(
         } else {
             gpui::FontWeight::NORMAL
         })
-        .when(!selected, |this| {
-            this.hover(|s| s.bg(palette::border()))
-        })
+        .when(!selected, |this| this.hover(|s| s.bg(palette::border())))
         .on_click(on_click)
         .child(
             gpui_component::Icon::from(icon)
@@ -530,37 +524,24 @@ fn workspace_toolbar(
         .child(
             div()
                 .id("toolbar-new-entry")
-                .child(toolbar_button(
-                    "New entry",
-                    Some(AppIcon::Key),
-                    true,
-                ))
-                .on_click(cx.listener(
-                    |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                        window.dispatch_action(Box::new(NewEntry), cx);
-                    },
-                )),
+                .child(toolbar_button("New entry", Some(AppIcon::Key), true))
+                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(NewEntry), cx);
+                })),
         )
+        .child(div().w(px(1.)).h(px(18.)).bg(palette::border()))
         .child(
             div()
-                .w(px(1.))
-                .h(px(18.))
-                .bg(palette::border()),
+                .id("toolbar-group")
+                .child(toolbar_button("Group", Some(AppIcon::Note), false)),
         )
-        .child(div().id("toolbar-group").child(toolbar_button(
-            "Group",
-            Some(AppIcon::Note),
-            false,
-        )))
         .child(
             div()
                 .id("toolbar-sync")
                 .child(toolbar_button("Sync", Some(AppIcon::Sync), false))
-                .on_click(cx.listener(
-                    |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                        window.dispatch_action(Box::new(SyncNow), cx);
-                    },
-                )),
+                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(SyncNow), cx);
+                })),
         )
         .child(div().flex_1())
         .child(
@@ -577,16 +558,22 @@ fn workspace_toolbar(
                 })
                 .child(toolbar_button(
                     if is_open { "Lock" } else { "Open vault" },
-                    Some(if is_open { AppIcon::Lock } else { AppIcon::Unlock }),
+                    Some(if is_open {
+                        AppIcon::Lock
+                    } else {
+                        AppIcon::Unlock
+                    }),
                     is_open,
                 ))
-                .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                    if is_open {
-                        window.dispatch_action(Box::new(LockVault), cx);
-                    } else {
-                        window.dispatch_action(Box::new(OpenVault), cx);
-                    }
-                })),
+                .on_click(
+                    cx.listener(move |_: &mut AppShell, _: &ClickEvent, window, cx| {
+                        if is_open {
+                            window.dispatch_action(Box::new(LockVault), cx);
+                        } else {
+                            window.dispatch_action(Box::new(OpenVault), cx);
+                        }
+                    }),
+                ),
         )
 }
 
@@ -682,11 +669,17 @@ fn action_button(
 ) -> impl gpui::IntoElement {
     let (bg, fg, bd) = match (style, enabled) {
         (ActionStyle::Primary, true) => (palette::blue(), palette::panel(), palette::blue_hover()),
-        (ActionStyle::Primary, false) => {
-            (palette::sidebar(), palette::text_faint(), palette::border_strong())
+        (ActionStyle::Primary, false) => (
+            palette::sidebar(),
+            palette::text_faint(),
+            palette::border_strong(),
+        ),
+        (ActionStyle::Default, true) => {
+            (palette::panel(), palette::text(), palette::border_strong())
         }
-        (ActionStyle::Default, true) => (palette::panel(), palette::text(), palette::border_strong()),
-        (ActionStyle::Default, false) => (palette::sidebar(), palette::text_faint(), palette::border()),
+        (ActionStyle::Default, false) => {
+            (palette::sidebar(), palette::text_faint(), palette::border())
+        }
     };
 
     let mut row = div().id(id);
@@ -718,11 +711,11 @@ fn action_button(
     .when(enabled, move |this| {
         let _ = state_entity; // routed through AppShell now; keeping the
         // parameter avoids churn at the four call sites below.
-        this.on_click(cx.listener(
-            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+        this.on_click(
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 shell.copy_selected_value(kind, window, cx);
-            },
-        ))
+            }),
+        )
     })
 }
 
@@ -764,9 +757,10 @@ fn vault_split(
             // pass `None` and the row stays masked.
             selected_entry.as_ref().and_then(|e| {
                 if shell.is_password_revealed(&e.id) {
-                    shell.state().read(cx).copy_selected_value(
-                        crate::app::CopyValueKind::Password,
-                    )
+                    shell
+                        .state()
+                        .read(cx)
+                        .copy_selected_value(crate::app::CopyValueKind::Password)
                 } else {
                     None
                 }
@@ -831,7 +825,11 @@ fn entry_list(
     }
     if rest_count > 0 {
         rows.push(ListRow::Header {
-            label: if showing_search { "Results" } else { "All entries" },
+            label: if showing_search {
+                "Results"
+            } else {
+                "All entries"
+            },
             count: rest_count,
         });
         rows.extend(
@@ -889,15 +887,9 @@ fn entry_list(
                                 let Some(entry) = entries.get(entry_ix) else {
                                     return div().into_any_element();
                                 };
-                                let is_selected =
-                                    selected_id.as_deref() == Some(entry.id.as_str());
-                                entry_row(
-                                    entry.clone(),
-                                    is_selected,
-                                    state_entity.clone(),
-                                    cx,
-                                )
-                                .into_any_element()
+                                let is_selected = selected_id.as_deref() == Some(entry.id.as_str());
+                                entry_row(entry.clone(), is_selected, state_entity.clone(), cx)
+                                    .into_any_element()
                             }
                             None => div().into_any_element(),
                         }
@@ -1004,10 +996,13 @@ fn entry_row(
     let updated = entry.updated.clone().unwrap_or_default();
     let starred = entry.starred;
     let tags = entry.tags.clone();
-    let fav_letter = entry.favicon.letter.clone();
-    let fav_palette = entry.favicon.palette_index;
+    let fav = entry.favicon.clone();
 
-    let bg = if selected { palette::blue_soft() } else { palette::panel() };
+    let bg = if selected {
+        palette::blue_soft()
+    } else {
+        palette::panel()
+    };
     let border = if selected {
         palette::blue_border()
     } else {
@@ -1056,78 +1051,80 @@ fn entry_row(
         .when(!selected, |this| {
             this.hover(|s| s.bg(palette::sidebar()).border_color(palette::border()))
         })
-        .child(favicon(&fav_letter, fav_palette, 28.))
+        .child(favicon(&fav, 28.))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
                 .child(
-                    v_flex()
-                        .gap_0p5()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .min_w(px(0.))
                         .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
+                            div()
+                                .flex_1()
                                 .min_w(px(0.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .truncate()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(palette::text())
-                                        .child(title),
-                                )
-                                .when(starred, |this| {
-                                    this.child(
-                                        gpui_component::Icon::from(
-                                            gpui_component::IconName::StarFill,
-                                        )
-                                        .with_size(gpui_component::Size::Size(px(11.)))
-                                        .text_color(palette::orange()),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
                                 .truncate()
-                                .text_xs()
-                                .text_color(palette::text_muted())
-                                .font_family("JetBrains Mono")
-                                .child(if username.is_empty() {
-                                    if url.is_empty() { "—".to_string() } else { url }
-                                } else {
-                                    username
-                                }),
-                        ),
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(palette::text())
+                                .child(title),
+                        )
+                        .when(starred, |this| {
+                            this.child(
+                                gpui_component::Icon::from(gpui_component::IconName::StarFill)
+                                    .with_size(gpui_component::Size::Size(px(11.)))
+                                    .text_color(palette::orange()),
+                            )
+                        }),
                 )
                 .child(
-                    v_flex()
-                        .items_end()
-                        .flex_shrink_0()
-                        .gap_1()
-                        .child({
-                            let mut row = h_flex().gap_1();
-                            for tag in tags.iter().take(2) {
-                                let tone = if tag.eq_ignore_ascii_case("Work") {
-                                    ChipTone::Orange
-                                } else if tag.eq_ignore_ascii_case("2FA") {
-                                    ChipTone::Green
-                                } else {
-                                    ChipTone::Blue
-                                };
-                                row = row.child(chip(tag.clone(), tone));
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(palette::text_muted())
+                        .font_family("JetBrains Mono")
+                        .child(if username.is_empty() {
+                            if url.is_empty() {
+                                "—".to_string()
+                            } else {
+                                url
                             }
-                            row
-                        })
-                        .child(
-                            div()
-                                .text_xs()
-                                .whitespace_nowrap()
-                                .text_color(palette::text_faint())
-                                .child(updated),
-                        ),
-                )
+                        } else {
+                            username
+                        }),
+                ),
+        )
+        .child(
+            v_flex()
+                .items_end()
+                .flex_shrink_0()
+                .gap_1()
+                .child({
+                    let mut row = h_flex().gap_1();
+                    for tag in tags.iter().take(2) {
+                        let tone = if tag.eq_ignore_ascii_case("Work") {
+                            ChipTone::Orange
+                        } else if tag.eq_ignore_ascii_case("2FA") {
+                            ChipTone::Green
+                        } else {
+                            ChipTone::Blue
+                        };
+                        row = row.child(chip(tag.clone(), tone));
+                    }
+                    row
+                })
+                .child(
+                    div()
+                        .text_xs()
+                        .whitespace_nowrap()
+                        .text_color(palette::text_faint())
+                        .child(updated),
+                ),
+        )
 }
 
 fn entry_detail(
@@ -1160,11 +1157,7 @@ fn entry_detail(
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("Select an entry"),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .child("Entry details will appear here."),
-            )
+            .child(div().text_sm().child("Entry details will appear here."))
             .into_any_element(),
     };
 
@@ -1207,8 +1200,7 @@ fn entry_detail_body(
     let starred = entry.starred;
     let entry_id_for_star = entry.id.clone();
     let state_for_star = state_entity.clone();
-    let fav_color = favicon_color(entry.favicon.palette_index);
-    let fav_letter = entry.favicon.letter.clone();
+    let fav = entry.favicon.clone();
     let has_password = entry.has_password;
     let has_otp = entry.has_otp;
     let tags = entry.tags.clone();
@@ -1234,20 +1226,7 @@ fn entry_detail_body(
             h_flex()
                 .gap_3()
                 .items_start()
-                .child(
-                    div()
-                        .size(px(44.))
-                        .rounded(px(9.))
-                        .bg(fav_color)
-                        .text_color(palette::panel())
-                        .text_lg()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .flex_shrink_0()
-                        .child(fav_letter),
-                )
+                .child(div().flex_shrink_0().child(favicon(&fav, 44.)))
                 .child(
                     v_flex()
                         .flex_1()
@@ -1281,14 +1260,12 @@ fn entry_detail_body(
                         .p_1p5()
                         .rounded(px(6.))
                         .hover(|s| s.bg(palette::panel()))
-                        .on_click(cx.listener(
-                            move |_: &mut AppShell, _: &ClickEvent, _, cx| {
-                                let id = entry_id_for_star.clone();
-                                state_for_star.update(cx, |state, cx| {
-                                    let _ = state.toggle_starred(&id, cx);
-                                });
-                            },
-                        ))
+                        .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+                            let id = entry_id_for_star.clone();
+                            state_for_star.update(cx, |state, cx| {
+                                let _ = state.toggle_starred(&id, cx);
+                            });
+                        }))
                         .child(
                             gpui_component::Icon::from(if starred {
                                 gpui_component::IconName::StarFill
@@ -1324,37 +1301,20 @@ fn entry_detail_body(
             value_or_dash(&username_for_row),
             true,
             !username.is_empty(),
-            cx.listener(
-                move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                    shell.copy_selected_value(
-                        crate::app::CopyValueKind::Username,
-                        window,
-                        cx,
-                    );
-                },
-            ),
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.copy_selected_value(crate::app::CopyValueKind::Username, window, cx);
+            }),
         ))
         .child(password_row(
             has_password,
             revealed_password.clone(),
-            cx.listener(
-                move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                    let _ = entry_id_for_password;
-                    shell.copy_selected_value(
-                        crate::app::CopyValueKind::Password,
-                        window,
-                        cx,
-                    );
-                },
-            ),
-            cx.listener(
-                move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                    shell.toggle_password_reveal(
-                        entry_id_for_reveal.clone(),
-                        cx,
-                    );
-                },
-            ),
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                let _ = entry_id_for_password;
+                shell.copy_selected_value(crate::app::CopyValueKind::Password, window, cx);
+            }),
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.toggle_password_reveal(entry_id_for_reveal.clone(), cx);
+            }),
         ))
         .child(clickable_field_row(
             "detail-row-url",
@@ -1362,11 +1322,9 @@ fn entry_detail_body(
             value_or_dash(&url_for_row),
             false,
             !url.is_empty(),
-            cx.listener(
-                move |_: &mut AppShell, _: &ClickEvent, _, cx| {
-                    cx.open_url(&ensure_scheme(&url_for_row));
-                },
-            ),
+            cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+                cx.open_url(&ensure_scheme(&url_for_row));
+            }),
         ));
 
     if has_otp {
@@ -1447,29 +1405,26 @@ fn entry_detail_body(
 
     body_col = body_col
         .child(
-            v_flex()
-                .gap_1()
-                .child(label("Notes"))
-                .child(
-                    div()
-                        .min_h(px(54.))
-                        .p_3()
-                        .rounded(px(6.))
-                        .bg(palette::panel())
-                        .border_1()
-                        .border_color(palette::border())
-                        .text_xs()
-                        .text_color(if notes.is_empty() {
-                            palette::text_faint()
-                        } else {
-                            palette::text()
-                        })
-                        .child(if notes.is_empty() {
-                            "No notes for this entry.".to_string()
-                        } else {
-                            notes
-                        }),
-                ),
+            v_flex().gap_1().child(label("Notes")).child(
+                div()
+                    .min_h(px(54.))
+                    .p_3()
+                    .rounded(px(6.))
+                    .bg(palette::panel())
+                    .border_1()
+                    .border_color(palette::border())
+                    .text_xs()
+                    .text_color(if notes.is_empty() {
+                        palette::text_faint()
+                    } else {
+                        palette::text()
+                    })
+                    .child(if notes.is_empty() {
+                        "No notes for this entry.".to_string()
+                    } else {
+                        notes
+                    }),
+            ),
         )
         .child(
             v_flex()
@@ -1837,11 +1792,9 @@ fn empty_panel(summary: &VaultSummary, cx: &mut Context<AppShell>) -> impl gpui:
             div()
                 .id("empty-open-vault")
                 .child(toolbar_button("Open vault", Some(AppIcon::Unlock), true))
-                .on_click(cx.listener(
-                    |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                        window.dispatch_action(Box::new(OpenVault), cx);
-                    },
-                )),
+                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(OpenVault), cx);
+                })),
         )
 }
 
@@ -1888,7 +1841,11 @@ fn status_bar(
                 .gap_1()
                 .items_center()
                 .child(dot(palette::green(), 6.0))
-                .child(if summary.is_open { "Unlocked" } else { "Locked" }),
+                .child(if summary.is_open {
+                    "Unlocked"
+                } else {
+                    "Locked"
+                }),
         )
         .child(format!(
             "{} entries · {} groups",
@@ -1907,10 +1864,7 @@ fn status_bar(
 ///   this state is usually visible only for the ~500 ms Argon2 KDF window.
 /// * **Failed** → red dot + truncated error + clickable "Retry" chip. Retry
 ///   re-fires the same `SaveVault` action that `cmd-s` triggers.
-fn save_status_pill(
-    status: &SaveStatus,
-    cx: &mut Context<AppShell>,
-) -> impl gpui::IntoElement {
+fn save_status_pill(status: &SaveStatus, cx: &mut Context<AppShell>) -> impl gpui::IntoElement {
     match status {
         SaveStatus::Idle | SaveStatus::Saved => h_flex()
             .gap_1()
@@ -1962,14 +1916,9 @@ fn save_status_pill(
                         .items_center()
                         .justify_center()
                         .child("Retry")
-                        .on_click(cx.listener(
-                            |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                                window.dispatch_action(
-                                    Box::new(crate::app::actions::SaveVault),
-                                    cx,
-                                );
-                            },
-                        )),
+                        .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                            window.dispatch_action(Box::new(crate::app::actions::SaveVault), cx);
+                        })),
                 )
                 .into_any_element()
         }
