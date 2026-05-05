@@ -5,7 +5,7 @@ use crate::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
             DeleteEntry, EditEntry, SaveVault, ToggleTheme,
             FocusSearch, LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSettings,
-            OpenSyncSettings, OpenVault, SubmitPassword,
+            OpenSyncSettings, OpenVault, SubmitPassword, SyncNow,
         },
     },
     keepass::KeePassRepository,
@@ -677,6 +677,33 @@ impl AppShell {
         self.settings_tab = SettingsTab::Sync;
         self.state
             .update(cx, |state, cx| state.open_overlay(Overlay::Settings, cx));
+    }
+
+    fn on_action_sync_now(
+        &mut self,
+        _: &SyncNow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::app::SyncStatus;
+
+        let status = self.state.read(cx).sync_status().clone();
+        match status {
+            // Nothing to sync against — fall back to the Sync settings tab
+            // so the user can connect or re-authenticate.
+            SyncStatus::Disconnected | SyncStatus::Reconnect => {
+                window.dispatch_action(Box::new(OpenSyncSettings), cx);
+            }
+            // Already in flight or awaiting user input — do nothing.
+            SyncStatus::Syncing
+            | SyncStatus::Connecting
+            | SyncStatus::Restoring
+            | SyncStatus::Conflict(_) => {}
+            SyncStatus::Idle | SyncStatus::Synced { .. } | SyncStatus::Failed(_) => {
+                self.state
+                    .update(cx, |state, cx| state.sync_now(cx));
+            }
+        }
     }
 
     fn on_action_new_entry(
@@ -1377,6 +1404,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_open_connect))
             .on_action(cx.listener(Self::on_action_open_settings))
             .on_action(cx.listener(Self::on_action_open_sync_settings))
+            .on_action(cx.listener(Self::on_action_sync_now))
             .on_action(cx.listener(Self::on_action_new_entry))
             .on_action(cx.listener(Self::on_action_open_conflict_demo))
             .on_action(cx.listener(Self::on_action_create_vault))

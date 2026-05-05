@@ -16,6 +16,7 @@ actions!(
         OpenConnect,
         OpenSettings,
         OpenSyncSettings,
+        SyncNow,
         NewEntry,
         OpenConflictDemo,
         CreateVault,

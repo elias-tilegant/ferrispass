@@ -11,7 +11,7 @@ use gpui_component::{
 
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
-    actions::{LockVault, NewEntry, OpenSyncSettings, OpenVault},
+    actions::{LockVault, NewEntry, OpenSyncSettings, OpenVault, SyncNow},
 };
 use crate::domain::{VaultEntry, VaultGroup, VaultSnapshot};
 use crate::ui::app_shell::AppShell;
@@ -558,7 +558,7 @@ fn workspace_toolbar(
                 .child(toolbar_button("Sync", Some(AppIcon::Sync), false))
                 .on_click(cx.listener(
                     |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                        window.dispatch_action(Box::new(OpenSyncSettings), cx);
+                        window.dispatch_action(Box::new(SyncNow), cx);
                     },
                 )),
         )
