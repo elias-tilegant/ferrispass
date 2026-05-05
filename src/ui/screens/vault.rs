@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, Render, StatefulInteractiveElement as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Sizable as _, h_flex,
@@ -229,17 +229,44 @@ fn library_section(
             L::RecentlyUsed,
             cx,
         ))
-        .child(nav_row(
-            "lib-trash",
-            AppIcon::Note,
-            "Trash",
-            None,
-            selection.is_trash(),
-            palette::text_muted(),
-            state_entity,
-            L::Trash,
-            cx,
-        ))
+        .child({
+            // Trash gets the same drop wiring as group rows, but the
+            // drop calls `delete_entry` (which lazily creates the
+            // recycle bin if missing) — same semantics as the
+            // explicit Delete button. Build the drop listener BEFORE
+            // calling nav_row so the two cx borrows don't overlap (in
+            // edition 2024 the `impl IntoElement` return captures cx).
+            let state_for_drop = state_entity.clone();
+            let drop_listener = cx.listener(
+                move |_: &mut AppShell, drag: &EntryDrag, _, cx| {
+                    let entry_id = drag.entry_id.clone();
+                    state_for_drop.update(cx, |state, cx| {
+                        let _ = state.delete_entry(&entry_id, cx);
+                    });
+                },
+            );
+            let trash_row = nav_row(
+                "lib-trash",
+                AppIcon::Note,
+                "Trash",
+                None,
+                selection.is_trash(),
+                palette::text_muted(),
+                state_entity,
+                L::Trash,
+                cx,
+            );
+            div()
+                .id("lib-trash-drop")
+                .rounded(px(6.))
+                .drag_over::<EntryDrag>(|this, _, _, _| {
+                    this.bg(palette::orange_soft())
+                        .border_1()
+                        .border_color(palette::orange())
+                })
+                .on_drop(drop_listener)
+                .child(trash_row)
+        })
 }
 
 fn groups_section(
@@ -262,21 +289,50 @@ fn groups_section(
         let group_id = group.id.clone();
         let count = group.entry_count();
         let state_for_click = state_entity.clone();
+        let group_id_for_drop = group.id.clone();
+        let state_for_drop = state_entity.clone();
 
-        col = col.child(nav_pill(
-            gpui::SharedString::from(format!("group-{}", group.id)),
-            AppIcon::Note,
-            &group.name,
-            Some(count),
-            is_selected,
-            color,
-            cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
-                let id = group_id.clone();
-                state_for_click.update(cx, |state, cx| {
-                    state.select_group(id, cx);
-                });
-            }),
-        ));
+        // Wrap the nav_pill in a stateful div that acts as a drop
+        // target for entry-row drags. Wrapper, not nav_pill itself,
+        // because nav_pill returns `impl IntoElement` (opaque) and we
+        // want to keep its API tight — droppability is a sidebar-only
+        // concern. Bg highlight on drag-over draws through nav_pill's
+        // mx(6.) gap and its transparent background for unselected
+        // groups; selected groups already have solid blue, so the
+        // drop target reads visually via the wrapper's outline.
+        col = col.child(
+            div()
+                .id(gpui::SharedString::from(format!("group-drop-{}", group.id)))
+                .rounded(px(6.))
+                .drag_over::<EntryDrag>(|this, _, _, _| {
+                    this.bg(palette::blue_soft())
+                        .border_1()
+                        .border_color(palette::blue())
+                })
+                .on_drop(cx.listener(
+                    move |_: &mut AppShell, drag: &EntryDrag, _, cx| {
+                        let target = group_id_for_drop.clone();
+                        let entry_id = drag.entry_id.clone();
+                        state_for_drop.update(cx, |state, cx| {
+                            let _ = state.move_entry(&entry_id, &target, cx);
+                        });
+                    },
+                ))
+                .child(nav_pill(
+                    gpui::SharedString::from(format!("group-{}", group.id)),
+                    AppIcon::Note,
+                    &group.name,
+                    Some(count),
+                    is_selected,
+                    color,
+                    cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+                        let id = group_id.clone();
+                        state_for_click.update(cx, |state, cx| {
+                            state.select_group(id, cx);
+                        });
+                    }),
+                )),
+        );
     }
     col
 }
@@ -958,12 +1014,29 @@ fn entry_row(
         palette::panel()
     };
 
+    let drag_payload = EntryDrag {
+        entry_id: entry_id.clone(),
+        title: if title.trim().is_empty() {
+            "(untitled)".to_string()
+        } else {
+            title.clone()
+        },
+    };
+
     h_flex()
         .id(gpui::SharedString::from(format!("entry-{entry_id}")))
         .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
             let id = entry_id.clone();
             state_entity.update(cx, |state, cx| state.select_entry(id, cx));
         }))
+        // Drag-source. The closure builds a fresh preview entity
+        // anchored at the cursor; GPUI handles offset + repaint.
+        .on_drag(drag_payload, |drag, _offset, _window, cx| {
+            let title = drag.title.clone();
+            cx.new(|_| EntryDragPreview {
+                title: title.into(),
+            })
+        })
         // `w_full` is essential here: without it the entry row sizes to its
         // *content* (favicon + title + tags) and the tag/time column ends up
         // snuggled against the title instead of pinned to the panel edge.
@@ -1907,4 +1980,47 @@ fn save_status_pill(
 fn _status_badge_unused(text: &'static str) {
     let _ = status_badge(text, ChipTone::Green);
     let _ = label("noop");
+}
+
+// ============================================================
+// Drag-and-drop: relocate entries between groups
+// ============================================================
+
+/// Payload that travels with an entry-row drag. Carries the id (for
+/// the move) and the title (for the drag preview that follows the
+/// cursor). Captured as `T` in `on_drag::<EntryDrag, _>(...)`.
+#[derive(Clone)]
+pub struct EntryDrag {
+    pub entry_id: String,
+    pub title: String,
+}
+
+/// Tiny floating chip rendered as the drag preview. GPUI requires the
+/// preview to be a `Render` entity, so this gets `cx.new`-ed inside
+/// the `on_drag` constructor.
+pub struct EntryDragPreview {
+    title: gpui::SharedString,
+}
+
+impl Render for EntryDragPreview {
+    fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        h_flex()
+            .h(px(28.))
+            .px(px(10.))
+            .rounded(px(6.))
+            .bg(palette::panel())
+            .border_1()
+            .border_color(palette::blue_border())
+            .text_xs()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(palette::text())
+            .items_center()
+            .gap_1p5()
+            .child(
+                gpui_component::Icon::from(AppIcon::Note)
+                    .with_size(gpui_component::Size::Size(px(11.)))
+                    .text_color(palette::blue()),
+            )
+            .child(self.title.clone())
+    }
 }

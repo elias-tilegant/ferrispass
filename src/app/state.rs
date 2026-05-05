@@ -754,6 +754,42 @@ impl AppState {
         self.run_entry_mutation(cx, |doc| doc.restore_entry(entry_id), entry_id)
     }
 
+    /// Move an entry into a different group. Used by drag-and-drop.
+    /// Mirrors the update/delete pattern: refresh the visible-entries
+    /// cache against the current selection (which may now exclude the
+    /// moved entry, e.g. when viewing only one group), then schedule a
+    /// background save. Selection-tracking is intentionally lazy —
+    /// `vault_browser()` falls back to the first visible entry if the
+    /// previously-selected one disappears from view, so we don't need
+    /// to repoint `selected_entry_id` here.
+    pub fn move_entry(
+        &mut self,
+        entry_id: &str,
+        target_group_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        {
+            let VaultStatus::Open {
+                document,
+                selection,
+                search_query,
+                visible_entries,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            document.move_entry(entry_id, target_group_id)?;
+
+            *visible_entries =
+                Rc::new(entries_for_selection(document.snapshot(), selection, search_query));
+        }
+        cx.notify();
+        self.save_async(cx);
+        Ok(())
+    }
+
     /// Toggle the favourite-marker on an entry. Mutates the underlying
     /// `Favorite` tag through `VaultDocument`, refreshes the visible
     /// snapshot caches so the star icon updates immediately, and

@@ -231,6 +231,32 @@ impl VaultDocument {
         Ok(())
     }
 
+    /// Move an entry into `target_group_id`. Used by the drag-and-drop UI
+    /// to relocate entries between groups; trash-drop and the explicit
+    /// delete buttons go through `delete_entry` instead so the recycle
+    /// bin gets lazily created when needed.
+    pub fn move_entry(
+        &mut self,
+        entry_id_str: &str,
+        target_group_id_str: &str,
+    ) -> Result<(), MutationError> {
+        let entry_id = find_entry_id(&self.database, entry_id_str)
+            .ok_or(MutationError::EntryNotFound)?;
+        let target_id = find_group_id(&self.database, target_group_id_str)
+            .ok_or(MutationError::GroupNotFound)?;
+        let mut entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        entry
+            .move_to(target_id)
+            .map_err(|_| MutationError::GroupNotFound)?;
+        entry.times.last_modification = Some(keepass::db::Times::now());
+        drop(entry);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
     /// Move an entry to the database's Recycle Bin (creating one if missing).
     /// We deliberately don't expose hard-delete from this API yet — that lives
     /// behind the future "Empty trash" affordance in the Trash sidebar view.
@@ -764,6 +790,115 @@ mod tests {
             vec!["Personal".to_string(), "Mail".to_string()],
             "edit must not wipe tags it doesn't manage"
         );
+    }
+
+    #[test]
+    fn move_entry_relocates_between_groups() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        // Set up two child groups under root.
+        let work_id = {
+            let mut root = doc.database.root_mut();
+            let mut group = root.add_group();
+            group.name = "Work".into();
+            let id = group.id().to_string();
+            drop(group);
+            drop(root);
+            id
+        };
+        let personal_id = {
+            let mut root = doc.database.root_mut();
+            let mut group = root.add_group();
+            group.name = "Personal".into();
+            let id = group.id().to_string();
+            drop(group);
+            drop(root);
+            id
+        };
+        doc.refresh_snapshot();
+
+        // Create the entry in Work.
+        let entry_id = doc
+            .create_entry(
+                &work_id,
+                &EntryDraft {
+                    title: "Movable".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        // Sanity: lives in Work.
+        assert!(
+            doc.snapshot()
+                .find_group(&work_id)
+                .unwrap()
+                .entries
+                .iter()
+                .any(|e| e.id == entry_id)
+        );
+
+        // Move to Personal.
+        doc.move_entry(&entry_id, &personal_id).expect("move");
+
+        assert!(
+            doc.snapshot()
+                .find_group(&personal_id)
+                .unwrap()
+                .entries
+                .iter()
+                .any(|e| e.id == entry_id),
+            "entry now in Personal"
+        );
+        assert!(
+            !doc.snapshot()
+                .find_group(&work_id)
+                .unwrap()
+                .entries
+                .iter()
+                .any(|e| e.id == entry_id),
+            "entry no longer in Work"
+        );
+
+        // Move back to root.
+        doc.move_entry(&entry_id, &root_id).expect("move-to-root");
+        assert!(
+            doc.snapshot()
+                .root
+                .entries
+                .iter()
+                .any(|e| e.id == entry_id),
+            "entry now at root"
+        );
+    }
+
+    #[test]
+    fn move_entry_rejects_unknown_ids() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "X".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        assert!(matches!(
+            doc.move_entry("not-an-entry", &root_id),
+            Err(MutationError::EntryNotFound)
+        ));
+        assert!(matches!(
+            doc.move_entry(&id, "not-a-group"),
+            Err(MutationError::GroupNotFound)
+        ));
     }
 
     #[test]
