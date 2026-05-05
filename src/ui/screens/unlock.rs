@@ -16,9 +16,16 @@ use crate::ui::palette;
 use crate::ui::widgets::atoms::label;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
-    let prompt = match shell.state().read(cx).unlock_prompt() {
+    let state = shell.state().read(cx);
+    let prompt = match state.unlock_prompt() {
         Some(p) => p,
         None => return div().into_any_element(),
+    };
+    let summary = state.summary();
+    let subtitle = match (&summary.provider, &summary.synced_at) {
+        (Some(provider), Some(synced)) => format!("{provider} · {synced}"),
+        (Some(provider), None) => provider.clone(),
+        _ => prompt.display_path.clone(),
     };
 
     div()
@@ -70,7 +77,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                         .text_xs()
                                         .text_color(palette::text_muted())
                                         .font_family("JetBrains Mono")
-                                        .child("OneDrive · synced 2 minutes ago"),
+                                        .child(subtitle),
                                 ),
                         ),
                 )
