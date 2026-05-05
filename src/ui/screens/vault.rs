@@ -11,7 +11,7 @@ use gpui_component::{
 
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
-    actions::{LockVault, NewEntry, OpenSyncSettings, OpenVault, SyncNow},
+    actions::{LockVault, NewEntry, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SyncNow},
 };
 use crate::domain::{VaultEntry, VaultGroup, VaultSnapshot};
 use crate::ui::app_shell::AppShell;
@@ -86,11 +86,16 @@ fn sidebar(
         .border_color(palette::border())
         .child(
             h_flex()
+                .id("sidebar-vault-header")
                 .gap_2()
                 .items_center()
                 .px_3p5()
                 .pt_3()
                 .pb_2()
+                .hover(|s| s.bg(palette::panel()))
+                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(OpenVaultSwitcher), cx);
+                }))
                 .child(brand(22.))
                 .child(
                     v_flex()
@@ -113,6 +118,11 @@ fn sidebar(
                                 .child(dot(palette::green(), 6.0))
                                 .child(if summary.is_open { "Synced" } else { "Locked" }),
                         ),
+                )
+                .child(
+                    gpui_component::Icon::from(gpui_component::IconName::ChevronDown)
+                        .with_size(gpui_component::Size::Size(px(12.)))
+                        .text_color(palette::text_muted()),
                 ),
         )
         .child(

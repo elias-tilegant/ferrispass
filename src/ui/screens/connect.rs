@@ -36,9 +36,16 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let (step_index, body) = match &flow {
         ConnectFlow::PickProvider => (1usize, render_pick_provider(cx)),
         ConnectFlow::SigningIn { challenge } => (2, render_signing_in(challenge, cx)),
-        ConnectFlow::Picking { results, query, loading, error, .. } => {
-            (3, render_picking(shell, results, query, *loading, error.as_deref(), cx))
-        }
+        ConnectFlow::Picking {
+            results,
+            query,
+            loading,
+            error,
+            ..
+        } => (
+            3,
+            render_picking(shell, results, query, *loading, error.as_deref(), cx),
+        ),
         ConnectFlow::Downloading => (3, render_downloading(cx)),
         ConnectFlow::Failed(msg) => (1, render_failed(msg, cx)),
     };
@@ -138,14 +145,16 @@ fn provider_row_button(
 ) -> AnyElement {
     let row = div().id(provider.id.clone()).child(provider_row(provider));
     if enabled {
-        row.on_click(cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            // SharePoint button → go straight to device-code sign-in (no
-            // URL entry step; user picks the file from the post-auth list).
-            shell
-                .state()
-                .clone()
-                .update(cx, |state, cx| state.start_sharepoint_connect(cx));
-        }))
+        row.on_click(
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                // SharePoint button → go straight to device-code sign-in (no
+                // URL entry step; user picks the file from the post-auth list).
+                shell
+                    .state()
+                    .clone()
+                    .update(cx, |state, cx| state.start_sharepoint_connect(cx));
+            }),
+        )
         .into_any_element()
     } else {
         row.on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
@@ -280,9 +289,7 @@ fn render_picking(
         let q = query.to_lowercase();
         results
             .iter()
-            .filter(|h| {
-                h.name.to_lowercase().contains(&q) || h.path.to_lowercase().contains(&q)
-            })
+            .filter(|h| h.name.to_lowercase().contains(&q) || h.path.to_lowercase().contains(&q))
             .cloned()
             .collect()
     };
@@ -297,7 +304,13 @@ fn render_picking(
                     .w_full()
                     .rounded(px(2.))
                     .bg(palette::sidebar())
-                    .child(div().h_full().w(gpui::relative(0.4)).rounded(px(2.)).bg(palette::blue())),
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(0.4))
+                            .rounded(px(2.))
+                            .bg(palette::blue()),
+                    ),
             )
             .child(
                 div()
@@ -443,9 +456,11 @@ fn picker_row(hit: DriveItemHit, last: bool, cx: &mut Context<AppShell>) -> AnyE
                 .text_color(palette::text_faint())
                 .child(modified),
         )
-        .on_click(cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-            shell.start_pick_kdbx_file(hit_for_click.clone(), window, cx);
-        }))
+        .on_click(
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.start_pick_kdbx_file(hit_for_click.clone(), window, cx);
+            }),
+        )
         .into_any_element()
 }
 
@@ -503,7 +518,13 @@ fn render_downloading(_cx: &mut Context<AppShell>) -> AnyElement {
                 .w_full()
                 .rounded(px(2.))
                 .bg(palette::sidebar())
-                .child(div().h_full().w(gpui::relative(0.4)).rounded(px(2.)).bg(palette::blue())),
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(0.4))
+                        .rounded(px(2.))
+                        .bg(palette::blue()),
+                ),
         )
         .into_any_element()
 }
@@ -531,16 +552,14 @@ fn render_failed(msg: &str, cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::text())
                 .child(msg_owned),
         )
-        .child(
-            h_flex().gap_3().pt_2().child(secondary_button(
-                "Back",
-                "back-to-providers",
-                cx,
-                |state, cx| {
-                    state.connect_flow_set(ConnectFlow::PickProvider, cx);
-                },
-            )),
-        )
+        .child(h_flex().gap_3().pt_2().child(secondary_button(
+            "Back",
+            "back-to-providers",
+            cx,
+            |state, cx| {
+                state.connect_flow_set(ConnectFlow::PickProvider, cx);
+            },
+        )))
         .into_any_element()
 }
 
@@ -640,8 +659,13 @@ fn secondary_button(
         .items_center()
         .justify_center()
         .child(label)
-        .on_click(cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            shell.state().clone().update(cx, |state, cx| on_click(state, cx));
-        }))
+        .on_click(
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell
+                    .state()
+                    .clone()
+                    .update(cx, |state, cx| on_click(state, cx));
+            }),
+        )
         .into_any_element()
 }

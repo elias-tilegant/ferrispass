@@ -12,8 +12,8 @@
 //! them as live data is a future job (would need a sync-event log).
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gpui_component::{Sizable as _, WindowExt as _, h_flex, v_flex};
 
@@ -297,7 +297,10 @@ fn sync_now_button(cx: &mut Context<AppShell>) -> AnyElement {
         )
         .child("Sync now")
         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            shell.state().clone().update(cx, |state, cx| state.sync_now(cx));
+            shell
+                .state()
+                .clone()
+                .update(cx, |state, cx| state.sync_now(cx));
         }))
         .into_any_element()
 }
@@ -318,13 +321,15 @@ fn disconnect_button(cx: &mut Context<AppShell>) -> AnyElement {
         .items_center()
         .justify_center()
         .child("Disconnect")
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-            shell.state().clone().update(cx, |state, cx| {
-                state.disconnect_sync(cx);
-                let _ = state.close_overlay(cx);
-            });
-            window.push_notification("Cloud sync disconnected.", cx);
-        }))
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.state().clone().update(cx, |state, cx| {
+                    state.disconnect_sync(cx);
+                    let _ = state.close_overlay(cx);
+                });
+                window.push_notification("Cloud sync disconnected.", cx);
+            }),
+        )
         .into_any_element()
 }
 

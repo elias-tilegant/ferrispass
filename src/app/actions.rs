@@ -6,6 +6,7 @@ actions!(
     stc_keepass,
     [
         OpenVault,
+        OpenVaultSwitcher,
         SubmitPassword,
         CancelUnlock,
         LockVault,
@@ -34,7 +35,11 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
 
     cx.bind_keys([
-        KeyBinding::new("cmd-o", OpenVault, Some(APP_CONTEXT)),
+        // ⌘O opens the vault switcher (recents + filter + Browse…). The
+        // raw file-dialog action `OpenVault` is still wired so the
+        // switcher's "Browse other vault…" row, the Welcome screen, and
+        // the Unlock screen's fallback can dispatch it directly.
+        KeyBinding::new("cmd-o", OpenVaultSwitcher, Some(APP_CONTEXT)),
         KeyBinding::new("enter", SubmitPassword, Some(APP_CONTEXT)),
         KeyBinding::new("escape", CancelUnlock, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-l", LockVault, Some(APP_CONTEXT)),

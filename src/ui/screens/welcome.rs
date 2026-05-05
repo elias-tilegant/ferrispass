@@ -1,13 +1,13 @@
 use gpui::{
-    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
+use crate::app::RecentEntry;
 use crate::app::actions::{CreateVault, OpenConnect};
 use crate::app::time::relative_time_label;
-use crate::app::RecentEntry;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
@@ -16,7 +16,7 @@ use crate::ui::widgets::brand::brand;
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let theme = cx.theme();
     let bg_overlay = format!(
-        "background:radial-gradient(ellipse at 30% 20%,{} 0%, transparent 60%)," ,
+        "background:radial-gradient(ellipse at 30% 20%,{} 0%, transparent 60%),",
         css_color(palette::blue_soft())
     );
     let _ = bg_overlay;
@@ -136,74 +136,92 @@ fn choice_row<F>(
 where
     F: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 {
-    let bg = if accent { palette::blue_soft() } else { palette::sidebar() };
-    let border = if accent { palette::blue_border() } else { palette::border() };
-    let icon_bg = if accent { palette::blue() } else { palette::panel() };
-    let icon_color = if accent { palette::panel() } else { palette::text() };
-    let title_color = if accent { palette::blue_hover() } else { palette::text() };
+    let bg = if accent {
+        palette::blue_soft()
+    } else {
+        palette::sidebar()
+    };
+    let border = if accent {
+        palette::blue_border()
+    } else {
+        palette::border()
+    };
+    let icon_bg = if accent {
+        palette::blue()
+    } else {
+        palette::panel()
+    };
+    let icon_color = if accent {
+        palette::panel()
+    } else {
+        palette::text()
+    };
+    let title_color = if accent {
+        palette::blue_hover()
+    } else {
+        palette::text()
+    };
 
-    div()
-        .id(id)
-        .on_click(on_click)
-        .child(
-            h_flex()
-                .gap_3()
-                .items_center()
-                .p_3()
-                .rounded(px(8.))
-                .bg(bg)
-                .border_1()
-                .border_color(border)
-                .child(
-                    div()
-                        .size(px(32.))
-                        .rounded(px(7.))
-                        .bg(icon_bg)
-                        .text_color(icon_color)
-                        .border_1()
-                        .border_color(if accent { palette::blue() } else { palette::border() })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            gpui_component::Icon::from(icon)
-                                .with_size(gpui_component::Size::Size(px(15.))),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(title_color)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(palette::text_muted())
-                                .child(meta),
-                        ),
-                )
-                .child(
-                    gpui_component::Icon::from(gpui_component::IconName::ChevronRight)
-                        .with_size(gpui_component::Size::Size(px(14.)))
-                        .text_color(palette::text_faint()),
-                ),
-        )
+    div().id(id).on_click(on_click).child(
+        h_flex()
+            .gap_3()
+            .items_center()
+            .p_3()
+            .rounded(px(8.))
+            .bg(bg)
+            .border_1()
+            .border_color(border)
+            .child(
+                div()
+                    .size(px(32.))
+                    .rounded(px(7.))
+                    .bg(icon_bg)
+                    .text_color(icon_color)
+                    .border_1()
+                    .border_color(if accent {
+                        palette::blue()
+                    } else {
+                        palette::border()
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        gpui_component::Icon::from(icon)
+                            .with_size(gpui_component::Size::Size(px(15.))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(title_color)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette::text_muted())
+                            .child(meta),
+                    ),
+            )
+            .child(
+                gpui_component::Icon::from(gpui_component::IconName::ChevronRight)
+                    .with_size(gpui_component::Size::Size(px(14.)))
+                    .text_color(palette::text_faint()),
+            ),
+    )
 }
 
 /// "Recent" section above the three choice rows. Hidden when the
 /// recents list is empty (`render` skips this whole subtree via `.when`).
 /// Caps the visible list at 5 — enough to give a useful shortcut without
 /// dwarfing the primary actions.
-fn recents_section(
-    recents: &[RecentEntry],
-    cx: &mut Context<AppShell>,
-) -> impl IntoElement {
+fn recents_section(recents: &[RecentEntry], cx: &mut Context<AppShell>) -> impl IntoElement {
     let now = chrono::Local::now();
     v_flex()
         .gap_2()
@@ -216,11 +234,9 @@ fn recents_section(
         )
         .children(recents.iter().take(5).enumerate().map(|(idx, entry)| {
             let path_for_listener = entry.path.clone();
-            let on_click = cx.listener(
-                move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                    shell.open_recent(path_for_listener.clone(), window, cx);
-                },
-            );
+            let on_click = cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.open_recent(path_for_listener.clone(), window, cx);
+            });
             recent_row(idx, entry, now, on_click)
         }))
 }

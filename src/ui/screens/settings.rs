@@ -4,9 +4,8 @@
 //! visual hierarchy doesn't change as we fill them in.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px,
+    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
@@ -132,11 +131,11 @@ fn sidebar_item(
         div()
             .id(id)
             .cursor_pointer()
-            .on_click(cx.listener(
-                move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            .on_click(
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                     shell.set_settings_tab(target, cx);
-                },
-            ))
+                }),
+            )
             .child(row)
             .into_any_element()
     } else {
@@ -189,14 +188,7 @@ fn content_panel(
                         .child(subtitle),
                 ),
         )
-        .child(
-            v_flex()
-                .flex_1()
-                .min_h(px(0.))
-                .gap_6()
-                .p_8()
-                .child(body),
-        )
+        .child(v_flex().flex_1().min_h(px(0.)).gap_6().p_8().child(body))
         .into_any_element()
 }
 
@@ -236,10 +228,7 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
         .child(clipboard_section(&settings, cx))
 }
 
-fn auto_lock_section(
-    settings: &AppSettings,
-    cx: &mut Context<AppShell>,
-) -> impl IntoElement {
+fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
     let current = settings.auto_lock_secs;
     let mut row = h_flex().gap_2().flex_wrap();
     for (idx, preset) in AUTO_LOCK_PRESETS.iter().enumerate() {
@@ -268,10 +257,7 @@ fn auto_lock_section(
     )
 }
 
-fn clipboard_section(
-    settings: &AppSettings,
-    cx: &mut Context<AppShell>,
-) -> impl IntoElement {
+fn clipboard_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
     let current = settings.clipboard_clear_secs;
     let mut row = h_flex().gap_2().flex_wrap();
     for (idx, preset) in CLIPBOARD_CLEAR_PRESETS.iter().enumerate() {
@@ -335,7 +321,11 @@ where
     let (bg, fg, border) = if selected {
         (palette::blue(), palette::panel(), palette::blue_hover())
     } else {
-        (palette::sidebar(), palette::text(), palette::border_strong())
+        (
+            palette::sidebar(),
+            palette::text(),
+            palette::border_strong(),
+        )
     };
 
     div()

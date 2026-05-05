@@ -1,8 +1,8 @@
 use crate::app::recents::{self, RecentEntry};
 use crate::app::time::relative_time_label;
 use crate::domain::{VaultEntry, VaultSnapshot};
-use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
 use crate::keepass::merge::{ConflictReport, Side};
+use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
 use crate::sync::auth::{AccessToken, DeviceCodeChallenge};
 use crate::sync::config::SyncConfig;
 use crate::sync::graph::DriveItemHit;
@@ -230,6 +230,10 @@ pub enum Overlay {
     EditEntry { entry_id: String },
     /// Three-way conflict resolution.
     Conflict,
+    /// Quick vault picker — recents list + filter + "Browse other…" row.
+    /// Universal like `Settings`: reachable from any vault state, including
+    /// Welcome and Unlock screens.
+    VaultSwitcher,
 }
 
 impl Overlay {
@@ -334,7 +338,17 @@ impl AppState {
         if self.overlay == overlay {
             return;
         }
+        // Switching directly between overlays (e.g. ⌘O while Connect is
+        // mid-`SigningIn`) has to run the same teardown as
+        // `close_overlay` — otherwise the device-code polling loop would
+        // outlive the overlay and keep mutating `connect_flow` /
+        // `sync_status` behind a screen the user has already moved on
+        // from.
+        let leaving_connect = matches!(self.overlay, Overlay::Connect);
         self.overlay = overlay;
+        if leaving_connect {
+            self.unwind_connect_flow();
+        }
         cx.notify();
     }
 
@@ -342,24 +356,34 @@ impl AppState {
         if matches!(self.overlay, Overlay::None) {
             return false;
         }
-        let was_connect = matches!(self.overlay, Overlay::Connect);
+        let leaving_connect = matches!(self.overlay, Overlay::Connect);
         self.overlay = Overlay::None;
-        // Closing the Connect overlay also unwinds its flow state; otherwise
-        // the next "Connect SharePoint" click would re-open into whichever
-        // sub-step the user left it on (e.g., a stale "Failed" message).
-        if was_connect {
-            self.connect_flow = None;
-            // Cancel any in-flight Connecting status; if it's still mid-poll
-            // the polling loop will notice connect_flow is None and exit.
-            if matches!(self.sync_status, SyncStatus::Connecting | SyncStatus::Failed(_)) {
-                self.sync_status = match &self.sync {
-                    Some(_) => SyncStatus::Idle,
-                    None => SyncStatus::Disconnected,
-                };
-            }
+        if leaving_connect {
+            self.unwind_connect_flow();
         }
         cx.notify();
         true
+    }
+
+    /// Drop any in-flight Connect state when the Connect overlay is left,
+    /// regardless of whether we're closing to None or jumping to a
+    /// different overlay. The device-code polling loop watches
+    /// `connect_flow` and exits when it observes `None`; the sync status
+    /// reset clears whichever transient `Connecting` / `Failed` pill the
+    /// flow had pushed. Without this the next "Connect SharePoint" click
+    /// would also re-open into whichever sub-step the user left it on
+    /// (e.g. a stale "Failed" message).
+    fn unwind_connect_flow(&mut self) {
+        self.connect_flow = None;
+        if matches!(
+            self.sync_status,
+            SyncStatus::Connecting | SyncStatus::Failed(_)
+        ) {
+            self.sync_status = match &self.sync {
+                Some(_) => SyncStatus::Idle,
+                None => SyncStatus::Disconnected,
+            };
+        }
     }
 
     pub fn request_password(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -423,10 +447,8 @@ impl AppState {
             Ok(document) => {
                 let snapshot = document.snapshot();
                 let selection = LibrarySelection::Group(snapshot.root.id.clone());
-                let selected_entry_id =
-                    snapshot.root.entries.first().map(|entry| entry.id.clone());
-                let visible_entries =
-                    Rc::new(entries_for_selection(snapshot, &selection, ""));
+                let selected_entry_id = snapshot.root.entries.first().map(|entry| entry.id.clone());
+                let visible_entries = Rc::new(entries_for_selection(snapshot, &selection, ""));
                 let selected_strength = selected_entry_id
                     .as_deref()
                     .and_then(|id| document.strength_for_entry(id));
@@ -713,8 +735,11 @@ impl AppState {
 
             document.update_entry(entry_id, &draft)?;
 
-            *visible_entries =
-                Rc::new(entries_for_selection(document.snapshot(), selection, search_query));
+            *visible_entries = Rc::new(entries_for_selection(
+                document.snapshot(),
+                selection,
+                search_query,
+            ));
             // Re-score; the password may have changed.
             if selected_entry_id.as_deref() == Some(entry_id) {
                 *selected_strength = document.strength_for_entry(entry_id);
@@ -782,8 +807,11 @@ impl AppState {
 
             document.move_entry(entry_id, target_group_id)?;
 
-            *visible_entries =
-                Rc::new(entries_for_selection(document.snapshot(), selection, search_query));
+            *visible_entries = Rc::new(entries_for_selection(
+                document.snapshot(),
+                selection,
+                search_query,
+            ));
         }
         cx.notify();
         self.save_async(cx);
@@ -813,8 +841,11 @@ impl AppState {
 
             document.toggle_starred(entry_id)?;
 
-            *visible_entries =
-                Rc::new(entries_for_selection(document.snapshot(), selection, search_query));
+            *visible_entries = Rc::new(entries_for_selection(
+                document.snapshot(),
+                selection,
+                search_query,
+            ));
         }
         cx.notify();
         self.save_async(cx);
@@ -867,6 +898,19 @@ impl AppState {
         match &self.vault {
             VaultStatus::AwaitingPassword { path, .. } => Some(path.clone()),
             _ => None,
+        }
+    }
+
+    /// Path of the vault the user is currently looking at, regardless of
+    /// state (Open / Opening / AwaitingPassword). `None` on the Welcome
+    /// screen. Used by the vault switcher to mark the active row.
+    pub fn current_vault_path(&self) -> Option<PathBuf> {
+        match &self.vault {
+            VaultStatus::Open { path, .. }
+            | VaultStatus::Opening { path }
+            | VaultStatus::AwaitingPassword { path, .. } => Some(path.clone()),
+            VaultStatus::Empty => None,
+            VaultStatus::Error { path, .. } => path.clone(),
         }
     }
 
@@ -1192,9 +1236,7 @@ impl AppState {
         self.sync_status = SyncStatus::Connecting;
         cx.notify();
 
-        let task = cx.background_spawn(async move {
-            crate::sync::service::request_device_code()
-        });
+        let task = cx.background_spawn(async move { crate::sync::service::request_device_code() });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| match result {
@@ -1219,11 +1261,7 @@ impl AppState {
     /// Background polling loop. Runs until token received, code expired,
     /// auth declined, or the user cancels (we observe `connect_flow`
     /// transitioning out of `SigningIn` between iterations).
-    fn start_token_polling(
-        &mut self,
-        challenge: DeviceCodeChallenge,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_token_polling(&mut self, challenge: DeviceCodeChallenge, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let mut interval = challenge.interval;
             loop {
@@ -1253,9 +1291,9 @@ impl AppState {
 
                 let challenge_clone = challenge.clone();
                 let outcome = cx
-                    .background_spawn(async move {
-                        crate::sync::auth::poll_token(&challenge_clone)
-                    })
+                    .background_spawn(
+                        async move { crate::sync::auth::poll_token(&challenge_clone) },
+                    )
                     .await;
 
                 use crate::sync::auth::PollOutcome;
@@ -1302,14 +1340,19 @@ impl AppState {
     /// search call); results are filtered client-side as the user types.
     fn start_kdbx_search(&mut self, token: AccessToken, cx: &mut Context<Self>) {
         let token_for_task = token.clone();
-        let task = cx.background_spawn(async move {
-            crate::sync::service::list_kdbx_files(&token_for_task)
-        });
+        let task =
+            cx.background_spawn(
+                async move { crate::sync::service::list_kdbx_files(&token_for_task) },
+            );
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
-                if let Some(ConnectFlow::Picking { results, loading, error, .. }) =
-                    &mut state.connect_flow
+                if let Some(ConnectFlow::Picking {
+                    results,
+                    loading,
+                    error,
+                    ..
+                }) = &mut state.connect_flow
                 {
                     *loading = false;
                     match result {
@@ -1358,11 +1401,8 @@ impl AppState {
 
         let path_for_task = local_path.clone();
         let task = cx.background_spawn(async move {
-            let result = crate::sync::service::complete_connect_picked(
-                &hit,
-                token,
-                &path_for_task,
-            )?;
+            let result =
+                crate::sync::service::complete_connect_picked(&hit, token, &path_for_task)?;
             // Write bytes to disk before returning so the unlock flow's
             // `KeePassRepository::open` finds them.
             std::fs::write(&path_for_task, &result.remote_bytes).map_err(|e| {
@@ -1382,8 +1422,9 @@ impl AppState {
                         config: connect_result.config,
                         access_token: connect_result.access_token,
                     });
-                    state.sync_status =
-                        SyncStatus::Synced { at: chrono::Local::now() };
+                    state.sync_status = SyncStatus::Synced {
+                        at: chrono::Local::now(),
+                    };
                     state.connect_flow = None;
                     state.overlay = Overlay::None;
                     state.request_password(final_path, cx);
@@ -1424,8 +1465,7 @@ impl AppState {
         let task = cx.background_spawn(async move {
             let token = crate::sync::service::ensure_fresh(token, &config.account_email)?;
             let bytes = crate::sync::service::read_local(&local_path)?;
-            let outcome =
-                crate::sync::service::upload_after_save(&config, &token, &bytes)?;
+            let outcome = crate::sync::service::upload_after_save(&config, &token, &bytes)?;
             Ok::<_, crate::sync::service::ServiceError>((outcome, token))
         });
 
@@ -1446,11 +1486,15 @@ impl AppState {
                                 // conflict next push (and re-resolve).
                                 let _ = crate::sync::config::save(&b.config);
                             }
-                            state.sync_status =
-                                SyncStatus::Synced { at: chrono::Local::now() };
+                            state.sync_status = SyncStatus::Synced {
+                                at: chrono::Local::now(),
+                            };
                             cx.notify();
                         }
-                        UploadAfterSave::Conflict { remote_bytes, remote_etag } => {
+                        UploadAfterSave::Conflict {
+                            remote_bytes,
+                            remote_etag,
+                        } => {
                             state.handle_remote_conflict(
                                 remote_bytes,
                                 remote_etag,
@@ -1488,11 +1532,7 @@ impl AppState {
         };
         let local_db = document.database().clone();
 
-        match crate::keepass::KeePassRepository::open_bytes(
-            &remote_bytes,
-            &master_password,
-            None,
-        ) {
+        match crate::keepass::KeePassRepository::open_bytes(&remote_bytes, &master_password, None) {
             Ok(remote_doc) => {
                 let remote_db = remote_doc.database().clone();
                 let report = crate::keepass::merge::diff(&local_db, &remote_db);
@@ -1579,12 +1619,12 @@ impl AppState {
         cx.notify();
 
         let task = cx.background_spawn(async move {
-            payload.save_to(&local_path).map_err(|e| {
-                crate::sync::service::ServiceError::Io {
+            payload
+                .save_to(&local_path)
+                .map_err(|e| crate::sync::service::ServiceError::Io {
                     path: local_path.clone(),
                     source: std::io::Error::other(e.to_string()),
-                }
-            })?;
+                })?;
             let token = crate::sync::service::ensure_fresh(token, &config.account_email)?;
             let bytes = crate::sync::service::read_local(&local_path)?;
             let outcome = crate::sync::graph::upload_content(
@@ -1594,11 +1634,7 @@ impl AppState {
                 Some(&if_match),
                 &token,
             )?;
-            Ok::<_, crate::sync::service::ServiceError>((
-                outcome,
-                token,
-                local_path,
-            ))
+            Ok::<_, crate::sync::service::ServiceError>((outcome, token, local_path))
         });
 
         cx.spawn(async move |this, cx| {
@@ -1623,9 +1659,7 @@ impl AppState {
                                 None,
                             ) {
                                 Ok(reloaded) => {
-                                    if let VaultStatus::Open { document, .. } =
-                                        &mut state.vault
-                                    {
+                                    if let VaultStatus::Open { document, .. } = &mut state.vault {
                                         *document = Box::new(reloaded);
                                     }
                                 }
@@ -1635,8 +1669,9 @@ impl AppState {
                                     // re-open manually.
                                 }
                             }
-                            state.sync_status =
-                                SyncStatus::Synced { at: chrono::Local::now() };
+                            state.sync_status = SyncStatus::Synced {
+                                at: chrono::Local::now(),
+                            };
                             state.overlay = Overlay::None;
                             cx.notify();
                         }
@@ -1682,14 +1717,8 @@ fn entries_for_selection(
             .unwrap_or(&snapshot.root)
             .entries
             .clone(),
-        LibrarySelection::AllItems => snapshot
-            .entries_recursive()
-            .into_iter()
-            .cloned()
-            .collect(),
-        LibrarySelection::Favorites => {
-            snapshot.entries_starred().into_iter().cloned().collect()
-        }
+        LibrarySelection::AllItems => snapshot.entries_recursive().into_iter().cloned().collect(),
+        LibrarySelection::Favorites => snapshot.entries_starred().into_iter().cloned().collect(),
         LibrarySelection::RecentlyUsed => {
             let mut entries: Vec<VaultEntry> =
                 snapshot.entries_recursive().into_iter().cloned().collect();
@@ -1708,11 +1737,7 @@ fn entries_for_selection(
             .into_iter()
             .cloned()
             .collect(),
-        LibrarySelection::TotpEnabled => snapshot
-            .entries_with_otp()
-            .into_iter()
-            .cloned()
-            .collect(),
+        LibrarySelection::TotpEnabled => snapshot.entries_with_otp().into_iter().cloned().collect(),
     }
 }
 
@@ -1767,4 +1792,3 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
         SyncStatus::Reconnect => Some("Sign-in expired".into()),
     }
 }
-

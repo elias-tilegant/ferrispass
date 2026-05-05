@@ -1,10 +1,9 @@
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gpui_component::{
-    Sizable as _, WindowExt as _, checkbox::Checkbox, h_flex, input::Input,
-    slider::Slider, v_flex,
+    Sizable as _, WindowExt as _, checkbox::Checkbox, h_flex, input::Input, slider::Slider, v_flex,
 };
 
 use crate::ui::app_shell::AppShell;
@@ -107,16 +106,22 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .items_center()
         .justify_center()
         .child("Cancel")
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-            shell.clear_entry_form(window, cx);
-            shell.state().clone().update(cx, |state, cx| {
-                let _ = state.close_overlay(cx);
-            });
-        }));
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.clear_entry_form(window, cx);
+                shell.state().clone().update(cx, |state, cx| {
+                    let _ = state.close_overlay(cx);
+                });
+            }),
+        );
 
     let save_target_group_id = target_group_id.clone();
     let save_editing_id = editing_id.clone();
-    let save_label = if is_edit { "Save changes" } else { "Save entry" };
+    let save_label = if is_edit {
+        "Save changes"
+    } else {
+        "Save entry"
+    };
     let save_button = div()
         .id("add-save")
         .h(px(30.))
@@ -138,14 +143,11 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::panel()),
         )
         .child(save_label)
-        .on_click(cx.listener(
-            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+        .on_click(
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 let draft = shell.collect_entry_draft(cx);
                 if draft.title.trim().is_empty() {
-                    window.push_notification(
-                        "Title is required to save the entry.",
-                        cx,
-                    );
+                    window.push_notification("Title is required to save the entry.", cx);
                     return;
                 }
                 let state = shell.state().clone();
@@ -155,10 +157,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .map_err(|e| e.to_string()),
                     None => {
                         let Some(group_id) = save_target_group_id.clone() else {
-                            window.push_notification(
-                                "No destination group is selected.",
-                                cx,
-                            );
+                            window.push_notification("No destination group is selected.", cx);
                             return;
                         };
                         state
@@ -181,21 +180,20 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         window.push_notification(toast, cx);
                     }
                     Err(error) => {
-                        window.push_notification(
-                            format!("Could not save entry: {error}"),
-                            cx,
-                        );
+                        window.push_notification(format!("Could not save entry: {error}"), cx);
                     }
                 }
-            },
-        ));
+            }),
+        );
 
     let generate_button_el = div()
         .id("add-generate")
         .child(generate_button_visual())
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-            shell.generate_password(window, cx);
-        }));
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.generate_password(window, cx);
+            }),
+        );
 
     v_flex()
         .w(px(540.))
@@ -372,11 +370,9 @@ fn generator_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 Checkbox::new(id)
                     .checked(checked)
                     .label(label_text)
-                    .on_click(cx.listener(
-                        move |shell: &mut AppShell, _: &bool, _, cx| {
-                            shell.toggle_gen_class(idx, cx);
-                        },
-                    )),
+                    .on_click(cx.listener(move |shell: &mut AppShell, _: &bool, _, cx| {
+                        shell.toggle_gen_class(idx, cx);
+                    })),
             );
         }
         row

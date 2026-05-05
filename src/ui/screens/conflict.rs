@@ -8,9 +8,8 @@
 //! reachable.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, hsla,
-    prelude::FluentBuilder as _, px,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, hsla, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 
@@ -145,9 +144,7 @@ fn body(snapshot: ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement {
                     .border_color(palette::border())
                     .text_sm()
                     .text_color(palette::text())
-                    .child(
-                        "No per-entry conflicts. Click Apply to push the auto-merged result.",
-                    ),
+                    .child("No per-entry conflicts. Click Apply to push the auto-merged result."),
             )
             .into_any_element();
     }
@@ -172,11 +169,7 @@ fn body(snapshot: ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement {
     col.into_any_element()
 }
 
-fn conflict_block(
-    conflict: EntryConflict,
-    pick: Side,
-    cx: &mut Context<AppShell>,
-) -> AnyElement {
+fn conflict_block(conflict: EntryConflict, pick: Side, cx: &mut Context<AppShell>) -> AnyElement {
     h_flex()
         .gap_3p5()
         .child(column(
@@ -213,8 +206,16 @@ fn column(
     side: Side,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
-    let header_bg = if selected { palette::blue_soft() } else { palette::sidebar() };
-    let border = if selected { palette::blue() } else { palette::border() };
+    let header_bg = if selected {
+        palette::blue_soft()
+    } else {
+        palette::sidebar()
+    };
+    let border = if selected {
+        palette::blue()
+    } else {
+        palette::border()
+    };
     let highlight_bg = hsla(0.072_464, 0.851_852, 0.97, 1.0);
     let modified = view
         .modified
@@ -248,10 +249,22 @@ fn column(
                     div()
                         .size(px(24.))
                         .rounded(px(5.))
-                        .bg(if selected { palette::blue() } else { palette::panel() })
+                        .bg(if selected {
+                            palette::blue()
+                        } else {
+                            palette::panel()
+                        })
                         .border_1()
-                        .border_color(if selected { palette::blue() } else { palette::border() })
-                        .text_color(if selected { palette::panel() } else { palette::text_muted() })
+                        .border_color(if selected {
+                            palette::blue()
+                        } else {
+                            palette::border()
+                        })
+                        .text_color(if selected {
+                            palette::panel()
+                        } else {
+                            palette::text_muted()
+                        })
                         .text_xs()
                         .flex()
                         .items_center()
@@ -282,13 +295,13 @@ fn column(
     // Click anywhere on the header → make this the picked side. Wrapping
     // the whole column with on_click is also tempting, but field-row clicks
     // would then accidentally toggle the pick. Header-only is safer.
-    col = col.on_click(cx.listener(
-        move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+    col = col.on_click(
+        cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
             shell.state().clone().update(cx, |state, cx| {
                 state.set_conflict_pick(&entry_id_for_click, side, cx);
             });
-        },
-    ));
+        }),
+    );
 
     for (i, f) in fields.iter().enumerate() {
         let last = i == fields.len() - 1;
@@ -335,7 +348,11 @@ fn column(
                     div()
                         .text_xs()
                         .text_color(palette::text())
-                        .font_family(if f.label == "Notes" { "" } else { "JetBrains Mono" })
+                        .font_family(if f.label == "Notes" {
+                            ""
+                        } else {
+                            "JetBrains Mono"
+                        })
                         .child(value.to_string()),
                 ),
         );
@@ -366,14 +383,14 @@ fn apply_button(cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::panel()),
         )
         .child("Apply resolution")
-        .on_click(cx.listener(
-            |shell: &mut AppShell, _: &ClickEvent, _window, cx| {
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, _window, cx| {
                 shell
                     .state()
                     .clone()
                     .update(cx, |state, cx| state.apply_conflict_resolution(cx));
-            },
-        ))
+            }),
+        )
         .into_any_element()
 }
 
@@ -393,8 +410,8 @@ fn cancel_button(cx: &mut Context<AppShell>) -> AnyElement {
         .items_center()
         .justify_center()
         .child("Cancel")
-        .on_click(cx.listener(
-            |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 shell.state().clone().update(cx, |state, cx| {
                     let _ = state.close_overlay(cx);
                 });
@@ -402,8 +419,8 @@ fn cancel_button(cx: &mut Context<AppShell>) -> AnyElement {
                     "Conflict left pending — click Sync now in Sync settings to retry.",
                     cx,
                 );
-            },
-        ))
+            }),
+        )
         .into_any_element()
 }
 

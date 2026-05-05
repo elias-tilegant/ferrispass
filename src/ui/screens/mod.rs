@@ -5,4 +5,5 @@ pub mod settings;
 pub mod sync_settings;
 pub mod unlock;
 pub mod vault;
+pub mod vault_switcher;
 pub mod welcome;

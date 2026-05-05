@@ -4,8 +4,8 @@ use crate::{
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
             DeleteEntry, EditEntry, FocusSearch, LockVault, NewEntry, OpenConflictDemo,
-            OpenConnect, OpenSettings, OpenSyncSettings, OpenVault, SaveVault, SubmitPassword,
-            SyncNow, ToggleTheme,
+            OpenConnect, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SaveVault,
+            SubmitPassword, SyncNow, ToggleTheme,
         },
     },
     keepass::KeePassRepository,
@@ -57,6 +57,10 @@ pub struct AppShell {
     /// subscribe to `Change` events and forward the value to AppState
     /// (which keeps the filtered list in `connect_flow.Picking.query`).
     picker_query_input: Entity<InputState>,
+    /// Filter input for the vault-switcher overlay (`Overlay::VaultSwitcher`).
+    /// Cleared on every overlay-open so the picker always starts empty;
+    /// Enter on the input opens whichever recent currently floats to the top.
+    vault_switcher_input: Entity<InputState>,
     /// Length slider state for the AddEntry generator card. Range 4..64,
     /// default 18 (matches the prior hardcoded value the card used to display).
     /// We hold the entity so both the Slider widget and `generate_password`
@@ -163,6 +167,8 @@ impl AppShell {
             cx.new(|cx| InputState::new(window, cx).placeholder("otpauth://… or base32 secret"));
         let picker_query_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name or folder…"));
+        let vault_switcher_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Switch vault — type to filter…"));
 
         let gen_length_state = cx.new(|_| {
             SliderState::new()
@@ -202,6 +208,11 @@ impl AppShell {
             cx.subscribe_in(&keyfile_input, window, Self::on_keyfile_input_event),
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
             cx.subscribe_in(&picker_query_input, window, Self::on_picker_query_event),
+            cx.subscribe_in(
+                &vault_switcher_input,
+                window,
+                Self::on_vault_switcher_input_event,
+            ),
             // Re-render on slider drag so the "Length: N" label and the
             // strength preview update live alongside the thumb.
             cx.observe(&gen_length_state, |_shell: &mut AppShell, _, cx| {
@@ -221,6 +232,7 @@ impl AppShell {
             new_entry_notes_input,
             new_entry_otp_input,
             picker_query_input,
+            vault_switcher_input,
             gen_length_state,
             gen_classes: crate::keepass::password_gen::CharClasses::default(),
             entry_list_scroll: VirtualListScrollHandle::new(),
@@ -442,6 +454,10 @@ impl AppShell {
         &self.picker_query_input
     }
 
+    pub fn vault_switcher_input(&self) -> &Entity<InputState> {
+        &self.vault_switcher_input
+    }
+
     /// Open a save-file picker prefilled with the picked file's name, then
     /// trigger the download once the user confirms. If they cancel, leave
     /// the connect flow in the Picking step so they can pick something else.
@@ -564,12 +580,42 @@ impl AppShell {
         self.prompt_for_vault_path(window, cx);
     }
 
+    fn on_action_open_vault_switcher(
+        &mut self,
+        _: &OpenVaultSwitcher,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Toggle: ⌘O while the switcher is already open closes it. Same
+        // ergonomics as ⌘, on Settings.
+        if matches!(self.state.read(cx).overlay(), Overlay::VaultSwitcher) {
+            self.state.update(cx, |state, cx| state.close_overlay(cx));
+            return;
+        }
+        // Always start with an empty filter so previous queries don't carry
+        // over between invocations.
+        self.vault_switcher_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        self.state.update(cx, |state, cx| {
+            state.open_overlay(Overlay::VaultSwitcher, cx)
+        });
+    }
+
     fn on_action_submit_password(
         &mut self,
         _: &SubmitPassword,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The Enter keybinding is global, but pressing Enter inside an
+        // overlay (vault switcher, conflict picker, …) shouldn't also
+        // submit the underlying unlock prompt. The overlay's own Input
+        // handles its `PressEnter` event; let it own the keystroke.
+        if self.state.read(cx).overlay().is_active() {
+            return;
+        }
         self.submit_password(window, cx);
     }
 
@@ -920,6 +966,49 @@ impl AppShell {
         }
     }
 
+    fn on_vault_switcher_input_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            // Re-render the filtered list. Filtering itself is computed at
+            // render time from the current input value; here we just nudge.
+            InputEvent::Change => cx.notify(),
+            // Enter activates the current top match. If the filter eliminated
+            // every recent, fall through to the file dialog so the user
+            // doesn't get stuck on an empty list.
+            InputEvent::PressEnter { .. } => self.activate_vault_switcher_top(window, cx),
+            _ => {}
+        }
+    }
+
+    /// Snapshot the current filter, intersect it with the recents list, and
+    /// open the top match. Used by Enter on the filter input *and* the
+    /// "Switch" button on each row (the row click takes a path directly so
+    /// it bypasses this).
+    fn activate_vault_switcher_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.vault_switcher_input.read(cx).value().to_string();
+        let recents = self.state.read(cx).recents().to_vec();
+        let current = self.state.read(cx).current_vault_path();
+        let top = filter_recents(&recents, &query, current.as_deref())
+            .first()
+            .map(|e| e.path.clone());
+        match top {
+            Some(path) => {
+                self.state.update(cx, |state, cx| state.close_overlay(cx));
+                self.open_recent(path, window, cx);
+            }
+            None => {
+                // No matching recent — drop the user into the file dialog.
+                self.state.update(cx, |state, cx| state.close_overlay(cx));
+                self.prompt_for_vault_path(window, cx);
+            }
+        }
+    }
+
     fn on_search_input_event(
         &mut self,
         search_input: &Entity<InputState>,
@@ -1263,6 +1352,12 @@ impl AppShell {
         if matches!(overlay, Overlay::Settings) {
             return crate::ui::screens::settings::render(self, cx);
         }
+        // Vault switcher is global too — ⌘O works on Welcome / Unlock /
+        // Open alike, so the user can always re-route to a different
+        // database.
+        if matches!(overlay, Overlay::VaultSwitcher) {
+            return crate::ui::screens::vault_switcher::render(self, cx);
+        }
 
         match vault_status {
             crate::app::VaultStatus::Empty if matches!(overlay, Overlay::Connect) => {
@@ -1350,6 +1445,7 @@ impl Render for AppShell {
                 shell.last_activity = Instant::now();
             }))
             .on_action(cx.listener(Self::on_action_open_vault))
+            .on_action(cx.listener(Self::on_action_open_vault_switcher))
             .on_action(cx.listener(Self::on_action_submit_password))
             .on_action(cx.listener(Self::on_action_cancel_unlock))
             .on_action(cx.listener(Self::on_action_lock_vault))
@@ -1377,6 +1473,40 @@ impl Render for AppShell {
             .children(clipboard_pill)
             .children(notification_layer)
     }
+}
+
+/// Filter the recents list for the vault switcher. Match is case-insensitive
+/// against the file name *and* the parent directory so users can find a vault
+/// by either "personal" or "icloud". The currently-open vault is dropped from
+/// the list — switching to where you already are is a no-op the user
+/// shouldn't need to scan past.
+pub(crate) fn filter_recents<'a>(
+    recents: &'a [crate::app::RecentEntry],
+    query: &str,
+    current: Option<&std::path::Path>,
+) -> Vec<&'a crate::app::RecentEntry> {
+    let needle = query.trim().to_lowercase();
+    recents
+        .iter()
+        .filter(|entry| current.is_none_or(|c| c != entry.path.as_path()))
+        .filter(|entry| {
+            if needle.is_empty() {
+                return true;
+            }
+            let file_name = entry
+                .path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let parent = entry
+                .path
+                .parent()
+                .map(|p| p.display().to_string().to_lowercase())
+                .unwrap_or_default();
+            file_name.contains(&needle) || parent.contains(&needle)
+        })
+        .collect()
 }
 
 fn is_kdbx_path(path: &std::path::Path) -> bool {
