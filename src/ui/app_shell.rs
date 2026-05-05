@@ -15,7 +15,7 @@ use gpui::{
     InteractiveElement as _, ParentElement as _, PathPromptOptions, Render, ScrollStrategy,
     Styled as _, Subscription, Task, Window, div,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use gpui_component::{
     ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
     input::{InputEvent, InputState},
@@ -95,6 +95,15 @@ pub struct AppShell {
     /// detail panel. `None` = masked. Compared against the live selection
     /// in the state observer so switching entries (or locking) auto-masks.
     revealed_entry_id: Option<String>,
+    /// Wall-clock timestamp of the last user input event (mouse-move,
+    /// click, key-down). Updated cheaply on every event without
+    /// triggering a re-render — only the auto-lock checker reads it.
+    last_activity: Instant,
+    /// Periodic checker that locks the vault after
+    /// `AUTO_LOCK_TIMEOUT_SECS` of inactivity. Only running while a
+    /// vault is open (managed alongside `totp_tick` via the state
+    /// observer). Drop = cancel.
+    auto_lock_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -102,6 +111,16 @@ pub struct AppShell {
 /// secret. KeePassXC's default is 10s; long enough to paste once,
 /// short enough that an unattended laptop doesn't leak the password.
 pub const CLIPBOARD_CLEAR_SECS: u64 = 10;
+
+/// Idle timeout before an open vault auto-locks. Mirrors KeePassXC's
+/// default (4 minutes) — long enough for a coffee break, short enough
+/// that a left-open laptop isn't an open vault.
+pub const AUTO_LOCK_TIMEOUT_SECS: u64 = 240;
+
+/// How often the auto-lock checker wakes to compare `last_activity`
+/// against the timeout. Coarser than the timeout so the lock always
+/// fires within `AUTO_LOCK_TICK_SECS` of crossing the threshold.
+const AUTO_LOCK_TICK_SECS: u64 = 5;
 
 impl AppShell {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -145,9 +164,11 @@ impl AppShell {
 
         let _subscriptions = vec![
             cx.observe(&state, |shell: &mut AppShell, state, cx| {
-                // Re-render whenever AppState notifies AND keep the TOTP tick
-                // task in sync with whether a vault is currently open.
+                // Re-render whenever AppState notifies AND keep the
+                // background tasks (TOTP tick + auto-lock checker) in
+                // sync with whether a vault is currently open.
                 shell.sync_totp_tick(cx);
+                shell.sync_auto_lock_task(cx);
                 // Auto-mask: if the user moves to a different entry (or
                 // locks the vault), drop any reveal we held. Compared by
                 // id so re-renders against the same entry don't trigger.
@@ -196,6 +217,8 @@ impl AppShell {
             clipboard_clear_task: None,
             last_clipboard_value: None,
             revealed_entry_id: None,
+            last_activity: Instant::now(),
+            auto_lock_task: None,
             _subscriptions,
         }
     }
@@ -243,6 +266,86 @@ impl AppShell {
             }
             _ => {}
         }
+    }
+
+    /// Mirror of `sync_totp_tick` for the idle-timeout auto-lock
+    /// checker. Runs only while a vault is open; cancelled (= dropped)
+    /// when locked or never-opened. The task wakes every
+    /// `AUTO_LOCK_TICK_SECS` and triggers a lock once `last_activity`
+    /// has been silent for `AUTO_LOCK_TIMEOUT_SECS`.
+    fn sync_auto_lock_task(&mut self, cx: &mut Context<Self>) {
+        let vault_open = matches!(
+            self.state.read(cx).vault_status(),
+            crate::app::VaultStatus::Open { .. }
+        );
+
+        match (vault_open, self.auto_lock_task.is_some()) {
+            (true, false) => {
+                // Reset the activity baseline at vault-open so a stale
+                // timestamp from earlier in the session doesn't trip an
+                // immediate lock.
+                self.last_activity = Instant::now();
+                self.auto_lock_task = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_secs(AUTO_LOCK_TICK_SECS))
+                            .await;
+                        let triggered = this.update(cx, |shell, cx| {
+                            if shell.last_activity.elapsed()
+                                >= Duration::from_secs(AUTO_LOCK_TIMEOUT_SECS)
+                            {
+                                shell.auto_lock_now(cx);
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        // Stop after firing — observer will null this
+                        // slot when the vault transitions to Empty.
+                        // Also stop if the entity is gone.
+                        match triggered {
+                            Ok(true) | Err(_) => break,
+                            Ok(false) => continue,
+                        }
+                    }
+                }));
+            }
+            (false, true) => {
+                self.auto_lock_task = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Lock the vault from a non-foreground context (idle timeout).
+    /// Wipes shell-side secrets and delegates to AppState. Skips
+    /// clearing the password / search input fields because we don't
+    /// have a `Window` here — they get reset by `select_vault_path`
+    /// whenever the user picks a vault to re-open.
+    fn auto_lock_now(&mut self, cx: &mut Context<Self>) {
+        self.wipe_session_secrets(cx);
+        self.state.update(cx, |state, cx| state.lock_vault(cx));
+    }
+
+    /// Drop reveal flag, cancel any pending clipboard-clear timer, and
+    /// flush the OS clipboard *now* if it still holds the value we
+    /// last wrote. Shared between auto-lock and manual lock so
+    /// dropping the timer doesn't leave a copied password sitting on
+    /// the clipboard until the next copy.
+    fn wipe_session_secrets(&mut self, cx: &mut Context<Self>) {
+        self.revealed_entry_id = None;
+        if self.last_clipboard_value.is_some() {
+            let still_ours = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref()
+                == self.last_clipboard_value.as_deref();
+            if still_ours {
+                cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+            }
+        }
+        self.last_clipboard_value = None;
+        self.clipboard_clear_task = None;
     }
 
     pub fn arm_perma_delete(&mut self, entry_id: String, cx: &mut Context<Self>) {
@@ -934,6 +1037,9 @@ impl AppShell {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        // Same secret-wipe as auto-lock: drop reveal, cancel pending
+        // clipboard timer, flush clipboard if it still holds our copy.
+        self.wipe_session_secrets(cx);
         self.state.update(cx, |state, cx| state.lock_vault(cx));
     }
 
@@ -1090,6 +1196,16 @@ impl Render for AppShell {
         div()
             .key_context(APP_CONTEXT)
             .track_focus(&self.focus_handle)
+            // Reset the idle clock on any user input. Setting an
+            // `Instant` is cheap and we deliberately don't `cx.notify`
+            // here — only the auto-lock checker reads the field, and
+            // it does so on its own schedule.
+            .on_mouse_move(cx.listener(|shell: &mut AppShell, _, _, _| {
+                shell.last_activity = Instant::now();
+            }))
+            .on_key_down(cx.listener(|shell: &mut AppShell, _, _, _| {
+                shell.last_activity = Instant::now();
+            }))
             .on_action(cx.listener(Self::on_action_open_vault))
             .on_action(cx.listener(Self::on_action_submit_password))
             .on_action(cx.listener(Self::on_action_cancel_unlock))
