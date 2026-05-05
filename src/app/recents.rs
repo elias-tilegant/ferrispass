@@ -147,7 +147,8 @@ pub(crate) fn save_in(dir: &Path, recents: &RecentVaults) -> Result<(), RecentsE
         use std::io::Write as _;
         file.write_all(text.as_bytes())
             .map_err(|e| RecentsError::Io(tmp.clone(), e))?;
-        file.sync_all().map_err(|e| RecentsError::Io(tmp.clone(), e))?;
+        file.sync_all()
+            .map_err(|e| RecentsError::Io(tmp.clone(), e))?;
     }
     fs::rename(&tmp, &target).map_err(|e| RecentsError::Io(target, e))?;
     Ok(())
@@ -209,11 +210,7 @@ mod tests {
         let mut entries: Vec<RecentEntry> = (0..MAX_RECENTS)
             .map(|i| entry(&format!("/tmp/v{i}.kdbx")))
             .collect();
-        push_front_in(
-            &mut entries,
-            PathBuf::from("/tmp/new.kdbx"),
-            MAX_RECENTS,
-        );
+        push_front_in(&mut entries, PathBuf::from("/tmp/new.kdbx"), MAX_RECENTS);
         assert_eq!(entries.len(), MAX_RECENTS);
         assert_eq!(entries[0].path, PathBuf::from("/tmp/new.kdbx"));
         // Oldest (index MAX_RECENTS - 1 before the push) got dropped.

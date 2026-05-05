@@ -9,7 +9,8 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
-use crate::app::AppSettings;
+use crate::app::actions::DownloadFavicons;
+use crate::app::{AppSettings, FaviconDownloadStatus, VaultStatus};
 use crate::ui::app_shell::{AppShell, SettingsTab};
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
@@ -222,10 +223,14 @@ fn close_button(cx: &mut Context<AppShell>) -> AnyElement {
 
 fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoElement {
     let settings = shell.settings().clone();
+    let state = shell.state().read(cx);
+    let favicon_status = state.favicon_status().clone();
+    let vault_open = matches!(state.vault_status(), VaultStatus::Open { .. });
     v_flex()
         .gap_6()
         .child(auto_lock_section(&settings, cx))
         .child(clipboard_section(&settings, cx))
+        .child(favicon_section(&favicon_status, vault_open, cx))
 }
 
 fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
@@ -285,6 +290,86 @@ fn clipboard_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl
          The clipboard always wipes when you lock the vault.",
         row,
     )
+}
+
+fn favicon_section(
+    status: &FaviconDownloadStatus,
+    vault_open: bool,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let running = status.is_running();
+    // Click is gated on (vault open + not currently running). When the
+    // gate fails we still render the same chrome but skip wiring the
+    // listener — the chip styles below mute the colours so the user can
+    // see why it isn't actionable.
+    let enabled = vault_open && !running;
+
+    let label: SharedString = match status {
+        FaviconDownloadStatus::Idle => "Download favicons".into(),
+        FaviconDownloadStatus::Running { done, total, .. } => {
+            format!("Downloading… {done}/{total}").into()
+        }
+        FaviconDownloadStatus::Finished { succeeded, total } => {
+            format!("Download favicons · last run: {succeeded}/{total}").into()
+        }
+    };
+
+    let mut button = h_flex()
+        .id("download-favicons")
+        .h(px(28.))
+        .px_3()
+        .gap_2()
+        .items_center()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(if enabled {
+            palette::blue_border()
+        } else {
+            palette::border()
+        })
+        .bg(if enabled {
+            palette::blue_soft()
+        } else {
+            palette::sidebar()
+        })
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(if enabled {
+            palette::blue()
+        } else {
+            palette::text_muted()
+        })
+        .child(
+            gpui_component::Icon::from(AppIcon::Cloud)
+                .with_size(gpui_component::Size::Size(px(12.))),
+        )
+        .child(label);
+    if enabled {
+        button = button.on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+            window.dispatch_action(Box::new(DownloadFavicons), cx);
+        }));
+    }
+
+    let hint = match (vault_open, status) {
+        (false, _) => "Open a vault first — favicons are stored inside the database.",
+        (true, FaviconDownloadStatus::Running { .. }) => {
+            "Fetching one site at a time so we don't hammer the icon service."
+        }
+        (
+            true,
+            FaviconDownloadStatus::Finished {
+                succeeded: 0,
+                total: 0,
+            },
+        ) => "Every URL entry already has a custom icon. Nothing to do.",
+        (true, _) => {
+            "Pulls a small icon from DuckDuckGo's icon service for every URL \
+             entry that doesn't already have a custom icon. Sends each \
+             hostname to icons.duckduckgo.com."
+        }
+    };
+
+    section_frame("Favicons", hint, button)
 }
 
 fn section_frame(

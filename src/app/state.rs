@@ -34,6 +34,10 @@ pub struct AppState {
     /// construction (`with_resume`), prepended on every successful unlock,
     /// persisted async. Most-recent first.
     recents: Vec<RecentEntry>,
+    /// Favicon-download progress. Driven by `start_favicon_download`;
+    /// the UI reads it to render a live "X/Y downloaded" label and
+    /// disable the trigger button while a run is in flight.
+    favicon_status: FaviconDownloadStatus,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -86,6 +90,31 @@ pub enum SyncStatus {
     Failed(String),
     /// Refresh token is gone or revoked — user must re-run Connect.
     Reconnect,
+}
+
+/// Lifecycle of the explicit "Download favicons" action. Surfaced in the
+/// Settings → General panel; `Idle` is the resting state, `Running`
+/// drives the live progress label, `Finished` hangs around for one
+/// session so the user can see the result before moving on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum FaviconDownloadStatus {
+    #[default]
+    Idle,
+    Running {
+        done: usize,
+        total: usize,
+        succeeded: usize,
+    },
+    Finished {
+        succeeded: usize,
+        total: usize,
+    },
+}
+
+impl FaviconDownloadStatus {
+    pub fn is_running(&self) -> bool {
+        matches!(self, FaviconDownloadStatus::Running { .. })
+    }
 }
 
 /// Heavy state owned by `SyncStatus::Conflict`. Holds both decrypted
@@ -328,6 +357,10 @@ impl AppState {
     /// screen's "Recent" section.
     pub fn recents(&self) -> &[RecentEntry] {
         &self.recents
+    }
+
+    pub fn favicon_status(&self) -> &FaviconDownloadStatus {
+        &self.favicon_status
     }
 
     pub fn overlay(&self) -> &Overlay {
@@ -629,6 +662,104 @@ impl AppState {
         };
         let id = selected_entry_id.as_deref()?;
         document.totp_for_entry(id)
+    }
+
+    /// Walk the open vault, find every entry with a non-empty URL and no
+    /// existing custom icon, and pull a favicon for each from DuckDuckGo.
+    /// Successful fetches are written into the database as Custom Icons;
+    /// once the loop is done we trigger a single `save_async` so the
+    /// flushed bytes ride out via the normal save → sync path.
+    ///
+    /// Sequential by design: a typical vault has 30–200 entries with
+    /// URLs, and DDG's icon service is fast — running these in parallel
+    /// would mostly just shave a few seconds while burning more cache
+    /// quota. Keeping it serial also gives us a clean progress label
+    /// without coordinating shared mutable state across workers.
+    ///
+    /// Re-entrancy: if a run is already in flight, additional triggers
+    /// are dropped (the UI also disables its button).
+    pub fn start_favicon_download(&mut self, cx: &mut Context<Self>) {
+        if self.favicon_status.is_running() {
+            return;
+        }
+        let VaultStatus::Open { document, .. } = &self.vault else {
+            return;
+        };
+
+        // Snapshot the (id, url) pairs up front so the spawned task
+        // doesn't have to re-borrow the snapshot every iteration. We
+        // skip entries that already have a custom icon — re-running
+        // shouldn't blow away user-curated icons.
+        let targets: Vec<(String, String)> = document
+            .snapshot()
+            .entries_recursive()
+            .into_iter()
+            .filter(|entry| !entry.url.trim().is_empty())
+            .filter(|entry| entry.favicon.image.is_none())
+            .map(|entry| (entry.id.clone(), entry.url.clone()))
+            .collect();
+
+        let total = targets.len();
+        if total == 0 {
+            self.favicon_status = FaviconDownloadStatus::Finished {
+                succeeded: 0,
+                total: 0,
+            };
+            cx.notify();
+            return;
+        }
+
+        self.favicon_status = FaviconDownloadStatus::Running {
+            done: 0,
+            total,
+            succeeded: 0,
+        };
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let mut succeeded = 0usize;
+            for (idx, (entry_id, url)) in targets.into_iter().enumerate() {
+                // Each fetch off the UI thread — ureq is sync, so we'd
+                // block the renderer otherwise.
+                let url_for_task = url.clone();
+                let bytes_result = cx
+                    .background_spawn(async move { crate::favicon::fetch_favicon(&url_for_task) })
+                    .await;
+
+                let _ = this.update(cx, |state, cx| {
+                    if let Ok(bytes) = bytes_result {
+                        if let VaultStatus::Open { document, .. } = &mut state.vault {
+                            // Errors here mean the entry vanished
+                            // mid-run (e.g. user deleted it) — fine to
+                            // silently skip.
+                            if document.set_entry_custom_icon(&entry_id, bytes).is_ok() {
+                                succeeded += 1;
+                            }
+                        }
+                    }
+                    state.favicon_status = FaviconDownloadStatus::Running {
+                        done: idx + 1,
+                        total,
+                        succeeded,
+                    };
+                    cx.notify();
+                });
+            }
+
+            let _ = this.update(cx, |state, cx| {
+                state.favicon_status = FaviconDownloadStatus::Finished { succeeded, total };
+                cx.notify();
+                // Persist whichever icons we managed to land. `save_async`
+                // is a no-op if `succeeded == 0` would still be valid —
+                // running it harmlessly re-writes the same bytes — but
+                // skip when there's nothing to save so we don't block
+                // the disk for a no-op.
+                if succeeded > 0 {
+                    state.save_async(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Spawn an atomic save of the open vault on a background thread.

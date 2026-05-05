@@ -155,9 +155,7 @@ pub fn resolve_site(host: &str, site_path: &str, token: &AccessToken) -> Result<
 /// List all document libraries (drives) on a site. Used to find the drive
 /// whose name matches the URL parser's library segment.
 pub fn list_drives(site_id: &str, token: &AccessToken) -> Result<Vec<Drive>, GraphError> {
-    let url = format!(
-        "{GRAPH_BASE}/sites/{site_id}/drives?$select=id,name,webUrl",
-    );
+    let url = format!("{GRAPH_BASE}/sites/{site_id}/drives?$select=id,name,webUrl",);
     let body = http_get(&url, token)?;
     let resp: DriveListResponse = parse_json(&body)?;
     Ok(resp
@@ -183,7 +181,10 @@ pub fn find_drive(
     if let Some(d) = drives.iter().find(|d| d.name == library_name) {
         return Ok(d.clone());
     }
-    if let Some(d) = drives.iter().find(|d| d.name.eq_ignore_ascii_case(library_name)) {
+    if let Some(d) = drives
+        .iter()
+        .find(|d| d.name.eq_ignore_ascii_case(library_name))
+    {
         return Ok(d.clone());
     }
     Err(GraphError::DriveNotFound(library_name.to_string()))
@@ -453,7 +454,9 @@ impl SearchQueryResponse {
             .filter_map(|h| {
                 let res = h.resource?;
                 let parent = res.parent?;
-                let name = res.name.filter(|n| n.to_ascii_lowercase().ends_with(".kdbx"))?;
+                let name = res
+                    .name
+                    .filter(|n| n.to_ascii_lowercase().ends_with(".kdbx"))?;
                 Some(DriveItemHit {
                     item_id: res.id,
                     site_id: parent.site_id?,
@@ -621,11 +624,15 @@ mod tests {
             ]
         }"#;
         let resp: DriveListResponse = serde_json::from_str(body).unwrap();
-        let drives: Vec<Drive> = resp.value.into_iter().map(|d| Drive {
-            id: d.id,
-            name: d.name.unwrap_or_default(),
-            web_url: d.web_url.unwrap_or_default(),
-        }).collect();
+        let drives: Vec<Drive> = resp
+            .value
+            .into_iter()
+            .map(|d| Drive {
+                id: d.id,
+                name: d.name.unwrap_or_default(),
+                web_url: d.web_url.unwrap_or_default(),
+            })
+            .collect();
         assert_eq!(drives.len(), 2);
         assert_eq!(drives[0].name, "Documents");
         assert_eq!(drives[1].id, "b!def");

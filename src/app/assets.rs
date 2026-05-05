@@ -52,8 +52,11 @@ impl AssetSource for AppAssets {
 }
 
 pub fn font_bytes() -> Vec<Cow<'static, [u8]>> {
-    ["fonts/JetBrainsMono-Regular.ttf", "fonts/JetBrainsMono-Medium.ttf"]
-        .into_iter()
-        .filter_map(|path| ProjectAssets::get(path).map(|file| file.data))
-        .collect()
+    [
+        "fonts/JetBrainsMono-Regular.ttf",
+        "fonts/JetBrainsMono-Medium.ttf",
+    ]
+    .into_iter()
+    .filter_map(|path| ProjectAssets::get(path).map(|file| file.data))
+    .collect()
 }

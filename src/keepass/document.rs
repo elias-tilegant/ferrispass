@@ -1,9 +1,6 @@
 use crate::domain::VaultSnapshot;
 use crate::keepass::repository::{find_entry_id, find_group_id, snapshot_from_database};
-use keepass::{
-    Database, DatabaseKey,
-    db::fields,
-};
+use keepass::{Database, DatabaseKey, db::fields};
 use std::{
     fmt, fs,
     io::{self, Write as _},
@@ -163,8 +160,8 @@ impl VaultDocument {
         group_id_str: &str,
         draft: &EntryDraft,
     ) -> Result<String, MutationError> {
-        let group_id = find_group_id(&self.database, group_id_str)
-            .ok_or(MutationError::GroupNotFound)?;
+        let group_id =
+            find_group_id(&self.database, group_id_str).ok_or(MutationError::GroupNotFound)?;
         let mut group = self
             .database
             .group_mut(group_id)
@@ -190,8 +187,8 @@ impl VaultDocument {
     /// other clients. Returns the new starred state. Caller is expected
     /// to schedule a background save.
     pub fn toggle_starred(&mut self, entry_id_str: &str) -> Result<bool, MutationError> {
-        let entry_id = find_entry_id(&self.database, entry_id_str)
-            .ok_or(MutationError::EntryNotFound)?;
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
         let mut entry = self
             .database
             .entry_mut(entry_id)
@@ -202,9 +199,7 @@ impl VaultDocument {
             .iter()
             .any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG));
         if was_starred {
-            entry
-                .tags
-                .retain(|t| !t.eq_ignore_ascii_case(FAVORITE_TAG));
+            entry.tags.retain(|t| !t.eq_ignore_ascii_case(FAVORITE_TAG));
         } else {
             entry.tags.push(FAVORITE_TAG.to_string());
         }
@@ -219,13 +214,41 @@ impl VaultDocument {
         entry_id_str: &str,
         draft: &EntryDraft,
     ) -> Result<(), MutationError> {
-        let entry_id = find_entry_id(&self.database, entry_id_str)
-            .ok_or(MutationError::EntryNotFound)?;
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
         let mut entry = self
             .database
             .entry_mut(entry_id)
             .ok_or(MutationError::EntryNotFound)?;
         apply_draft_to_entry(&mut entry, draft);
+        drop(entry);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
+    /// Replace the entry's icon with a custom-icon blob. `bytes` is the raw
+    /// PNG/JPEG/ICO/etc — keepass-rs stores it verbatim and our
+    /// repository-side magic-byte sniffer figures out the format on the
+    /// next read. Used by the favicon downloader; safe to call repeatedly
+    /// (each call replaces any previous icon, including a previously-
+    /// downloaded one).
+    pub fn set_entry_custom_icon(
+        &mut self,
+        entry_id_str: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), MutationError> {
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
+        let mut entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        // `set_icon_custom_new` drops any previous icon (built-in or
+        // custom) and registers a fresh `CustomIconId`. We don't try to
+        // dedupe identical blobs across entries — the typical vault has
+        // distinct icons per site, and the dedup bookkeeping isn't worth
+        // it for an explicit user action.
+        entry.set_icon_custom_new(bytes);
         drop(entry);
         self.refresh_snapshot();
         Ok(())
@@ -240,8 +263,8 @@ impl VaultDocument {
         entry_id_str: &str,
         target_group_id_str: &str,
     ) -> Result<(), MutationError> {
-        let entry_id = find_entry_id(&self.database, entry_id_str)
-            .ok_or(MutationError::EntryNotFound)?;
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
         let target_id = find_group_id(&self.database, target_group_id_str)
             .ok_or(MutationError::GroupNotFound)?;
         let mut entry = self
@@ -261,8 +284,8 @@ impl VaultDocument {
     /// We deliberately don't expose hard-delete from this API yet — that lives
     /// behind the future "Empty trash" affordance in the Trash sidebar view.
     pub fn delete_entry(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
-        let entry_id = find_entry_id(&self.database, entry_id_str)
-            .ok_or(MutationError::EntryNotFound)?;
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
         let recycle_bin_id = self.ensure_recycle_bin();
         let mut entry = self
             .database
@@ -280,8 +303,8 @@ impl VaultDocument {
     /// Bin — call this only after explicit user confirmation; the data is
     /// unrecoverable once `save_async` flushes the result to disk.
     pub fn delete_entry_permanent(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
-        let entry_id = find_entry_id(&self.database, entry_id_str)
-            .ok_or(MutationError::EntryNotFound)?;
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
         let entry = self
             .database
             .entry_mut(entry_id)
@@ -296,8 +319,8 @@ impl VaultDocument {
     /// doesn't preserve that), so root is the standard place to dump
     /// restored items — the user can re-organise from there.
     pub fn restore_entry(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
-        let entry_id = find_entry_id(&self.database, entry_id_str)
-            .ok_or(MutationError::EntryNotFound)?;
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
         let root_id = self.database.root().id();
         let mut entry = self
             .database
@@ -442,12 +465,12 @@ impl SavePayload {
     /// Build a payload from arbitrary inputs — used by the sync conflict
     /// flow to encrypt a freshly-merged Database without going through the
     /// live VaultDocument (which already holds the *un*-merged state).
-    pub fn for_merged(
-        database: Database,
-        password: String,
-        keyfile_path: Option<PathBuf>,
-    ) -> Self {
-        SavePayload { database, password, keyfile_path }
+    pub fn for_merged(database: Database, password: String, keyfile_path: Option<PathBuf>) -> Self {
+        SavePayload {
+            database,
+            password,
+            keyfile_path,
+        }
     }
 
     /// Atomically write the database to `target_path`. Writes to `<target>.tmp`,
@@ -460,7 +483,9 @@ impl SavePayload {
         }
         if let Some(kf) = &self.keyfile_path {
             let mut kf_handle = fs::File::open(kf).map_err(SaveError::ReadKeyfile)?;
-            key = key.with_keyfile(&mut kf_handle).map_err(SaveError::Keyfile)?;
+            key = key
+                .with_keyfile(&mut kf_handle)
+                .map_err(SaveError::Keyfile)?;
         }
 
         let tmp_path = temp_path_for(target_path);
@@ -629,11 +654,20 @@ mod tests {
 
         let root_id = doc.database.root().id().to_string();
         let id = doc
-            .create_entry(&root_id, &EntryDraft { title: "Deletable".into(), ..Default::default() })
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Deletable".into(),
+                    ..Default::default()
+                },
+            )
             .expect("create");
 
         // Recycle-bin should not exist yet — delete must lazily create one.
-        assert!(doc.database.recycle_bin().is_none(), "no recycle bin initially");
+        assert!(
+            doc.database.recycle_bin().is_none(),
+            "no recycle bin initially"
+        );
 
         doc.delete_entry(&id).expect("delete");
 
@@ -714,7 +748,12 @@ mod tests {
         assert!(now_starred);
         let entry = doc.snapshot().find_entry(&id).unwrap();
         assert!(entry.starred);
-        assert!(entry.tags.iter().any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG)));
+        assert!(
+            entry
+                .tags
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG))
+        );
         assert!(entry.tags.contains(&"Personal".to_string()));
 
         // Toggle off: returns false, tag removed, other tags still there.
@@ -722,7 +761,12 @@ mod tests {
         assert!(!now_unstarred);
         let entry = doc.snapshot().find_entry(&id).unwrap();
         assert!(!entry.starred);
-        assert!(!entry.tags.iter().any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG)));
+        assert!(
+            !entry
+                .tags
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG))
+        );
         assert!(entry.tags.contains(&"Personal".to_string()));
     }
 
@@ -866,11 +910,7 @@ mod tests {
         // Move back to root.
         doc.move_entry(&entry_id, &root_id).expect("move-to-root");
         assert!(
-            doc.snapshot()
-                .root
-                .entries
-                .iter()
-                .any(|e| e.id == entry_id),
+            doc.snapshot().root.entries.iter().any(|e| e.id == entry_id),
             "entry now at root"
         );
     }
@@ -1072,8 +1112,8 @@ mod tests {
 
         // Re-open via our own repository — uses the same parse path the UI
         // path takes, so success here means a real user could re-open too.
-        let reopened = crate::keepass::KeePassRepository::open(&path, "vault-pw", None)
-            .expect("reopen");
+        let reopened =
+            crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("reopen");
         assert_eq!(
             reopened.password_for_entry(&entry_id).as_deref(),
             Some("p4ss"),

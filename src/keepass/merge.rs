@@ -22,7 +22,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDateTime;
-use keepass::db::{fields, Database, EntryId, EntryRef, GroupId, Times};
+use keepass::db::{Database, EntryId, EntryRef, GroupId, Times, fields};
 
 /// Value snapshot of an entry at the moment of diffing — owned, no borrows
 /// of the source `Database`. Safe to keep around in UI state for as long as
@@ -252,7 +252,9 @@ fn redact(pw: &str) -> String {
 }
 
 fn replace_entry_fields(db: &mut Database, id: EntryId, view: &EntryView) {
-    let Some(mut entry) = db.entry_mut(id) else { return };
+    let Some(mut entry) = db.entry_mut(id) else {
+        return;
+    };
     entry.set_unprotected(fields::TITLE, &view.title);
     entry.set_unprotected(fields::USERNAME, &view.username);
     entry.set_protected(fields::PASSWORD, &view.password);
@@ -262,7 +264,9 @@ fn replace_entry_fields(db: &mut Database, id: EntryId, view: &EntryView) {
 }
 
 fn add_entry_under(db: &mut Database, group_id: GroupId, view: &EntryView) {
-    let Some(mut group) = db.group_mut(group_id) else { return };
+    let Some(mut group) = db.group_mut(group_id) else {
+        return;
+    };
     let mut entry = group.add_entry();
     entry.set_unprotected(fields::TITLE, &view.title);
     entry.set_unprotected(fields::USERNAME, &view.username);
@@ -272,7 +276,6 @@ fn add_entry_under(db: &mut Database, group_id: GroupId, view: &EntryView) {
     entry.times.last_modification = Some(Times::now());
     entry.times.creation = Some(Times::now());
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -397,8 +400,11 @@ mod tests {
         let remote = Database::new();
         let report = diff(&db, &remote);
         assert!(report.conflicts.is_empty());
-        assert!(report.local_only.is_empty(),
-            "recycle-bin entries must be filtered out, got {:?}", report.local_only);
+        assert!(
+            report.local_only.is_empty(),
+            "recycle-bin entries must be filtered out, got {:?}",
+            report.local_only
+        );
         assert!(report.remote_only.is_empty());
     }
 
@@ -466,7 +472,11 @@ mod tests {
         add(&mut remote, "Mango", "m");
 
         let report = diff(&local, &remote);
-        let titles: Vec<&str> = report.remote_only.iter().map(|v| v.title.as_str()).collect();
+        let titles: Vec<&str> = report
+            .remote_only
+            .iter()
+            .map(|v| v.title.as_str())
+            .collect();
         assert_eq!(titles, vec!["Alpha", "Mango", "Zebra"]);
     }
 }

@@ -1,6 +1,4 @@
-use gpui::{
-    AnyElement, IntoElement as _, ParentElement as _, Styled as _, div, px,
-};
+use gpui::{AnyElement, IntoElement as _, ParentElement as _, Styled as _, div, px};
 use gpui_component::{h_flex, v_flex};
 
 use crate::domain::Strength;
@@ -52,13 +50,11 @@ pub fn strength_card(strength: Strength, length: usize, bits: Option<u32>) -> An
             let mut row = h_flex().gap(px(3.));
             for i in 0..10 {
                 let filled = i < segments;
-                row = row.child(
-                    div()
-                        .h(px(4.))
-                        .w(px(20.))
-                        .rounded(px(1.))
-                        .bg(if filled { color } else { soft }),
-                );
+                row = row.child(div().h(px(4.)).w(px(20.)).rounded(px(1.)).bg(if filled {
+                    color
+                } else {
+                    soft
+                }));
             }
             row
         })
@@ -73,4 +69,3 @@ pub fn footer_chip(text: impl Into<String>, _cx: &gpui::App) -> AnyElement {
         .child(text.into())
         .into_any_element()
 }
-

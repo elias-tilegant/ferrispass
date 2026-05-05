@@ -34,4 +34,3 @@ impl IconNamed for AppIcon {
         .into()
     }
 }
-

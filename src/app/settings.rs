@@ -97,7 +97,8 @@ pub(crate) fn save_in(dir: &Path, settings: &AppSettings) -> Result<(), Settings
         use std::io::Write as _;
         file.write_all(text.as_bytes())
             .map_err(|e| SettingsError::Io(tmp.clone(), e))?;
-        file.sync_all().map_err(|e| SettingsError::Io(tmp.clone(), e))?;
+        file.sync_all()
+            .map_err(|e| SettingsError::Io(tmp.clone(), e))?;
     }
     fs::rename(&tmp, &target).map_err(|e| SettingsError::Io(target, e))?;
     Ok(())

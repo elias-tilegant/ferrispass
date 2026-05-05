@@ -188,27 +188,47 @@ mod tests {
 
         assert_eq!(alphabet_size(CharClasses::default()), 26 + 26 + 10 + 21);
         assert_eq!(
-            alphabet_size(CharClasses { upper: false, lower: true, digits: false, symbols: false }),
+            alphabet_size(CharClasses {
+                upper: false,
+                lower: true,
+                digits: false,
+                symbols: false
+            }),
             26
         );
     }
 
     #[test]
     fn estimate_bits_scales_with_length_and_classes() {
-        let lower_only = CharClasses { upper: false, lower: true, digits: false, symbols: false };
+        let lower_only = CharClasses {
+            upper: false,
+            lower: true,
+            digits: false,
+            symbols: false,
+        };
         // 18 chars * log2(26) ≈ 18 * 4.7 = 84
         let b = estimate_bits(18, lower_only);
         assert!((83..=85).contains(&b), "bits={b}");
 
         // Adding upper doubles the alphabet (52) → log2 grows by 1 → +18 bits.
-        let with_upper = CharClasses { upper: true, ..lower_only };
+        let with_upper = CharClasses {
+            upper: true,
+            ..lower_only
+        };
         let b2 = estimate_bits(18, with_upper);
-        assert!(b2 >= b + 17 && b2 <= b + 19, "bits={b2} expected ~{}", b + 18);
+        assert!(
+            b2 >= b + 17 && b2 <= b + 19,
+            "bits={b2} expected ~{}",
+            b + 18
+        );
 
         // Length scales linearly: doubling length doubles bits.
         let half = estimate_bits(9, CharClasses::default());
         let full = estimate_bits(18, CharClasses::default());
-        assert!(full >= 2 * half - 1 && full <= 2 * half + 1, "half={half} full={full}");
+        assert!(
+            full >= 2 * half - 1 && full <= 2 * half + 1,
+            "half={half} full={full}"
+        );
     }
 
     #[test]
@@ -223,12 +243,15 @@ mod tests {
 
     #[test]
     fn no_classes_falls_back_to_lowercase() {
-        let pw = generate(10, CharClasses {
-            upper: false,
-            lower: false,
-            digits: false,
-            symbols: false,
-        });
+        let pw = generate(
+            10,
+            CharClasses {
+                upper: false,
+                lower: false,
+                digits: false,
+                symbols: false,
+            },
+        );
         assert!(pw.chars().all(|c| c.is_ascii_lowercase()));
     }
 }

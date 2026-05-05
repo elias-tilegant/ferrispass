@@ -62,7 +62,10 @@ pub enum UploadAfterSave {
 /// whether to nudge the user with "remote has new changes".
 pub enum RefreshCheck {
     Same,
-    RemoteAhead { remote_etag: String, item: DriveItem },
+    RemoteAhead {
+        remote_etag: String,
+        item: DriveItem,
+    },
 }
 
 /// Step 1 of connect: request a device code. Just wraps `auth::` so the
@@ -187,7 +190,10 @@ pub fn force_upload(
 /// On app launch: compare the cached etag to what's currently on the server.
 /// Cheap (one metadata fetch, no body download). Used to nudge the user
 /// when another device wrote since they last synced.
-pub fn refresh_check(config: &SyncConfig, token: &AccessToken) -> Result<RefreshCheck, ServiceError> {
+pub fn refresh_check(
+    config: &SyncConfig,
+    token: &AccessToken,
+) -> Result<RefreshCheck, ServiceError> {
     let item = graph::get_item_metadata(&config.drive_id, &config.item_id, token)?;
     if item.etag == config.last_etag {
         Ok(RefreshCheck::Same)
@@ -203,8 +209,8 @@ pub fn refresh_check(config: &SyncConfig, token: &AccessToken) -> Result<Refresh
 /// On `InvalidGrant` the refresh token is gone forever — caller should
 /// transition the UI to "reconnect required".
 pub fn refresh_access_token(account_email: &str) -> Result<AccessToken, ServiceError> {
-    let refresh = tokens::load(account_email)?
-        .ok_or_else(|| ServiceError::Auth(AuthError::InvalidGrant))?;
+    let refresh =
+        tokens::load(account_email)?.ok_or_else(|| ServiceError::Auth(AuthError::InvalidGrant))?;
     let token = auth::refresh(&refresh)?;
     // Microsoft sometimes rotates the refresh token; persist whatever came back.
     if token.refresh_token != refresh {
@@ -215,10 +221,7 @@ pub fn refresh_access_token(account_email: &str) -> Result<AccessToken, ServiceE
 
 /// Make sure `token` is fresh enough to use; refresh in-place if not.
 /// Slack of 60 s rides out clock skew + a typical Graph round-trip.
-pub fn ensure_fresh(
-    token: AccessToken,
-    account_email: &str,
-) -> Result<AccessToken, ServiceError> {
+pub fn ensure_fresh(token: AccessToken, account_email: &str) -> Result<AccessToken, ServiceError> {
     if token.is_near_expiry(std::time::Duration::from_secs(60)) {
         refresh_access_token(account_email)
     } else {

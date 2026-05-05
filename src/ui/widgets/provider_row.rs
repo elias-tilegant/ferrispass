@@ -24,8 +24,16 @@ pub fn provider_row(provider: Provider) -> AnyElement {
         color,
         selected,
     } = provider;
-    let bg = if selected { palette::blue_soft() } else { palette::panel() };
-    let border = if selected { palette::blue() } else { palette::border() };
+    let bg = if selected {
+        palette::blue_soft()
+    } else {
+        palette::panel()
+    };
+    let border = if selected {
+        palette::blue()
+    } else {
+        palette::border()
+    };
 
     div()
         .id(id)
@@ -74,8 +82,16 @@ pub fn provider_row(provider: Provider) -> AnyElement {
                         .size(px(18.))
                         .rounded_full()
                         .border_1()
-                        .border_color(if selected { palette::blue() } else { palette::border_strong() })
-                        .bg(if selected { palette::blue() } else { palette::panel() })
+                        .border_color(if selected {
+                            palette::blue()
+                        } else {
+                            palette::border_strong()
+                        })
+                        .bg(if selected {
+                            palette::blue()
+                        } else {
+                            palette::panel()
+                        })
                         .text_color(palette::panel())
                         .flex()
                         .items_center()

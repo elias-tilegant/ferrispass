@@ -148,10 +148,7 @@ pub fn poll_token(challenge: &DeviceCodeChallenge) -> PollOutcome {
     let result = post_form(
         &url,
         &[
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:device_code",
-            ),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("client_id", client_id()),
             ("device_code", &challenge.device_code),
         ],
@@ -301,7 +298,10 @@ mod tests {
     #[test]
     fn slow_down_classifies_as_slow_down() {
         let body = r#"{"error":"slow_down"}"#;
-        assert!(matches!(classify_token_response(body), PollOutcome::SlowDown));
+        assert!(matches!(
+            classify_token_response(body),
+            PollOutcome::SlowDown
+        ));
     }
 
     #[test]
@@ -384,5 +384,4 @@ mod tests {
         };
         assert!(!token.is_near_expiry(Duration::from_secs(60)));
     }
-
 }

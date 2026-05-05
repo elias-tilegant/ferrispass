@@ -1,6 +1,4 @@
-use gpui::{
-    AnyElement, App, Hsla, IntoElement as _, ParentElement as _, Styled as _, div, px,
-};
+use gpui::{AnyElement, App, Hsla, IntoElement as _, ParentElement as _, Styled as _, div, px};
 use gpui_component::{ActiveTheme as _, h_flex};
 
 use crate::ui::palette;
@@ -36,9 +34,21 @@ pub enum ChipTone {
 impl ChipTone {
     fn colors(self) -> (Hsla, Hsla, Hsla) {
         match self {
-            ChipTone::Blue => (palette::blue_soft(), palette::blue(), palette::blue_border()),
-            ChipTone::Orange => (palette::orange_soft(), palette::orange_deep(), palette::orange_border()),
-            ChipTone::Green => (palette::green_soft(), palette::green(), palette::green_border()),
+            ChipTone::Blue => (
+                palette::blue_soft(),
+                palette::blue(),
+                palette::blue_border(),
+            ),
+            ChipTone::Orange => (
+                palette::orange_soft(),
+                palette::orange_deep(),
+                palette::orange_border(),
+            ),
+            ChipTone::Green => (
+                palette::green_soft(),
+                palette::green(),
+                palette::green_border(),
+            ),
             ChipTone::Gray => (palette::sidebar(), palette::text_muted(), palette::border()),
         }
     }

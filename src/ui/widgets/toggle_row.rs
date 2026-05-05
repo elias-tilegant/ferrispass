@@ -11,7 +11,9 @@ pub fn toggle_row(label: &'static str, detail: &'static str, on: bool, last: boo
         .gap_3()
         .items_center()
         .p_3p5()
-        .when(!last, |this| this.border_b_1().border_color(palette::border()))
+        .when(!last, |this| {
+            this.border_b_1().border_color(palette::border())
+        })
         .child(
             v_flex()
                 .gap_0p5()
@@ -40,7 +42,11 @@ fn switch_visual(on: bool) -> AnyElement {
         .w(px(32.))
         .h(px(18.))
         .rounded_full()
-        .bg(if on { palette::blue() } else { palette::border_strong() })
+        .bg(if on {
+            palette::blue()
+        } else {
+            palette::border_strong()
+        })
         .child(
             div()
                 .absolute()

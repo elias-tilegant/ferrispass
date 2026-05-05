@@ -113,8 +113,8 @@ pub(crate) fn load_in(dir: &Path, local_path: &Path) -> Result<Option<SyncConfig
     let path = dir.join(format!("{}.json", path_hash(local_path)));
     match fs::read_to_string(&path) {
         Ok(text) => {
-            let cfg: SyncConfig = serde_json::from_str(&text)
-                .map_err(|e| ConfigError::Parse(path.clone(), e))?;
+            let cfg: SyncConfig =
+                serde_json::from_str(&text).map_err(|e| ConfigError::Parse(path.clone(), e))?;
             Ok(Some(cfg))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -138,7 +138,8 @@ pub(crate) fn save_in(dir: &Path, config: &SyncConfig) -> Result<(), ConfigError
         use std::io::Write as _;
         file.write_all(text.as_bytes())
             .map_err(|e| ConfigError::Io(tmp.clone(), e))?;
-        file.sync_all().map_err(|e| ConfigError::Io(tmp.clone(), e))?;
+        file.sync_all()
+            .map_err(|e| ConfigError::Io(tmp.clone(), e))?;
     }
     fs::rename(&tmp, &target).map_err(|e| ConfigError::Io(target, e))?;
     Ok(())
@@ -173,8 +174,8 @@ fn sync_dir() -> Result<PathBuf, ConfigError> {
 }
 
 pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
-    let home = env::var_os("HOME")
-        .ok_or_else(|| ConfigError::NoSupportDir("$HOME not set".into()))?;
+    let home =
+        env::var_os("HOME").ok_or_else(|| ConfigError::NoSupportDir("$HOME not set".into()))?;
     let mut p = PathBuf::from(home);
     if cfg!(target_os = "macos") {
         p.push("Library/Application Support");
@@ -250,8 +251,14 @@ mod tests {
         save_in(dir.path(), &b).unwrap();
         // Both still readable after writing the other — would fail if hashes
         // collided or paths weren't part of the key.
-        assert_eq!(load_in(dir.path(), &a.local_path).unwrap().as_ref(), Some(&a));
-        assert_eq!(load_in(dir.path(), &b.local_path).unwrap().as_ref(), Some(&b));
+        assert_eq!(
+            load_in(dir.path(), &a.local_path).unwrap().as_ref(),
+            Some(&a)
+        );
+        assert_eq!(
+            load_in(dir.path(), &b.local_path).unwrap().as_ref(),
+            Some(&b)
+        );
     }
 
     #[test]

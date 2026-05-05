@@ -18,6 +18,7 @@ actions!(
         OpenSettings,
         OpenSyncSettings,
         SyncNow,
+        DownloadFavicons,
         NewEntry,
         OpenConflictDemo,
         CreateVault,

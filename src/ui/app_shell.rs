@@ -3,9 +3,9 @@ use crate::{
         AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
-            DeleteEntry, EditEntry, FocusSearch, LockVault, NewEntry, OpenConflictDemo,
-            OpenConnect, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SaveVault,
-            SubmitPassword, SyncNow, ToggleTheme,
+            DeleteEntry, DownloadFavicons, EditEntry, FocusSearch, LockVault, NewEntry,
+            OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings, OpenVault,
+            OpenVaultSwitcher, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
         },
     },
     keepass::KeePassRepository,
@@ -733,6 +733,16 @@ impl AppShell {
         }
     }
 
+    fn on_action_download_favicons(
+        &mut self,
+        _: &DownloadFavicons,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |state, cx| state.start_favicon_download(cx));
+    }
+
     fn on_action_new_entry(&mut self, _: &NewEntry, window: &mut Window, cx: &mut Context<Self>) {
         let is_open = matches!(
             self.state.read(cx).vault_status(),
@@ -1457,6 +1467,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_open_settings))
             .on_action(cx.listener(Self::on_action_open_sync_settings))
             .on_action(cx.listener(Self::on_action_sync_now))
+            .on_action(cx.listener(Self::on_action_download_favicons))
             .on_action(cx.listener(Self::on_action_new_entry))
             .on_action(cx.listener(Self::on_action_open_conflict_demo))
             .on_action(cx.listener(Self::on_action_create_vault))

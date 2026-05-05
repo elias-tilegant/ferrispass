@@ -49,7 +49,11 @@ pub fn ghost_pill(id: impl Into<ElementId>, label: impl Into<String>) -> AnyElem
 }
 
 /// Step indicator like "1 — 2 — 3" used on the connect screen.
-pub fn step_indicator<'a>(steps: &'a [(usize, &'a str)], active: usize, cx: &gpui::App) -> AnyElement {
+pub fn step_indicator<'a>(
+    steps: &'a [(usize, &'a str)],
+    active: usize,
+    cx: &gpui::App,
+) -> AnyElement {
     let theme_border = cx.theme().border;
     let mut row = h_flex().items_center().gap_3().w_full();
 

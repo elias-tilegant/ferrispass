@@ -1,6 +1,4 @@
-use gpui::{
-    AnyElement, IntoElement as _, ParentElement as _, Styled as _, div, px,
-};
+use gpui::{AnyElement, IntoElement as _, ParentElement as _, Styled as _, div, px};
 use gpui_component::{Icon, Sizable as _};
 
 use crate::ui::icons::AppIcon;
