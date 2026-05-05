@@ -1078,8 +1078,14 @@ impl Focusable for AppShell {
 }
 
 impl Render for AppShell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let body = AppShell::render_body(self, cx);
+        // Without this layer the `Root::notification` `NotificationList`
+        // never gets painted — `window.push_notification(...)` queues
+        // toasts into a list that nothing renders, so the user sees
+        // nothing despite the call site looking correct. Mirrors the
+        // gpui-component story-shell pattern.
+        let notification_layer = Root::render_notification_layer(window, cx);
 
         div()
             .key_context(APP_CONTEXT)
@@ -1107,6 +1113,7 @@ impl Render for AppShell {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(body)
+            .children(notification_layer)
     }
 }
 
