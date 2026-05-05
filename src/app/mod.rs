@@ -2,10 +2,12 @@ pub mod actions;
 pub mod assets;
 
 mod recents;
+pub mod settings;
 mod state;
 pub(crate) mod time;
 
 pub use recents::{RecentEntry, RecentsError};
+pub use settings::AppSettings;
 pub use state::{
     AppState, ConflictState, ConnectFlow, CopyValueKind, LibrarySelection, Overlay,
     SaveStatus, SyncBinding, SyncStatus, UnlockPrompt, VaultBrowserModel, VaultStatus,

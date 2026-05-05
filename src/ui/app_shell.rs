@@ -1,15 +1,24 @@
 use crate::{
     app::{
-        AppState, CopyValueKind, Overlay,
+        AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
             DeleteEntry, EditEntry, SaveVault, ToggleTheme,
-            FocusSearch, LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSyncSettings,
-            OpenVault, SubmitPassword,
+            FocusSearch, LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSettings,
+            OpenSyncSettings, OpenVault, SubmitPassword,
         },
     },
     keepass::KeePassRepository,
 };
+
+/// Which section of the unified Settings overlay is currently active.
+/// Lives in AppShell because it's UI-local state — not worth persisting,
+/// reset to General whenever the overlay closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsTab {
+    General,
+    Sync,
+}
 use gpui::{
     AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, ParentElement as _, PathPromptOptions, Render, ScrollStrategy,
@@ -99,27 +108,27 @@ pub struct AppShell {
     /// click, key-down). Updated cheaply on every event without
     /// triggering a re-render — only the auto-lock checker reads it.
     last_activity: Instant,
-    /// Periodic checker that locks the vault after
-    /// `AUTO_LOCK_TIMEOUT_SECS` of inactivity. Only running while a
-    /// vault is open (managed alongside `totp_tick` via the state
-    /// observer). Drop = cancel.
+    /// Periodic checker that locks the vault after the configured
+    /// auto-lock timeout. Only running while a vault is open AND a
+    /// non-`None` timeout is configured (managed alongside `totp_tick`
+    /// via the state observer). Drop = cancel.
     auto_lock_task: Option<Task<()>>,
+    /// User-tunable timeouts (auto-lock, clipboard-clear). Loaded from
+    /// `~/Library/Application Support/stc-keepass/settings.json` at
+    /// construction; mutated by the Settings overlay; persisted async
+    /// on every change.
+    settings: AppSettings,
+    /// Selected tab inside the unified Settings overlay. Reset to
+    /// General when the overlay opens via ⌘,, jumped to Sync when
+    /// opened via ⌘⇧, or any "Sync settings"-style button.
+    settings_tab: SettingsTab,
     _subscriptions: Vec<Subscription>,
 }
 
-/// Seconds the clipboard auto-clear timer waits before wiping a copied
-/// secret. KeePassXC's default is 10s; long enough to paste once,
-/// short enough that an unattended laptop doesn't leak the password.
-pub const CLIPBOARD_CLEAR_SECS: u64 = 10;
-
-/// Idle timeout before an open vault auto-locks. Mirrors KeePassXC's
-/// default (4 minutes) — long enough for a coffee break, short enough
-/// that a left-open laptop isn't an open vault.
-pub const AUTO_LOCK_TIMEOUT_SECS: u64 = 240;
-
 /// How often the auto-lock checker wakes to compare `last_activity`
-/// against the timeout. Coarser than the timeout so the lock always
-/// fires within `AUTO_LOCK_TICK_SECS` of crossing the threshold.
+/// against the configured timeout. Coarser than the typical timeout
+/// so the lock always fires within this window of crossing the
+/// threshold.
 const AUTO_LOCK_TICK_SECS: u64 = 5;
 
 impl AppShell {
@@ -219,7 +228,20 @@ impl AppShell {
             revealed_entry_id: None,
             last_activity: Instant::now(),
             auto_lock_task: None,
+            settings: crate::app::settings::load(),
+            settings_tab: SettingsTab::General,
             _subscriptions,
+        }
+    }
+
+    pub fn settings_tab(&self) -> SettingsTab {
+        self.settings_tab
+    }
+
+    pub fn set_settings_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        if self.settings_tab != tab {
+            self.settings_tab = tab;
+            cx.notify();
         }
     }
 
@@ -269,17 +291,21 @@ impl AppShell {
     }
 
     /// Mirror of `sync_totp_tick` for the idle-timeout auto-lock
-    /// checker. Runs only while a vault is open; cancelled (= dropped)
-    /// when locked or never-opened. The task wakes every
-    /// `AUTO_LOCK_TICK_SECS` and triggers a lock once `last_activity`
-    /// has been silent for `AUTO_LOCK_TIMEOUT_SECS`.
+    /// checker. Runs only while a vault is open AND `auto_lock_secs`
+    /// is configured; cancelled (= dropped) otherwise. The task wakes
+    /// every `AUTO_LOCK_TICK_SECS` and triggers a lock once
+    /// `last_activity` has been silent for the configured threshold.
+    /// Reads the threshold inside the loop so settings changes apply
+    /// at the next tick without restarting the task.
     fn sync_auto_lock_task(&mut self, cx: &mut Context<Self>) {
         let vault_open = matches!(
             self.state.read(cx).vault_status(),
             crate::app::VaultStatus::Open { .. }
         );
+        let auto_lock_enabled = self.settings.auto_lock_secs.is_some();
+        let should_run = vault_open && auto_lock_enabled;
 
-        match (vault_open, self.auto_lock_task.is_some()) {
+        match (should_run, self.auto_lock_task.is_some()) {
             (true, false) => {
                 // Reset the activity baseline at vault-open so a stale
                 // timestamp from earlier in the session doesn't trip an
@@ -291,8 +317,13 @@ impl AppShell {
                             .timer(Duration::from_secs(AUTO_LOCK_TICK_SECS))
                             .await;
                         let triggered = this.update(cx, |shell, cx| {
+                            // Re-read on each tick so toggling the
+                            // setting takes effect within ~5 s.
+                            let Some(threshold) = shell.settings.auto_lock_secs else {
+                                return true; // settings disabled — exit.
+                            };
                             if shell.last_activity.elapsed()
-                                >= Duration::from_secs(AUTO_LOCK_TIMEOUT_SECS)
+                                >= Duration::from_secs(threshold)
                             {
                                 shell.auto_lock_now(cx);
                                 true
@@ -300,9 +331,6 @@ impl AppShell {
                                 false
                             }
                         });
-                        // Stop after firing — observer will null this
-                        // slot when the vault transitions to Empty.
-                        // Also stop if the entity is gone.
                         match triggered {
                             Ok(true) | Err(_) => break,
                             Ok(false) => continue,
@@ -612,20 +640,30 @@ impl AppShell {
         });
     }
 
+    fn on_action_open_settings(
+        &mut self,
+        _: &OpenSettings,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Universally available — no vault-open gate.
+        self.settings_tab = SettingsTab::General;
+        self.state
+            .update(cx, |state, cx| state.open_overlay(Overlay::Settings, cx));
+    }
+
     fn on_action_open_sync_settings(
         &mut self,
         _: &OpenSyncSettings,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_open = matches!(
-            self.state.read(cx).vault_status(),
-            crate::app::VaultStatus::Open { .. }
-        );
-        if is_open {
-            self.state
-                .update(cx, |state, cx| state.open_overlay(Overlay::SyncSettings, cx));
-        }
+        // Same Settings overlay as ⌘, but jumps directly to the Sync
+        // tab. Reachable from the vault-header sync chip and ⌘⇧, so
+        // users can land where they were going without a tab click.
+        self.settings_tab = SettingsTab::Sync;
+        self.state
+            .update(cx, |state, cx| state.open_overlay(Overlay::Settings, cx));
     }
 
     fn on_action_new_entry(
@@ -1074,6 +1112,8 @@ impl AppShell {
     /// (`copy_selected_value`) and the live-TOTP copy in the detail
     /// panel. Replaces any in-flight clear so the latest copy always
     /// wins — older timers would otherwise wipe the new value early.
+    /// When `clipboard_clear_secs` is `None` (user picked "Never"), no
+    /// timer is scheduled; the clipboard still gets wiped at lock time.
     pub fn copy_with_auto_clear(
         &mut self,
         value: String,
@@ -1082,12 +1122,11 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-        window.push_notification(
-            format!(
-                "{label} copied. Clipboard clears in {CLIPBOARD_CLEAR_SECS} s."
-            ),
-            cx,
-        );
+        let toast = match self.settings.clipboard_clear_secs {
+            Some(secs) => format!("{label} copied. Clipboard clears in {secs} s."),
+            None => format!("{label} copied."),
+        };
+        window.push_notification(toast, cx);
         self.schedule_clipboard_clear(value, cx);
     }
 
@@ -1095,9 +1134,15 @@ impl AppShell {
         self.last_clipboard_value = Some(value);
         // Drop any prior timer by replacing the slot. GPUI tasks cancel
         // on drop (same pattern as `totp_tick`).
+        let Some(secs) = self.settings.clipboard_clear_secs else {
+            // "Never": don't spawn a timer. We still record the value
+            // so the lock-time wipe can compare-then-clear.
+            self.clipboard_clear_task = None;
+            return;
+        };
         self.clipboard_clear_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_secs(CLIPBOARD_CLEAR_SECS))
+                .timer(Duration::from_secs(secs))
                 .await;
             let _ = this.update(cx, |shell, cx| {
                 // Only clear when the clipboard still holds *our* value.
@@ -1139,6 +1184,35 @@ impl AppShell {
         cx.notify();
     }
 
+    pub fn settings(&self) -> &AppSettings {
+        &self.settings
+    }
+
+    /// Persist a new `AppSettings`. Background-saves to disk
+    /// (fire-and-forget — failures are non-fatal, the in-memory
+    /// settings still apply for this session) and re-runs
+    /// `sync_auto_lock_task` so a freshly-disabled timer is cancelled
+    /// or a freshly-enabled one starts immediately.
+    pub fn update_settings(
+        &mut self,
+        new_settings: AppSettings,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings == new_settings {
+            return;
+        }
+        self.settings = new_settings.clone();
+        // If the user just toggled auto-lock on/off, we need to start
+        // or cancel the checker task immediately rather than waiting
+        // for the next state notification.
+        self.sync_auto_lock_task(cx);
+        cx.background_spawn(async move {
+            let _ = crate::app::settings::save(&new_settings);
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn click_open_vault(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.prompt_for_vault_path(window, cx);
     }
@@ -1150,6 +1224,13 @@ impl AppShell {
     fn render_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let vault_status = self.state.read(cx).vault_status();
         let overlay = self.state.read(cx).overlay();
+
+        // Settings is a global overlay — accessible regardless of
+        // whether a vault is open (matches the Mac ⌘, convention of
+        // Preferences always being reachable).
+        if matches!(overlay, Overlay::Settings) {
+            return crate::ui::screens::settings::render(self, cx);
+        }
 
         match vault_status {
             crate::app::VaultStatus::Empty if matches!(overlay, Overlay::Connect) => {
@@ -1163,7 +1244,6 @@ impl AppShell {
                 crate::ui::screens::vault::render(self, cx)
             }
             crate::app::VaultStatus::Open { .. } => match overlay {
-                Overlay::SyncSettings => crate::ui::screens::sync_settings::render(self, cx),
                 Overlay::Conflict => crate::ui::screens::conflict::render(self, cx),
                 Overlay::AddEntry | Overlay::EditEntry { .. } => {
                     // The same modal renders both Add and Edit; the variant
@@ -1215,6 +1295,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_copy_url))
             .on_action(cx.listener(Self::on_action_copy_password))
             .on_action(cx.listener(Self::on_action_open_connect))
+            .on_action(cx.listener(Self::on_action_open_settings))
             .on_action(cx.listener(Self::on_action_open_sync_settings))
             .on_action(cx.listener(Self::on_action_new_entry))
             .on_action(cx.listener(Self::on_action_open_conflict_demo))

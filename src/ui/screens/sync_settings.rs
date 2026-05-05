@@ -15,7 +15,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::{Sizable as _, WindowExt as _, h_flex, v_flex};
 
 use crate::app::actions::OpenConnect;
 use crate::app::{SyncBinding, SyncStatus};
@@ -24,158 +24,21 @@ use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip};
 
-pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
+/// Render the Sync tab body — content only, no chrome. The unified
+/// Settings overlay (`screens::settings`) wraps this with the sidebar
+/// and header. The three Connected / Reconnect / Disconnected shapes
+/// are picked from `AppState::sync_binding` + `sync_status`.
+pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let state_handle = shell.state().clone();
     let snapshot = state_handle.read(cx);
     let binding = snapshot.sync_binding().cloned_for_render();
     let status = snapshot.sync_status().clone();
 
-    let body = match (&binding, &status) {
+    match (&binding, &status) {
         (_, SyncStatus::Reconnect) => render_reconnect(cx),
         (Some(b), _) => render_connected(b, &status, cx),
         (None, _) => render_disconnected(cx),
-    };
-
-    h_flex()
-        .size_full()
-        .bg(cx.theme().background)
-        .child(sidebar())
-        .child(content_panel(body, cx))
-        .into_any_element()
-}
-
-// --------------- chrome ---------------
-
-fn sidebar() -> AnyElement {
-    let items = [
-        (AppIcon::Key, "General", false),
-        (AppIcon::Shield, "Security", false),
-        (AppIcon::Cloud, "Sync", true),
-        (AppIcon::Sync, "Auto-type", false),
-        (AppIcon::Note, "Backups", false),
-        (AppIcon::Refresh, "Advanced", false),
-    ];
-
-    let mut col = v_flex()
-        .w(px(200.))
-        .flex_shrink_0()
-        .h_full()
-        .pt_4()
-        .bg(palette::sidebar())
-        .border_r_1()
-        .border_color(palette::border())
-        .child(
-            div()
-                .px_3p5()
-                .pb_2p5()
-                .text_xs()
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(palette::text_faint())
-                .child("SETTINGS"),
-        );
-
-    for (icon, label, selected) in items {
-        let bg = if selected { palette::blue() } else { palette::sidebar() };
-        let fg = if selected { palette::panel() } else { palette::text() };
-        let icon_color = if selected { palette::panel() } else { palette::text_muted() };
-        col = col.child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .h(px(28.))
-                .mx(px(6.))
-                .px_3p5()
-                .rounded(px(5.))
-                .bg(bg)
-                .text_color(fg)
-                .text_sm()
-                .child(
-                    gpui_component::Icon::from(icon)
-                        .with_size(gpui_component::Size::Size(px(13.)))
-                        .text_color(icon_color),
-                )
-                .child(label),
-        );
     }
-
-    col.into_any_element()
-}
-
-fn content_panel(body: AnyElement, cx: &mut Context<AppShell>) -> AnyElement {
-    v_flex()
-        .flex_1()
-        .min_w(px(0.))
-        .h_full()
-        .bg(palette::panel())
-        .child(
-            v_flex()
-                .gap_1()
-                .px_8()
-                .pt_5()
-                .pb_4()
-                .border_b_1()
-                .border_color(palette::border())
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(palette::text_muted())
-                        .child("SETTINGS"),
-                )
-                .child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .child("Cloud sync"),
-                        )
-                        .child(close_button(cx)),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(palette::text_muted())
-                        .child(
-                            "Keep your encrypted vault in sync across devices via your own cloud storage.",
-                        ),
-                ),
-        )
-        .child(
-            v_flex()
-                .flex_1()
-                .min_h(px(0.))
-                .gap_6()
-                .p_8()
-                .child(body),
-        )
-        .into_any_element()
-}
-
-fn close_button(cx: &mut Context<AppShell>) -> AnyElement {
-    div()
-        .id("close-sync-settings")
-        .h(px(28.))
-        .px(px(10.))
-        .rounded(px(5.))
-        .bg(palette::panel())
-        .border_1()
-        .border_color(palette::border_strong())
-        .text_xs()
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(palette::text())
-        .flex()
-        .items_center()
-        .justify_center()
-        .child("Close")
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            shell.state().clone().update(cx, |state, cx| {
-                let _ = state.close_overlay(cx);
-            });
-        }))
-        .into_any_element()
 }
 
 // --------------- bodies ---------------

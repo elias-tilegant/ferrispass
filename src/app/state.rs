@@ -218,8 +218,10 @@ pub enum Overlay {
     None,
     /// Cloud provider picker (welcome → connect flow).
     Connect,
-    /// Sync settings — full window over vault.
-    SyncSettings,
+    /// Unified Settings overlay — full window. Tabs (General, Sync, …)
+    /// are tracked in AppShell as UI-local state. Universally available
+    /// (no vault-open gate), matching the Mac ⌘, convention.
+    Settings,
     /// New entry modal — appears over the vault.
     AddEntry,
     /// Edit existing entry. Carries the entry id so the Save handler knows
