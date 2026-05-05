@@ -22,7 +22,7 @@ pub enum SettingsTab {
 use gpui::{
     AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, ParentElement as _, PathPromptOptions, Render, ScrollStrategy,
-    Styled as _, Subscription, Task, Window, div,
+    Styled as _, Subscription, Task, Window, div, px,
 };
 use std::time::{Duration, Instant};
 use gpui_component::{
@@ -100,6 +100,15 @@ pub struct AppShell {
     /// (e.g. an unrelated string they copied from another app in the
     /// meantime) from being clobbered by our timer.
     last_clipboard_value: Option<String>,
+    /// Wall-clock deadline at which the pending clipboard-clear fires.
+    /// Drives the countdown pill in the bottom-right corner. `None`
+    /// when no clear is scheduled (no active copy, or settings have
+    /// `clipboard_clear_secs = None`).
+    clipboard_clear_deadline: Option<Instant>,
+    /// 1 Hz tick that re-renders the countdown pill while a clear is
+    /// pending. Dropped when the deadline lapses or the user copies
+    /// something else.
+    clipboard_pill_tick: Option<Task<()>>,
     /// Id of the entry whose password is currently revealed in the
     /// detail panel. `None` = masked. Compared against the live selection
     /// in the state observer so switching entries (or locking) auto-masks.
@@ -225,6 +234,8 @@ impl AppShell {
             totp_tick: None,
             clipboard_clear_task: None,
             last_clipboard_value: None,
+            clipboard_clear_deadline: None,
+            clipboard_pill_tick: None,
             revealed_entry_id: None,
             last_activity: Instant::now(),
             auto_lock_task: None,
@@ -374,6 +385,8 @@ impl AppShell {
         }
         self.last_clipboard_value = None;
         self.clipboard_clear_task = None;
+        self.clipboard_clear_deadline = None;
+        self.clipboard_pill_tick = None;
     }
 
     pub fn arm_perma_delete(&mut self, entry_id: String, cx: &mut Context<Self>) {
@@ -1135,11 +1148,38 @@ impl AppShell {
         // Drop any prior timer by replacing the slot. GPUI tasks cancel
         // on drop (same pattern as `totp_tick`).
         let Some(secs) = self.settings.clipboard_clear_secs else {
-            // "Never": don't spawn a timer. We still record the value
-            // so the lock-time wipe can compare-then-clear.
+            // "Never": don't spawn a timer or pill. We still record
+            // the value so the lock-time wipe can compare-then-clear.
             self.clipboard_clear_task = None;
+            self.clipboard_clear_deadline = None;
+            self.clipboard_pill_tick = None;
             return;
         };
+        // Track the deadline so the countdown pill can render
+        // `clears in N s…`. Re-rendering at 1 Hz comes from
+        // `clipboard_pill_tick` below.
+        self.clipboard_clear_deadline =
+            Some(Instant::now() + Duration::from_secs(secs));
+        self.clipboard_pill_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(1))
+                    .await;
+                let keep_ticking = this
+                    .update(cx, |shell, cx| {
+                        if shell.clipboard_clear_deadline.is_none() {
+                            // Wipe fired (or settings flipped to Never).
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_ticking {
+                    break;
+                }
+            }
+        }));
         self.clipboard_clear_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_secs(secs))
@@ -1158,6 +1198,9 @@ impl AppShell {
                 }
                 shell.last_clipboard_value = None;
                 shell.clipboard_clear_task = None;
+                shell.clipboard_clear_deadline = None;
+                shell.clipboard_pill_tick = None;
+                cx.notify();
             });
         }));
     }
@@ -1263,6 +1306,42 @@ impl Focusable for AppShell {
     }
 }
 
+impl AppShell {
+    /// Tiny pill in the bottom-right corner that counts down the
+    /// remaining seconds until the clipboard auto-clear fires. `None`
+    /// when no clear is pending or the deadline has lapsed (the wipe
+    /// task drops the deadline as part of its cleanup).
+    fn render_clipboard_pill(&self) -> Option<impl gpui::IntoElement> {
+        let deadline = self.clipboard_clear_deadline?;
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let secs = remaining.as_secs();
+        if secs == 0 {
+            return None;
+        }
+        Some(
+            div()
+                .absolute()
+                .bottom_4()
+                .right_4()
+                .child(
+                    gpui::div()
+                        .h(px(28.))
+                        .px(px(12.))
+                        .rounded(px(14.))
+                        .bg(crate::ui::palette::panel())
+                        .border_1()
+                        .border_color(crate::ui::palette::border_strong())
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(crate::ui::palette::text_muted())
+                        .flex()
+                        .items_center()
+                        .child(format!("Clipboard clears in {secs} s")),
+                ),
+        )
+    }
+}
+
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let body = AppShell::render_body(self, cx);
@@ -1272,6 +1351,7 @@ impl Render for AppShell {
         // nothing despite the call site looking correct. Mirrors the
         // gpui-component story-shell pattern.
         let notification_layer = Root::render_notification_layer(window, cx);
+        let clipboard_pill = self.render_clipboard_pill();
 
         div()
             .key_context(APP_CONTEXT)
@@ -1310,6 +1390,7 @@ impl Render for AppShell {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(body)
+            .children(clipboard_pill)
             .children(notification_layer)
     }
 }
