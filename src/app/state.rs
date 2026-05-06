@@ -664,6 +664,25 @@ impl AppState {
         document.totp_for_entry(id)
     }
 
+    /// Flip the expanded/collapsed state of a sidebar group. Reads the
+    /// current flag from the snapshot, writes the inverse via the
+    /// document, and queues a save so the change is durable. No-ops
+    /// silently if the group has vanished mid-flight (rare race when
+    /// the user clicks while a sync overwrites the tree).
+    pub fn toggle_group_expanded(&mut self, group_id: &str, cx: &mut Context<Self>) {
+        let VaultStatus::Open { document, .. } = &mut self.vault else {
+            return;
+        };
+        let Some(group) = document.snapshot().find_group(group_id) else {
+            return;
+        };
+        let new_value = !group.is_expanded;
+        if document.set_group_expanded(group_id, new_value).is_ok() {
+            cx.notify();
+            self.save_async(cx);
+        }
+    }
+
     /// Walk the open vault, find every entry with a non-empty URL and no
     /// existing custom icon, and pull a favicon for each from DuckDuckGo.
     /// Successful fetches are written into the database as Custom Icons;
@@ -1843,11 +1862,20 @@ fn entries_for_selection(
     }
 
     match selection {
+        // Selecting a group includes everything below it — entries directly
+        // in the group *plus* every entry in any nested subgroup. Without
+        // this the entry-count chip in the sidebar (which is recursive,
+        // see `VaultGroup::entry_count`) and the visible list disagree:
+        // clicking "Personal" with a "Personal/Banking" subgroup would
+        // show "57" as the count but only the direct hits in the list.
+        // Matches KeePassXC's behaviour.
         LibrarySelection::Group(id) => snapshot
             .find_group(id)
             .unwrap_or(&snapshot.root)
-            .entries
-            .clone(),
+            .entries_recursive()
+            .into_iter()
+            .cloned()
+            .collect(),
         LibrarySelection::AllItems => snapshot.entries_recursive().into_iter().cloned().collect(),
         LibrarySelection::Favorites => snapshot.entries_starred().into_iter().cloned().collect(),
         LibrarySelection::RecentlyUsed => {

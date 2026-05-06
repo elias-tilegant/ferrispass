@@ -153,7 +153,14 @@ fn group_from_ref(
 
     parent_path.pop();
 
-    VaultGroup::new(group_id_str, name, groups, entries)
+    let is_expanded = group.is_expanded;
+    VaultGroup {
+        id: group_id_str,
+        name,
+        groups,
+        entries,
+        is_expanded,
+    }
 }
 
 fn entry_from_ref(

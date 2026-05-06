@@ -226,6 +226,32 @@ impl VaultDocument {
         Ok(())
     }
 
+    /// Toggle the KeePass `IsExpanded` flag on a group. Persisting via
+    /// the standard save flow keeps the user's sidebar collapse state
+    /// across sessions and across other clients (KeePassXC and KeePass2
+    /// honour the same flag, so dipping in from another app doesn't
+    /// scramble what's open here). Returns `Ok` even when no flip is
+    /// needed — idempotent.
+    pub fn set_group_expanded(
+        &mut self,
+        group_id_str: &str,
+        expanded: bool,
+    ) -> Result<(), MutationError> {
+        let group_id =
+            find_group_id(&self.database, group_id_str).ok_or(MutationError::GroupNotFound)?;
+        let mut group = self
+            .database
+            .group_mut(group_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        if group.is_expanded == expanded {
+            return Ok(());
+        }
+        group.is_expanded = expanded;
+        drop(group);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
     /// Replace the entry's icon with a custom-icon blob. `bytes` is the raw
     /// PNG/JPEG/ICO/etc — keepass-rs stores it verbatim and our
     /// repository-side magic-byte sniffer figures out the format on the

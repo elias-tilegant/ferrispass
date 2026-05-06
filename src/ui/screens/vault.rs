@@ -75,7 +75,8 @@ fn sidebar(
     let starred_count = snapshot.map(|s| s.entries_starred().len()).unwrap_or(0);
     let twofa_count = snapshot.map(|s| s.entries_with_otp().len()).unwrap_or(0);
 
-    let groups = snapshot.map(|s| s.root.groups.clone()).unwrap_or_default();
+    let root_group = snapshot.map(|s| s.root.clone());
+    let recycle_bin_id = snapshot.and_then(|s| s.recycle_bin_id.clone());
 
     v_flex()
         .w(px(220.))
@@ -139,7 +140,13 @@ fn sidebar(
                     state_entity.clone(),
                     cx,
                 ))
-                .child(groups_section(&groups, selection, state_entity.clone(), cx))
+                .child(groups_section(
+                    root_group.as_ref(),
+                    recycle_bin_id.as_deref(),
+                    selection,
+                    state_entity.clone(),
+                    cx,
+                ))
                 .child(tags_section(
                     twofa_count,
                     selection,
@@ -263,11 +270,51 @@ fn library_section(
 }
 
 fn groups_section(
-    groups: &[VaultGroup],
+    root: Option<&VaultGroup>,
+    recycle_bin_id: Option<&str>,
     selection: &crate::app::LibrarySelection,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
+    // Flatten the tree to a depth-tagged preorder list once, starting at
+    // the database root so the root group is visible — KeePassXC does
+    // the same, and entries that live directly at root would otherwise
+    // be unreachable via the group nav (only via "All items"). Drops on
+    // the root row move an entry back to top level. We deliberately
+    // render the whole tree (no expand/collapse yet) because users
+    // overwhelmingly want their structure visible at a glance;
+    // collapsibility is a later polish.
+    //
+    // The recycle-bin group is dropped from the tree because it has its
+    // own dedicated "Trash" affordance under the Library section —
+    // surfacing it as a regular group here would just confuse the user
+    // about where deleted entries live.
+    let mut flat: Vec<(usize, &VaultGroup)> = Vec::new();
+    fn collect<'a>(
+        group: &'a VaultGroup,
+        depth: usize,
+        recycle_bin_id: Option<&str>,
+        out: &mut Vec<(usize, &'a VaultGroup)>,
+    ) {
+        if recycle_bin_id == Some(group.id.as_str()) {
+            return;
+        }
+        out.push((depth, group));
+        // Skip children when the parent is collapsed. The flag lives on
+        // the KeePass `Group::is_expanded` field, so collapse state is
+        // persisted with the database and survives restarts and
+        // round-trips through other clients.
+        if !group.is_expanded {
+            return;
+        }
+        for child in &group.groups {
+            collect(child, depth + 1, recycle_bin_id, out);
+        }
+    }
+    if let Some(root) = root {
+        collect(root, 0, recycle_bin_id, &mut flat);
+    }
+
     let palette_colors = [
         palette::blue(),
         palette::orange(),
@@ -281,26 +328,67 @@ fn groups_section(
         .pb_2()
         .child(div().px_3p5().pb_1().child(section_heading("Groups")));
 
-    for (i, group) in groups.iter().enumerate() {
+    for (i, (depth, group)) in flat.iter().enumerate() {
+        let depth = *depth;
         let color = palette_colors[i % palette_colors.len()];
         let is_selected = group.id == selected_group;
         let group_id = group.id.clone();
         let count = group.entry_count();
+        let has_children = !group.groups.is_empty();
+        let is_expanded = group.is_expanded;
         let state_for_click = state_entity.clone();
         let group_id_for_drop = group.id.clone();
         let state_for_drop = state_entity.clone();
+        let group_id_for_toggle = group.id.clone();
+        let state_for_toggle = state_entity.clone();
 
-        // Wrap the nav_pill in a stateful div that acts as a drop
-        // target for entry-row drags. Wrapper, not nav_pill itself,
-        // because nav_pill returns `impl IntoElement` (opaque) and we
-        // want to keep its API tight — droppability is a sidebar-only
-        // concern. Bg highlight on drag-over draws through nav_pill's
-        // mx(6.) gap and its transparent background for unselected
-        // groups; selected groups already have solid blue, so the
-        // drop target reads visually via the wrapper's outline.
-        col = col.child(
+        // Layout per row: [chevron column | nav_pill (flex_1)]. The
+        // chevron and the pill are *siblings*, not nested — clicks on
+        // the chevron toggle expansion without bubbling into the row's
+        // select handler, matching the codebase pattern noted in
+        // `password_row` (see "we don't have to manage stop_propagation").
+        //
+        // The chevron column is rendered even for leaf groups so all
+        // rows align vertically; leaves just don't get an icon or a
+        // listener.
+        //
+        // Depth-based left padding gives the tree shape. 12 px per
+        // level lines up with the icon column and produces a readable
+        // indent without eating the 220 px sidebar width even for
+        // moderately deep trees (4–5 levels still fit).
+        let chevron_id = gpui::SharedString::from(format!("group-chev-{}", group.id));
+        let chevron = if has_children {
             div()
+                .id(chevron_id)
+                .w(px(16.))
+                .h(px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(palette::text_muted())
+                .hover(|s| s.text_color(palette::text()))
+                .child(
+                    gpui_component::Icon::from(if is_expanded {
+                        gpui_component::IconName::ChevronDown
+                    } else {
+                        gpui_component::IconName::ChevronRight
+                    })
+                    .with_size(gpui_component::Size::Size(px(11.))),
+                )
+                .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
+                    let id = group_id_for_toggle.clone();
+                    state_for_toggle.update(cx, |state, cx| state.toggle_group_expanded(&id, cx));
+                }))
+                .into_any_element()
+        } else {
+            div().w(px(16.)).h(px(16.)).into_any_element()
+        };
+
+        col = col.child(
+            h_flex()
                 .id(gpui::SharedString::from(format!("group-drop-{}", group.id)))
+                .pl(px(depth as f32 * 12.))
+                .items_center()
                 .rounded(px(6.))
                 .drag_over::<EntryDrag>(|this, _, _, _| {
                     this.bg(palette::blue_soft())
@@ -316,7 +404,8 @@ fn groups_section(
                         });
                     }),
                 )
-                .child(nav_pill(
+                .child(chevron)
+                .child(div().flex_1().min_w_0().child(nav_pill(
                     gpui::SharedString::from(format!("group-{}", group.id)),
                     AppIcon::Note,
                     &group.name,
@@ -329,7 +418,7 @@ fn groups_section(
                             state.select_group(id, cx);
                         });
                     }),
-                )),
+                ))),
         );
     }
     col

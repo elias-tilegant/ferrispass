@@ -9,12 +9,30 @@ pub struct VaultSnapshot {
     pub recycle_bin_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultGroup {
     pub id: String,
     pub name: String,
     pub groups: Vec<VaultGroup>,
     pub entries: Vec<VaultEntry>,
+    /// Mirrors the KeePass `IsExpanded` flag — round-trips through every
+    /// other client (KeePassXC, KeePass2) so the user's collapse state
+    /// in our sidebar follows them across machines via sync. Defaults to
+    /// `true` for groups we synthesize ourselves (test fixtures, fresh
+    /// vaults) so the tree opens up by default.
+    pub is_expanded: bool,
+}
+
+impl Default for VaultGroup {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            groups: Vec::new(),
+            entries: Vec::new(),
+            is_expanded: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -169,6 +187,7 @@ impl VaultGroup {
             name: name.into(),
             groups,
             entries,
+            is_expanded: true,
         }
     }
 
