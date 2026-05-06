@@ -22,8 +22,7 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, Root};
 
 const APP_NAME: &str = "FerrisPass";
-#[allow(dead_code)]
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn run() {
     let application = gpui_platform::application().with_assets(assets::AppAssets::new());

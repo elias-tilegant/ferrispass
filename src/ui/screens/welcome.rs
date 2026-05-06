@@ -107,7 +107,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .justify_between()
                                 .text_xs()
                                 .text_color(palette::text_faint())
-                                .child("v0.4.2 · KDBX 4.1")
+                                .child(format!("v{} · KDBX 4.1", crate::app::APP_VERSION))
                                 .child(
                                     h_flex()
                                         .gap_1()
