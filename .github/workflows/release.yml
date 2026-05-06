@@ -68,8 +68,34 @@ jobs:
           # runner's ${RUNNER_TEMP} is wiped after the job, so the key
           # never persists on the GitHub Actions infrastructure.
           mkdir -p "${RUNNER_TEMP}/ferrispass"
-          printf '%s\n' "${MINISIGN_PRIVATE_KEY}" > "${RUNNER_TEMP}/ferrispass/minisign.key"
-          chmod 600 "${RUNNER_TEMP}/ferrispass/minisign.key"
+          KEY="${RUNNER_TEMP}/ferrispass/minisign.key"
+
+          # `tr -d '\r'` defends against CRLF line endings sneaking in
+          # from a clipboard round-trip on Windows / via the GitHub UI.
+          echo "$MINISIGN_PRIVATE_KEY" | tr -d '\r' > "$KEY"
+          chmod 600 "$KEY"
+
+          # Validate the file structure before letting build-mac.sh hit
+          # minisign — its error message ("base64 conversion failed") is
+          # opaque and doesn't tell you what was actually wrong.
+          if ! head -1 "$KEY" | grep -q "untrusted comment"; then
+              echo "" >&2
+              echo "✗ MINISIGN_PRIVATE_KEY secret is malformed." >&2
+              echo "  File: $(wc -l < $KEY) lines, $(wc -c < $KEY) bytes." >&2
+              echo "  First line begins with: $(head -c 30 $KEY)..." >&2
+              echo "" >&2
+              echo "  A valid minisign secret key file has TWO lines:" >&2
+              echo "    Line 1: untrusted comment: minisign encrypted secret key" >&2
+              echo "    Line 2: RWRTY0IyqOk... (base64 blob)" >&2
+              echo "" >&2
+              echo "  Fix: locally on your Mac, run" >&2
+              echo "      cat ~/.ferrispass/minisign.key | pbcopy" >&2
+              echo "  then paste the FULL clipboard content into the GitHub" >&2
+              echo "  Secret 'MINISIGN_PRIVATE_KEY' (Settings → Secrets and" >&2
+              echo "  variables → Actions). Both lines, including the comment." >&2
+              exit 1
+          fi
+          echo "✓ MINISIGN_PRIVATE_KEY format check passed ($(wc -l < $KEY) lines)."
 
       - name: Verify icon present
         run: |
