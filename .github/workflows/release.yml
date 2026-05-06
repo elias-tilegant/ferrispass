@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Required Secrets (set in repo Settings → Secrets and variables → Actions):
+#   APPLE_CERT_BASE64         — base64-encoded .p12 of Developer ID Application cert
+#   APPLE_CERT_PASSWORD       — password set when exporting the .p12
+#   APPLE_ID                  — Apple ID email used for notarization
+#   APPLE_TEAM_ID             — 10-char Team ID (5GAMHB3974)
+#   APPLE_NOTARIZE_PASSWORD   — app-specific password from appleid.apple.com
+#
+# How to export the .p12 (one-time, on the Mac that holds the cert):
+#   1. Keychain Access → "Developer ID Application" cert → File → Export → .p12
+#   2. Set a password when prompted (this becomes APPLE_CERT_PASSWORD)
+#   3. base64 < cert.p12 | pbcopy   → paste as APPLE_CERT_BASE64
+
+jobs:
+  build:
+    name: Build & notarize DMG
+    runs-on: macos-latest
+    permissions:
+      contents: write  # needed to create/update the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Import code-signing cert
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERT_BASE64 }}
+          p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
+
+      - name: Set up notarization keychain profile
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "ferrispass-notarize" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_NOTARIZE_PASSWORD"
+
+      - name: Verify icon present
+        run: |
+          if [ ! -f bundle/icon.png ]; then
+            echo "✗ bundle/icon.png missing — commit the icon before tagging a release" >&2
+            exit 1
+          fi
+
+      - name: Build, sign, notarize, staple
+        run: scripts/build-mac.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true
+          draft: false
+          prerelease: false

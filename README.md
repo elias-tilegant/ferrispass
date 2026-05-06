@@ -1,5 +1,7 @@
 # FerrisPass
 
+[![CI](https://github.com/elias-tilegant/ferrispass/actions/workflows/ci.yml/badge.svg)](https://github.com/elias-tilegant/ferrispass/actions/workflows/ci.yml)
+
 A native macOS, KeePass-compatible client built in Rust on top of [GPUI](https://github.com/zed-industries/zed).
 
 Reads and writes KDBX 4 files (AES-256 + Argon2id), interoperable with KeePassXC and KeePass2.
@@ -72,6 +74,20 @@ Requirements (one-time setup):
 - Optional: `brew install create-dmg` (prettier DMG window; falls back to plain `hdiutil` if absent)
 
 Forks must edit the `TEAM_ID`, `SIGNING_IDENTITY`, and `BUNDLE_ID` constants at the top of `scripts/build-mac.sh` to match their own Apple Developer account.
+
+### Automated releases (GitHub Actions)
+
+`.github/workflows/release.yml` runs the full pipeline on every `v*` tag push and attaches the resulting DMG to a GitHub Release. Required repo secrets:
+
+| Secret | Source |
+|---|---|
+| `APPLE_CERT_BASE64` | `base64 < cert.p12 \| pbcopy` (export Developer ID cert from Keychain Access first) |
+| `APPLE_CERT_PASSWORD` | password set when exporting the .p12 |
+| `APPLE_ID` | Apple ID email used for notarization |
+| `APPLE_TEAM_ID` | 10-char Team ID |
+| `APPLE_NOTARIZE_PASSWORD` | app-specific password from [appleid.apple.com](https://appleid.apple.com) |
+
+If you'd rather keep signing material off GitHub, leave the secrets unset and run `scripts/build-mac.sh` locally instead. The release workflow only fires on tag pushes, so until you set the secrets it won't run successfully — that's the intended fail-safe.
 
 ## Keyboard shortcuts
 

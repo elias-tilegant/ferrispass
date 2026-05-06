@@ -9,6 +9,14 @@ description = "A native, KeePass-compatible password manager for macOS, written 
 readme = "README.md"
 repository = "https://github.com/elias-tilegant/ferrispass"
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = 0
+incremental = false
+
 [dependencies]
 # Pinned to the elias-tilegant/keepass-rs fork that carries three KDBX 4
 # write-path interop fixes (AES-KDF UUID, omit-None-Option XML fields,
