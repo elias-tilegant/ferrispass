@@ -21,36 +21,120 @@ use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip};
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
-    // Snapshot the conflict so we don't hold the AppState borrow across the
-    // closures the buttons need.
-    let snapshot = match shell.state().read(cx).sync_status() {
-        SyncStatus::Conflict(state) => Some(ConflictSnapshot {
-            conflicts: state.report.conflicts.clone(),
-            local_only_count: state.report.local_only.len(),
-            remote_only_count: state.report.remote_only.len(),
-            picks: state.picks.clone(),
-        }),
-        _ => None,
-    };
+    // The conflict overlay outlives the `Conflict(state)` sync-status it
+    // was opened for: clicking "Apply resolution" flips the status to
+    // `Syncing` while the merged file is being uploaded (~500 ms KDF +
+    // network), and a non-412 upload error parks it in `Failed(_)`. We
+    // need a real screen for each of those — rendering an empty
+    // background was the source of the "white screen after Apply" bug.
+    match shell.state().read(cx).sync_status() {
+        SyncStatus::Conflict(state) => {
+            let snapshot = ConflictSnapshot {
+                conflicts: state.report.conflicts.clone(),
+                local_only_count: state.report.local_only.len(),
+                remote_only_count: state.report.remote_only.len(),
+                picks: state.picks.clone(),
+            };
+            let header = header(&snapshot, cx);
+            let body = body(snapshot, cx);
+            v_flex()
+                .size_full()
+                .bg(cx.theme().background)
+                .child(header)
+                .child(body)
+                .into_any_element()
+        }
+        SyncStatus::Syncing => transitional_screen(
+            "Applying merged result…",
+            "Encrypting and uploading the merged vault. This usually takes \
+             a couple of seconds.",
+            None,
+            cx,
+        ),
+        SyncStatus::Failed(message) => {
+            let msg = message.clone();
+            transitional_screen("Could not apply resolution", &msg, Some("Close"), cx)
+        }
+        // Resolution succeeded but the overlay hasn't been swapped to
+        // None yet (single-frame race): show the same chrome as the
+        // failed branch but with success copy and a Close affordance,
+        // so the user always has a visible way out.
+        _ => transitional_screen(
+            "Resolution applied",
+            "The merged vault is in sync.",
+            Some("Close"),
+            cx,
+        ),
+    }
+}
 
-    let Some(snapshot) = snapshot else {
-        // Fallback: shouldn't be visible if SyncStatus isn't Conflict, but
-        // render an empty body rather than panicking if we get here mid-
-        // transition (e.g., a successful Apply has cleared the status).
-        return v_flex()
-            .size_full()
-            .bg(cx.theme().background)
-            .into_any_element();
-    };
+/// Centred status card used while the merged file is being uploaded
+/// (`SyncStatus::Syncing`) or after a non-412 failure
+/// (`SyncStatus::Failed`). When `close_label` is `Some`, renders a
+/// button that closes the overlay back to the vault — the only
+/// guaranteed way out of a Failed state.
+fn transitional_screen(
+    title: &str,
+    body: &str,
+    close_label: Option<&'static str>,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    let title = title.to_string();
+    let body = body.to_string();
+    let close_button = close_label.map(|label| {
+        div()
+            .id("conflict-transitional-close")
+            .h(px(30.))
+            .px(px(14.))
+            .rounded(px(6.))
+            .bg(palette::blue())
+            .border_1()
+            .border_color(palette::blue_hover())
+            .text_color(palette::panel())
+            .text_sm()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(label)
+            .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.state().clone().update(cx, |state, cx| {
+                    let _ = state.close_overlay(cx);
+                });
+            }))
+    });
 
-    let header = header(&snapshot, cx);
-    let body = body(snapshot, cx);
-
-    v_flex()
+    div()
         .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
         .bg(cx.theme().background)
-        .child(header)
-        .child(body)
+        .child(
+            v_flex()
+                .w(px(420.))
+                .gap_3()
+                .p_8()
+                .rounded(px(12.))
+                .bg(palette::panel())
+                .border_1()
+                .border_color(palette::border())
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(palette::text_muted())
+                        .child(body),
+                )
+                .when_some(close_button, |this, btn| {
+                    this.child(h_flex().pt_2().justify_end().child(btn))
+                }),
+        )
         .into_any_element()
 }
 

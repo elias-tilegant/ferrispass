@@ -666,7 +666,10 @@ impl AppState {
 
     /// Flip the expanded/collapsed state of a sidebar group. Reads the
     /// current flag from the snapshot, writes the inverse via the
-    /// document, and queues a save so the change is durable. No-ops
+    /// document, and queues a *local-only* save so the change is
+    /// durable across restarts without firing a cloud-sync push for
+    /// every chevron click. The flag still rides out to the cloud
+    /// piggybacking on the next real mutation's save_async. No-ops
     /// silently if the group has vanished mid-flight (rare race when
     /// the user clicks while a sync overwrites the tree).
     pub fn toggle_group_expanded(&mut self, group_id: &str, cx: &mut Context<Self>) {
@@ -679,7 +682,7 @@ impl AppState {
         let new_value = !group.is_expanded;
         if document.set_group_expanded(group_id, new_value).is_ok() {
             cx.notify();
-            self.save_async(cx);
+            self.save_async_local_only(cx);
         }
     }
 
@@ -789,6 +792,22 @@ impl AppState {
     /// flight we deliberately let the new one queue behind it — the latest
     /// state always wins, but we don't drop user changes.
     pub fn save_async(&mut self, cx: &mut Context<Self>) {
+        self.save_async_internal(true, cx);
+    }
+
+    /// Save locally but skip the cloud-sync push afterwards. Used for
+    /// purely cosmetic mutations (today: sidebar group collapse/expand)
+    /// where firing a SharePoint upload on every click would burn
+    /// bandwidth and — worse — race against any already-in-flight sync
+    /// to produce a 412 ETag mismatch and an unnecessary Conflict
+    /// overlay. The change still rides out to the cloud the next time
+    /// any "real" mutation triggers `save_async`, so other devices
+    /// eventually see the updated flags.
+    pub fn save_async_local_only(&mut self, cx: &mut Context<Self>) {
+        self.save_async_internal(false, cx);
+    }
+
+    fn save_async_internal(&mut self, sync_after: bool, cx: &mut Context<Self>) {
         let VaultStatus::Open { document, path, .. } = &self.vault else {
             return;
         };
@@ -809,10 +828,10 @@ impl AppState {
                     Err(error) => SaveStatus::Failed(error.to_string()),
                 };
                 cx.notify();
-                // Chain into sync if we have a binding. `sync_now` is a
-                // no-op when sync is None or when the vault isn't Open, so
-                // it's safe to call unconditionally on success.
-                if succeeded && state.sync.is_some() {
+                // Chain into sync if we have a binding *and* the caller
+                // wanted it. `sync_now` is a no-op when sync is None or
+                // when the vault isn't Open.
+                if succeeded && sync_after && state.sync.is_some() {
                     state.sync_now(cx);
                 }
             });
@@ -1768,29 +1787,88 @@ impl AppState {
         self.sync_status = SyncStatus::Syncing;
         cx.notify();
 
-        let task = cx.background_spawn(async move {
-            payload
-                .save_to(&local_path)
-                .map_err(|e| crate::sync::service::ServiceError::Io {
-                    path: local_path.clone(),
-                    source: std::io::Error::other(e.to_string()),
-                })?;
-            let token = crate::sync::service::ensure_fresh(token, &config.account_email)?;
-            let bytes = crate::sync::service::read_local(&local_path)?;
-            let outcome = crate::sync::graph::upload_content(
-                &config.drive_id,
-                &config.item_id,
-                &bytes,
-                Some(&if_match),
-                &token,
-            )?;
-            Ok::<_, crate::sync::service::ServiceError>((outcome, token, local_path))
-        });
+        // Phase 1: local merge save. Splitting this off from the
+        // network step lets us commit the merge into the in-memory
+        // document *before* we go anywhere near the network. Without
+        // that, an upload failure (or a token-refresh failure) parked
+        // the user back on the pre-merge in-memory state while the
+        // already-merged bytes sat on disk — the next ordinary save
+        // would clobber the merge with stale data.
+        let save_path = local_path.clone();
+        let local_save_task = cx.background_spawn(async move { payload.save_to(&save_path) });
+
+        let reload_path = local_path.clone();
+        let reload_password = master_password.clone();
+        let network_path = local_path;
 
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let local_save_result = local_save_task.await;
+            let proceed = this
+                .update(cx, |state, cx| {
+                    if let Err(error) = &local_save_result {
+                        state.sync_status = SyncStatus::Failed(error.to_string());
+                        cx.notify();
+                        return false;
+                    }
+                    // Reload the in-memory document from the freshly
+                    // merged file. After this point the in-memory state
+                    // and the on-disk file agree, so a subsequent
+                    // network failure can't strand the merge on disk.
+                    let bytes = std::fs::read(&reload_path).unwrap_or_default();
+                    match crate::keepass::KeePassRepository::open_bytes(
+                        &bytes,
+                        &reload_password,
+                        None,
+                    ) {
+                        Ok(reloaded) => {
+                            if let VaultStatus::Open { document, .. } = &mut state.vault {
+                                *document = Box::new(reloaded);
+                            }
+                            cx.notify();
+                            true
+                        }
+                        Err(_) => {
+                            // The bytes we just wrote shouldn't fail to
+                            // re-open with the same password — but if
+                            // they do, surface the failure and skip the
+                            // network step instead of pressing on with a
+                            // stale in-memory state.
+                            state.sync_status = SyncStatus::Failed(
+                                "Merge saved locally but could not be re-read; \
+                                 reopen the vault to continue."
+                                    .into(),
+                            );
+                            cx.notify();
+                            false
+                        }
+                    }
+                })
+                .unwrap_or(false);
+
+            if !proceed {
+                return;
+            }
+
+            // Phase 2: token refresh + upload. If anything in here
+            // fails, the in-memory state is already aligned with disk
+            // (from phase 1), so the user can dismiss the Failed
+            // overlay and keep working without losing the merge.
+            let network_task = cx.background_spawn(async move {
+                let token = crate::sync::service::ensure_fresh(token, &config.account_email)?;
+                let bytes = crate::sync::service::read_local(&network_path)?;
+                let outcome = crate::sync::graph::upload_content(
+                    &config.drive_id,
+                    &config.item_id,
+                    &bytes,
+                    Some(&if_match),
+                    &token,
+                )?;
+                Ok::<_, crate::sync::service::ServiceError>((outcome, token))
+            });
+
+            let result = network_task.await;
             let _ = this.update(cx, |state, cx| match result {
-                Ok((outcome, fresh_token, local_path)) => {
+                Ok((outcome, fresh_token)) => {
                     if let Some(b) = state.sync.as_mut() {
                         b.access_token = fresh_token;
                     }
@@ -1800,24 +1878,6 @@ impl AppState {
                             if let Some(b) = state.sync.as_mut() {
                                 b.config.last_etag = new_etag;
                                 let _ = crate::sync::config::save(&b.config);
-                            }
-                            // Reload the document from the merged file so the
-                            // in-memory snapshot matches what's now on disk.
-                            match crate::keepass::KeePassRepository::open_bytes(
-                                &std::fs::read(&local_path).unwrap_or_default(),
-                                &master_password,
-                                None,
-                            ) {
-                                Ok(reloaded) => {
-                                    if let VaultStatus::Open { document, .. } = &mut state.vault {
-                                        *document = Box::new(reloaded);
-                                    }
-                                }
-                                Err(_) => {
-                                    // Shouldn't happen — we just wrote it.
-                                    // Surface a warning and let the user
-                                    // re-open manually.
-                                }
                             }
                             state.sync_status = SyncStatus::Synced {
                                 at: chrono::Local::now(),
