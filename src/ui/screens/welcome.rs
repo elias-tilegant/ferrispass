@@ -12,6 +12,7 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::brand::brand;
+use crate::update::UpdateStatus;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let theme = cx.theme();
@@ -24,6 +25,10 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     // Snapshot recents up front so the listener closures can move clones
     // of each path without re-borrowing `shell` inside the render tree.
     let recents: Vec<RecentEntry> = shell.state().read(cx).recents().to_vec();
+
+    // Snapshot update status so the conditional banner below has a stable
+    // value to render against without re-reading state mid-build.
+    let update_status = shell.state().read(cx).update_status().clone();
 
     div()
         .size_full()
@@ -96,6 +101,9 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                             }),
                         )),
                 )
+                .when(update_status.has_visible_update(), |this| {
+                    this.child(update_banner(&update_status, cx))
+                })
                 .child(
                     div()
                         .pt_4()
@@ -123,6 +131,81 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+fn update_banner(status: &UpdateStatus, cx: &mut Context<AppShell>) -> AnyElement {
+    let (label, action_label, clickable) = match status {
+        UpdateStatus::Available(info) => (
+            SharedString::from(format!("Update available: FerrisPass {}", info.version)),
+            Some(SharedString::from("Install")),
+            true,
+        ),
+        UpdateStatus::Downloading { .. } => (
+            "Downloading update…".into(),
+            None,
+            false,
+        ),
+        UpdateStatus::ReadyToRestart => (
+            "Update installed. Restart FerrisPass to apply.".into(),
+            None,
+            false,
+        ),
+        // Other variants don't pass `has_visible_update`, but match
+        // exhaustively so a future variant can't sneak through silently.
+        UpdateStatus::Idle | UpdateStatus::Checking | UpdateStatus::Failed(_) => {
+            return div().into_any_element();
+        }
+    };
+
+    let action_button = action_label.map(|label| {
+        div()
+            .id("welcome-update-install")
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.85))
+            .h(px(28.))
+            .px(px(12.))
+            .rounded(px(6.))
+            .bg(palette::blue())
+            .text_color(palette::panel())
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(label)
+            .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.state().clone().update(cx, |state, cx| {
+                    state.install_update(cx);
+                });
+            }))
+    });
+
+    let row = h_flex()
+        .gap_3()
+        .items_center()
+        .justify_between()
+        .px(px(12.))
+        .py(px(10.))
+        .rounded(px(8.))
+        .bg(palette::blue_soft())
+        .border_1()
+        .border_color(palette::blue_border())
+        .child(
+            div()
+                .flex_1()
+                .text_xs()
+                .text_color(palette::text())
+                .child(label),
+        );
+
+    let row = if let Some(button) = action_button {
+        row.child(button)
+    } else {
+        row
+    };
+
+    let _ = clickable;
+    row.into_any_element()
 }
 
 fn choice_row<F>(

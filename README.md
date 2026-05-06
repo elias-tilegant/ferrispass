@@ -40,6 +40,16 @@ The app is signed with a Developer ID and Apple-notarized, so first launch opens
 
 Requires Apple Silicon (M1 or newer) and macOS 12 (Monterey) or later. Intel Macs are not supported.
 
+## Auto-updates
+
+FerrisPass checks GitHub Releases on launch (rate-limited to once per day). When a newer build is published, a banner appears on the Welcome screen with an **Install** button — click it and the app downloads the new bundle, verifies its Ed25519 signature against an embedded public key, atomic-replaces itself, and prompts you to restart.
+
+Independent of Apple's Developer ID + notarization (which signs the DMG), every update payload carries a separate [minisign](https://jedisct1.github.io/minisign/) signature. Both must verify before an update is applied.
+
+To disable: Settings → General → Updates → toggle to **Off**. The "Check now" button still works manually any time. The preference persists in `~/Library/Application Support/ferrispass/settings.json`.
+
+The auto-updater lives in `src/update/`; the public key it verifies against is `bundle/minisign-pub.txt`, embedded into every build at compile time via `include_str!`.
+
 ## Development
 
 For local development:
@@ -73,7 +83,7 @@ Requirements (one-time setup):
 - `bundle/icon.png` — a 1024×1024 master PNG of the app icon
 - Optional: `brew install create-dmg` (prettier DMG window; falls back to plain `hdiutil` if absent)
 
-Forks must edit the `TEAM_ID`, `SIGNING_IDENTITY`, and `BUNDLE_ID` constants at the top of `scripts/build-mac.sh` to match their own Apple Developer account.
+Forks must edit the `TEAM_ID`, `SIGNING_IDENTITY`, and `BUNDLE_ID` constants at the top of `scripts/build-mac.sh` to match their own Apple Developer account, plus generate their own minisign keypair (`scripts/setup-minisign.sh`) and update the `UPDATE_ENDPOINT` constant in `src/update/mod.rs` to point at their fork's release URL. The embedded public key is unique per fork — users of one fork won't accept update bundles signed by another.
 
 ### Automated releases (GitHub Actions)
 

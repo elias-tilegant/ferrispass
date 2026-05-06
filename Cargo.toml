@@ -1,6 +1,6 @@
 [package]
 name = "ferrispass"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Elias Tilegant <45147025+elias-tilegant@users.noreply.github.com>"]
 edition = "2024"
 publish = false
@@ -45,6 +45,11 @@ serde_json = "1"
 keyring = { version = "3", features = ["apple-native"] }
 url = "2"
 sha2 = "0.10"
+# Auto-update: cross-platform updater (macOS/Linux/Windows) by the Tauri team.
+# Verifies update bundles via embedded minisign Ed25519 public key, downloads
+# new build over HTTPS, atomic-replaces the .app and restarts.
+cargo-packager-updater = "0.2"
+semver = "1"
 
 [dev-dependencies]
 tempfile = "3"

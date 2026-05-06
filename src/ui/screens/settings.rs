@@ -14,6 +14,7 @@ use crate::app::{AppSettings, FaviconDownloadStatus, VaultStatus};
 use crate::ui::app_shell::{AppShell, SettingsTab};
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
+use crate::update::UpdateStatus;
 
 const AUTO_LOCK_PRESETS: &[Option<u64>] = &[Some(60), Some(240), Some(900), None];
 const CLIPBOARD_CLEAR_PRESETS: &[Option<u64>] = &[Some(5), Some(10), Some(30), None];
@@ -225,12 +226,14 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
     let settings = shell.settings().clone();
     let state = shell.state().read(cx);
     let favicon_status = state.favicon_status().clone();
+    let update_status = state.update_status().clone();
     let vault_open = matches!(state.vault_status(), VaultStatus::Open { .. });
     v_flex()
         .gap_6()
         .child(auto_lock_section(&settings, cx))
         .child(clipboard_section(&settings, cx))
         .child(favicon_section(&favicon_status, vault_open, cx))
+        .child(updates_section(&settings, &update_status, cx))
 }
 
 fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
@@ -370,6 +373,93 @@ fn favicon_section(
     };
 
     section_frame("Favicons", hint, button)
+}
+
+fn updates_section(
+    settings: &AppSettings,
+    update_status: &UpdateStatus,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let auto_check = settings.auto_update_check_enabled;
+
+    // Status line — concise plain text below the chips. Cycles through
+    // checking → available → idle/failed depending on what `start_update_check`
+    // last produced.
+    let status_label: SharedString = match update_status {
+        UpdateStatus::Idle => "You're on the latest version.".into(),
+        UpdateStatus::Checking => "Checking for updates…".into(),
+        UpdateStatus::Available(info) => {
+            SharedString::from(format!("Update available: FerrisPass {}", info.version))
+        }
+        UpdateStatus::Downloading { .. } => "Downloading update…".into(),
+        UpdateStatus::ReadyToRestart => "Update installed. Restart FerrisPass to apply.".into(),
+        UpdateStatus::Failed(msg) => SharedString::from(format!("Update check failed: {msg}")),
+    };
+
+    // Toggle: On/Off chip pair. Mirrors the auto-lock preset row visually.
+    let on_baseline = settings.clone();
+    let off_baseline = settings.clone();
+    let toggle_row = h_flex()
+        .gap_2()
+        .child(preset_chip(
+            "auto-update-on".into(),
+            "On".into(),
+            auto_check,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.update_settings(
+                    AppSettings {
+                        auto_update_check_enabled: true,
+                        ..on_baseline.clone()
+                    },
+                    cx,
+                );
+            }),
+        ))
+        .child(preset_chip(
+            "auto-update-off".into(),
+            "Off".into(),
+            !auto_check,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.update_settings(
+                    AppSettings {
+                        auto_update_check_enabled: false,
+                        ..off_baseline.clone()
+                    },
+                    cx,
+                );
+            }),
+        ));
+
+    // "Check now" — manual trigger regardless of auto-check setting.
+    let check_now = preset_chip(
+        "auto-update-check-now".into(),
+        "Check now".into(),
+        false,
+        cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            shell.state().clone().update(cx, |state, cx| {
+                state.start_update_check(cx);
+            });
+        }),
+    );
+
+    let body = v_flex()
+        .gap_3()
+        .child(toggle_row)
+        .child(check_now)
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(status_label),
+        );
+
+    section_frame(
+        "Updates",
+        "FerrisPass checks GitHub for new releases on launch (rate-limited \
+         to once per day). Update bundles are verified against an embedded \
+         Ed25519 public key before install.",
+        body,
+    )
 }
 
 fn section_frame(

@@ -22,6 +22,21 @@ const FILE_NAME: &str = "settings.json";
 pub struct AppSettings {
     pub auto_lock_secs: Option<u64>,
     pub clipboard_clear_secs: Option<u64>,
+    /// When `true`, FerrisPass quietly checks GitHub Releases on app start
+    /// (rate-limited to ~1×/24h) and surfaces a banner if a newer build
+    /// is available. Off-by-default would be more privacy-conservative,
+    /// but the security upside of fast patch propagation in a password
+    /// manager is significant — net better default is on.
+    ///
+    /// `#[serde(default = "default_true")]` so settings.json files written
+    /// by older builds (which lack this field) deserialize cleanly with
+    /// the right default rather than silently flipping to off.
+    #[serde(default = "default_true")]
+    pub auto_update_check_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -31,6 +46,7 @@ impl Default for AppSettings {
         Self {
             auto_lock_secs: Some(240),
             clipboard_clear_secs: Some(10),
+            auto_update_check_enabled: true,
         }
     }
 }
@@ -115,6 +131,7 @@ mod tests {
         let s = AppSettings {
             auto_lock_secs: Some(60),
             clipboard_clear_secs: None,
+            auto_update_check_enabled: true,
         };
         save_in(dir.path(), &s).unwrap();
         let loaded = load_in(dir.path()).unwrap();
@@ -144,6 +161,7 @@ mod tests {
         let s = AppSettings {
             auto_lock_secs: None,
             clipboard_clear_secs: None,
+            auto_update_check_enabled: true,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"auto_lock_secs\":null"));

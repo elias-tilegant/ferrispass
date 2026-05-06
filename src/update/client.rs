@@ -1,0 +1,107 @@
+//! Thin wrapper around `cargo-packager-updater` that translates the library's
+//! API surface into the friendlier `Result<_, UpdateError>` shape the rest of
+//! FerrisPass works with, plus an early-out when the placeholder public key
+//! is still in place (which would otherwise produce a confusing
+//! signature-verification error from a perfectly valid manifest).
+
+use cargo_packager_updater::{check_update, Config};
+use semver::Version;
+
+use super::info::{UpdateError, UpdateInfo};
+use super::{MINISIGN_PUBLIC_KEY, UPDATE_ENDPOINT};
+
+/// Ask the GitHub-hosted manifest whether a newer release exists. Returns
+/// `Ok(None)` when we're already on the latest version (the common case),
+/// `Ok(Some(info))` when a newer build is published. Blocking — call from
+/// `cx.background_spawn`.
+pub fn check() -> Result<Option<UpdateInfo>, UpdateError> {
+    let config = build_config()?;
+    let current = current_version()?;
+
+    let update = check_update(current, config).map_err(map_err)?;
+
+    Ok(update.map(|u| UpdateInfo {
+        version: u.version,
+        notes: u.body.unwrap_or_default(),
+        pub_date: u.date.map(|d| d.to_string()),
+    }))
+}
+
+/// Fetch the latest bundle, verify its minisign signature against the
+/// embedded public key, atomic-replace the running app, return. The caller
+/// is responsible for prompting the user to restart afterwards (or quitting
+/// the app, which causes the OS to launch the new binary on next open).
+///
+/// Blocking — call from `cx.background_spawn`. Re-checks the manifest
+/// internally so the install operates on whatever's current on the server,
+/// not on stale info from a previous `check()` call.
+///
+/// `on_progress(downloaded, total)` fires periodically during download.
+/// `total` is `None` when the server didn't report `Content-Length`.
+pub fn install<F>(on_progress: F) -> Result<(), UpdateError>
+where
+    F: Fn(usize, Option<u64>) + Send + 'static,
+{
+    let config = build_config()?;
+    let current = current_version()?;
+
+    let update = check_update(current, config)
+        .map_err(map_err)?
+        .ok_or_else(|| UpdateError::Network("no update available at install time".into()))?;
+
+    update
+        .download_and_install_extended(on_progress, || {})
+        .map_err(map_err)?;
+
+    Ok(())
+}
+
+// ---------- internals ----------
+
+fn build_config() -> Result<Config, UpdateError> {
+    let pubkey = MINISIGN_PUBLIC_KEY.trim().to_string();
+    if pubkey.contains("PLACEHOLDER") || pubkey.contains("AAAAAAAAAAAA") {
+        return Err(UpdateError::PlaceholderKey);
+    }
+
+    let endpoint = UPDATE_ENDPOINT
+        .parse()
+        .map_err(|e: url::ParseError| UpdateError::Parse(format!("endpoint URL: {e}")))?;
+
+    Ok(Config {
+        endpoints: vec![endpoint],
+        pubkey,
+        ..Default::default()
+    })
+}
+
+fn current_version() -> Result<Version, UpdateError> {
+    Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|e| UpdateError::Parse(format!("CARGO_PKG_VERSION: {e}")))
+}
+
+/// Crude classification of `cargo-packager-updater` errors into our enum.
+/// The library doesn't expose a stable variant taxonomy we can match
+/// exhaustively, so we string-match on the Display output. Acceptable
+/// for an MVP — refine once we observe real failure modes in the wild.
+fn map_err(e: cargo_packager_updater::Error) -> UpdateError {
+    let msg = e.to_string();
+    let lower = msg.to_lowercase();
+
+    if lower.contains("signature") || lower.contains("pubkey") || lower.contains("verify") {
+        UpdateError::SignatureInvalid
+    } else if lower.contains("install")
+        || lower.contains("relocate")
+        || lower.contains("extract")
+        || lower.contains("permission")
+    {
+        UpdateError::Install(msg)
+    } else if lower.contains("parse")
+        || lower.contains("json")
+        || lower.contains("deserialize")
+    {
+        UpdateError::Parse(msg)
+    } else {
+        UpdateError::Network(msg)
+    }
+}

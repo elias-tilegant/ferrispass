@@ -6,6 +6,7 @@ use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, Vaul
 use crate::sync::auth::{AccessToken, DeviceCodeChallenge};
 use crate::sync::config::SyncConfig;
 use crate::sync::graph::DriveItemHit;
+use crate::update::UpdateStatus;
 use gpui::{AppContext as _, Context};
 use keepass::db::Database;
 use std::collections::HashMap;
@@ -38,6 +39,10 @@ pub struct AppState {
     /// the UI reads it to render a live "X/Y downloaded" label and
     /// disable the trigger button while a run is in flight.
     favicon_status: FaviconDownloadStatus,
+    /// Auto-update flow state. Idle by default; transitions through
+    /// Checking → Available → Downloading → ReadyToRestart on the happy path.
+    /// Drives the welcome banner + the Settings → Updates row.
+    update_status: UpdateStatus,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -584,6 +589,79 @@ impl AppState {
                     state.sync_status = SyncStatus::Failed(e.to_string());
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Read-only access to the auto-update flow state. Drives the welcome
+    /// banner + Settings → Updates row.
+    pub fn update_status(&self) -> &UpdateStatus {
+        &self.update_status
+    }
+
+    /// Kick off a background update check. No-op when one is already in
+    /// flight or a download is running. Transitions:
+    ///
+    /// - `Idle` (or `Failed`) → `Checking` → `Available(_) | Idle | Failed`
+    ///
+    /// Mirrors the `try_restore_sync_binding` pattern: blocking I/O on a
+    /// background thread, UI mutations bounced back to the main loop via
+    /// `cx.spawn` + `entity.update`.
+    pub fn start_update_check(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_status,
+            UpdateStatus::Checking | UpdateStatus::Downloading { .. }
+        ) {
+            return;
+        }
+        self.update_status = UpdateStatus::Checking;
+        cx.notify();
+
+        let task = cx.background_spawn(async move { crate::update::check() });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| {
+                state.update_status = match result {
+                    Ok(Some(info)) => UpdateStatus::Available(info),
+                    Ok(None) => UpdateStatus::Idle,
+                    Err(e) => UpdateStatus::Failed(e.to_string()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Download + install whatever update is currently advertised. Caller is
+    /// expected to have verified `update_status() == Available(_)` before
+    /// calling — we don't pre-check, the underlying library re-fetches the
+    /// manifest as part of `download_and_install`.
+    ///
+    /// Live progress isn't surfaced in v0.2.0; the UI shows an indeterminate
+    /// "Downloading…" state until the install completes (or fails).
+    pub fn install_update(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.update_status, UpdateStatus::Downloading { .. }) {
+            return;
+        }
+        self.update_status = UpdateStatus::Downloading { progress: 0.0 };
+        cx.notify();
+
+        let task = cx.background_spawn(async move {
+            crate::update::install(|_downloaded, _total| {
+                // Progress wiring deferred — see UpdateStatus::Downloading
+                // doc comment. Atomics + a periodic UI tick would be the
+                // straightforward path when we want to add it.
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| {
+                state.update_status = match result {
+                    Ok(()) => UpdateStatus::ReadyToRestart,
+                    Err(e) => UpdateStatus::Failed(e.to_string()),
+                };
+                cx.notify();
             });
         })
         .detach();

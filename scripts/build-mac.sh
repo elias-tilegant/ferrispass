@@ -16,7 +16,8 @@
 #   6. Codesign the DMG
 #   7. Submit to Apple's notarization service (--wait)
 #   8. Staple notarization ticket onto DMG
-#   9. Final spctl Gatekeeper assessment
+#   9. Tarball + minisign-sign the .app + write update.json manifest
+#  10. Final spctl Gatekeeper assessment
 #
 # Flags:
 #   --skip-notarize    Stop after step 6. Useful for local iteration where
@@ -97,7 +98,7 @@ rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
 
 # ---------- 1. arm64 binary ----------
-echo "▸ [1/8] Building arm64 binary"
+echo "▸ [1/9] Building arm64 binary"
 rustup target add aarch64-apple-darwin >/dev/null
 cargo build --release --target aarch64-apple-darwin
 
@@ -106,7 +107,7 @@ cp "${PROJECT_ROOT}/target/aarch64-apple-darwin/release/${BINARY_NAME}" "${BIN_P
 echo "    ✓ $(file "${BIN_PATH}" | sed 's|.*: ||')"
 
 # ---------- 2. icon ----------
-echo "▸ [2/8] Generating .icns from bundle/icon.png"
+echo "▸ [2/9] Generating .icns from bundle/icon.png"
 ICONSET="${DIST_DIR}/AppIcon.iconset"
 mkdir -p "${ICONSET}"
 for size in 16 32 128 256 512; do
@@ -119,7 +120,7 @@ iconutil -c icns "${ICONSET}" -o "${DIST_DIR}/AppIcon.icns"
 rm -rf "${ICONSET}"
 
 # ---------- 3. .app bundle ----------
-echo "▸ [3/8] Assembling .app bundle"
+echo "▸ [3/9] Assembling .app bundle"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
 mv "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${BINARY_NAME}"
@@ -129,7 +130,7 @@ sed "s/__VERSION__/${VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
     > "${APP_BUNDLE}/Contents/Info.plist"
 
 # ---------- 4. codesign ----------
-echo "▸ [4/8] Code-signing with Hardened Runtime"
+echo "▸ [4/9] Code-signing with Hardened Runtime"
 codesign --force --options runtime --timestamp \
     --entitlements "${BUNDLE_DIR}/entitlements.plist" \
     --sign "${SIGNING_IDENTITY}" \
@@ -137,7 +138,7 @@ codesign --force --options runtime --timestamp \
 codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}" 2>&1 | tail -3
 
 # ---------- 5. DMG ----------
-echo "▸ [5/8] Building DMG"
+echo "▸ [5/9] Building DMG"
 DMG_NAME="${APP_NAME}-${VERSION}-arm64.dmg"
 DMG_PATH="${DIST_DIR}/${DMG_NAME}"
 
@@ -160,7 +161,7 @@ else
 fi
 
 # ---------- 6. sign DMG ----------
-echo "▸ [6/8] Code-signing DMG"
+echo "▸ [6/9] Code-signing DMG"
 codesign --force --sign "${SIGNING_IDENTITY}" --timestamp "${DMG_PATH}"
 
 if [ "${SKIP_NOTARIZE}" = "true" ]; then
@@ -172,14 +173,69 @@ if [ "${SKIP_NOTARIZE}" = "true" ]; then
 fi
 
 # ---------- 7. notarize ----------
-echo "▸ [7/8] Submitting to Apple notarization (typically 1-5 min)"
+echo "▸ [7/9] Submitting to Apple notarization (typically 1-5 min)"
 xcrun notarytool submit "${DMG_PATH}" \
     --keychain-profile "${NOTARIZE_PROFILE}" \
     --wait
 
 # ---------- 8. staple ----------
-echo "▸ [8/8] Stapling notarization ticket"
+echo "▸ [8/9] Stapling notarization ticket"
 xcrun stapler staple "${DMG_PATH}"
+
+# ---------- 9. update tarball + minisign signature + manifest ----------
+# Produces the artefacts the in-app auto-updater fetches:
+#   - ${APP_NAME}-${VERSION}-arm64.app.tar.gz   (the bundle to install)
+#   - same .minisig file                        (signature)
+#   - update.json                               (manifest read by the updater)
+#
+# Skips gracefully when minisign isn't installed or the private key isn't
+# present, so a fresh contributor without the signing keypair can still
+# produce a DMG via --skip-notarize.
+echo "▸ [9/9] Generating .app.tar.gz + minisign signature + update manifest"
+
+MINISIGN_KEY="${MINISIGN_KEY:-${HOME}/.ferrispass/minisign.key}"
+TAR_NAME="${APP_NAME}-${VERSION}-arm64.app.tar.gz"
+TAR_PATH="${DIST_DIR}/${TAR_NAME}"
+SIG_PATH="${TAR_PATH}.minisig"
+MANIFEST="${DIST_DIR}/update.json"
+
+if ! command -v minisign >/dev/null 2>&1; then
+    echo "    (skipped — minisign not installed; 'brew install minisign' to enable)"
+elif [ ! -f "${MINISIGN_KEY}" ]; then
+    echo "    (skipped — ${MINISIGN_KEY} not found; run scripts/setup-minisign.sh first)"
+else
+    tar czf "${TAR_PATH}" -C "${DIST_DIR}" "${APP_NAME}.app"
+
+    # Sign. Pull passphrase from MINISIGN_PASSWORD env var when set (CI path);
+    # otherwise minisign prompts interactively (local-dev path).
+    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+        echo "${MINISIGN_PASSWORD}" | minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}" >/dev/null
+    else
+        minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}"
+    fi
+
+    DOWNLOAD_URL="https://github.com/elias-tilegant/ferrispass/releases/download/v${VERSION}/${TAR_NAME}"
+
+    jq -n \
+        --arg version "${VERSION}" \
+        --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg url "${DOWNLOAD_URL}" \
+        --rawfile sig "${SIG_PATH}" \
+        '{
+            version: $version,
+            pub_date: $pub_date,
+            platforms: {
+                "macos-aarch64": {
+                    signature: $sig,
+                    url: $url,
+                    format: "app"
+                }
+            }
+        }' > "${MANIFEST}"
+
+    echo "    ✓ ${TAR_NAME}"
+    echo "    ✓ update.json"
+fi
 
 # ---------- final verification ----------
 echo ""
@@ -188,5 +244,6 @@ spctl -a -t open --context context:primary-signature -v "${DMG_PATH}" 2>&1 | tai
 
 echo ""
 echo "✓ ${APP_NAME} ${VERSION} ready for distribution"
-echo "  ${DMG_PATH}"
-ls -lh "${DMG_PATH}"
+ls -lh "${DIST_DIR}/"*.dmg 2>/dev/null || true
+ls -lh "${DIST_DIR}/"*.tar.gz 2>/dev/null || true
+ls -lh "${DIST_DIR}/"update.json 2>/dev/null || true

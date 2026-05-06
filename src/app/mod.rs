@@ -55,7 +55,19 @@ fn open_main_window(cx: &mut App) {
         };
 
         cx.open_window(window_options, |window, cx| {
-            let app_state = cx.new(|_| AppState::with_resume());
+            let app_state = cx.new(|cx| {
+                let mut state = AppState::with_resume();
+                // Kick off the auto-update check at startup so a banner can
+                // appear on the welcome screen if a newer release exists.
+                // Reads settings directly because AppShell (which owns the
+                // live AppSettings) hasn't been constructed yet at this
+                // point in the bootstrap; the settings.json read is cheap
+                // (small JSON, sync I/O).
+                if settings::load().auto_update_check_enabled {
+                    state.start_update_check(cx);
+                }
+                state
+            });
             let shell = cx.new(|cx| AppShell::new(app_state, window, cx));
 
             cx.new(|cx: &mut Context<Root>| Root::new(shell, window, cx).bg(cx.theme().background))
