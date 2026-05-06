@@ -1,6 +1,9 @@
 /target
 .DS_Store
 
+# Release artefacts produced by scripts/build-mac.sh
+/dist/
+
 # Local dev-tool infrastructure (Claude Code skills, agent metadata)
 /.agents/
 /.claude/

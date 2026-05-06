@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        FerrisPass runs under Hardened Runtime (required for Apple
+        notarization) but uses no behaviors that would be restricted by it:
+        - Network access works without entitlement when unsandboxed.
+        - File access via NSOpenPanel/NSSavePanel is user-mediated.
+        - Keychain access via the `keyring` crate uses Security framework
+          and prompts the user at runtime.
+        - No JIT, no unsigned dylibs, no DYLD env-var injection.
+
+        If a future feature requires opting into a restricted behavior
+        (e.g. JIT, library validation bypass), add it here as the minimal
+        scope needed and document the reason.
+    -->
+</dict>
+</plist>

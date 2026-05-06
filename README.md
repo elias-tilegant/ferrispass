@@ -30,7 +30,17 @@ examples/
   dump_xml.rs interop diagnostic — prints the decoded KDBX inner XML
 ```
 
-## Build & run
+## Installation
+
+Download `FerrisPass-X.Y.Z-arm64.dmg` from the [Releases](https://github.com/elias-tilegant/ferrispass/releases) page, open it, drag `FerrisPass.app` into `Applications`.
+
+The app is signed with a Developer ID and Apple-notarized, so first launch opens cleanly with no Gatekeeper override.
+
+Requires Apple Silicon (M1 or newer) and macOS 12 (Monterey) or later. Intel Macs are not supported.
+
+## Development
+
+For local development:
 
 ```sh
 cargo check
@@ -39,6 +49,29 @@ cargo run
 ```
 
 Tested on macOS only. Linux builds but the SharePoint sync expects the Apple Keychain.
+
+## Building a release DMG
+
+`scripts/build-mac.sh` produces a notarized, stapled, arm64 `.dmg` ready for distribution. Pipeline: `cargo build --release --target aarch64-apple-darwin` → `.app` bundle → `codesign --options runtime` → `create-dmg` → `notarytool submit --wait` → `stapler staple`.
+
+```sh
+scripts/build-mac.sh                  # full release build
+scripts/build-mac.sh --skip-notarize  # local iteration, no Apple roundtrip
+```
+
+Requirements (one-time setup):
+- Xcode Command Line Tools (`xcode-select --install`)
+- `Developer ID Application` certificate in Keychain (Xcode → Settings → Accounts → Manage Certificates)
+- Notarization credentials stored as Keychain profile named `ferrispass-notarize`:
+  ```sh
+  xcrun notarytool store-credentials "ferrispass-notarize" \
+      --apple-id <your-apple-id> --team-id <your-team-id> \
+      --password <app-specific-password>
+  ```
+- `bundle/icon.png` — a 1024×1024 master PNG of the app icon
+- Optional: `brew install create-dmg` (prettier DMG window; falls back to plain `hdiutil` if absent)
+
+Forks must edit the `TEAM_ID`, `SIGNING_IDENTITY`, and `BUNDLE_ID` constants at the top of `scripts/build-mac.sh` to match their own Apple Developer account.
 
 ## Keyboard shortcuts
 
@@ -65,6 +98,10 @@ Tested on macOS only. Linux builds but the SharePoint sync expects the Apple Key
 - KDBX writer is pinned to a [forked keepass-rs](https://github.com/elias-tilegant/keepass-rs) (`cc6845a`) carrying three KDBX 4 interop fixes the upstream lacks; without these, written files don't reopen in KeePassXC.
 - SharePoint refresh tokens live in the macOS Keychain (`ferrispass-sync` service); access tokens are in-memory and ~1 h TTL.
 - Recents file (`~/Library/Application Support/ferrispass/recent.json`) holds **paths only** — no passwords, no tokens.
+
+## Author
+
+Created and maintained by [Elias Tilegant](https://github.com/elias-tilegant).
 
 ## License
 
