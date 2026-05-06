@@ -6,7 +6,7 @@
 //! cargo run --example dump_xml -- /path/to/file.kdbx
 //! ```
 //!
-//! Then it prompts for the master password (or read it from `STC_KDBX_PW`
+//! Then it prompts for the master password (or read it from `FERRISPASS_KDBX_PW`
 //! env var). The password never leaves your machine. Output is XML —
 //! grep for `<…/>` empty tags to spot interop-breaking serializations.
 
@@ -28,7 +28,7 @@ fn main() {
 
     // Prefer env var (so password isn't visible in shell history) but fall
     // back to a stdin prompt for convenience.
-    let password = std::env::var("STC_KDBX_PW").unwrap_or_else(|_| {
+    let password = std::env::var("FERRISPASS_KDBX_PW").unwrap_or_else(|_| {
         eprint!("master password: ");
         let _ = io::stderr().flush();
         let mut buf = String::new();

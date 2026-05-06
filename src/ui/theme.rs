@@ -3,7 +3,7 @@ use gpui_component::theme::{Theme, ThemeMode};
 
 use crate::ui::palette;
 
-/// Override gpui-component's default theme with the KeePass RS design tokens.
+/// Override gpui-component's default theme with the FerrisPass design tokens.
 /// Reads the current `Theme.mode` and picks the matching palette so the call
 /// works for both the initial light setup and runtime light/dark switches.
 pub fn apply(cx: &mut App) {

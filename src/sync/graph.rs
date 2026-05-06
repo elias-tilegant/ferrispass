@@ -521,10 +521,10 @@ mod tests {
 
     #[test]
     fn me_response_falls_back_to_user_principal_name_when_mail_null() {
-        let body = r#"{ "mail": null, "userPrincipalName": "elias@contoso.onmicrosoft.com" }"#;
+        let body = r#"{ "mail": null, "userPrincipalName": "alice@contoso.onmicrosoft.com" }"#;
         let resp: MeResponse = serde_json::from_str(body).unwrap();
         let email = resp.mail.or(resp.user_principal_name).unwrap();
-        assert_eq!(email, "elias@contoso.onmicrosoft.com");
+        assert_eq!(email, "alice@contoso.onmicrosoft.com");
     }
 
     #[test]

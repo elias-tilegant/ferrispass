@@ -1,3 +1,3 @@
 fn main() {
-    stc_keepass::app::run();
+    ferrispass::app::run();
 }

@@ -1,9 +1,9 @@
 use gpui::{App, KeyBinding, actions};
 
-pub const APP_CONTEXT: &str = "StcKeepass";
+pub const APP_CONTEXT: &str = "FerrisPass";
 
 actions!(
-    stc_keepass,
+    ferrispass,
     [
         OpenVault,
         OpenVaultSwitcher,

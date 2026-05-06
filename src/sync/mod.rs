@@ -1,7 +1,7 @@
 //! SharePoint cloud sync. Owns the OAuth flow, Microsoft Graph client,
 //! per-vault sync configuration, and the upload-on-save orchestration.
 //!
-//! Design overview lives in `/Users/elias/.claude/plans/...`. Short version:
+//! Short overview:
 //!
 //! - Auth: device-code flow against `login.microsoftonline.com/common`,
 //!   refresh tokens persisted to the macOS Keychain.

@@ -57,7 +57,7 @@ pub fn fetch_favicon(entry_url: &str) -> Result<Vec<u8>, FaviconError> {
     // timeout", which is wrong for an icon fetcher.
     let agent = ureq::AgentBuilder::new()
         .timeout(TIMEOUT)
-        .user_agent("stc-keepass/favicon-fetcher")
+        .user_agent("ferrispass/favicon-fetcher")
         .build();
 
     let resp = agent.get(&target).call().map_err(|e| match e {

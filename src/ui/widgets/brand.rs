@@ -4,7 +4,7 @@ use gpui_component::{Icon, Sizable as _};
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 
-/// The "KeePass RS" mark — a deep-blue rounded square with an orange key glyph.
+/// The "FerrisPass" mark — a deep-blue rounded square with an orange key glyph.
 pub fn brand(size: f32) -> AnyElement {
     div()
         .size(px(size))

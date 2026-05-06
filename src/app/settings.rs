@@ -1,5 +1,5 @@
 //! App-wide preferences (auto-lock / clipboard-clear timeouts) persisted
-//! at `~/Library/Application Support/stc-keepass/settings.json`.
+//! at `~/Library/Application Support/ferrispass/settings.json`.
 //!
 //! Only stores plain numbers — no secrets — so JSON is fine. Same atomic
 //! write pattern as `sync/config.rs` and `app/recents.rs` (temp file +

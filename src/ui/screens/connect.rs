@@ -91,7 +91,7 @@ fn render_pick_provider(cx: &mut Context<AppShell>) -> AnyElement {
     v_flex()
         .gap_4()
         .child(heading(
-            "Where should KeePass RS sync your vault?",
+            "Where should FerrisPass sync your vault?",
             "Your .kdbx file is encrypted on this device before it ever \
              leaves. The provider only sees ciphertext.",
         ))
@@ -612,7 +612,7 @@ fn footer(cx: &mut Context<AppShell>) -> AnyElement {
                 .text_xs()
                 .text_color(palette::text_muted())
                 .child(
-                    "KeePass RS uses the official Microsoft Graph API. We never see your password.",
+                    "FerrisPass uses the official Microsoft Graph API. We never see your password.",
                 ),
         )
         .child(

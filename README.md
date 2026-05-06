@@ -1,6 +1,6 @@
-# STC KeePass
+# FerrisPass
 
-A native macOS KeePass client built in Rust on top of [GPUI](https://github.com/zed-industries/zed).
+A native macOS, KeePass-compatible client built in Rust on top of [GPUI](https://github.com/zed-industries/zed).
 
 Reads and writes KDBX 4 files (AES-256 + Argon2id), interoperable with KeePassXC and KeePass2.
 
@@ -63,5 +63,13 @@ Tested on macOS only. Linux builds but the SharePoint sync expects the Apple Key
 
 - Master password is held in memory only while the vault is open; required to re-encrypt on save.
 - KDBX writer is pinned to a [forked keepass-rs](https://github.com/elias-tilegant/keepass-rs) (`cc6845a`) carrying three KDBX 4 interop fixes the upstream lacks; without these, written files don't reopen in KeePassXC.
-- SharePoint refresh tokens live in the macOS Keychain (`stc-keepass-sync` service); access tokens are in-memory and ~1 h TTL.
-- Recents file (`~/Library/Application Support/stc-keepass/recent.json`) holds **paths only** — no passwords, no tokens.
+- SharePoint refresh tokens live in the macOS Keychain (`ferrispass-sync` service); access tokens are in-memory and ~1 h TTL.
+- Recents file (`~/Library/Application Support/ferrispass/recent.json`) holds **paths only** — no passwords, no tokens.
+
+## License
+
+FerrisPass is licensed under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`). See [LICENSE](./LICENSE) for the full text.
+
+The GPL is required because FerrisPass links GPUI, which transitively depends on `ztracing` / `zlog` (both GPL-3.0-or-later). It also matches the convention of the broader KeePass-compatible ecosystem (KeePass2, KeePassXC, Bitwarden are all GPL).
+
+This means: anyone distributing a modified FerrisPass binary must publish their source modifications under the same terms — a deliberate guarantee for a security-critical app.

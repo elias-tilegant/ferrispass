@@ -127,7 +127,7 @@ pub struct AppShell {
     /// via the state observer). Drop = cancel.
     auto_lock_task: Option<Task<()>>,
     /// User-tunable timeouts (auto-lock, clipboard-clear). Loaded from
-    /// `~/Library/Application Support/stc-keepass/settings.json` at
+    /// `~/Library/Application Support/ferrispass/settings.json` at
     /// construction; mutated by the Settings overlay; persisted async
     /// on every change.
     settings: AppSettings,

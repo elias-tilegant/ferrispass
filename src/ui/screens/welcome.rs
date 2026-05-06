@@ -48,7 +48,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                             div()
                                 .text_xl()
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .child("Welcome to KeePass RS"),
+                                .child("Welcome to FerrisPass"),
                         )
                         .child(
                             div()

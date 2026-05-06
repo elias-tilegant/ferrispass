@@ -38,14 +38,14 @@ pub const SCOPE: &str = "Files.ReadWrite.All offline_access";
 /// build time without touching source:
 ///
 /// ```sh
-/// STC_KEEPASS_CLIENT_ID=<your-guid> cargo build --release
+/// FERRISPASS_CLIENT_ID=<your-guid> cargo build --release
 /// ```
 pub const DEFAULT_CLIENT_ID: &str = "39481acc-7592-42c8-a8ae-3481cb76bb27";
 
 /// Resolves to the active Azure AD client ID — env override at build time
 /// wins over the default const so forks don't have to patch source.
 pub fn client_id() -> &'static str {
-    match option_env!("STC_KEEPASS_CLIENT_ID") {
+    match option_env!("FERRISPASS_CLIENT_ID") {
         Some(s) if !s.is_empty() => s,
         _ => DEFAULT_CLIENT_ID,
     }

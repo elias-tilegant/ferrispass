@@ -4,8 +4,8 @@
 //! Stored as a single JSON file under the platform's app-support directory,
 //! beside the per-vault sync configs:
 //!
-//! On macOS:   `~/Library/Application Support/stc-keepass/recent.json`
-//! On Linux:   `$XDG_CONFIG_HOME/stc-keepass/recent.json`
+//! On macOS:   `~/Library/Application Support/ferrispass/recent.json`
+//! On Linux:   `$XDG_CONFIG_HOME/ferrispass/recent.json`
 //!
 //! Contents are intentionally minimal — paths + last-opened timestamps,
 //! nothing else. **No master passwords, no OAuth tokens.** Refresh tokens

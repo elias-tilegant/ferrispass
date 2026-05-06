@@ -1,8 +1,12 @@
 [package]
-name = "stc-keepass"
+name = "ferrispass"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "GPL-3.0-or-later"
+description = "A native, KeePass-compatible password manager for macOS, written in Rust on GPUI."
+readme = "README.md"
+repository = "https://github.com/elias-tilegant/ferrispass"
 
 [dependencies]
 # Pinned to the elias-tilegant/keepass-rs fork that carries three KDBX 4

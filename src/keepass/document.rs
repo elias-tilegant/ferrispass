@@ -643,7 +643,7 @@ mod tests {
 
         let draft = EntryDraft {
             title: "GitHub".to_string(),
-            username: "elias".to_string(),
+            username: "alice".to_string(),
             password: "S3cret!".to_string(),
             url: "github.com".to_string(),
             notes: "Personal account".to_string(),

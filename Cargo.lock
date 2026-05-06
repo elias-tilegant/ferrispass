@@ -1752,6 +1752,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrispass"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui_platform",
+ "keepass",
+ "keyring",
+ "rand 0.9.4",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "ureq",
+ "url",
+ "zxcvbn",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5901,30 +5925,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "stc-keepass"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
- "gpui_platform",
- "keepass",
- "keyring",
- "rand 0.9.4",
- "rust-embed",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "ureq",
- "url",
- "zxcvbn",
-]
 
 [[package]]
 name = "str_indices"

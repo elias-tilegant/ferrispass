@@ -21,7 +21,9 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, Root};
 
-const WINDOW_TITLE: &str = "KeePass RS";
+const APP_NAME: &str = "FerrisPass";
+#[allow(dead_code)]
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn run() {
     let application = gpui_platform::application().with_assets(assets::AppAssets::new());
@@ -47,7 +49,7 @@ fn open_main_window(cx: &mut App) {
             window_bounds: Some(window_bounds),
             window_min_size: Some(size(px(860.), px(560.))),
             titlebar: Some(TitlebarOptions {
-                title: Some(SharedString::from(WINDOW_TITLE)),
+                title: Some(SharedString::from(APP_NAME)),
                 ..TitlebarOptions::default()
             }),
             ..WindowOptions::default()
@@ -59,7 +61,7 @@ fn open_main_window(cx: &mut App) {
 
             cx.new(|cx: &mut Context<Root>| Root::new(shell, window, cx).bg(cx.theme().background))
         })
-        .expect("failed to open KeePass RS window");
+        .expect("failed to open FerrisPass window");
     })
     .detach();
 }

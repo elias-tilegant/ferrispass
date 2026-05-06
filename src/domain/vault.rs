@@ -280,7 +280,7 @@ mod tests {
     use super::{Favicon, Strength, VaultEntry, VaultGroup, VaultSnapshot};
 
     fn entry(id: &str, title: &str) -> VaultEntry {
-        VaultEntry::new(id, title, "elias", "", true)
+        VaultEntry::new(id, title, "alice", "", true)
     }
 
     #[test]

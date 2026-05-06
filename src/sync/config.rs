@@ -3,9 +3,9 @@
 //! SHA-256 of the canonical local path so two vaults with the same filename
 //! in different folders don't collide and renames are caught.
 //!
-//! On macOS:   `~/Library/Application Support/stc-keepass/sync/<hash>.json`
-//! On Linux:   `$XDG_CONFIG_HOME/stc-keepass/sync/<hash>.json` (or
-//!             `~/.config/stc-keepass/sync/<hash>.json` if XDG not set)
+//! On macOS:   `~/Library/Application Support/ferrispass/sync/<hash>.json`
+//! On Linux:   `$XDG_CONFIG_HOME/ferrispass/sync/<hash>.json` (or
+//!             `~/.config/ferrispass/sync/<hash>.json` if XDG not set)
 //! Windows is unsupported in this MVP — see plan §Risks.
 //!
 //! What's *not* in this file: the OAuth refresh token. Tokens live in the
@@ -25,7 +25,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncConfig {
     pub provider: SyncProvider,
-    /// User-facing identity (e.g. `elias@contoso.onmicrosoft.com`). Also used
+    /// User-facing identity (e.g. `alice@contoso.onmicrosoft.com`). Also used
     /// as the Keychain account key when looking up the refresh token.
     pub account_email: String,
     /// Microsoft Graph site id of the form `{host},{site-guid},{web-guid}`.
@@ -192,7 +192,7 @@ pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
             env::consts::OS
         )));
     }
-    p.push("stc-keepass");
+    p.push("ferrispass");
     Ok(p)
 }
 
@@ -204,7 +204,7 @@ mod tests {
     fn fixture(local_path: &str) -> SyncConfig {
         SyncConfig {
             provider: SyncProvider::SharePoint,
-            account_email: "elias@contoso.onmicrosoft.com".into(),
+            account_email: "alice@contoso.onmicrosoft.com".into(),
             site_id: "contoso.sharepoint.com,abc-guid,def-guid".into(),
             drive_id: "b!drive-id".into(),
             item_id: "01ITEMID".into(),
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn path_hash_is_stable_across_calls() {
-        let p = Path::new("/Users/elias/Documents/passwords.kdbx");
+        let p = Path::new("/Users/alice/Documents/vault.kdbx");
         assert_eq!(path_hash(p), path_hash(p));
         assert_ne!(path_hash(p), path_hash(Path::new("/elsewhere.kdbx")));
     }

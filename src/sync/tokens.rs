@@ -3,8 +3,8 @@
 //! platform-specific backends.
 //!
 //! Storage shape: one keychain entry per (provider × account email).
-//! - service = `"stc-keepass-sync"` (constant)
-//! - account = the user's account email (e.g. `elias@contoso.onmicrosoft.com`)
+//! - service = `"ferrispass-sync"` (constant)
+//! - account = the user's account email (e.g. `alice@contoso.onmicrosoft.com`)
 //! - secret  = the OAuth refresh token (opaque string, ~1–4 KB)
 //!
 //! Multiple accounts can coexist — each lookup is by email. Disconnect
@@ -14,7 +14,7 @@
 use keyring::Entry;
 use thiserror::Error;
 
-const SERVICE: &str = "stc-keepass-sync";
+const SERVICE: &str = "ferrispass-sync";
 
 #[derive(Debug, Error)]
 pub enum TokenError {
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     #[ignore = "touches real macOS Keychain — run explicitly with --ignored"]
     fn round_trip_store_load_delete() {
-        let account = format!("test-{}@stc-keepass.invalid", std::process::id());
+        let account = format!("test-{}@ferrispass.invalid", std::process::id());
         let token = "abc123-refresh-token";
 
         // Pre-clean in case a prior run left state behind.
