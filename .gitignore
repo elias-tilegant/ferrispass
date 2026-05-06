@@ -1,2 +1,7 @@
 /target
 .DS_Store
+
+# Local dev-tool infrastructure (Claude Code skills, agent metadata)
+/.agents/
+/.claude/
+/skills-lock.json
