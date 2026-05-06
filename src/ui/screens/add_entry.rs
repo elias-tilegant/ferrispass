@@ -1,11 +1,13 @@
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
+    px,
 };
 use gpui_component::{
     Sizable as _, WindowExt as _, checkbox::Checkbox, h_flex, input::Input, slider::Slider, v_flex,
 };
 
+use crate::domain::VaultGroup;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
@@ -24,6 +26,12 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             // size near the middle, on short ones it caps at viewport height
             // and the form body inside scrolls. The 16 px padding around the
             // edges prevents the chrome from kissing the window border.
+            //
+            // `occlude()` blocks every mouse interaction — clicks, hover, AND
+            // scroll-wheel — from reaching the underlay vault view sitting
+            // behind us. Without it, scrolling on the dimmed background (or
+            // past a modal scroll boundary) would bubble through to the
+            // sidebar / entry list and shift the user's place under them.
             div()
                 .absolute()
                 .top_0()
@@ -31,6 +39,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .bottom_0()
                 .left_0()
                 .bg(palette::transparent_overlay())
+                .occlude()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -56,16 +65,40 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     };
     let is_edit = editing_id.is_some();
 
-    // Resolve the destination group (only relevant for Add): prefer the user's
-    // currently-selected group; fall back to the vault root if they're viewing
-    // a tag/library filter (no specific group context).
+    // Resolve the destination group (only relevant for Add). Priority:
+    //   1. user's explicit pick from the inline group picker, if any
+    //   2. the sidebar's currently-selected group
+    //   3. vault root (when the user was viewing a tag / library filter
+    //      with no specific group context)
     let target_group_id = {
         let state = shell.state().read(cx);
-        state.vault_browser().and_then(|b| match b.selection {
-            crate::app::LibrarySelection::Group(id) => Some(id),
-            _ => Some(b.snapshot.root.id.clone()),
-        })
+        shell
+            .new_entry_target_group_id()
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                state.vault_browser().and_then(|b| match b.selection {
+                    crate::app::LibrarySelection::Group(id) => Some(id),
+                    _ => Some(b.snapshot.root.id.clone()),
+                })
+            })
     };
+    // Snapshot the root group so the inline picker can render the full
+    // tree without re-borrowing AppState across the closure boundary
+    // when each row's click listener fires. `None` while the vault is
+    // closing/locked — the modal won't render in those states anyway,
+    // but we still gate the picker on it.
+    let root_group: Option<VaultGroup> = shell
+        .state()
+        .read(cx)
+        .vault_browser()
+        .map(|b| b.snapshot.root.clone());
+    let recycle_bin_id: Option<String> = shell
+        .state()
+        .read(cx)
+        .vault_browser()
+        .and_then(|b| b.snapshot.recycle_bin_id.clone());
+    let picker_open = shell.new_entry_picker_open() && !is_edit;
+
     let target_group_label = if is_edit {
         // For edits, show the entry's current parent group instead of where a
         // new entry would land.
@@ -239,14 +272,22 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child(if is_edit { "Edit entry" } else { "New entry" }),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(palette::text_muted())
-                                .child(format!("in {target_group_label}")),
-                        ),
+                        .child(target_group_chip(
+                            &target_group_label,
+                            picker_open,
+                            is_edit,
+                            cx,
+                        )),
                 ),
         )
+        .when(picker_open, |this| {
+            this.child(group_picker_panel(
+                root_group.as_ref(),
+                recycle_bin_id.as_deref(),
+                target_group_id.as_deref(),
+                cx,
+            ))
+        })
         .child(
             // Form body claims the remaining vertical space and scrolls
             // internally — header (above) and footer (below) stay pinned so
@@ -430,5 +471,141 @@ fn generate_button_visual() -> AnyElement {
                 .text_color(palette::panel()),
         )
         .child("Generate")
+        .into_any_element()
+}
+
+/// "in {Group} ▾" chip below the header. Clickable in Add mode (toggles
+/// the inline group picker); rendered as plain muted text in Edit mode
+/// because the entry's parent group can't be moved from this modal.
+fn target_group_chip(
+    label: &str,
+    picker_open: bool,
+    is_edit: bool,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    let text: SharedString = format!("in {label}").into();
+    if is_edit {
+        return div()
+            .text_xs()
+            .text_color(palette::text_muted())
+            .child(text)
+            .into_any_element();
+    }
+    h_flex()
+        .id("add-entry-group-chip")
+        .gap_1()
+        .items_center()
+        .rounded(px(4.))
+        .px(px(4.))
+        .text_xs()
+        .text_color(palette::text_muted())
+        .hover(|s| s.bg(palette::sidebar()).text_color(palette::text()))
+        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            shell.toggle_new_entry_picker(cx);
+        }))
+        .child(text)
+        .child(
+            gpui_component::Icon::from(if picker_open {
+                gpui_component::IconName::ChevronUp
+            } else {
+                gpui_component::IconName::ChevronDown
+            })
+            .with_size(gpui_component::Size::Size(px(10.))),
+        )
+        .into_any_element()
+}
+
+/// Inline group-picker panel rendered below the header when expanded.
+/// Lists every group in the vault as an indented preorder tree (same
+/// shape as the sidebar walk in `screens::vault::groups_section`); the
+/// recycle bin is filtered out because creating a new entry there would
+/// be confusing. Click a row → it becomes the new target.
+fn group_picker_panel(
+    root: Option<&VaultGroup>,
+    recycle_bin_id: Option<&str>,
+    selected_id: Option<&str>,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    let mut flat: Vec<(usize, &VaultGroup)> = Vec::new();
+    fn collect<'a>(
+        group: &'a VaultGroup,
+        depth: usize,
+        recycle_bin_id: Option<&str>,
+        out: &mut Vec<(usize, &'a VaultGroup)>,
+    ) {
+        if recycle_bin_id == Some(group.id.as_str()) {
+            return;
+        }
+        out.push((depth, group));
+        // Picker always shows the *whole* tree regardless of the
+        // sidebar's collapse state — the user has to be able to pick
+        // any group, even one they happen to have folded shut.
+        for child in &group.groups {
+            collect(child, depth + 1, recycle_bin_id, out);
+        }
+    }
+    if let Some(root) = root {
+        collect(root, 0, recycle_bin_id, &mut flat);
+    }
+
+    let selected_owned = selected_id.map(ToOwned::to_owned);
+    let mut col = v_flex();
+    for (idx, (depth, group)) in flat.iter().enumerate() {
+        let depth = *depth;
+        let group_id = group.id.clone();
+        let is_selected = selected_owned.as_deref() == Some(group.id.as_str());
+        let row_id: SharedString = format!("add-entry-group-row-{idx}").into();
+        let name: SharedString = group.name.clone().into();
+        col = col.child(
+            h_flex()
+                .id(row_id)
+                .h(px(26.))
+                .pl(px(8. + depth as f32 * 14.))
+                .pr(px(10.))
+                .items_center()
+                .gap_2()
+                .rounded(px(4.))
+                .bg(if is_selected {
+                    palette::blue_soft()
+                } else {
+                    gpui::transparent_black()
+                })
+                .text_color(if is_selected {
+                    palette::blue()
+                } else {
+                    palette::text()
+                })
+                .text_sm()
+                .when(!is_selected, |this| {
+                    this.hover(|s| s.bg(palette::sidebar()))
+                })
+                .on_click(
+                    cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                        shell.set_new_entry_target_group(group_id.clone(), cx);
+                    }),
+                )
+                .child(
+                    gpui_component::Icon::from(AppIcon::Note)
+                        .with_size(gpui_component::Size::Size(px(12.)))
+                        .text_color(if is_selected {
+                            palette::blue()
+                        } else {
+                            palette::text_muted()
+                        }),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(name)),
+        );
+    }
+
+    div()
+        .id("add-entry-group-picker")
+        .max_h(px(200.))
+        .overflow_y_scroll()
+        .px_3()
+        .py_2()
+        .border_b_1()
+        .border_color(palette::border())
+        .bg(palette::sidebar())
+        .child(col)
         .into_any_element()
 }

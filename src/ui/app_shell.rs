@@ -135,6 +135,15 @@ pub struct AppShell {
     /// General when the overlay opens via ⌘,, jumped to Sync when
     /// opened via ⌘⇧, or any "Sync settings"-style button.
     settings_tab: SettingsTab,
+    /// Optional user-chosen target group for the AddEntry overlay. When
+    /// `Some`, overrides the auto-derived "currently-selected group"
+    /// fallback in `add_entry::render`. Cleared on overlay close so a
+    /// fresh ⌘N starts from the user's current sidebar selection again.
+    new_entry_target_group_id: Option<String>,
+    /// Whether the inline group picker inside the AddEntry modal is
+    /// currently expanded. Independent of `new_entry_target_group_id`
+    /// so the user can flip it open without committing a change.
+    new_entry_picker_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -249,6 +258,8 @@ impl AppShell {
             auto_lock_task: None,
             settings: crate::app::settings::load(),
             settings_tab: SettingsTab::General,
+            new_entry_target_group_id: None,
+            new_entry_picker_open: false,
             _subscriptions,
         }
     }
@@ -527,6 +538,36 @@ impl AppShell {
         ] {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
+        // Drop any explicit target-group pick so the next open re-derives
+        // from the current sidebar selection, and snap the picker shut.
+        self.new_entry_target_group_id = None;
+        self.new_entry_picker_open = false;
+    }
+
+    /// User's explicit target-group pick for the AddEntry modal, if any.
+    /// `None` means "follow the sidebar selection" (the fallback handled
+    /// in `add_entry::render`).
+    pub fn new_entry_target_group_id(&self) -> Option<&str> {
+        self.new_entry_target_group_id.as_deref()
+    }
+
+    pub fn set_new_entry_target_group(
+        &mut self,
+        group_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_entry_target_group_id = Some(group_id.into());
+        self.new_entry_picker_open = false;
+        cx.notify();
+    }
+
+    pub fn new_entry_picker_open(&self) -> bool {
+        self.new_entry_picker_open
+    }
+
+    pub fn toggle_new_entry_picker(&mut self, cx: &mut Context<Self>) {
+        self.new_entry_picker_open = !self.new_entry_picker_open;
+        cx.notify();
     }
 
     /// Read the current generator length from the slider state. Centralised so
