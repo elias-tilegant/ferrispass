@@ -154,12 +154,20 @@ fn group_from_ref(
     parent_path.pop();
 
     let is_expanded = group.is_expanded;
+    // Same custom-icon handling as entries: if the group has
+    // `Icon::Custom(_)`, decode the bytes once at snapshot time and
+    // hand the renderer a ready-to-go `gpui::Image`. Built-in icon
+    // ids fall through to `None` and the sidebar uses its default.
+    let icon = group
+        .custom_icon()
+        .and_then(|custom| favicon_image_from_bytes(&custom.data));
     VaultGroup {
         id: group_id_str,
         name,
         groups,
         entries,
         is_expanded,
+        icon,
     }
 }
 

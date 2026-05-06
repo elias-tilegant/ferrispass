@@ -21,6 +21,13 @@ pub struct VaultGroup {
     /// `true` for groups we synthesize ourselves (test fixtures, fresh
     /// vaults) so the tree opens up by default.
     pub is_expanded: bool,
+    /// Custom-icon bytes pulled from the KeePass `custom_icons` table
+    /// when the group has `Icon::Custom(_)`. Same shape as
+    /// `VaultEntry::favicon.image` — we reuse the `FaviconImage` newtype
+    /// because it's just decoded image bytes ready for `gpui::img()`,
+    /// regardless of whether the source is an entry or a group.
+    /// `None` for groups using a built-in icon or no icon at all.
+    pub icon: Option<FaviconImage>,
 }
 
 impl Default for VaultGroup {
@@ -31,6 +38,7 @@ impl Default for VaultGroup {
             groups: Vec::new(),
             entries: Vec::new(),
             is_expanded: true,
+            icon: None,
         }
     }
 }
@@ -188,6 +196,7 @@ impl VaultGroup {
             groups,
             entries,
             is_expanded: true,
+            icon: None,
         }
     }
 

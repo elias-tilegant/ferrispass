@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
-    px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Sizable as _, WindowExt as _, checkbox::Checkbox, h_flex, input::Input, slider::Slider, v_flex,
@@ -584,15 +584,7 @@ fn group_picker_panel(
                         shell.set_new_entry_target_group(group_id.clone(), cx);
                     }),
                 )
-                .child(
-                    gpui_component::Icon::from(AppIcon::Note)
-                        .with_size(gpui_component::Size::Size(px(12.)))
-                        .text_color(if is_selected {
-                            palette::blue()
-                        } else {
-                            palette::text_muted()
-                        }),
-                )
+                .child(picker_row_icon(group, is_selected))
                 .child(div().flex_1().min_w_0().truncate().child(name)),
         );
     }
@@ -607,5 +599,41 @@ fn group_picker_panel(
         .border_color(palette::border())
         .bg(palette::sidebar())
         .child(col)
+        .into_any_element()
+}
+
+/// Leading icon for a row in the AddEntry group picker. Custom-icon
+/// image (when the group has `Icon::Custom(_)`) takes priority over
+/// the generic note glyph; image rendering uses `with_fallback` so a
+/// corrupt blob silently falls back to the glyph instead of leaving
+/// an empty slot.
+fn picker_row_icon(group: &VaultGroup, is_selected: bool) -> AnyElement {
+    let glyph_color = if is_selected {
+        palette::blue()
+    } else {
+        palette::text_muted()
+    };
+    if let Some(image) = group.icon.as_ref() {
+        return div()
+            .id("picker-row-icon")
+            .size(px(12.))
+            .rounded(px(3.))
+            .overflow_hidden()
+            .child(
+                gpui::img(image.0.clone())
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .size(px(12.))
+                    .with_fallback(move || {
+                        gpui_component::Icon::from(AppIcon::Note)
+                            .with_size(gpui_component::Size::Size(px(12.)))
+                            .text_color(glyph_color)
+                            .into_any_element()
+                    }),
+            )
+            .into_any_element();
+    }
+    gpui_component::Icon::from(AppIcon::Note)
+        .with_size(gpui_component::Size::Size(px(12.)))
+        .text_color(glyph_color)
         .into_any_element()
 }

@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _,
     IntoElement as _, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    StyledImage as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Sizable as _, h_flex,
@@ -13,7 +13,7 @@ use crate::app::{
     AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{LockVault, NewEntry, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SyncNow},
 };
-use crate::domain::{VaultEntry, VaultGroup, VaultSnapshot};
+use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
@@ -408,6 +408,7 @@ fn groups_section(
                 .child(div().flex_1().min_w_0().child(nav_pill(
                     gpui::SharedString::from(format!("group-{}", group.id)),
                     AppIcon::Note,
+                    group.icon.as_ref(),
                     &group.name,
                     Some(count),
                     is_selected,
@@ -487,6 +488,7 @@ fn nav_row(
     nav_pill(
         gpui::SharedString::from(id),
         icon,
+        None,
         label_text,
         count,
         selected,
@@ -504,10 +506,15 @@ fn nav_row(
 /// `on_click` handler, and `hover` style so we don't need a separate wrapper
 /// (which would either swallow the inner background or create a click-vs-hover
 /// region mismatch).
+// `icon_image`, when Some, replaces the `AppIcon` glyph with a custom-icon
+// image — used by group rows so KeePass `Icon::Custom(_)` shows the user's
+// own bitmap instead of the generic note icon. Tinting doesn't apply to
+// images (mirrors KeePassXC).
 #[allow(clippy::too_many_arguments)]
 fn nav_pill(
     id: gpui::SharedString,
     icon: AppIcon,
+    icon_image: Option<&FaviconImage>,
     label_text: &str,
     count: Option<usize>,
     selected: bool,
@@ -555,11 +562,7 @@ fn nav_pill(
         })
         .when(!selected, |this| this.hover(|s| s.bg(palette::border())))
         .on_click(on_click)
-        .child(
-            gpui_component::Icon::from(icon)
-                .with_size(gpui_component::Size::Size(px(13.)))
-                .text_color(icon_resolved),
-        )
+        .child(nav_pill_icon(icon, icon_image, icon_resolved))
         .child(div().flex_1().min_w_0().truncate().child(label_owned))
         .when_some(count, |this, c| {
             this.child(
@@ -570,6 +573,37 @@ fn nav_pill(
                     .child(c.to_string()),
             )
         })
+}
+
+/// Render the leading 13×13 icon slot for a nav pill. Custom-icon image
+/// (when present) takes priority over the `AppIcon` fallback. The image
+/// gets `with_fallback` so a corrupt blob falls back to the glyph
+/// instead of an empty slot — same defensive treatment as the entry
+/// favicon path in `entry_chrome::favicon`.
+fn nav_pill_icon(icon: AppIcon, icon_image: Option<&FaviconImage>, icon_color: Hsla) -> AnyElement {
+    if let Some(image) = icon_image {
+        return div()
+            .id("nav-pill-icon")
+            .size(px(13.))
+            .rounded(px(3.))
+            .overflow_hidden()
+            .child(
+                gpui::img(image.0.clone())
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .size(px(13.))
+                    .with_fallback(move || {
+                        gpui_component::Icon::from(icon)
+                            .with_size(gpui_component::Size::Size(px(13.)))
+                            .text_color(icon_color)
+                            .into_any_element()
+                    }),
+            )
+            .into_any_element();
+    }
+    gpui_component::Icon::from(icon)
+        .with_size(gpui_component::Size::Size(px(13.)))
+        .text_color(icon_color)
+        .into_any_element()
 }
 
 fn workspace(
