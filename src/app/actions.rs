@@ -27,13 +27,29 @@ actions!(
         SaveVault,
         EditEntry,
         DeleteEntry,
+        /// Open the currently-selected entry in its native external app
+        /// (e.g. SAP GUI for entries with a `SAP_CONN` custom field).
+        /// No default keybinding in v0.3 — the detail-panel button is
+        /// the only entry point until we know which shortcut won't
+        /// collide with future "Open in browser" / "Open in terminal"
+        /// flavours.
+        LaunchEntry,
     ]
 );
 
 pub fn init(cx: &mut App) {
     // App-global Quit handler. Wired here (not on AppShell) so the action fires
     // independently of whatever view currently holds focus.
-    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    cx.on_action(|_: &Quit, cx: &mut App| {
+        // Wipe the launch tempdir before we hand control back to the
+        // OS — a Quit-mid-launch otherwise leaves cleartext payload
+        // files lying around. The startup sweep would catch them on
+        // the next run, but "delete on the way out" closes the window
+        // tighter and avoids the user wondering about stray files
+        // between sessions.
+        crate::launch::sweeper::purge_all();
+        cx.quit();
+    });
 
     cx.bind_keys([
         // ⌘O opens the vault switcher (recents + filter + Browse…). The

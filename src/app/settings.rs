@@ -33,10 +33,37 @@ pub struct AppSettings {
     /// the right default rather than silently flipping to off.
     #[serde(default = "default_true")]
     pub auto_update_check_enabled: bool,
+    /// How long the launch tempfile (e.g. `.sapc` for SAP GUI) lives
+    /// before the cleanup task unlinks it. SAP GUI parses the file in
+    /// well under 2 s in practice, but slow VPNs or first-launch
+    /// keychain prompts can stretch it; 30 s is a comfortable default.
+    /// Clamped on read to 10..=60 so a corrupt or hand-edited
+    /// settings file can't disable cleanup or set an absurd window.
+    #[serde(default = "default_launch_cleanup_secs")]
+    pub launch_cleanup_secs: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_launch_cleanup_secs() -> u32 {
+    DEFAULT_LAUNCH_CLEANUP_SECS
+}
+
+pub const DEFAULT_LAUNCH_CLEANUP_SECS: u32 = 30;
+pub const LAUNCH_CLEANUP_SECS_RANGE: std::ops::RangeInclusive<u32> = 10..=60;
+
+impl AppSettings {
+    /// Read the launch-cleanup TTL with the documented clamp applied.
+    /// Centralised so every consumer gets the same safety net rather
+    /// than each one re-implementing the bounds check.
+    pub fn launch_cleanup_secs_clamped(&self) -> u32 {
+        self.launch_cleanup_secs.clamp(
+            *LAUNCH_CLEANUP_SECS_RANGE.start(),
+            *LAUNCH_CLEANUP_SECS_RANGE.end(),
+        )
+    }
 }
 
 impl Default for AppSettings {
@@ -47,6 +74,7 @@ impl Default for AppSettings {
             auto_lock_secs: Some(240),
             clipboard_clear_secs: Some(10),
             auto_update_check_enabled: true,
+            launch_cleanup_secs: DEFAULT_LAUNCH_CLEANUP_SECS,
         }
     }
 }
@@ -132,10 +160,42 @@ mod tests {
             auto_lock_secs: Some(60),
             clipboard_clear_secs: None,
             auto_update_check_enabled: true,
+            launch_cleanup_secs: 45,
         };
         save_in(dir.path(), &s).unwrap();
         let loaded = load_in(dir.path()).unwrap();
         assert_eq!(loaded, s);
+    }
+
+    /// Old settings files (written before launch_cleanup_secs existed)
+    /// must deserialize cleanly with the documented default applied —
+    /// otherwise upgrading the app would brick the settings file.
+    #[test]
+    fn missing_launch_cleanup_uses_default() {
+        let dir = TempDir::new().unwrap();
+        // Write a v0.2.x-shaped settings file (no launch_cleanup_secs).
+        fs::write(
+            dir.path().join(FILE_NAME),
+            r#"{"auto_lock_secs":60,"clipboard_clear_secs":null,"auto_update_check_enabled":true}"#,
+        )
+        .unwrap();
+        let loaded = load_in(dir.path()).unwrap();
+        assert_eq!(loaded.launch_cleanup_secs, DEFAULT_LAUNCH_CLEANUP_SECS);
+    }
+
+    /// Hand-edited or corrupt TTL values can't be allowed to disable
+    /// cleanup (0) or invent a 24-hour window (huge value). The
+    /// clamp() is the single defensive choke-point everyone reads
+    /// through.
+    #[test]
+    fn launch_cleanup_secs_clamps_to_range() {
+        let mut s = AppSettings::default();
+        s.launch_cleanup_secs = 0;
+        assert_eq!(s.launch_cleanup_secs_clamped(), 10);
+        s.launch_cleanup_secs = 9999;
+        assert_eq!(s.launch_cleanup_secs_clamped(), 60);
+        s.launch_cleanup_secs = 30;
+        assert_eq!(s.launch_cleanup_secs_clamped(), 30);
     }
 
     #[test]
@@ -162,6 +222,7 @@ mod tests {
             auto_lock_secs: None,
             clipboard_clear_secs: None,
             auto_update_check_enabled: true,
+            launch_cleanup_secs: DEFAULT_LAUNCH_CLEANUP_SECS,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"auto_lock_secs\":null"));

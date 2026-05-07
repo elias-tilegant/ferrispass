@@ -3,12 +3,13 @@ use crate::{
         AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
-            DeleteEntry, DownloadFavicons, EditEntry, FocusSearch, LockVault, NewEntry,
-            OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings, OpenVault,
+            DeleteEntry, DownloadFavicons, EditEntry, FocusSearch, LaunchEntry, LockVault,
+            NewEntry, OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings, OpenVault,
             OpenVaultSwitcher, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
         },
     },
     keepass::KeePassRepository,
+    launch::{self, LaunchContext, LaunchError, LaunchHandle},
 };
 
 /// Which section of the unified Settings overlay is currently active.
@@ -144,6 +145,15 @@ pub struct AppShell {
     /// currently expanded. Independent of `new_entry_target_group_id`
     /// so the user can flip it open without committing a change.
     new_entry_picker_open: bool,
+    /// Live launches whose temp file is still on disk. Each handle owns
+    /// its file (drop = unlink). Capped by paired entries in
+    /// `launch_cleanup_tasks`, which drop the head of this Vec after
+    /// the user-configured TTL fires.
+    pending_launches: Vec<LaunchHandle>,
+    /// One-shot timers, one per pending launch. Holding the `Task`
+    /// keeps the timer alive; dropping it cancels (used when lock/quit
+    /// purges everything early).
+    launch_cleanup_tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -229,6 +239,13 @@ impl AppShell {
             }),
         ];
 
+        // Sweep launch payloads orphaned by a previous crash. We only
+        // touch files older than 60 s — short enough that a near-miss
+        // (us starting the moment a previous instance dropped a
+        // payload) doesn't kill it, long enough that anything from a
+        // previous session that didn't shut down cleanly is gone.
+        crate::launch::sweeper::sweep_stale(std::time::Duration::from_secs(60));
+
         Self {
             state,
             password_input,
@@ -260,6 +277,8 @@ impl AppShell {
             settings_tab: SettingsTab::General,
             new_entry_target_group_id: None,
             new_entry_picker_open: false,
+            pending_launches: Vec::new(),
+            launch_cleanup_tasks: Vec::new(),
             _subscriptions,
         }
     }
@@ -404,6 +423,14 @@ impl AppShell {
         self.clipboard_clear_task = None;
         self.clipboard_clear_deadline = None;
         self.clipboard_pill_tick = None;
+        // Drop any pending launch payloads — each handle's Drop unlinks
+        // its file. Cancel the cleanup timers since we just did the
+        // cleanup ourselves. Then purge the launch tempdir for good
+        // measure: covers anything raced in between by another instance
+        // or anything our own Drop missed.
+        self.pending_launches.clear();
+        self.launch_cleanup_tasks.clear();
+        crate::launch::sweeper::purge_all();
     }
 
     pub fn arm_perma_delete(&mut self, entry_id: String, cx: &mut Context<Self>) {
@@ -717,6 +744,15 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         self.copy_selected_value(CopyValueKind::Password, window, cx);
+    }
+
+    fn on_action_launch_entry(
+        &mut self,
+        _: &LaunchEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.launch_selected_entry(window, cx);
     }
 
     fn on_action_open_connect(
@@ -1261,6 +1297,98 @@ impl AppShell {
         }
     }
 
+    /// Launch the currently-selected entry in its native external app
+    /// (SAP GUI today, more later). Pulls the entry snapshot + cleartext
+    /// password out of state, hands them to the matching `Launcher`,
+    /// parks the returned handle in `pending_launches`, and schedules a
+    /// cleanup task that drops the head of the queue after the
+    /// user-configured TTL — that drop unlinks the temp payload file.
+    ///
+    /// All failure paths surface a toast and leave no temp file on
+    /// disk. The launcher itself is responsible for never leaving
+    /// half-written payloads on a partial failure.
+    pub fn launch_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self
+            .state
+            .read(cx)
+            .vault_browser()
+            .and_then(|b| b.selected_entry)
+        else {
+            window.push_notification("Select an entry first.", cx);
+            return;
+        };
+        let Some(launcher) = launch::primary_launcher_for(&entry) else {
+            window.push_notification("No launcher available for this entry.", cx);
+            return;
+        };
+        // Read the password — copy_selected_value returns the cleartext
+        // *without* writing to the clipboard when called via &self. The
+        // launcher needs it to compose the .sapc body; we don't want it
+        // accidentally landing on the clipboard for this flow.
+        let password = self
+            .state
+            .read(cx)
+            .copy_selected_value(CopyValueKind::Password);
+
+        let ctx = LaunchContext {
+            entry: &entry,
+            password: password.as_deref(),
+            custom_fields: &entry.custom_fields,
+        };
+        match launcher.launch(ctx) {
+            Ok(handle) => {
+                window.push_notification(format!("Starting {}…", launcher.label()), cx);
+                self.pending_launches.push(handle);
+                self.schedule_launch_cleanup(cx);
+                // Treat a launch the same as a copy for the recently-
+                // used filter — the user just authenticated with this
+                // entry, even if no clipboard touch happened.
+                self.state
+                    .update(cx, |state, _| state.mark_selected_used());
+            }
+            Err(LaunchError::NoPassword) => {
+                window.push_notification("No password set on this entry.", cx);
+            }
+            Err(LaunchError::MissingField(key)) => {
+                window.push_notification(format!("Missing field: {key}"), cx);
+            }
+            Err(LaunchError::Io(e)) => {
+                // Show only the kind, never the file body. The path is
+                // ours, but even leaking it is unnecessary for the user.
+                window.push_notification(format!("Launch failed: {}", e.kind()), cx);
+            }
+        }
+    }
+
+    /// Park a one-shot timer that drops the oldest pending launch
+    /// after the configured TTL. Drop = `TempLaunchFile::drop` runs =
+    /// payload unlinked. Each launch gets its own timer so multiple
+    /// rapid launches don't share a deadline.
+    fn schedule_launch_cleanup(&mut self, cx: &mut Context<Self>) {
+        let ttl = std::time::Duration::from_secs(
+            self.settings.launch_cleanup_secs_clamped() as u64,
+        );
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ttl).await;
+            let _ = this.update(cx, |this, _| {
+                if !this.pending_launches.is_empty() {
+                    // FIFO — the oldest pending launch is the one that
+                    // matches our timer. Drop drops the TempLaunchFile,
+                    // which unlinks the file.
+                    this.pending_launches.remove(0);
+                }
+                if !this.launch_cleanup_tasks.is_empty() {
+                    // The Task we drop here is *this* timer (the one
+                    // that just woke us up). Letting it drop cancels
+                    // its slot — `remove(0)` returns the Task by
+                    // value, which is then dropped immediately.
+                    let _ = this.launch_cleanup_tasks.remove(0);
+                }
+            });
+        });
+        self.launch_cleanup_tasks.push(task);
+    }
+
     /// Single source of truth for "put this on the clipboard, tell the
     /// user, schedule a clear". Used by the saved-fields copy path
     /// (`copy_selected_value`) and the live-TOTP copy in the detail
@@ -1515,6 +1643,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_copy_username))
             .on_action(cx.listener(Self::on_action_copy_url))
             .on_action(cx.listener(Self::on_action_copy_password))
+            .on_action(cx.listener(Self::on_action_launch_entry))
             .on_action(cx.listener(Self::on_action_open_connect))
             .on_action(cx.listener(Self::on_action_open_settings))
             .on_action(cx.listener(Self::on_action_open_sync_settings))
