@@ -19,6 +19,10 @@ use crate::update::UpdateStatus;
 
 const AUTO_LOCK_PRESETS: &[Option<u64>] = &[Some(60), Some(240), Some(900), None];
 const CLIPBOARD_CLEAR_PRESETS: &[Option<u64>] = &[Some(5), Some(10), Some(30), None];
+/// Allowed cleanup TTLs for the launch tempfile. Bracketed by
+/// `LAUNCH_CLEANUP_SECS_RANGE` (10..=60) so any preset added here
+/// stays within the validated band.
+const LAUNCH_CLEANUP_PRESETS: &[u32] = &[10, 30, 60];
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let active = shell.settings_tab();
@@ -233,6 +237,7 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
         .gap_6()
         .child(auto_lock_section(&settings, cx))
         .child(clipboard_section(&settings, cx))
+        .child(launch_cleanup_section(&settings, cx))
         .child(favicon_section(&favicon_status, vault_open, cx))
         .child(updates_section(&settings, &update_status, cx))
 }
@@ -292,6 +297,44 @@ fn clipboard_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl
         "Clear clipboard after copy",
         "Wipe a copied password / username / TOTP after this many seconds. \
          The clipboard always wipes when you lock the vault.",
+        row,
+    )
+}
+
+/// "Auto-clean launch payloads after N seconds" picker. Mirrors the
+/// shape of the clipboard picker — three preset chips, the selected
+/// one highlighted. Range is clamped on read in `AppSettings` so a
+/// hand-edited settings file can't push the timer outside 10..=60 s.
+fn launch_cleanup_section(
+    settings: &AppSettings,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let current = settings.launch_cleanup_secs_clamped();
+    let mut row = h_flex().gap_2().flex_wrap();
+    for (idx, preset) in LAUNCH_CLEANUP_PRESETS.iter().enumerate() {
+        let preset_value = *preset;
+        let selected = preset_value == current;
+        let baseline = settings.clone();
+        row = row.child(preset_chip(
+            SharedString::from(format!("launch-cleanup-preset-{idx}")),
+            SharedString::from(format!("{preset_value} s")),
+            selected,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.update_settings(
+                    AppSettings {
+                        launch_cleanup_secs: preset_value,
+                        ..baseline.clone()
+                    },
+                    cx,
+                );
+            }),
+        ));
+    }
+    section_frame(
+        "Auto-clean launch payloads",
+        "How long the temp file used to launch external apps (e.g. SAP GUI) \
+         lives before FerrisPass deletes it. The file is also removed when \
+         you lock the vault or quit.",
         row,
     )
 }

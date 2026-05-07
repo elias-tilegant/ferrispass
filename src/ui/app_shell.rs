@@ -1297,6 +1297,31 @@ impl AppShell {
         }
     }
 
+    /// Click handler for the "Additional fields" rows in the detail
+    /// panel. Reads the cleartext value off the open vault, writes it
+    /// to the clipboard, and schedules the standard auto-clear timer.
+    /// `key` is matched against the entry's `custom_fields[].key`
+    /// verbatim (case-sensitive).
+    pub fn copy_custom_field(
+        &mut self,
+        entry_id: &str,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = self.state.read(cx).custom_field_value(entry_id, key);
+        let Some(value) = value.filter(|v| !v.is_empty()) else {
+            window.push_notification(format!("No value for {key}."), cx);
+            return;
+        };
+        // Mark the entry as recently-used too — copying a custom
+        // field counts as authenticating with the entry, same rule
+        // as for password / username copies.
+        self.state
+            .update(cx, |state, _| state.mark_selected_used());
+        self.copy_with_auto_clear(value, key, window, cx);
+    }
+
     /// Launch the currently-selected entry in its native external app
     /// (SAP GUI today, more later). Pulls the entry snapshot + cleartext
     /// password out of state, hands them to the matching `Launcher`,

@@ -1389,6 +1389,17 @@ impl AppState {
         }
     }
 
+    /// Read a single custom-field value off any entry by id. Drives
+    /// the detail-panel "Additional fields" copy buttons and the
+    /// launcher path's per-key lookups. Returns `None` when no vault
+    /// is open, the entry doesn't exist, or the field is unset.
+    pub fn custom_field_value(&self, entry_id: &str, key: &str) -> Option<String> {
+        let VaultStatus::Open { document, .. } = &self.vault else {
+            return None;
+        };
+        document.custom_field_value(entry_id, key)
+    }
+
     pub fn vault_browser(&self) -> Option<VaultBrowserModel> {
         let VaultStatus::Open {
             document,

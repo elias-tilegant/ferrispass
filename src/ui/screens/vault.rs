@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement as _, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledImage as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Sizable as _, h_flex,
@@ -799,6 +799,47 @@ fn footer_button(
         .into_any_element()
 }
 
+/// Same visual chrome as `action_button`, but the click routes to
+/// `AppShell::launch_selected_entry` instead of a clipboard copy.
+/// Lives next to `action_button` so the button row stays visually
+/// consistent — the user shouldn't be able to tell at a glance that
+/// "Open in SAP GUI" is structurally different from the Copy buttons.
+fn launch_action_button(
+    label: &'static str,
+    icon: AppIcon,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    let (bg, fg, bd) = (palette::panel(), palette::text(), palette::border_strong());
+    div()
+        .id("detail-launch")
+        .child(
+            h_flex()
+                .h(px(28.))
+                .px(px(12.))
+                .gap_1p5()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .bg(bg)
+                .text_color(fg)
+                .border_1()
+                .border_color(bd)
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(
+                    gpui_component::Icon::from(icon)
+                        .with_size(gpui_component::Size::Size(px(12.)))
+                        .text_color(fg),
+                )
+                .child(label),
+        )
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.launch_selected_entry(window, cx);
+            }),
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn action_button(
     id: &'static str,
@@ -1570,6 +1611,9 @@ fn entry_detail_body(
                     }),
             ),
         )
+        .when(!entry.custom_fields.is_empty(), |this| {
+            this.child(custom_fields_section(&entry, cx))
+        })
         .child(
             v_flex()
                 .gap_1()
@@ -1681,12 +1725,21 @@ fn entry_detail_body(
             )
         };
 
+        // The Launch button is conditional on a registered launcher
+        // matching the entry (currently: SAP GUI for entries with a
+        // `SAP_CONN` custom field). Slotted before the Copy buttons
+        // so the primary "do the thing" CTA reads left-to-right.
+        let launcher = crate::launch::primary_launcher_for(&entry);
+
         h_flex()
             .flex_shrink_0()
             .gap_2()
             .p_3()
             .border_t_1()
             .border_color(palette::border())
+            .when_some(launcher, |this, l| {
+                this.child(launch_action_button(l.label(), AppIcon::Cloud, cx))
+            })
             .child(action_button(
                 "detail-copy-password",
                 "Copy password",
@@ -1732,6 +1785,79 @@ fn entry_detail_body(
         .child(header)
         .child(body_col)
         .child(footer)
+}
+
+/// "Additional fields" section in the detail panel — read-only list
+/// of `entry.custom_fields` with click-to-copy on every row. Protected
+/// values render as `••••` until copy; clicking a protected row puts
+/// the cleartext on the clipboard and triggers the standard auto-clear
+/// timer, just like the password copy button.
+///
+/// Hidden when the entry has no custom fields (the caller gates the
+/// whole section behind `.when(!entry.custom_fields.is_empty(), …)`).
+fn custom_fields_section(
+    entry: &VaultEntry,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    let mut col = v_flex().gap_1().child(label("Additional fields"));
+    for (idx, cf) in entry.custom_fields.iter().enumerate() {
+        let key_label: SharedString = cf.key.clone().into();
+        let display: SharedString = if cf.protected {
+            "••••".into()
+        } else if cf.value.is_empty() {
+            "—".into()
+        } else {
+            cf.value.clone().into()
+        };
+        let entry_id = entry.id.clone();
+        let field_key = cf.key.clone();
+        let copyable = !cf.value.is_empty();
+        let row_id = SharedString::from(format!("detail-cf-{idx}"));
+        let mut row = div()
+            .id(row_id)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .h(px(34.))
+                    .px_3()
+                    .rounded(px(6.))
+                    .bg(palette::panel())
+                    .border_1()
+                    .border_color(palette::border())
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(palette::text_muted())
+                            .min_w(px(110.))
+                            .child(key_label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(if copyable {
+                                palette::text()
+                            } else {
+                                palette::text_faint()
+                            })
+                            .font_family("JetBrains Mono")
+                            .child(display),
+                    ),
+            );
+        if copyable {
+            row = row.on_click(cx.listener(
+                move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.copy_custom_field(&entry_id, &field_key, window, cx);
+                },
+            ));
+        }
+        col = col.child(row);
+    }
+    col
 }
 
 /// Click-to-act detail row used for username (copy) and URL (open in
