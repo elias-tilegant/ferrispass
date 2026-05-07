@@ -86,8 +86,14 @@ pub enum SyncStatus {
     /// Push or pull in flight.
     Syncing,
     /// Last operation succeeded at the given time. `chrono::Local` for the
-    /// "Synced 2 minutes ago" UI string.
-    Synced { at: chrono::DateTime<chrono::Local> },
+    /// "Synced 2 minutes ago" UI string. `auto_merged` is the number of
+    /// remote-only entries that got pulled in during a git-style silent
+    /// merge — non-zero only when `handle_remote_conflict` short-circuited
+    /// past the overlay; zero for normal saves and manual conflict resolution.
+    Synced {
+        at: chrono::DateTime<chrono::Local>,
+        auto_merged: usize,
+    },
     /// Server returned 412 — local + remote diverged. UI opens the Conflict
     /// overlay; resolution clears this back to Synced.
     Conflict(Box<ConflictState>),
@@ -574,6 +580,7 @@ impl AppState {
                     });
                     state.sync_status = SyncStatus::Synced {
                         at: chrono::Local::now(),
+                        auto_merged: 0,
                     };
                     cx.notify();
                 }
@@ -1671,6 +1678,7 @@ impl AppState {
                     });
                     state.sync_status = SyncStatus::Synced {
                         at: chrono::Local::now(),
+                        auto_merged: 0,
                     };
                     state.connect_flow = None;
                     state.overlay = Overlay::None;
@@ -1735,6 +1743,7 @@ impl AppState {
                             }
                             state.sync_status = SyncStatus::Synced {
                                 at: chrono::Local::now(),
+                                auto_merged: 0,
                             };
                             cx.notify();
                         }
@@ -1783,10 +1792,29 @@ impl AppState {
             Ok(remote_doc) => {
                 let remote_db = remote_doc.database().clone();
                 let report = crate::keepass::merge::diff(&local_db, &remote_db);
+
+                // Git-style: if no per-entry conflicts to decide, auto-merge
+                // silently. Remote-only additions get pulled in with their
+                // original UUIDs preserved (see merge::add_entry_under) and
+                // the result uploads back. The user sees no overlay — just a
+                // "Synced · N merged" badge in the status pill.
+                if report.conflicts.is_empty() {
+                    let auto_merged_count = report.remote_only.len();
+                    let merged = crate::keepass::merge::apply_picks(
+                        &local_db,
+                        &remote_db,
+                        &HashMap::new(),
+                        &report,
+                    );
+                    self.commit_merged(merged, remote_etag, master_password, auto_merged_count, cx);
+                    return;
+                }
+
+                // Real conflicts — user has to pick per entry. Prefill every
+                // conflict with Local (last writer wins; we just hit save, so
+                // local was the user's intent).
                 let mut picks: HashMap<String, Side> = HashMap::new();
                 for c in &report.conflicts {
-                    // Prefill every conflict with Local (last writer wins —
-                    // we just hit save here, so local was the user's intent).
                     picks.insert(c.id.clone(), Side::Local);
                 }
                 self.sync_status = SyncStatus::Conflict(Box::new(ConflictState {
@@ -1835,6 +1863,43 @@ impl AppState {
         let SyncStatus::Conflict(state) = &self.sync_status else {
             return;
         };
+        let VaultStatus::Open { document, .. } = &self.vault else {
+            return;
+        };
+        let merged = crate::keepass::merge::apply_picks(
+            &state.local_db,
+            &state.remote_db,
+            &state.picks,
+            &state.report,
+        );
+        let remote_etag = state.remote_etag.clone();
+        let master_password = document.password().to_string();
+
+        // User-driven resolution — the "Synced · N merged" badge is reserved
+        // for git-style silent merges where the user got no overlay at all.
+        // Manual resolution always reports auto_merged = 0.
+        self.commit_merged(merged, remote_etag, master_password, 0, cx);
+    }
+
+    /// Save a merged Database locally, reload the in-memory document from
+    /// the freshly-encrypted bytes, and force-upload to SharePoint with the
+    /// supplied `If-Match` ETag. Used by both:
+    ///
+    /// - **Manual conflict resolution** (`apply_conflict_resolution`) where
+    ///   the user picked sides in the overlay, and
+    /// - **Silent auto-merge** (in `handle_remote_conflict` when the diff
+    ///   is conflict-free) where there was nothing for the user to decide.
+    ///
+    /// `auto_merged` is the count surfaced in the "Synced · N merged" badge —
+    /// non-zero only on the silent-merge path.
+    fn commit_merged(
+        &mut self,
+        merged: keepass::Database,
+        remote_etag: String,
+        master_password: String,
+        auto_merged: usize,
+        cx: &mut Context<Self>,
+    ) {
         let VaultStatus::Open { document, path, .. } = &self.vault else {
             return;
         };
@@ -1842,41 +1907,33 @@ impl AppState {
             return;
         };
 
-        let merged = crate::keepass::merge::apply_picks(
-            &state.local_db,
-            &state.remote_db,
-            &state.picks,
-            &state.report,
-        );
-
         // Encrypt + save locally first. Re-uses the existing save path so
         // crash-safety semantics match a normal save.
         let payload = crate::keepass::SavePayload::for_merged(
-            merged.clone(),
+            merged,
             document.password().to_string(),
             document.keyfile_path().map(std::path::Path::to_path_buf),
         );
         let local_path = path.clone();
         let config = binding.config.clone();
         let token = binding.access_token.clone();
-        let if_match = state.remote_etag.clone();
-        let master_password = document.password().to_string();
+        let if_match = remote_etag;
 
         self.sync_status = SyncStatus::Syncing;
         cx.notify();
 
-        // Phase 1: local merge save. Splitting this off from the
-        // network step lets us commit the merge into the in-memory
-        // document *before* we go anywhere near the network. Without
-        // that, an upload failure (or a token-refresh failure) parked
-        // the user back on the pre-merge in-memory state while the
-        // already-merged bytes sat on disk — the next ordinary save
-        // would clobber the merge with stale data.
+        // Phase 1: local merge save. Splitting this off from the network
+        // step lets us commit the merge into the in-memory document
+        // *before* we go anywhere near the network. Without that, an
+        // upload failure (or a token-refresh failure) parked the user back
+        // on the pre-merge in-memory state while the already-merged bytes
+        // sat on disk — the next ordinary save would clobber the merge
+        // with stale data.
         let save_path = local_path.clone();
         let local_save_task = cx.background_spawn(async move { payload.save_to(&save_path) });
 
         let reload_path = local_path.clone();
-        let reload_password = master_password.clone();
+        let reload_password = master_password;
         let network_path = local_path;
 
         cx.spawn(async move |this, cx| {
@@ -1888,10 +1945,10 @@ impl AppState {
                         cx.notify();
                         return false;
                     }
-                    // Reload the in-memory document from the freshly
-                    // merged file. After this point the in-memory state
-                    // and the on-disk file agree, so a subsequent
-                    // network failure can't strand the merge on disk.
+                    // Reload the in-memory document from the freshly merged
+                    // file. After this point the in-memory state and the
+                    // on-disk file agree, so a subsequent network failure
+                    // can't strand the merge on disk.
                     let bytes = std::fs::read(&reload_path).unwrap_or_default();
                     match crate::keepass::KeePassRepository::open_bytes(
                         &bytes,
@@ -1907,10 +1964,10 @@ impl AppState {
                         }
                         Err(_) => {
                             // The bytes we just wrote shouldn't fail to
-                            // re-open with the same password — but if
-                            // they do, surface the failure and skip the
-                            // network step instead of pressing on with a
-                            // stale in-memory state.
+                            // re-open with the same password — but if they
+                            // do, surface the failure and skip the network
+                            // step instead of pressing on with a stale
+                            // in-memory state.
                             state.sync_status = SyncStatus::Failed(
                                 "Merge saved locally but could not be re-read; \
                                  reopen the vault to continue."
@@ -1927,10 +1984,10 @@ impl AppState {
                 return;
             }
 
-            // Phase 2: token refresh + upload. If anything in here
-            // fails, the in-memory state is already aligned with disk
-            // (from phase 1), so the user can dismiss the Failed
-            // overlay and keep working without losing the merge.
+            // Phase 2: token refresh + upload. If anything in here fails,
+            // the in-memory state is already aligned with disk (from phase
+            // 1), so the user can dismiss the Failed overlay and keep
+            // working without losing the merge.
             let network_task = cx.background_spawn(async move {
                 let token = crate::sync::service::ensure_fresh(token, &config.account_email)?;
                 let bytes = crate::sync::service::read_local(&network_path)?;
@@ -1959,7 +2016,12 @@ impl AppState {
                             }
                             state.sync_status = SyncStatus::Synced {
                                 at: chrono::Local::now(),
+                                auto_merged,
                             };
+                            // No-op for the silent auto-merge path (overlay
+                            // was never opened); cleanup for the manual
+                            // resolution path. Both branches go through
+                            // here.
                             state.overlay = Overlay::None;
                             cx.notify();
                         }
@@ -2083,7 +2145,14 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
         SyncStatus::Connecting => Some("Connecting…".into()),
         SyncStatus::Restoring => Some("Connecting…".into()),
         SyncStatus::Syncing => Some("Syncing…".into()),
-        SyncStatus::Synced { at } => Some(relative_time_label(*at, Local::now())),
+        SyncStatus::Synced { at, auto_merged } => {
+            let base = relative_time_label(*at, Local::now());
+            if *auto_merged > 0 {
+                Some(format!("{base} · {auto_merged} merged"))
+            } else {
+                Some(base)
+            }
+        }
         SyncStatus::Conflict(_) => Some("Conflict".into()),
         SyncStatus::Failed(_) => Some("Sync failed".into()),
         SyncStatus::Reconnect => Some("Sign-in expired".into()),

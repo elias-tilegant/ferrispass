@@ -61,7 +61,14 @@ fn render_connected(
         SyncStatus::Disconnected | SyncStatus::Reconnect => chip("Off", ChipTone::Gray),
     };
     let last_sync = match status {
-        SyncStatus::Synced { at } => format!("Last synced at {}", at.format("%H:%M:%S")),
+        SyncStatus::Synced { at, auto_merged } => {
+            let base = format!("Last synced at {}", at.format("%H:%M:%S"));
+            if *auto_merged > 0 {
+                format!("{base} · pulled in {auto_merged} new entr{}", if *auto_merged == 1 { "y" } else { "ies" })
+            } else {
+                base
+            }
+        }
         SyncStatus::Failed(msg) => format!("Last attempt failed: {msg}"),
         SyncStatus::Syncing => "Syncing now…".into(),
         SyncStatus::Connecting => "Connecting…".into(),
