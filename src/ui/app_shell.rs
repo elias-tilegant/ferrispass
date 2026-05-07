@@ -1244,6 +1244,13 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         if let Some(value) = self.state.read(cx).copy_selected_value(kind) {
+            // Password and username copies count as "actually used"
+            // for the Recently-Used filter. URL copies don't — the
+            // user might just be sharing a link, not authenticating.
+            if matches!(kind, CopyValueKind::Password | CopyValueKind::Username) {
+                self.state
+                    .update(cx, |state, _| state.mark_selected_used());
+            }
             self.copy_with_auto_clear(value, copy_value_label(kind), window, cx);
         } else {
             window.push_notification(format!("No {} to copy.", copy_value_label(kind)), cx);

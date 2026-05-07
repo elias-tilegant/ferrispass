@@ -7,6 +7,7 @@ use crate::sync::auth::{AccessToken, DeviceCodeChallenge};
 use crate::sync::config::SyncConfig;
 use crate::sync::graph::DriveItemHit;
 use crate::update::UpdateStatus;
+use chrono::{DateTime, Local};
 use gpui::{AppContext as _, Context};
 use keepass::db::Database;
 use std::collections::HashMap;
@@ -198,6 +199,11 @@ pub enum VaultStatus {
         /// per selection change so the detail view can render an accurate bar
         /// without paying the ~1-5 ms zxcvbn cost on every frame.
         selected_strength: Option<StrengthReport>,
+        /// In-memory access log: entry-id → wall-clock time of the last
+        /// password/username copy. Drives the "Recently used" library
+        /// filter. Intentionally session-scoped — closing the vault drops
+        /// the map so a read-only browse never touches disk.
+        last_used: HashMap<String, DateTime<Local>>,
     },
     Error {
         message: String,
@@ -492,7 +498,12 @@ impl AppState {
                 let snapshot = document.snapshot();
                 let selection = LibrarySelection::Group(snapshot.root.id.clone());
                 let selected_entry_id = snapshot.root.entries.first().map(|entry| entry.id.clone());
-                let visible_entries = Rc::new(entries_for_selection(snapshot, &selection, ""));
+                let visible_entries = Rc::new(entries_for_selection(
+                    snapshot,
+                    &selection,
+                    "",
+                    &HashMap::new(),
+                ));
                 let selected_strength = selected_entry_id
                     .as_deref()
                     .and_then(|id| document.strength_for_entry(id));
@@ -506,6 +517,7 @@ impl AppState {
                     search_query: String::new(),
                     visible_entries,
                     selected_strength,
+                    last_used: HashMap::new(),
                 }
             }
             Err(message) => VaultStatus::AwaitingPassword {
@@ -941,6 +953,7 @@ impl AppState {
                 search_query,
                 visible_entries,
                 selected_strength,
+                last_used,
                 ..
             } = &mut self.vault
             else {
@@ -955,7 +968,7 @@ impl AppState {
             *selection = LibrarySelection::Group(group_id.to_string());
             search_query.clear();
 
-            let entries = entries_for_selection(document.snapshot(), selection, "");
+            let entries = entries_for_selection(document.snapshot(), selection, "", last_used);
             *selected_entry_id = Some(new_id.clone());
             *visible_entries = Rc::new(entries);
             *selected_strength = document.strength_for_entry(&new_id);
@@ -981,6 +994,7 @@ impl AppState {
                 search_query,
                 visible_entries,
                 selected_strength,
+                last_used,
                 ..
             } = &mut self.vault
             else {
@@ -993,6 +1007,7 @@ impl AppState {
                 document.snapshot(),
                 selection,
                 search_query,
+                last_used,
             ));
             // Re-score; the password may have changed.
             if selected_entry_id.as_deref() == Some(entry_id) {
@@ -1053,6 +1068,7 @@ impl AppState {
                 selection,
                 search_query,
                 visible_entries,
+                last_used,
                 ..
             } = &mut self.vault
             else {
@@ -1065,6 +1081,7 @@ impl AppState {
                 document.snapshot(),
                 selection,
                 search_query,
+                last_used,
             ));
         }
         cx.notify();
@@ -1087,6 +1104,7 @@ impl AppState {
                 selection,
                 search_query,
                 visible_entries,
+                last_used,
                 ..
             } = &mut self.vault
             else {
@@ -1099,6 +1117,7 @@ impl AppState {
                 document.snapshot(),
                 selection,
                 search_query,
+                last_used,
             ));
         }
         cx.notify();
@@ -1126,6 +1145,7 @@ impl AppState {
                 search_query,
                 visible_entries,
                 selected_strength,
+                last_used,
                 ..
             } = &mut self.vault
             else {
@@ -1134,7 +1154,7 @@ impl AppState {
 
             mutate(document)?;
 
-            let entries = entries_for_selection(document.snapshot(), selection, search_query);
+            let entries = entries_for_selection(document.snapshot(), selection, search_query, last_used);
             if selected_entry_id.as_deref() == Some(entry_id) {
                 *selected_entry_id = entries.first().map(|e| e.id.clone());
                 *selected_strength = selected_entry_id
@@ -1195,6 +1215,7 @@ impl AppState {
             search_query,
             visible_entries,
             selected_strength,
+            last_used,
             ..
         } = &mut self.vault
         else {
@@ -1208,7 +1229,7 @@ impl AppState {
 
         *selection = LibrarySelection::Group(group_id);
         search_query.clear();
-        let entries = entries_for_selection(snapshot, selection, "");
+        let entries = entries_for_selection(snapshot, selection, "", last_used);
         *selected_entry_id = entries.first().map(|entry| entry.id.clone());
         *selected_strength = selected_entry_id
             .as_deref()
@@ -1225,6 +1246,7 @@ impl AppState {
             search_query,
             visible_entries,
             selected_strength,
+            last_used,
             ..
         } = &mut self.vault
         else {
@@ -1235,7 +1257,7 @@ impl AppState {
         }
         *selection = sel;
         search_query.clear();
-        let entries = entries_for_selection(document.snapshot(), selection, "");
+        let entries = entries_for_selection(document.snapshot(), selection, "", last_used);
         *selected_entry_id = entries.first().map(|entry| entry.id.clone());
         *selected_strength = selected_entry_id
             .as_deref()
@@ -1274,6 +1296,7 @@ impl AppState {
             search_query,
             visible_entries,
             selected_strength,
+            last_used,
             ..
         } = &mut self.vault
         else {
@@ -1285,7 +1308,7 @@ impl AppState {
         }
 
         *search_query = query;
-        let entries = entries_for_selection(document.snapshot(), selection, search_query);
+        let entries = entries_for_selection(document.snapshot(), selection, search_query, last_used);
         let selected_entry_is_visible = selected_entry_id
             .as_deref()
             .is_some_and(|id| entries.iter().any(|entry| entry.id == id));
@@ -1309,6 +1332,7 @@ impl AppState {
             search_query,
             visible_entries,
             selected_strength,
+            last_used,
             ..
         } = &mut self.vault
         else {
@@ -1320,13 +1344,32 @@ impl AppState {
         }
 
         search_query.clear();
-        let entries = entries_for_selection(document.snapshot(), selection, "");
+        let entries = entries_for_selection(document.snapshot(), selection, "", last_used);
         *selected_entry_id = entries.first().map(|entry| entry.id.clone());
         *selected_strength = selected_entry_id
             .as_deref()
             .and_then(|id| document.strength_for_entry(id));
         *visible_entries = Rc::new(entries);
         cx.notify();
+    }
+
+    /// Stamp the currently-selected entry as "just used" in the
+    /// in-memory access log. Called from the AppShell after a
+    /// successful password / username copy. No-op when no vault is
+    /// open or no entry is selected. Doesn't notify — the
+    /// `RecentlyUsed` list is rebuilt on the next selection change,
+    /// which matches KeePassXC (the list is a snapshot, not live).
+    pub fn mark_selected_used(&mut self) {
+        if let VaultStatus::Open {
+            selected_entry_id,
+            last_used,
+            ..
+        } = &mut self.vault
+        {
+            if let Some(id) = selected_entry_id.clone() {
+                last_used.insert(id, Local::now());
+            }
+        }
     }
 
     pub fn copy_selected_value(&self, kind: CopyValueKind) -> Option<String> {
@@ -2049,6 +2092,7 @@ fn entries_for_selection(
     snapshot: &VaultSnapshot,
     selection: &LibrarySelection,
     search_query: &str,
+    last_used: &HashMap<String, DateTime<Local>>,
 ) -> Vec<VaultEntry> {
     let query = search_query.trim().to_lowercase();
 
@@ -2079,10 +2123,19 @@ fn entries_for_selection(
         LibrarySelection::AllItems => snapshot.entries_recursive().into_iter().cloned().collect(),
         LibrarySelection::Favorites => snapshot.entries_starred().into_iter().cloned().collect(),
         LibrarySelection::RecentlyUsed => {
-            let mut entries: Vec<VaultEntry> =
-                snapshot.entries_recursive().into_iter().cloned().collect();
-            entries.sort_by(|a, b| b.updated.cmp(&a.updated));
-            entries.truncate(50);
+            // Session-scoped: only entries the user has actually copied
+            // a password/username from since unlock. Newest first.
+            let mut entries: Vec<VaultEntry> = snapshot
+                .entries_recursive()
+                .into_iter()
+                .filter(|entry| last_used.contains_key(&entry.id))
+                .cloned()
+                .collect();
+            entries.sort_by(|a, b| {
+                last_used
+                    .get(&b.id)
+                    .cmp(&last_used.get(&a.id))
+            });
             entries
         }
         LibrarySelection::Trash => snapshot
