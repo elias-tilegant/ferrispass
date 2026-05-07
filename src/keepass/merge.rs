@@ -1,19 +1,30 @@
 //! Pure-data diff and three-way merge over keepass `Database`s, used by the
 //! sync conflict resolution flow. No GPUI dependencies — fully unit-testable.
 //!
-//! Scope (MVP):
-//! - Entry-grain diff. Title / Username / Password / URL / Notes are
-//!   compared; everything else (icons, tags, custom fields, attachments,
-//!   AutoType, group hierarchy) is preserved from whichever side wins per
-//!   entry but not surfaced in the conflict UI.
+//! Scope:
+//! - Entry-grain diff over UUID-identified entries. Title / Username /
+//!   Password / URL / Notes / Tags are surfaced in the conflict UI as
+//!   side-by-side rows. Custom-data, AutoType, and colors are preserved
+//!   silently (replaced when user picks Remote, kept when user picks Local)
+//!   without rendering as diff rows — they're rarely user-visible in
+//!   normal vault use, so surfacing each one would be UI noise.
+//! - Remote-only entries are imported with their **original UUID** preserved
+//!   via `Group::add_entry_with_id`. This is essential for cross-client sync:
+//!   without it, every merge cycle re-randomises UUIDs, and other clients
+//!   (KeePass2, KeePassXC) treat the entry as new on their side — leading
+//!   to exponential entry duplication on each round trip.
 //! - Recycle-bin entries are filtered out — they're effectively deleted from
 //!   the user's perspective. Edge case "X live on one side, X recycled on
 //!   the other" therefore presents as a one-sided add (the live side wins
-//!   silently). That's acceptable for MVP; refining requires surfacing
-//!   delete-vs-edit conflicts, which is its own project.
+//!   silently). Acceptable; refining requires surfacing delete-vs-edit
+//!   conflicts, which is its own project.
 //! - Group additions are not detected. A remote-only entry lands in the
 //!   merged vault under the local root group, regardless of where it sat in
 //!   the remote tree. Documented limitation.
+//! - **Not preserved** across a merge: icon bytes, attachments, history.
+//!   Both icon and attachments are accessed through private fields in
+//!   keepass-rs; exposing them is a separate fork-patch chunk. History
+//!   is intentionally reset because the merge itself is a fresh write.
 //! - Passwords are compared in cleartext (necessarily — both sides are
 //!   already decrypted) but the displayed `FieldDiff.local`/`.remote` for
 //!   the Password row is redacted to `"••• (N chars)"` so the conflict
@@ -22,14 +33,23 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDateTime;
-use keepass::db::{Database, EntryId, EntryRef, GroupId, Times, fields};
+use keepass::db::{
+    AutoType, Color, CustomDataItem, Database, EntryId, EntryMut, EntryRef, GroupId, Times, fields,
+};
 
 /// Value snapshot of an entry at the moment of diffing — owned, no borrows
 /// of the source `Database`. Safe to keep around in UI state for as long as
 /// the user is reviewing the conflict.
+///
+/// Carries the full set of entry fields the merge round-trips, not just the
+/// five visible-in-UI ones. When the user picks "Remote" for a conflict, all
+/// these fields get transplanted onto the local entry — partial transplants
+/// were the source of a silent-data-loss bug pre-v0.2.1.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryView {
-    /// EntryId stringified to its UUID. Stable across diff/apply.
+    /// EntryId stringified to its UUID. Stable across diff/apply, and
+    /// re-hydrated via `EntryId::from_uuid` when adding remote-only entries
+    /// to the merged DB so cross-client sync keeps the same identity.
     pub id: String,
     pub title: String,
     pub username: String,
@@ -39,6 +59,16 @@ pub struct EntryView {
     pub url: String,
     pub notes: String,
     pub modified: Option<NaiveDateTime>,
+    /// User-assigned tags. Surfaced as a `FieldDiff` row in the conflict UI.
+    pub tags: Vec<String>,
+    /// Plugin / metadata key-value pairs attached to the entry by other
+    /// KeePass clients (e.g. KeePassXC stores favorite-marker hashes here).
+    /// Silently preserved across merges; not surfaced as a diff row.
+    pub custom_data: HashMap<String, CustomDataItem>,
+    pub autotype: Option<AutoType>,
+    pub foreground_color: Option<Color>,
+    pub background_color: Option<Color>,
+    pub override_url: Option<String>,
 }
 
 /// One field's local-vs-remote comparison. `local` and `remote` are the
@@ -210,6 +240,15 @@ fn entry_to_view(e: &EntryRef<'_>) -> EntryView {
         url: e.get(fields::URL).unwrap_or("").to_string(),
         notes: e.get(fields::NOTES).unwrap_or("").to_string(),
         modified: e.times.last_modification,
+        // EntryRef Derefs to Entry, so the public fields below are reached
+        // straight through. Cloning here is cheap relative to KDF cost on
+        // any subsequent save.
+        tags: e.tags.clone(),
+        custom_data: e.custom_data.clone(),
+        autotype: e.autotype.clone(),
+        foreground_color: e.foreground_color.clone(),
+        background_color: e.background_color.clone(),
+        override_url: e.override_url.clone(),
     }
 }
 
@@ -220,7 +259,21 @@ fn field_diffs(local: &EntryView, remote: &EntryView) -> Vec<FieldDiff> {
         password_diff(&local.password, &remote.password),
         plain_diff("URL", &local.url, &remote.url),
         plain_diff("Notes", &local.notes, &remote.notes),
+        tags_diff(&local.tags, &remote.tags),
     ]
+}
+
+fn tags_diff(local: &[String], remote: &[String]) -> FieldDiff {
+    // Order-sensitive comparison: tags are technically a set in KeePass'
+    // mental model, but in the file they're a Vec<String> and clients
+    // (including ours) preserve write order. Treating reorder as a diff
+    // is the simpler + safer behaviour.
+    FieldDiff {
+        label: "Tags",
+        local: local.join(", "),
+        remote: remote.join(", "),
+        differs: local != remote,
+    }
 }
 
 fn plain_diff(label: &'static str, local: &str, remote: &str) -> FieldDiff {
@@ -251,15 +304,30 @@ fn redact(pw: &str) -> String {
     }
 }
 
-fn replace_entry_fields(db: &mut Database, id: EntryId, view: &EntryView) {
-    let Some(mut entry) = db.entry_mut(id) else {
-        return;
-    };
+/// Copy every field from `view` onto `entry`. Shared by the conflict-pick
+/// path (`replace_entry_fields`) and the remote-only-import path
+/// (`add_entry_under`) so they stay in lockstep — pre-v0.2.1 they each had
+/// their own field list and drifted, causing tags/custom-data to silently
+/// not be transplanted when the user picked Remote.
+fn populate_from_view(entry: &mut EntryMut<'_>, view: &EntryView) {
     entry.set_unprotected(fields::TITLE, &view.title);
     entry.set_unprotected(fields::USERNAME, &view.username);
     entry.set_protected(fields::PASSWORD, &view.password);
     entry.set_unprotected(fields::URL, &view.url);
     entry.set_unprotected(fields::NOTES, &view.notes);
+    entry.tags = view.tags.clone();
+    entry.custom_data = view.custom_data.clone();
+    entry.autotype = view.autotype.clone();
+    entry.foreground_color = view.foreground_color.clone();
+    entry.background_color = view.background_color.clone();
+    entry.override_url = view.override_url.clone();
+}
+
+fn replace_entry_fields(db: &mut Database, id: EntryId, view: &EntryView) {
+    let Some(mut entry) = db.entry_mut(id) else {
+        return;
+    };
+    populate_from_view(&mut entry, view);
     entry.times.last_modification = Some(Times::now());
 }
 
@@ -267,12 +335,29 @@ fn add_entry_under(db: &mut Database, group_id: GroupId, view: &EntryView) {
     let Some(mut group) = db.group_mut(group_id) else {
         return;
     };
-    let mut entry = group.add_entry();
-    entry.set_unprotected(fields::TITLE, &view.title);
-    entry.set_unprotected(fields::USERNAME, &view.username);
-    entry.set_protected(fields::PASSWORD, &view.password);
-    entry.set_unprotected(fields::URL, &view.url);
-    entry.set_unprotected(fields::NOTES, &view.notes);
+
+    // Re-hydrate the original remote-side EntryId from its UUID string so
+    // the imported entry keeps the identity other KeePass clients know it
+    // by. Falls back to a fresh-UUID add if the string isn't a valid UUID
+    // (shouldn't happen — `entry_to_view` produces these via
+    // `EntryId::to_string` — but stay defensive rather than panic).
+    let entry_id = match uuid::Uuid::parse_str(&view.id) {
+        Ok(uuid) => EntryId::from_uuid(uuid),
+        Err(_) => {
+            eprintln!(
+                "merge: remote entry UUID unparseable, importing with fresh UUID: {}",
+                view.id
+            );
+            let mut entry = group.add_entry();
+            populate_from_view(&mut entry, view);
+            entry.times.last_modification = Some(Times::now());
+            entry.times.creation = Some(Times::now());
+            return;
+        }
+    };
+
+    let mut entry = group.add_entry_with_id(entry_id);
+    populate_from_view(&mut entry, view);
     entry.times.last_modification = Some(Times::now());
     entry.times.creation = Some(Times::now());
 }
@@ -448,18 +533,126 @@ mod tests {
     fn apply_picks_adds_remote_only_entries_to_root() {
         let local = Database::new();
         let mut remote = fork(&local);
-        add(&mut remote, "NewRemote", "remote-secret");
+        let remote_id = add(&mut remote, "NewRemote", "remote-secret");
 
         let report = diff(&local, &remote);
         let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
 
-        // Find by title since the remote entry's UUID isn't preserved through
-        // apply_picks (documented MVP limitation — no public add-with-id API).
+        // UUID preservation regression test (bug fixed in v0.2.1): the
+        // entry must be findable by the *original* remote EntryId in the
+        // merged DB, not just by title. Without this, cross-client sync
+        // (FerrisPass ↔ KeePass2) accumulates duplicates exponentially
+        // because each merge rewrites the UUID and other clients then
+        // see "an entry I haven't seen before" on every cycle.
         let added = merged
-            .iter_all_entries()
-            .find(|e| e.get_title() == Some("NewRemote"))
-            .expect("remote-only entry should be in merged result");
+            .entry(remote_id)
+            .expect("remote entry's UUID must be preserved through apply_picks");
+        assert_eq!(added.get_title(), Some("NewRemote"));
         assert_eq!(added.get_password(), Some("remote-secret"));
+    }
+
+    #[test]
+    fn apply_picks_remote_pick_replaces_tags() {
+        // Bug-B regression: pre-v0.2.1, picking Remote only copied 5
+        // standard fields. Tags + custom_data + colors stayed at the
+        // local value, producing a hybrid the user never asked for.
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "pw");
+        local.entry_mut(id).unwrap().tags = vec!["personal".to_string()];
+
+        let mut remote = fork(&local);
+        // Diverge: local kept "personal", remote rewrites to "work" + "shared"
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "local-pw");
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "remote-pw");
+        remote.entry_mut(id).unwrap().tags = vec!["work".to_string(), "shared".to_string()];
+
+        let report = diff(&local, &remote);
+        let conflict = report
+            .conflicts
+            .first()
+            .expect("password divergence should produce a conflict");
+        let tag_field = conflict
+            .fields
+            .iter()
+            .find(|f| f.label == "Tags")
+            .expect("Tags must be one of the field-diff rows");
+        assert!(tag_field.differs, "tag-diff should fire when sets differ");
+        assert_eq!(tag_field.local, "personal");
+        assert_eq!(tag_field.remote, "work, shared");
+
+        // User picks Remote → all remote fields land on the merged entry,
+        // including the tags.
+        let mut picks = HashMap::new();
+        picks.insert(id.to_string(), Side::Remote);
+        let merged = apply_picks(&local, &remote, &picks, &report);
+
+        let entry = merged.entry(id).unwrap();
+        assert_eq!(entry.get_password(), Some("remote-pw"));
+        assert_eq!(
+            entry.tags,
+            vec!["work".to_string(), "shared".to_string()],
+            "Picking Remote must transplant tags, not just the 5 standard fields"
+        );
+    }
+
+    #[test]
+    fn three_way_round_trip_does_not_duplicate_entries() {
+        // The end-to-end canary that pins the user-reported sync bug:
+        // FerrisPass → cloud → KeePass2-style merge → cloud → FerrisPass
+        // should leave the entry count stable. Pre-fix, this test failed
+        // because UUID drift made each side treat the entry as new on
+        // every cycle.
+
+        // Round 1: KP2 creates an entry, cloud has it; FP local is empty.
+        let local_fp = Database::new();
+        let mut cloud = fork(&local_fp);
+        add(&mut cloud, "TestKP", "secret");
+        let kp2_local_after_round1 = cloud.clone();
+
+        // FP merges. report.remote_only contains the new entry.
+        let report = diff(&local_fp, &cloud);
+        assert_eq!(
+            report.remote_only.len(),
+            1,
+            "expected exactly one remote-only entry"
+        );
+        let merged_fp = apply_picks(&local_fp, &cloud, &HashMap::new(), &report);
+        assert_eq!(
+            merged_fp.iter_all_entries().count(),
+            1,
+            "merged DB should have exactly the one entry, not more"
+        );
+
+        // FP uploads merged_fp; that's now the cloud state.
+        let cloud_after_fp = merged_fp;
+
+        // KP2 syncs against cloud_after_fp. KP2's local already had the
+        // entry with its original UUID (because KP2 created it). With
+        // UUID preservation, cloud_after_fp's entry has the *same* UUID,
+        // so KP2's diff should be clean — no new entries to import,
+        // no conflicts to resolve.
+        let kp2_view = diff(&kp2_local_after_round1, &cloud_after_fp);
+        assert!(
+            kp2_view.is_clean(),
+            "after FP merges with UUID preservation, KP2 should see a clean diff. \
+             Got conflicts={:?} remote_only={:?} local_only={:?}",
+            kp2_view.conflicts,
+            kp2_view.remote_only,
+            kp2_view.local_only,
+        );
+
+        // And the count stays at 1 across the round-trip.
+        assert_eq!(
+            cloud_after_fp.iter_all_entries().count(),
+            1,
+            "round-trip should preserve entry count, not multiply it"
+        );
     }
 
     #[test]

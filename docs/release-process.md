@@ -97,6 +97,14 @@ Common causes:
 
 Step End. The workflow lacks `contents: write` permission. Already set in `release.yml`'s `permissions:` block; only an issue if someone removed it.
 
+### Users report duplicate entries after sync
+
+Symptom: a single entry created in KeePass2 (or another KeePass client) shows up two, three, or more times in FerrisPass after a sync round-trip — and the counts grow with each cycle. The duplication is real (in the .kdbx file), not a UI artefact.
+
+Root cause: pre-v0.2.1 builds had a bug in `src/keepass/merge.rs::add_entry_under` that re-randomised UUIDs on remote-only entry imports. Other clients then saw the entry as "new on the cloud" on every cycle and kept their own original copy alongside, producing exponential duplication. Fixed in commit XXX (visibility flips in the keepass-rs fork plus deep-replace logic in merge.rs).
+
+Recovery for users on a corrupted vault is documented in §"v0.2.1 release: cleanup recipe for affected users" below — they need a one-time manual deduplication; the code fix only stops the bleeding.
+
 ## Recovery: re-tagging a botched release
 
 If the pipeline failed before creating the GitHub Release, no cleanup needed — just fix the issue, re-run the failed job. The tag stays put.
@@ -150,6 +158,23 @@ scripts/build-mac.sh --skip-notarize
 Outputs `dist/FerrisPass-X.Y.Z-arm64.dmg` that opens with a Gatekeeper warning (signed but not notarized). Useful for verifying the icon, app start-up flow, etc., before committing to a real release.
 
 If you have minisign installed locally and the keypair at `~/.ferrispass/minisign.key`, the `--skip-notarize` build also produces the `.app.tar.gz` + `.minisig` + `update.json` artefacts. Otherwise it skips Stage 9 with a warning; the DMG alone is still produced.
+
+## v0.2.1 release: cleanup recipe for affected users
+
+The duplicate-entries sync bug (see §Common failure modes) was fixed in v0.2.1, but already-corrupted vaults won't auto-heal — the duplicates are real bytes in the .kdbx file, the fix only stops new ones from appearing. Paste the following into the GitHub Release body for v0.2.1 so users running the affected v0.2.0 know what to do:
+
+> **⚠️ One-time cleanup needed if you hit duplicate entries**
+>
+> Earlier FerrisPass builds (v0.2.0 and before) had a sync bug that accumulated duplicate entries on cross-client merges with KeePass2 / KeePassXC. The bug is fixed in this release, but existing vault files may already contain duplicates that won't disappear on their own. To clean up:
+>
+> 1. In KeePass2 or KeePassXC, open your `.kdbx` file
+> 2. Sort entries by Title and identify duplicates (typically same title, possibly identical fields)
+> 3. Delete the older copies (keep the most recent per logical entry; "Last Modified" column helps)
+> 4. Save and let the change propagate to the cloud
+> 5. In FerrisPass: Settings → Sync → Disconnect, then reconnect from scratch (Welcome screen → Connect OneDrive → pick the cleaned file)
+> 6. Subsequent syncs will not produce new duplicates
+>
+> Vaults that were never synced cross-client are unaffected.
 
 ## See also
 

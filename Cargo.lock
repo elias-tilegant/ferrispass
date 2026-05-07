@@ -1841,6 +1841,7 @@ dependencies = [
  "thiserror 2.0.18",
  "ureq",
  "url",
+ "uuid",
  "zxcvbn",
 ]
 
@@ -3014,7 +3015,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -3385,7 +3386,7 @@ dependencies = [
 [[package]]
 name = "keepass"
 version = "0.0.0-placeholder-version"
-source = "git+https://github.com/elias-tilegant/keepass-rs?rev=cc6845a#cc6845aa025c1623bd9e76f02de2332a52c8da82"
+source = "git+https://github.com/elias-tilegant/keepass-rs?rev=db05af8#db05af87eefeb88af95ebe3a3e7fb577a2622c3d"
 dependencies = [
  "aes 0.9.0",
  "base32",

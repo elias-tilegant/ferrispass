@@ -23,7 +23,7 @@ incremental = false
 # base64 timestamps). The upstream crate's `save_kdbx4` path produces files
 # unreadable by KeePass2 / KeePassXC without these patches. Re-evaluate the
 # pin if those fixes land upstream.
-keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "cc6845a", features = ["save_kdbx4", "totp"] }
+keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "db05af8", features = ["save_kdbx4", "totp"] }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
@@ -50,6 +50,11 @@ sha2 = "0.10"
 # new build over HTTPS, atomic-replaces the .app and restarts.
 cargo-packager-updater = "0.2"
 semver = "1"
+# Direct uuid dep so merge.rs can re-hydrate EntryId from a stringified
+# UUID (`EntryId::from_uuid(Uuid::parse_str(s)?)`). Same crate the keepass
+# dep already pulls in transitively; pinning major matches keepass-rs's
+# expectation (1.x).
+uuid = "1"
 
 [dev-dependencies]
 tempfile = "3"
