@@ -128,7 +128,8 @@ impl VaultDocument {
             .database
             .iter_all_entries()
             .find(|e| e.id().to_string() == entry_id)?;
-        let totp = entry.get_otp().ok()?;
+        let raw = entry.get_raw_otp_value()?;
+        let totp = parse_otp_value(raw)?;
         let code = totp.value_now().ok()?;
         // The spec uses 6 digits in 99% of issuers; insert a thin space mid-code
         // for readability (`123 456`) when we get an even count.
@@ -461,6 +462,34 @@ pub struct OtpDisplay {
     pub code: String,
     pub remaining_secs: u32,
     pub period_secs: u32,
+}
+
+/// Parse the raw OTP field of a KeePass entry into a `TOTP`.
+///
+/// The keepass crate's `Entry::get_otp` only accepts `otpauth://totp/...`
+/// URLs, but our UI advertises "otpauth URL or secret" and the KeePassXC
+/// import path also accepts bare base32 secrets that authenticator apps
+/// often hand out unwrapped. When the stored value isn't a URL, we wrap
+/// it in a default-parameter otpauth URL (SHA1, 30 s, 6 digits — the
+/// near-universal defaults) so the same downstream parser handles both
+/// shapes. Whitespace inside the secret (some apps render it grouped:
+/// `JBSW Y3DP …`) is stripped, and the alphabet is upper-cased so
+/// lower-case input doesn't fail base32 decode.
+fn parse_otp_value(raw: &str) -> Option<keepass::db::TOTP> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("otpauth://") {
+        return trimmed.parse().ok();
+    }
+    let normalized: String = trimmed
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .flat_map(char::to_uppercase)
+        .collect();
+    let url = format!("otpauth://totp/?secret={normalized}");
+    url.parse().ok()
 }
 
 /// Inserts a thin space in the middle of even-length codes (`123456` → `123 456`).
@@ -1073,6 +1102,59 @@ mod tests {
             otp.code
         );
         assert!(otp.remaining_secs <= otp.period_secs);
+    }
+
+    /// A user pasting just the base32 secret (e.g. "JBSWY3DPEHPK3PXP")
+    /// — what most authenticator apps and many setup pages hand out —
+    /// must produce a working live code. Before the bare-secret
+    /// fallback was added, the keepass crate's URL-only `from_str`
+    /// rejected this input and the UI was stuck rendering "—".
+    #[test]
+    fn bare_secret_yields_live_code() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "BareSecret".into(),
+                    otp: "JBSWY3DPEHPK3PXP".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        let otp = doc.totp_for_entry(&id).expect("bare secret resolves");
+        let raw: String = otp.code.chars().filter(|c| c.is_ascii_digit()).collect();
+        assert!(!raw.is_empty(), "code is digits, got: {}", otp.code);
+        assert!(otp.remaining_secs <= otp.period_secs);
+    }
+
+    /// Authenticator-style grouped + lower-case secrets ("jbsw y3dp …")
+    /// must also work; we strip whitespace and upper-case before
+    /// handing to the base32 decoder.
+    #[test]
+    fn bare_secret_accepts_spaces_and_lowercase() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Pretty".into(),
+                    otp: "jbsw y3dp ehpk 3pxp".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        assert!(doc.totp_for_entry(&id).is_some());
     }
 
     #[test]
