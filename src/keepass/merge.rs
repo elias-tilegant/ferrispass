@@ -101,13 +101,32 @@ pub struct EntryConflict {
     pub fields: Vec<FieldDiff>,
 }
 
+/// One entry that diverged but was auto-resolved by `last_modification`
+/// timestamp — the side with the strictly newer timestamp wins, no UI
+/// prompt. `apply_picks` replays these alongside the user's manual picks
+/// so the merged DB picks up the winner regardless of whether any other
+/// entries forced the overlay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoResolved {
+    pub id: String,
+    pub winner: Side,
+    /// Carried so `apply_picks` can transplant remote fields when
+    /// `winner == Remote` without re-walking the remote DB.
+    pub remote: EntryView,
+}
+
 /// The full picture handed to the Conflict overlay. `conflicts` is the list
-/// the user must resolve; `local_only` / `remote_only` are auto-merged.
+/// the user must resolve; `local_only` / `remote_only` / `auto_resolved`
+/// are auto-merged.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ConflictReport {
     pub conflicts: Vec<EntryConflict>,
     pub local_only: Vec<EntryView>,
     pub remote_only: Vec<EntryView>,
+    /// Entries that diverged on at least one visible field but where one
+    /// side's `last_modification` is strictly newer — last-write-wins,
+    /// applied silently.
+    pub auto_resolved: Vec<AutoResolved>,
 }
 
 impl ConflictReport {
@@ -115,7 +134,7 @@ impl ConflictReport {
     /// can skip the Conflict overlay entirely and just upload `apply_picks`
     /// with an empty pick map.
     pub fn is_clean(&self) -> bool {
-        self.conflicts.is_empty() && self.remote_only.is_empty()
+        self.conflicts.is_empty() && self.remote_only.is_empty() && self.auto_resolved.is_empty()
         // `local_only` doesn't dirty the merge: those entries are already in
         // the local DB we'll start the merge from.
     }
@@ -137,17 +156,32 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
     let remote_ids: HashSet<&String> = remote_map.keys().collect();
 
     let mut conflicts = Vec::new();
+    let mut auto_resolved = Vec::new();
     for id in local_ids.intersection(&remote_ids) {
         let l = &local_map[*id];
         let r = &remote_map[*id];
         let fields = field_diffs(l, r);
-        if fields.iter().any(|f| f.differs) {
-            conflicts.push(EntryConflict {
+        if !fields.iter().any(|f| f.differs) {
+            continue;
+        }
+        // KeePass-style last-write-wins: when one side's `last_modification`
+        // is strictly newer, take that side automatically. The overlay is
+        // reserved for the genuinely ambiguous cases (timestamps tied or
+        // missing) — pre-v0.4 every field-level divergence forced a prompt
+        // even when the user had clearly saved one side later than the
+        // other, which made benign sync round-trips noisy.
+        match timestamp_winner(l.modified, r.modified) {
+            Some(winner) => auto_resolved.push(AutoResolved {
+                id: (*id).clone(),
+                winner,
+                remote: r.clone(),
+            }),
+            None => conflicts.push(EntryConflict {
                 id: (*id).clone(),
                 local: l.clone(),
                 remote: r.clone(),
                 fields,
-            });
+            }),
         }
     }
 
@@ -167,11 +201,26 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
     conflicts.sort_by(|a, b| by_title_then_id(&a.local, &b.local));
     local_only.sort_by(by_title_then_id);
     remote_only.sort_by(by_title_then_id);
+    auto_resolved.sort_by(|a, b| a.remote.title.cmp(&b.remote.title).then(a.id.cmp(&b.id)));
 
     ConflictReport {
         conflicts,
         local_only,
         remote_only,
+        auto_resolved,
+    }
+}
+
+/// Returns the strictly-newer side, or `None` when timestamps are tied
+/// or either side is missing a `last_modification` (treat as ambiguous —
+/// surface to the user). Equal-second timestamps are ambiguous because
+/// KeePass file format is second-precision and a true race on the same
+/// second is the case where we *want* to prompt.
+fn timestamp_winner(local: Option<NaiveDateTime>, remote: Option<NaiveDateTime>) -> Option<Side> {
+    match (local, remote) {
+        (Some(l), Some(r)) if l > r => Some(Side::Local),
+        (Some(l), Some(r)) if r > l => Some(Side::Remote),
+        _ => None,
     }
 }
 
@@ -212,6 +261,20 @@ pub fn apply_picks(
         if side == Side::Remote {
             replace_entry_fields(&mut merged, entry_id, &conflict.remote);
         }
+    }
+
+    // Auto-resolved entries (timestamp-based last-write-wins) get applied
+    // unconditionally — they never appear in `picks` because the user was
+    // never asked. Local-winners are no-ops since `merged` started as a
+    // clone of local; only Remote-winners need their fields transplanted.
+    for resolved in &report.auto_resolved {
+        if resolved.winner != Side::Remote {
+            continue;
+        }
+        let Some(&entry_id) = id_lookup.get(&resolved.id) else {
+            continue;
+        };
+        replace_entry_fields(&mut merged, entry_id, &resolved.remote);
     }
 
     let root_id = merged.root().id();
@@ -495,6 +558,115 @@ mod tests {
         let title_field = c.fields.iter().find(|f| f.label == "Title").unwrap();
         assert!(!title_field.differs);
         assert_eq!(title_field.local, "GitHub");
+    }
+
+    #[test]
+    fn newer_remote_auto_resolves_without_user_prompt() {
+        use chrono::NaiveDate;
+        let older = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(12, 22, 0)
+            .unwrap();
+        let newer = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(13, 0, 0)
+            .unwrap();
+
+        let mut local = Database::new();
+        let id = add(&mut local, "Elias SH1", "secret-pass-32-chars-padding-ok!");
+        local.entry_mut(id).unwrap().times.last_modification = Some(older);
+        let mut remote = fork(&local);
+        // Remote has the strictly newer save with non-empty Notes.
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_unprotected(fields::NOTES, "abc");
+        remote.entry_mut(id).unwrap().times.last_modification = Some(newer);
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.conflicts.is_empty(),
+            "newer remote should auto-resolve, not prompt — got {} conflicts",
+            report.conflicts.len()
+        );
+        assert_eq!(report.auto_resolved.len(), 1);
+        assert_eq!(report.auto_resolved[0].winner, Side::Remote);
+        assert!(!report.is_clean(), "auto-resolved still requires writeback");
+
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
+        let merged_notes = merged
+            .iter_all_entries()
+            .find(|e| e.id() == id)
+            .unwrap()
+            .get(fields::NOTES)
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(merged_notes, "abc");
+    }
+
+    #[test]
+    fn newer_local_auto_resolves_without_user_prompt() {
+        use chrono::NaiveDate;
+        let older = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let newer = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(13, 0, 0)
+            .unwrap();
+
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "shared");
+        let mut remote = fork(&local);
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_unprotected(fields::URL, "https://new.example.com");
+        local.entry_mut(id).unwrap().times.last_modification = Some(newer);
+        remote.entry_mut(id).unwrap().times.last_modification = Some(older);
+
+        let report = diff(&local, &remote);
+        assert!(report.conflicts.is_empty());
+        assert_eq!(report.auto_resolved.len(), 1);
+        assert_eq!(report.auto_resolved[0].winner, Side::Local);
+
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
+        let merged_url = merged
+            .iter_all_entries()
+            .find(|e| e.id() == id)
+            .unwrap()
+            .get(fields::URL)
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(merged_url, "https://new.example.com");
+    }
+
+    #[test]
+    fn equal_timestamps_still_prompt_user() {
+        use chrono::NaiveDate;
+        let same = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(13, 0, 0)
+            .unwrap();
+
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "shared");
+        let mut remote = fork(&local);
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "rotated-locally");
+        local.entry_mut(id).unwrap().times.last_modification = Some(same);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "rotated-remotely");
+        remote.entry_mut(id).unwrap().times.last_modification = Some(same);
+
+        let report = diff(&local, &remote);
+        assert_eq!(report.conflicts.len(), 1);
+        assert!(report.auto_resolved.is_empty());
     }
 
     #[test]

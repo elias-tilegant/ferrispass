@@ -1853,7 +1853,7 @@ impl AppState {
                 // the result uploads back. The user sees no overlay — just a
                 // "Synced · N merged" badge in the status pill.
                 if report.conflicts.is_empty() {
-                    let auto_merged_count = report.remote_only.len();
+                    let auto_merged_count = report.remote_only.len() + report.auto_resolved.len();
                     let merged = crate::keepass::merge::apply_picks(
                         &local_db,
                         &remote_db,
