@@ -23,7 +23,7 @@ pub enum SettingsTab {
 use gpui::{
     AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, ParentElement as _, PathPromptOptions, Render, ScrollStrategy,
-    Styled as _, Subscription, Task, Window, div, px,
+    SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
@@ -614,6 +614,46 @@ impl AppShell {
         });
         cx.notify();
         id
+    }
+
+    /// Quick-add: drop in the canonical SAP-connection rows in one
+    /// click. Keys are pre-filled (`SAP_HOST`, `SAP_INSTANCE`, …) and
+    /// each value input gets a placeholder hint so the user knows
+    /// what to type. Skips any row whose key already exists in the
+    /// editor — clicking the button twice is idempotent rather than
+    /// producing duplicate rows.
+    pub fn add_sap_connection_template(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (key, value_placeholder) in crate::launch::sap::QUICK_ADD_KEYS {
+            // Idempotency: don't stack multiple SAP_HOST rows on
+            // repeat clicks. Match against any existing row regardless
+            // of whether the user has typed into it yet.
+            let already_present = self
+                .new_entry_custom_fields
+                .iter()
+                .any(|row| row.key_input.read(cx).value().to_string() == *key);
+            if already_present {
+                continue;
+            }
+            let id = self.next_custom_field_id;
+            self.next_custom_field_id = self.next_custom_field_id.wrapping_add(1);
+            let placeholder: SharedString = (*value_placeholder).into();
+            let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Key"));
+            let value_input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+            // Pre-fill the key so the row is functional immediately;
+            // the value stays empty for the user to fill.
+            key_input.update(cx, |s, cx| s.set_value(*key, window, cx));
+            self.new_entry_custom_fields.push(CustomFieldDraftInputs {
+                id,
+                key_input,
+                value_input,
+                protected: false,
+            });
+        }
+        cx.notify();
     }
 
     /// Remove a row by its stable id (the trash button on each row).

@@ -1173,7 +1173,7 @@ mod tests {
             custom_fields: vec![
                 CustomField {
                     key: "SAP_CONN".into(),
-                    value: "/H/sh1sap.status-c.intern/S/3200".into(),
+                    value: "/H/sap.example.com/S/3200".into(),
                     protected: false,
                 },
                 CustomField {
@@ -1205,7 +1205,7 @@ mod tests {
         // Direct lookup helper used by the launcher path.
         assert_eq!(
             doc.custom_field_value(&id, "SAP_CONN").as_deref(),
-            Some("/H/sh1sap.status-c.intern/S/3200")
+            Some("/H/sap.example.com/S/3200")
         );
 
         // Save + reopen — the kdbx writer must serialise the protection

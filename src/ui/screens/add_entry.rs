@@ -502,26 +502,57 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
         );
     }
 
+    // Trailing actions row: generic "+ Add field" plus the SAP
+    // quick-add. Both are styled like the existing buttons in the
+    // modal (small chip, sidebar-tone bg) — the SAP one gets the
+    // accent border to nudge users towards the structured path
+    // when they want to wire up an SAP connection.
     col.child(
-        div()
-            .id("cf-row-add")
-            .h(px(28.))
-            .px_3()
-            .rounded(px(6.))
-            .border_1()
-            .border_color(palette::border())
-            .bg(palette::sidebar())
-            .text_color(palette::text_muted())
-            .text_xs()
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child("+ Add field")
-            .on_click(
-                cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                    shell.add_custom_field_row(window, cx);
-                }),
+        h_flex()
+            .gap_2()
+            .child(
+                div()
+                    .id("cf-row-add")
+                    .h(px(28.))
+                    .px_3()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(palette::border())
+                    .bg(palette::sidebar())
+                    .text_color(palette::text_muted())
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child("+ Add field")
+                    .on_click(cx.listener(
+                        |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                            shell.add_custom_field_row(window, cx);
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .id("cf-row-add-sap")
+                    .h(px(28.))
+                    .px_3()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(palette::blue_border())
+                    .bg(palette::blue_soft())
+                    .text_color(palette::blue())
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child("+ Add SAP connection")
+                    .on_click(cx.listener(
+                        |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                            shell.add_sap_connection_template(window, cx);
+                        },
+                    )),
             ),
     )
     .into_any_element()

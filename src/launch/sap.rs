@@ -5,15 +5,43 @@
 //! for Mac registers itself as the handler for that extension, picks
 //! up the params, and lands the user in a logged-in session.
 //!
-//! Detection: an entry counts as "SAP-supported" if it has a custom
-//! field with key `SAP_CONN`. The value is treated as the raw server
-//! string (e.g. `/H/sh1sap.status-c.intern/S/3200`); user / lang come
-//! from `SAP_USER` / `SAP_LANG` custom fields with fallback to the
-//! standard Username field, and the password is the standard Password.
+//! ## Field model — decomposed
 //!
-//! Process-list defence: we pass **only** the file path to `open`,
-//! never the password as an argument. The password reaches SAP GUI
-//! through the file (mode 0600 in our 0700 tempdir).
+//! Connection metadata lives across separate custom-field keys
+//! instead of one opaque connection string. Mirrors how SAP GUI
+//! presents these in its own logon dialog and lets the user fill
+//! them out without thinking in `/H/host/S/instance` terms:
+//!
+//! - `SAP_HOST`     — application server (e.g. `sap.example.com`)
+//! - `SAP_INSTANCE` — system / instance number (e.g. `3200`)
+//! - `SAP_LANG`     — logon language (e.g. `DE`)
+//! - `SAP_CLIENT`   — SAP client / mandant (e.g. `100`)
+//! - `SAP_USER`     — *optional* username override; falls back to
+//!   the entry's standard Username field. Only useful when the
+//!   primary identity on the entry differs from the SAP user (e.g.
+//!   email-based sign-in elsewhere, technical SAP service account
+//!   here).
+//! - `SAP_EXPERT`   — *optional* opt-out for `expert=true`; absent
+//!   or any non-falsy value leaves it on.
+//!
+//! The launcher composes `/H/SAP_HOST/S/SAP_INSTANCE` itself, so the
+//! user never has to type slashes or remember the prefix.
+//!
+//! ## Wire format
+//!
+//! `.sapc` body is **literal** `&`-separated key=value pairs — SAP
+//! GUI does NOT URL-decode. Encoding `/` to `%2F` was the bug behind
+//! "No valid host specification for connection" — SAP GUI couldn't
+//! parse the conn string and fell back to picking text from the
+//! file path. We now write characters as-is. Passwords containing
+//! `&` or `=` aren't representable in this format; that's a SAP GUI
+//! limitation, not ours, and is rare enough in practice to ignore.
+//!
+//! ## Process-list defence
+//!
+//! We pass **only** the file path to `open`, never the password as
+//! an argument. The password reaches SAP GUI through the file (mode
+//! 0600 in our 0700 tempdir).
 
 use std::process::Command;
 
@@ -24,13 +52,27 @@ use super::{LaunchContext, LaunchError, LaunchHandle, Launcher, TempLaunchFile};
 /// Reserved custom-field keys. Conventional naming, no namespacing —
 /// KeePassXC's "Additional attributes" UI shows them verbatim, so the
 /// user can pick the same convention there.
-pub const KEY_CONN: &str = "SAP_CONN";
+pub const KEY_HOST: &str = "SAP_HOST";
+pub const KEY_INSTANCE: &str = "SAP_INSTANCE";
 pub const KEY_USER: &str = "SAP_USER";
 pub const KEY_LANG: &str = "SAP_LANG";
+pub const KEY_CLIENT: &str = "SAP_CLIENT";
 /// Optional flag — accepts "false" / "0" / "no" (case-insensitive) to
 /// turn off `expert=true` in the .sapc body. Default is on, matching
 /// the behaviour the user requested in the example payload.
 pub const KEY_EXPERT: &str = "SAP_EXPERT";
+
+/// Keys that the "Add SAP connection" quick-add button materialises
+/// in the editor, in display order. The Username override is
+/// intentionally absent here — every entry already has the standard
+/// Username field, and the launcher uses it by default. Power users
+/// who need a different SAP user can still add SAP_USER manually.
+pub const QUICK_ADD_KEYS: &[(&str, &str)] = &[
+    (KEY_HOST, "sap.example.com"),
+    (KEY_INSTANCE, "3200"),
+    (KEY_LANG, "DE"),
+    (KEY_CLIENT, "100"),
+];
 
 pub static SAP_GUI_MAC: SapGuiMacLauncher = SapGuiMacLauncher;
 
@@ -46,24 +88,40 @@ impl Launcher for SapGuiMacLauncher {
     }
 
     fn supports(&self, entry: &VaultEntry) -> bool {
-        entry
-            .custom_fields
-            .iter()
-            .any(|f| f.key == KEY_CONN && !f.value.trim().is_empty())
+        // Both HOST and INSTANCE are needed to compose a working
+        // conn string. Either alone is meaningless — surface the
+        // launcher only when both are present and non-empty.
+        let host = lookup(&entry.custom_fields, KEY_HOST)
+            .filter(|v| !v.trim().is_empty())
+            .is_some();
+        let instance = lookup(&entry.custom_fields, KEY_INSTANCE)
+            .filter(|v| !v.trim().is_empty())
+            .is_some();
+        host && instance
     }
 
     fn launch(&self, ctx: LaunchContext<'_>) -> Result<LaunchHandle, LaunchError> {
-        let conn = lookup(ctx.custom_fields, KEY_CONN)
+        let host = lookup(ctx.custom_fields, KEY_HOST)
+            .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
-            .ok_or(LaunchError::MissingField(KEY_CONN))?;
+            .ok_or(LaunchError::MissingField(KEY_HOST))?;
+        let instance = lookup(ctx.custom_fields, KEY_INSTANCE)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or(LaunchError::MissingField(KEY_INSTANCE))?;
         let password = ctx.password.ok_or(LaunchError::NoPassword)?;
         let user = lookup(ctx.custom_fields, KEY_USER)
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| ctx.entry.username.clone());
-        let lang = lookup(ctx.custom_fields, KEY_LANG).unwrap_or_default();
+        let lang = lookup(ctx.custom_fields, KEY_LANG)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let client = lookup(ctx.custom_fields, KEY_CLIENT)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
         let expert = expert_flag(ctx.custom_fields);
 
-        let body = render_sapc_body(&conn, &user, &lang, password, expert);
+        let body = render_sapc_body(&host, &instance, &user, &lang, &client, password, expert);
         let temp_file = TempLaunchFile::create("sapc", body.as_bytes())?;
 
         // We don't `.wait()` — `open` returns as soon as Launch Services
@@ -104,31 +162,38 @@ fn expert_flag(fields: &[CustomField]) -> bool {
     )
 }
 
-/// Render the `.sapc` body. URL-encoding is non-negotiable — SAP
-/// passwords routinely contain `&`, `=`, `%`, `+`, and Unicode, all
-/// of which would break the param parser otherwise. The reference
-/// password from the bug report (`Ss^i4Kcw$FeLtzS^HLET33smA%^ywi*`)
-/// is one such case.
+/// Render the `.sapc` body. **No URL-encoding** — see module docs for
+/// the bug that taught us this. SAP GUI parses literal `&`-separated
+/// `key=value` pairs and would otherwise read `%2F` as a literal
+/// percent-2-F instead of `/`, breaking the host parser entirely.
 pub(crate) fn render_sapc_body(
-    conn: &str,
+    host: &str,
+    instance: &str,
     user: &str,
     lang: &str,
+    client: &str,
     password: &str,
     expert: bool,
 ) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("conn", conn);
+    let mut body = format!("conn=/H/{host}/S/{instance}");
     if !user.is_empty() {
-        serializer.append_pair("user", user);
+        body.push_str("&user=");
+        body.push_str(user);
     }
     if !lang.is_empty() {
-        serializer.append_pair("lang", lang);
+        body.push_str("&lang=");
+        body.push_str(lang);
     }
-    serializer.append_pair("pass", password);
+    if !client.is_empty() {
+        body.push_str("&client=");
+        body.push_str(client);
+    }
+    body.push_str("&pass=");
+    body.push_str(password);
     if expert {
-        serializer.append_pair("expert", "true");
+        body.push_str("&expert=true");
     }
-    serializer.finish()
+    body
 }
 
 #[cfg(test)]
@@ -143,58 +208,80 @@ mod tests {
         }
     }
 
-    /// The actual user-reported password from the bug report — the
-    /// regression target this whole feature was driven by. Every
-    /// special character must round-trip correctly through the
-    /// percent-encoded body.
+    /// The body must be **literal** — SAP GUI doesn't URL-decode, so
+    /// any percent-encoding leaks straight into the connection
+    /// string. Pre-fix this test asserted percent-encoded slashes;
+    /// that's exactly what broke "Open in SAP GUI" in the field
+    /// ("Connection failed: No valid host specification for
+    /// connection: tmp" — SAP GUI couldn't parse and fell back to
+    /// reading text from the file path).
     #[test]
-    fn render_sapc_body_url_encodes_password() {
+    fn render_sapc_body_writes_literal_chars() {
         let body = render_sapc_body(
-            "/H/sh1sap.status-c.intern/S/3200",
-            "tilegant",
+            "sap.example.com",
+            "3200",
+            "alice",
             "DE",
-            "Ss^i4Kcw$FeLtzS^HLET33smA%^ywi*",
+            "100",
+            "hunter2",
             true,
         );
 
-        // Decode and verify each param made it through without
-        // double-encoding or truncation.
-        let decoded: std::collections::HashMap<String, String> = url::form_urlencoded::parse(
-            body.as_bytes(),
-        )
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-
-        assert_eq!(
-            decoded.get("conn").map(String::as_str),
-            Some("/H/sh1sap.status-c.intern/S/3200")
-        );
-        assert_eq!(decoded.get("user").map(String::as_str), Some("tilegant"));
-        assert_eq!(decoded.get("lang").map(String::as_str), Some("DE"));
-        assert_eq!(
-            decoded.get("pass").map(String::as_str),
-            Some("Ss^i4Kcw$FeLtzS^HLET33smA%^ywi*"),
-            "password with special chars must survive a round-trip"
-        );
-        assert_eq!(decoded.get("expert").map(String::as_str), Some("true"));
-
-        // Sanity: the dangerous chars actually got percent-encoded on
-        // the wire — `^`, `$`, and `%` would all derail SAP GUI's
-        // parser if they leaked through unescaped. (`*` survives
-        // unencoded; that's fine — it isn't a reserved char in
-        // application/x-www-form-urlencoded.)
+        // Slashes must be literal — the parser keys off /H/ and /S/.
         assert!(
-            body.contains("%5E") && body.contains("%24") && body.contains("%25"),
-            "expected percent-encoded ^ $ %% in body: {body}"
+            body.starts_with("conn=/H/sap.example.com/S/3200"),
+            "conn segment must be literal, got: {body}"
+        );
+        // Each known param appears exactly once with no encoding.
+        assert!(body.contains("&user=alice"));
+        assert!(body.contains("&lang=DE"));
+        assert!(body.contains("&client=100"));
+        assert!(body.contains("&pass=hunter2"));
+        assert!(body.contains("&expert=true"));
+        // No percent-encoded leftover from a prior implementation.
+        assert!(!body.contains('%'), "no percent escapes allowed: {body}");
+    }
+
+    /// Special characters in passwords must pass through verbatim —
+    /// the user's reference payload contained `^$%*` in the password
+    /// and worked because SAP GUI takes it literally.
+    #[test]
+    fn render_sapc_body_passes_special_password_chars_through() {
+        let body = render_sapc_body(
+            "host",
+            "00",
+            "u",
+            "EN",
+            "",
+            "Ss^i4Kcw$FeLtzS^HLET33smA%^ywi*",
+            true,
+        );
+        assert!(
+            body.contains("&pass=Ss^i4Kcw$FeLtzS^HLET33smA%^ywi*"),
+            "password chars must survive: {body}"
         );
     }
 
+    /// Empty optional params (lang, client) are dropped from the
+    /// body rather than being written as `&lang=`. Some SAP versions
+    /// treat an empty value differently from an absent param.
+    #[test]
+    fn render_sapc_body_omits_empty_optional_params() {
+        let body = render_sapc_body("host", "00", "u", "", "", "p", true);
+        assert!(!body.contains("lang="));
+        assert!(!body.contains("client="));
+        // user + pass + expert still present.
+        assert!(body.contains("&user=u"));
+        assert!(body.contains("&pass=p"));
+        assert!(body.contains("&expert=true"));
+    }
+
     /// Without an explicit `SAP_EXPERT=false`, `expert=true` is on —
-    /// that's the behaviour matching the user's reference payload.
+    /// matches the user's reference payload.
     #[test]
     fn expert_defaults_on_when_field_absent() {
-        let body = render_sapc_body("/H/host/S/3200", "u", "DE", "p", true);
-        assert!(body.contains("expert=true"));
+        let body = render_sapc_body("host", "00", "u", "DE", "100", "p", true);
+        assert!(body.contains("&expert=true"));
     }
 
     /// Explicit opt-out via `SAP_EXPERT=false` removes the param.
@@ -211,69 +298,77 @@ mod tests {
         assert!(expert_flag(&[cf(KEY_EXPERT, "maybe")]));
     }
 
-    /// Detection key: an entry without `SAP_CONN` must NOT light up
-    /// the SAP launcher (the detail-panel button stays hidden).
+    /// Detection: both SAP_HOST AND SAP_INSTANCE must be present
+    /// (and non-empty). Either alone is unactionable — we can't
+    /// compose `/H/host/S/instance` without both halves.
     #[test]
-    fn supports_requires_sap_conn_field() {
+    fn supports_requires_host_and_instance() {
         let mut entry = VaultEntry::default();
         assert!(!SAP_GUI_MAC.supports(&entry), "no fields → not supported");
 
-        entry.custom_fields.push(cf("UNRELATED", "x"));
-        assert!(!SAP_GUI_MAC.supports(&entry), "wrong key → not supported");
+        entry.custom_fields.push(cf(KEY_HOST, "host.example"));
+        assert!(
+            !SAP_GUI_MAC.supports(&entry),
+            "host alone → not supported (no instance)"
+        );
 
-        entry.custom_fields.push(cf(KEY_CONN, "/H/host/S/3200"));
-        assert!(SAP_GUI_MAC.supports(&entry), "SAP_CONN present → supported");
+        entry.custom_fields.push(cf(KEY_INSTANCE, "3200"));
+        assert!(
+            SAP_GUI_MAC.supports(&entry),
+            "host + instance → supported"
+        );
     }
 
-    /// Empty SAP_CONN value doesn't count — same UX rule as "blank
-    /// password = no copy button". User likely deleted the value but
-    /// kept the row around in the editor.
+    /// Whitespace-only fields don't count as set — the editor leaves
+    /// blank rows around for the "+" button to fill, and we don't
+    /// want those tripping the launcher detection.
     #[test]
-    fn supports_rejects_blank_sap_conn() {
+    fn supports_rejects_whitespace_only_fields() {
         let mut entry = VaultEntry::default();
-        entry.custom_fields.push(cf(KEY_CONN, "   "));
-        assert!(!SAP_GUI_MAC.supports(&entry));
+        entry.custom_fields.push(cf(KEY_HOST, "   "));
+        entry.custom_fields.push(cf(KEY_INSTANCE, "3200"));
+        assert!(
+            !SAP_GUI_MAC.supports(&entry),
+            "whitespace host should not count"
+        );
     }
 
     /// `SAP_USER` overrides the standard Username field. Lets users
     /// keep a "service account" username separate from the entry's
     /// primary identity (e.g. shared SAP technical user vs. the
-    /// employee's email used elsewhere).
+    /// employee's email used elsewhere). The Quick-Add template
+    /// doesn't include this row — most users want the standard
+    /// Username, this is power-user territory only.
     #[test]
     fn user_override_via_sap_user_custom_field() {
-        let body = render_body_for_lookup_test("primary-name", &[cf(KEY_USER, "service-acct")]);
-        let decoded: std::collections::HashMap<String, String> = url::form_urlencoded::parse(
-            body.as_bytes(),
-        )
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-        assert_eq!(
-            decoded.get("user").map(String::as_str),
-            Some("service-acct"),
-            "SAP_USER should outrank the standard Username field"
-        );
+        let user = lookup(&[cf(KEY_USER, "service-acct")], KEY_USER)
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "primary-name".into());
+        let body = render_sapc_body("h", "00", &user, "", "", "p", false);
+        assert!(body.contains("&user=service-acct"));
     }
 
-    /// And without `SAP_USER`, we fall back to the standard Username.
+    /// And without `SAP_USER`, the standard Username feeds through.
     #[test]
     fn user_falls_back_to_standard_username() {
-        let body = render_body_for_lookup_test("primary-name", &[]);
-        let decoded: std::collections::HashMap<String, String> = url::form_urlencoded::parse(
-            body.as_bytes(),
-        )
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-        assert_eq!(decoded.get("user").map(String::as_str), Some("primary-name"));
+        let user = lookup(&[], KEY_USER)
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "primary-name".into());
+        let body = render_sapc_body("h", "00", &user, "", "", "p", false);
+        assert!(body.contains("&user=primary-name"));
     }
 
-    /// Helper that mirrors the launch path's username-resolution
-    /// without actually spawning `open` (which would fail in CI).
-    fn render_body_for_lookup_test(standard_username: &str, fields: &[CustomField]) -> String {
-        let user = lookup(fields, KEY_USER)
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| standard_username.to_string());
-        let lang = lookup(fields, KEY_LANG).unwrap_or_default();
-        let expert = expert_flag(fields);
-        render_sapc_body("/H/host/S/3200", &user, &lang, "pw", expert)
+    /// QUICK_ADD_KEYS is the public contract for the editor's
+    /// "+ Add SAP connection" button. The keys it lists must match
+    /// the constants above (a typo would silently produce rows the
+    /// launcher then ignores). Pinned here so a future refactor
+    /// of the constants forces an audit of the Quick-Add list too.
+    #[test]
+    fn quick_add_keys_match_constants() {
+        let keys: Vec<&str> = QUICK_ADD_KEYS.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec![KEY_HOST, KEY_INSTANCE, KEY_LANG, KEY_CLIENT]);
+        // SAP_USER intentionally NOT in the quick-add list — the
+        // standard Username field on the entry covers the typical case.
+        assert!(!keys.contains(&KEY_USER));
     }
 }
