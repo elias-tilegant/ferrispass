@@ -1,5 +1,4 @@
 use crate::app::recents::{self, RecentEntry};
-use crate::app::time::relative_time_label;
 use crate::domain::{VaultEntry, VaultSnapshot};
 use crate::keepass::merge::{ConflictReport, Side};
 use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
@@ -309,9 +308,16 @@ pub struct VaultSummary {
     /// Provider name from the active SyncBinding. `None` when the open vault
     /// is local-only.
     pub provider: Option<String>,
-    /// Human-readable last-synced indicator (e.g. "just now", "2 minutes ago",
-    /// "Failed", "Connecting…"). Derived from `SyncStatus`.
+    /// Human-readable last-synced indicator (e.g. "just now", "2m ago",
+    /// "Failed", "Connecting…"). Derived from `SyncStatus`. Compact form
+    /// ("16s ago" not "16 seconds ago") so the sidebar pill can fit
+    /// provider + time + an optional merge badge on one line.
     pub synced_at: Option<String>,
+    /// Number of entries the most recent sync silently merged from
+    /// remote (`remote_only` adds + timestamp-resolved divergences).
+    /// `Some(n)` only when `synced_at` is also `Some` and the count is
+    /// non-zero. Rendered next to `synced_at` as a `[+N]` chip.
+    pub auto_merged: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -1443,6 +1449,10 @@ impl AppState {
             crate::sync::config::SyncProvider::SharePoint => "SharePoint".to_string(),
         });
         let synced_at = sync_status_label(&self.sync_status);
+        let auto_merged = match &self.sync_status {
+            SyncStatus::Synced { auto_merged, .. } if *auto_merged > 0 => Some(*auto_merged),
+            _ => None,
+        };
 
         match &self.vault {
             VaultStatus::Empty => VaultSummary {
@@ -1455,6 +1465,7 @@ impl AppState {
                 is_busy: false,
                 provider: None,
                 synced_at: None,
+                auto_merged: None,
             },
             VaultStatus::AwaitingPassword { path, .. } => VaultSummary {
                 title: file_name(path),
@@ -1466,6 +1477,7 @@ impl AppState {
                 is_busy: false,
                 provider: provider.clone(),
                 synced_at: synced_at.clone(),
+                auto_merged,
             },
             VaultStatus::Opening { path } => VaultSummary {
                 title: file_name(path),
@@ -1477,6 +1489,7 @@ impl AppState {
                 is_busy: true,
                 provider: provider.clone(),
                 synced_at: synced_at.clone(),
+                auto_merged,
             },
             VaultStatus::Open { path, document, .. } => VaultSummary {
                 title: file_name(path),
@@ -1488,6 +1501,7 @@ impl AppState {
                 is_busy: false,
                 provider,
                 synced_at,
+                auto_merged,
             },
             VaultStatus::Error { message, path } => VaultSummary {
                 title: "Could not open vault".to_string(),
@@ -1501,6 +1515,7 @@ impl AppState {
                 is_busy: false,
                 provider: None,
                 synced_at: None,
+                auto_merged: None,
             },
         }
     }
@@ -2209,13 +2224,13 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
         SyncStatus::Connecting => Some("Connecting…".into()),
         SyncStatus::Restoring => Some("Connecting…".into()),
         SyncStatus::Syncing => Some("Syncing…".into()),
-        SyncStatus::Synced { at, auto_merged } => {
-            let base = relative_time_label(*at, Local::now());
-            if *auto_merged > 0 {
-                Some(format!("{base} · {auto_merged} merged"))
-            } else {
-                Some(base)
-            }
+        // Compact time only — the merge count rides as a separate
+        // `auto_merged` badge in `VaultSummary`, rendered next to this
+        // string by the sidebar pill. Keeping them separate stops the
+        // pill from overflowing in narrow sidebars and lets the badge
+        // be styled independently.
+        SyncStatus::Synced { at, .. } => {
+            Some(crate::app::time::relative_time_label_short(*at, Local::now()))
         }
         SyncStatus::Conflict(_) => Some("Conflict".into()),
         SyncStatus::Failed(_) => Some("Sync failed".into()),

@@ -64,7 +64,13 @@ fn render_connected(
         SyncStatus::Synced { at, auto_merged } => {
             let base = format!("Last synced at {}", at.format("%H:%M:%S"));
             if *auto_merged > 0 {
-                format!("{base} · pulled in {auto_merged} new entr{}", if *auto_merged == 1 { "y" } else { "ies" })
+                // Counts both fresh remote-only entries AND existing entries
+                // where remote had a strictly newer last_modification (the
+                // merge module auto-resolves those). "merged" covers both
+                // cases — "pulled in N new entries" was misleading after
+                // last-write-wins landed.
+                let noun = if *auto_merged == 1 { "entry" } else { "entries" };
+                format!("{base} · merged {auto_merged} {noun} from remote")
             } else {
                 base
             }

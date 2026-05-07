@@ -71,6 +71,7 @@ fn sidebar(
     // / "—" pair rather than showing stale OneDrive copy.
     let provider = summary.provider.clone().unwrap_or_else(|| "Local".into());
     let synced_at = summary.synced_at.clone().unwrap_or_else(|| "—".into());
+    let auto_merged = summary.auto_merged;
     let entry_count = summary.entries;
     // One walk over the tree per render instead of two; library_counts
     // tallies starred + has_otp inline without allocating the
@@ -180,7 +181,30 @@ fn sidebar(
                         .with_size(gpui_component::Size::Size(px(13.)))
                         .text_color(palette::blue()),
                 )
-                .child(div().flex_1().child(format!("{provider} · {synced_at}")))
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .gap_1p5()
+                        .items_center()
+                        .child(format!("{provider} · {synced_at}"))
+                        .when_some(auto_merged, |this, n| {
+                            this.child(
+                                div()
+                                    .h(px(16.))
+                                    .px(px(5.))
+                                    .rounded(px(4.))
+                                    .bg(palette::blue_soft())
+                                    .text_color(palette::blue())
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(format!("+{n}")),
+                            )
+                        }),
+                )
                 .child(
                     div()
                         .id("sidebar-settings")

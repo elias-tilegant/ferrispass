@@ -32,6 +32,26 @@ pub fn relative_time_label(when: DateTime<Local>, now: DateTime<Local>) -> Strin
     }
 }
 
+/// Compact variant of `relative_time_label`: "just now" / "16s ago" /
+/// "2m ago" / "3h ago" / "<date>". Used by the sidebar sync pill where
+/// the long form ("16 seconds ago") truncates next to the provider name
+/// and an optional merge badge. Same threshold cutoffs as the long form
+/// so the two surfaces stay in lockstep.
+pub fn relative_time_label_short(when: DateTime<Local>, now: DateTime<Local>) -> String {
+    let secs = (now - when).num_seconds().max(0);
+    if secs < 10 {
+        "just now".into()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        when.format("%Y-%m-%d").to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +95,32 @@ mod tests {
             relative_time_label(now - Duration::hours(3), now),
             "3 hours ago"
         );
+    }
+
+    #[test]
+    fn short_form_uses_compact_units() {
+        let now = anchor();
+        assert_eq!(relative_time_label_short(now, now), "just now");
+        assert_eq!(
+            relative_time_label_short(now - Duration::seconds(30), now),
+            "30s ago"
+        );
+        assert_eq!(
+            relative_time_label_short(now - Duration::minutes(1), now),
+            "1m ago"
+        );
+        assert_eq!(
+            relative_time_label_short(now - Duration::minutes(45), now),
+            "45m ago"
+        );
+        assert_eq!(
+            relative_time_label_short(now - Duration::hours(2), now),
+            "2h ago"
+        );
+        // Day fallback drops the time-of-day so the pill stays narrow.
+        let label = relative_time_label_short(now - Duration::days(2), now);
+        assert!(!label.contains("ago"));
+        assert_eq!(label.len(), 10); // YYYY-MM-DD
     }
 
     #[test]
