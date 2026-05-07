@@ -28,7 +28,8 @@ jobs:
     name: Build & notarize DMG
     runs-on: macos-latest
     permissions:
-      contents: write  # needed to create/update the GitHub Release
+      contents: write       # needed to create/update the GitHub Release
+      pull-requests: read   # git-cliff queries /pulls for PR metadata
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,6 +122,13 @@ jobs:
           # format without us reviewing it.
           GIT_CLIFF_VERSION: 2.13.1
           GITHUB_REPO: ${{ github.repository }}
+          # cliff 2.x auto-queries the GitHub API for PR/contributor
+          # metadata when the remote is github.com. Without a token it
+          # uses anonymous requests (60/h shared per IP) and the runner
+          # pool gets rate-limited → 403 → release fails. Passing the
+          # workflow's auto-issued GITHUB_TOKEN lifts the budget to the
+          # standard 1000/h authenticated rate.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # We used to call orhun/git-cliff-action@v4 here, but its
           # post-step uses GNU `stat -c %s` to size-check the output
