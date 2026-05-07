@@ -470,26 +470,50 @@ pub struct OtpDisplay {
 /// URLs, but our UI advertises "otpauth URL or secret" and the KeePassXC
 /// import path also accepts bare base32 secrets that authenticator apps
 /// often hand out unwrapped. When the stored value isn't a URL, we wrap
-/// it in a default-parameter otpauth URL (SHA1, 30 s, 6 digits — the
-/// near-universal defaults) so the same downstream parser handles both
-/// shapes. Whitespace inside the secret (some apps render it grouped:
-/// `JBSW Y3DP …`) is stripped, and the alphabet is upper-cased so
-/// lower-case input doesn't fail base32 decode.
+/// it in a default-parameter otpauth URL so the same downstream parser
+/// handles both shapes. Whitespace inside the secret (some apps render
+/// it grouped: `JBSW Y3DP …`) is stripped, and the alphabet is
+/// upper-cased so lower-case input doesn't fail base32 decode.
+///
+/// Also force `digits=6` when the URL doesn't pin a value: keepass-rs's
+/// missing-param default is 8, which contradicts RFC 6238 and every
+/// mainstream authenticator (Google, Authy, Microsoft) — leaving it on
+/// 8 produced codes that just don't match the server's expectation.
 fn parse_otp_value(raw: &str) -> Option<keepass::db::TOTP> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with("otpauth://") {
-        return trimmed.parse().ok();
-    }
-    let normalized: String = trimmed
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-')
-        .flat_map(char::to_uppercase)
-        .collect();
-    let url = format!("otpauth://totp/?secret={normalized}");
+    let base = if trimmed.starts_with("otpauth://") {
+        trimmed.to_string()
+    } else {
+        let normalized: String = trimmed
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '-')
+            .flat_map(char::to_uppercase)
+            .collect();
+        format!("otpauth://totp/?secret={normalized}")
+    };
+    let url = if query_has_param(&base, "digits") {
+        base
+    } else {
+        let sep = if base.contains('?') { '&' } else { '?' };
+        format!("{base}{sep}digits=6")
+    };
     url.parse().ok()
+}
+
+/// Cheap "is `key=` set in this URL's query string?" check. Avoids
+/// pulling in a full URL parser just to inspect one parameter — we
+/// already trust the input to be either an `otpauth://` URL or a base32
+/// secret we just wrapped, so the query split is unambiguous.
+fn query_has_param(url: &str, key: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    query
+        .split('&')
+        .any(|pair| pair.split_once('=').is_some_and(|(k, _)| k == key))
 }
 
 /// Inserts a thin space in the middle of even-length codes (`123456` → `123 456`).
@@ -1089,18 +1113,13 @@ mod tests {
         // Round-trip the URL itself for the Edit-prefill path.
         assert_eq!(doc.otp_url_for_entry(&id).as_deref(), Some(url));
 
-        // Live code path. Without a `digits=` URL param keepass-rs defaults
-        // to 8 digits — most real services pin `digits=6` in the QR code, but
-        // either value is valid TOTP. We just assert it's non-empty digits in
-        // the expected formatted shape.
+        // Live code path. The pasted URL omits `digits=`, so keepass-rs
+        // would have picked its non-standard default of 8; our wrapper
+        // injects `digits=6` to match RFC 6238 + every real authenticator.
         let otp = doc.totp_for_entry(&id).expect("totp computes");
         assert!(otp.code.contains(' '), "code is formatted: {}", otp.code);
         let raw: String = otp.code.chars().filter(|c| c.is_ascii_digit()).collect();
-        assert!(
-            raw.len() == 6 || raw.len() == 8,
-            "expected 6 or 8 digits, got: {}",
-            otp.code
-        );
+        assert_eq!(raw.len(), 6, "expected 6 digits, got: {}", otp.code);
         assert!(otp.remaining_secs <= otp.period_secs);
     }
 
@@ -1131,6 +1150,58 @@ mod tests {
         let raw: String = otp.code.chars().filter(|c| c.is_ascii_digit()).collect();
         assert!(!raw.is_empty(), "code is digits, got: {}", otp.code);
         assert!(otp.remaining_secs <= otp.period_secs);
+    }
+
+    /// Bare-secret entries must produce 6-digit codes (the universal
+    /// authenticator default), not the 8-digit value keepass-rs would
+    /// hand back if we left its missing-param default in place.
+    #[test]
+    fn bare_secret_defaults_to_six_digits() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "BareSecret".into(),
+                    otp: "JBSWY3DPEHPK3PXP".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        let otp = doc.totp_for_entry(&id).expect("totp computes");
+        let digits: String = otp.code.chars().filter(|c| c.is_ascii_digit()).collect();
+        assert_eq!(digits.len(), 6, "expected 6 digits, got: {}", otp.code);
+    }
+
+    /// An explicit `digits=8` in the pasted URL must win — we only
+    /// inject the default when the URL is silent on the matter.
+    #[test]
+    fn explicit_eight_digits_is_respected() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+
+        let root_id = doc.database.root().id().to_string();
+        let url = "otpauth://totp/X?secret=JBSWY3DPEHPK3PXP&digits=8";
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "EightDigit".into(),
+                    otp: url.into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        let otp = doc.totp_for_entry(&id).expect("totp computes");
+        let digits: String = otp.code.chars().filter(|c| c.is_ascii_digit()).collect();
+        assert_eq!(digits.len(), 8, "explicit digits=8 must be preserved");
     }
 
     /// Authenticator-style grouped + lower-case secrets ("jbsw y3dp …")
