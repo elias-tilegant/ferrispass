@@ -97,7 +97,12 @@ fn map_err(e: cargo_packager_updater::Error) -> UpdateError {
     let msg = e.to_string();
     let lower = msg.to_lowercase();
 
-    if lower.contains("signature") || lower.contains("pubkey") || lower.contains("verify") {
+    if lower.contains("base64")
+        || lower.contains("invalid symbol")
+        || lower.contains("decode")
+    {
+        UpdateError::Parse(msg)
+    } else if lower.contains("signature") || lower.contains("pubkey") || lower.contains("verify") {
         UpdateError::SignatureInvalid
     } else if lower.contains("install")
         || lower.contains("relocate")

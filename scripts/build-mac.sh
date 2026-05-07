@@ -185,7 +185,7 @@ xcrun stapler staple "${DMG_PATH}"
 # ---------- 9. update tarball + minisign signature + manifest ----------
 # Produces the artefacts the in-app auto-updater fetches:
 #   - ${APP_NAME}-${VERSION}-arm64.app.tar.gz   (the bundle to install)
-#   - same .minisig file                        (signature)
+#   - same .minisig file                        (detached signature)
 #   - update.json                               (manifest read by the updater)
 #
 # Skips gracefully when minisign isn't installed or the private key isn't
@@ -216,11 +216,16 @@ else
 
     DOWNLOAD_URL="https://github.com/elias-tilegant/ferrispass/releases/download/v${VERSION}/${TAR_NAME}"
 
+    # `cargo-packager-updater` expects the JSON `signature` field to be
+    # base64(contents-of-.minisig), not the raw minisign text. Strip wrapping
+    # newlines because the updater's decoder is strict about whitespace.
+    SIG_B64="$(base64 < "${SIG_PATH}" | tr -d '\n')"
+
     jq -n \
         --arg version "${VERSION}" \
         --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg url "${DOWNLOAD_URL}" \
-        --rawfile sig "${SIG_PATH}" \
+        --arg sig "${SIG_B64}" \
         '{
             version: $version,
             pub_date: $pub_date,
