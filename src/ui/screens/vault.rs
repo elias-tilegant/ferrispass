@@ -1649,7 +1649,7 @@ fn entry_detail_body(
     //      confirmation.
     //   2. Avoids the 6-button layout that overflowed the panel and clipped
     //      the trailing buttons on narrow widths.
-    let footer = if perma_armed {
+    let footer: AnyElement = if perma_armed {
         let confirm_id = entry_id_for_actions.clone();
         h_flex()
             .flex_shrink_0()
@@ -1683,6 +1683,7 @@ fn entry_detail_body(
                     shell.confirm_perma_delete(confirm_id.clone(), window, cx);
                 }),
             ))
+            .into_any_element()
     } else {
         // Normal footer: trailing pair depends on trash vs. live entry.
         let trailing_primary = if in_trash {
@@ -1727,19 +1728,15 @@ fn entry_detail_body(
 
         // The Launch button is conditional on a registered launcher
         // matching the entry (currently: SAP GUI for entries with a
-        // `SAP_CONN` custom field). Slotted before the Copy buttons
-        // so the primary "do the thing" CTA reads left-to-right.
+        // `SAP_CONN` custom field). When present we promote it to its
+        // own row above the action row — putting it inline with the
+        // five other buttons overflows narrow detail panels and clipped
+        // the trailing Delete button.
         let launcher = crate::launch::primary_launcher_for(&entry);
 
-        h_flex()
+        let action_row = h_flex()
             .flex_shrink_0()
             .gap_2()
-            .p_3()
-            .border_t_1()
-            .border_color(palette::border())
-            .when_some(launcher, |this, l| {
-                this.child(launch_action_button(l.label(), AppIcon::Cloud, cx))
-            })
             .child(action_button(
                 "detail-copy-password",
                 "Copy password",
@@ -1774,7 +1771,23 @@ fn entry_detail_body(
                 cx,
             ))
             .child(trailing_primary)
-            .child(trailing_secondary)
+            .child(trailing_secondary);
+
+        v_flex()
+            .flex_shrink_0()
+            .gap_2()
+            .p_3()
+            .border_t_1()
+            .border_color(palette::border())
+            .when_some(launcher, |this, l| {
+                this.child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .child(launch_action_button(l.label(), AppIcon::Cloud, cx)),
+                )
+            })
+            .child(action_row)
+            .into_any_element()
     };
 
     v_flex()
