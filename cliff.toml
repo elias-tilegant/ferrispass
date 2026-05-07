@@ -1,0 +1,67 @@
+# git-cliff configuration — drives the GitHub Release notes that the
+# release.yml workflow attaches to each tag.
+#
+# Recognises Conventional Commit prefixes (feat:, fix:, docs:, etc.) and
+# groups them under readable headings. Commits without a recognised prefix
+# fall into "Other Changes" rather than getting dropped, so a release isn't
+# silently empty when a refactor commit lacks the prefix.
+#
+# Local preview before tagging:
+#   brew install git-cliff
+#   git-cliff --latest
+
+[changelog]
+header = ""
+body = """
+{% if version %}\
+    {% if previous and previous.version %}\
+## What's changed since {{ previous.version }}
+    {% else %}\
+## What's in this release
+    {% endif %}
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}\
+- {{ commit.message | split(pat="\\n") | first | upper_first }}
+{% endfor %}\
+{% endfor %}
+{% if previous and previous.version %}
+**Full Changelog**: https://github.com/elias-tilegant/ferrispass/compare/{{ previous.version }}...{{ version }}
+{% endif %}
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+# We don't want to *drop* unconventional commits — they go into "Other
+# Changes" instead. That keeps history honest even when prefixes were
+# forgotten or didn't fit (rebrand commits, release: vX.Y.Z, etc.).
+filter_unconventional = false
+split_commits = false
+
+# Order matters: the first matching parser wins. Keep specific patterns
+# (release: bumps, dep updates) above the catch-all.
+commit_parsers = [
+  { message = "^release:", skip = true },
+  { message = "^chore: bump", skip = true },
+  { message = "^chore", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^test", skip = true },
+  { message = "^style", skip = true },
+
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^build", group = "Build & Tooling" },
+
+  # Catch-all for commits without a conventional prefix.
+  { message = ".*", group = "Other Changes" },
+]
+
+filter_commits = false
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+sort_commits = "newest"

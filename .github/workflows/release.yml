@@ -31,6 +31,10 @@ jobs:
       contents: write  # needed to create/update the GitHub Release
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need full history (not just the tagged commit) so git-cliff
+          # can walk back to the previous tag and produce a proper diff.
+          fetch-depth: 0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -110,6 +114,20 @@ jobs:
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: scripts/build-mac.sh
 
+      - name: Generate release notes from conventional commits
+        id: changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          # `--latest` outputs only the commits between the previous tag
+          # and the one we're releasing now. `--strip header` drops cliff's
+          # default top-of-file marker since the GitHub Release body is
+          # already a per-release context.
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+          GITHUB_REPO: ${{ github.repository }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -125,6 +143,10 @@ jobs:
             dist/*.app.tar.gz
             dist/*.minisig
             dist/update.json
-          generate_release_notes: true
+          # Body comes from git-cliff (above) instead of GitHub's
+          # generate_release_notes — the latter only produces a Full
+          # Changelog link when there are no PRs/labels to categorise.
+          body: ${{ steps.changelog.outputs.content }}
+          generate_release_notes: false
           draft: false
           prerelease: false

@@ -16,6 +16,30 @@ git pull --rebase origin master                  # in sync with remote
 
 If any of these fail, fix before tagging — the CI will refuse the release otherwise.
 
+## Commit message conventions
+
+The Release-page body is auto-generated from commit messages by [git-cliff](https://git-cliff.org), driven by `cliff.toml` at the repo root. Prefix each commit with a Conventional-Commits-style tag so it lands in the right section.
+
+| Prefix | Section | Example |
+|---|---|---|
+| `feat:` | Features | `feat(sync): per-vault sync intervals` |
+| `fix:` | Bug Fixes | `fix(merge): preserve UUIDs` |
+| `perf:` | Performance | `perf(ui): debounce search input` |
+| `docs:` | Documentation | `docs: add architecture diagram` |
+| `refactor:` | Refactoring | `refactor: extract sync helper` |
+| `build:` | Build & Tooling | `build: bump cargo-packager-updater to 0.3` |
+| (no prefix or unknown) | Other Changes | `add Author section to README` |
+| `chore:` / `ci:` / `test:` / `style:` / `release:` | **skipped** | not surfaced in release notes |
+
+Optional scope in parentheses (`fix(merge):`, `feat(ui):`) — purely documentary; doesn't affect rendering, but useful for `git log --grep`.
+
+**Preview before tagging:**
+```sh
+brew install git-cliff      # one-time
+git-cliff --unreleased --tag vX.Y.Z
+```
+Prints the exact markdown that will appear on the Release page. If the output looks empty or stuffs everything into "Other Changes", check that recent commits use the prefixes above.
+
 ## Bumping the version
 
 Single source of truth is `Cargo.toml`'s `[package].version`. Everything else (Welcome footer, About box, .app Info.plist, update manifest) reads it via `env!("CARGO_PKG_VERSION")` or `sed`-substitution at build time.
