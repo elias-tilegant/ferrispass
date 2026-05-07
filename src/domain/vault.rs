@@ -63,6 +63,25 @@ pub struct VaultEntry {
     /// swap the action footer (Restore + Delete forever) without having to
     /// re-walk the group tree per render.
     pub in_recycle_bin: bool,
+    /// Arbitrary key-value pairs stored on the KeePass entry beyond the
+    /// six standard fields (Title/UserName/Password/URL/Notes/otp). Used
+    /// by KeePassXC's "Additional attributes" UI and by our launcher
+    /// detection (`SAP_CONN`, etc.). Cleartext in the snapshot — same
+    /// trust zone as the cleartext password — but the `protected` flag
+    /// is preserved so we can re-write via `set_protected` on save and
+    /// mask the value in any read-only display.
+    pub custom_fields: Vec<CustomField>,
+}
+
+/// One non-standard attribute on a KeePass entry. `protected` mirrors the
+/// `Protected="True"` XML attribute — KeePassXC writes secrets (e.g.
+/// alternate passwords) with this flag and we must round-trip it so
+/// nothing silently downgrades from secret to plain on save.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CustomField {
+    pub key: String,
+    pub value: String,
+    pub protected: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,6 +319,7 @@ impl VaultEntry {
             strength: Strength::default(),
             group_path: Vec::new(),
             in_recycle_bin: false,
+            custom_fields: Vec::new(),
         }
     }
 }

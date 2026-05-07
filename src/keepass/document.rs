@@ -1,5 +1,7 @@
-use crate::domain::VaultSnapshot;
-use crate::keepass::repository::{find_entry_id, find_group_id, snapshot_from_database};
+use crate::domain::{CustomField, VaultSnapshot};
+use crate::keepass::repository::{
+    STANDARD_FIELDS, find_entry_id, find_group_id, snapshot_from_database,
+};
 use keepass::{Database, DatabaseKey, db::fields};
 use std::{
     fmt, fs,
@@ -105,6 +107,19 @@ impl VaultDocument {
         })
     }
 
+    /// Read a single custom-field (non-standard string) value off an
+    /// entry. Used by the launcher path to look up `SAP_CONN`, etc.
+    /// without snapshotting all custom fields. Returns `None` when the
+    /// entry doesn't exist or the field isn't set.
+    pub fn custom_field_value(&self, entry_id: &str, key: &str) -> Option<String> {
+        let entry = self
+            .database
+            .iter_all_entries()
+            .find(|e| e.id().to_string() == entry_id)?;
+        let value = entry.fields.get(key)?;
+        Some(value.get().clone())
+    }
+
     /// Raw `otp` field of an entry — `otpauth://...` URL or bare secret.
     /// Used to prefill the Edit modal so the user can change/remove it.
     /// Returns `None` if the entry has no OTP set.
@@ -169,10 +184,13 @@ impl VaultDocument {
             .ok_or(MutationError::GroupNotFound)?;
         let mut entry = group.add_entry();
         apply_draft_to_entry(&mut entry, draft);
-        // Tags are an *initial* set on create — `apply_draft_to_entry`
-        // intentionally leaves them alone so updates don't wipe out
-        // tags the user entered in another KeePass client.
+        // Tags + custom fields are an *initial* set on create —
+        // `apply_draft_to_entry` intentionally leaves them alone so
+        // updates don't wipe values the user entered in another
+        // KeePass client. `update_entry` will start writing custom
+        // fields once the editor (T10) produces authoritative drafts.
         entry.tags = draft.tags.clone();
+        apply_custom_fields(&mut entry, &draft.custom_fields);
         let id = entry.id().to_string();
         // Force the borrows to drop before we touch `self` again.
         drop(entry);
@@ -397,6 +415,12 @@ pub struct EntryDraft {
     /// = no OTP. Stored as a *protected* field because the value is the seed
     /// that generates every future code.
     pub otp: String,
+    /// Non-standard string fields (KeePassXC's "Additional attributes").
+    /// Drives our launcher detection (`SAP_CONN`, etc.) and round-trips
+    /// through other clients. Entries with empty `key` are skipped on
+    /// write, so the editor can keep blank rows around without polluting
+    /// the saved database.
+    pub custom_fields: Vec<CustomField>,
 }
 
 fn apply_draft_to_entry<E>(entry: &mut E, draft: &EntryDraft)
@@ -424,7 +448,46 @@ where
     // tags the user maintains in KeePassXC every time they re-saved an
     // entry. `create_entry` initialises tags explicitly; updates leave
     // them untouched.
+    //
+    // Custom fields follow the same rule until the editor lands (T10):
+    // wiping them on every save would silently drop SAP_CONN etc. from
+    // entries the user maintains in KeePassXC. `create_entry` writes
+    // them explicitly; `update_entry` will start writing them once the
+    // editor produces drafts that authoritatively reflect user intent.
     entry.times.last_modification = Some(keepass::db::Times::now());
+}
+
+/// Replace the non-standard fields on `entry` with `draft_fields`, in
+/// two passes: drop everything that's currently outside `STANDARD_FIELDS`
+/// (so removing a row in the editor actually removes it from the DB),
+/// then re-write the draft. Standard fields untouched.
+///
+/// Empty keys are skipped — the editor leaves blank rows around for the
+/// "+" button to fill, and we don't want those polluting the save.
+fn apply_custom_fields<E>(entry: &mut E, draft_fields: &[CustomField])
+where
+    E: std::ops::DerefMut<Target = keepass::db::Entry>,
+{
+    let drop: Vec<String> = entry
+        .fields
+        .keys()
+        .filter(|k| !STANDARD_FIELDS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    for key in drop {
+        entry.fields.remove(&key);
+    }
+    for cf in draft_fields {
+        let key = cf.key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if cf.protected {
+            entry.set_protected(key, cf.value.clone());
+        } else {
+            entry.set_unprotected(key, cf.value.clone());
+        }
+    }
 }
 
 fn set_or_clear_unprotected<E>(entry: &mut E, key: &str, value: &str)
@@ -702,6 +765,7 @@ mod tests {
             notes: "Personal account".to_string(),
             tags: vec!["Work".to_string(), "2FA".to_string()],
             otp: String::new(),
+            custom_fields: Vec::new(),
         };
         let new_id = doc
             .create_entry(&root_id, &draft)
@@ -1084,6 +1148,116 @@ mod tests {
             let bin = doc.snapshot().find_group(bin_id).expect("bin");
             assert!(!bin.entries.iter().any(|e| e.id == id));
         }
+    }
+
+    /// Custom fields supplied via `EntryDraft.custom_fields` are persisted
+    /// into the entry's `fields` map (with the `Protected` bit honoured),
+    /// survive an in-memory save+reopen, surface back via the snapshot's
+    /// `VaultEntry.custom_fields`, and are individually retrievable via
+    /// `custom_field_value`. This is the round-trip the SAP launcher
+    /// relies on — a regression here would silently break "open SAP GUI".
+    #[test]
+    fn custom_fields_round_trip() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("custom.kdbx");
+
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "vault-pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        let draft = EntryDraft {
+            title: "SAP DEV".into(),
+            password: "hunter2".into(),
+            custom_fields: vec![
+                CustomField {
+                    key: "SAP_CONN".into(),
+                    value: "/H/sh1sap.status-c.intern/S/3200".into(),
+                    protected: false,
+                },
+                CustomField {
+                    key: "SAP_LANG".into(),
+                    value: "DE".into(),
+                    protected: false,
+                },
+                CustomField {
+                    key: "API_TOKEN".into(),
+                    // Stored as protected — represents a secret-like field
+                    // the user might keep alongside the password.
+                    value: "sk-ze9y-zhg0-x".into(),
+                    protected: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let id = doc.create_entry(&root_id, &draft).expect("create");
+
+        // In-memory snapshot already exposes them, sorted alphabetically.
+        let fields = &doc.snapshot().find_entry(&id).expect("entry").custom_fields;
+        let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, vec!["API_TOKEN", "SAP_CONN", "SAP_LANG"]);
+        let api = fields.iter().find(|f| f.key == "API_TOKEN").unwrap();
+        assert!(api.protected, "API_TOKEN must round-trip as protected");
+        let conn = fields.iter().find(|f| f.key == "SAP_CONN").unwrap();
+        assert!(!conn.protected, "SAP_CONN was unprotected on the draft");
+
+        // Direct lookup helper used by the launcher path.
+        assert_eq!(
+            doc.custom_field_value(&id, "SAP_CONN").as_deref(),
+            Some("/H/sh1sap.status-c.intern/S/3200")
+        );
+
+        // Save + reopen — the kdbx writer must serialise the protection
+        // bits and the parser must restore them. (This is what would have
+        // broken if we'd written `set_unprotected` for the protected
+        // value, since kdbx stores them in different XML positions.)
+        doc.save_payload().save_to(&path).expect("save");
+        let reopened = crate::keepass::KeePassRepository::open(&path, "vault-pw", None)
+            .expect("reopen");
+        let after = &reopened
+            .snapshot()
+            .find_entry(&id)
+            .expect("entry survived save")
+            .custom_fields;
+        let api_after = after.iter().find(|f| f.key == "API_TOKEN").unwrap();
+        assert!(
+            api_after.protected,
+            "Protected bit must survive the save/reopen cycle",
+        );
+        assert_eq!(api_after.value, "sk-ze9y-zhg0-x");
+    }
+
+    /// Standard fields (Title/UserName/Password/URL/Notes/otp) must NOT
+    /// leak into `custom_fields`. KeePassXC users would notice the
+    /// duplication immediately; we'd also break our own filter logic
+    /// in the launcher detection.
+    #[test]
+    fn standard_fields_excluded_from_custom() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "vault-pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Boring".into(),
+                    username: "alice".into(),
+                    password: "p".into(),
+                    url: "u".into(),
+                    notes: "n".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        let entry = doc.snapshot().find_entry(&id).expect("entry");
+        assert!(
+            entry.custom_fields.is_empty(),
+            "no standard field should surface as custom: {:?}",
+            entry.custom_fields,
+        );
     }
 
     /// EntryDraft.otp is persisted into the entry's OTP field, can be

@@ -522,6 +522,10 @@ impl AppShell {
             notes: self.new_entry_notes_input.read(cx).value().to_string(),
             tags: Vec::new(),
             otp: self.new_entry_otp_input.read(cx).value().to_string(),
+            // T10 wires the editor's custom-fields rows into this slot.
+            // Until then, draft saves carry no custom-field changes; reads
+            // still surface anything the underlying entry already has.
+            custom_fields: Vec::new(),
         }
     }
 

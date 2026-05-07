@@ -1,13 +1,25 @@
 use crate::{
-    domain::{Favicon, FaviconImage, Strength, VaultEntry, VaultGroup, VaultSnapshot},
+    domain::{CustomField, Favicon, FaviconImage, Strength, VaultEntry, VaultGroup, VaultSnapshot},
     keepass::VaultDocument,
 };
 use chrono::{NaiveDateTime, Utc};
 use gpui::{Image, ImageFormat};
 use keepass::{
     Database, DatabaseKey,
-    db::{DatabaseOpenError, EntryId, EntryRef, GroupId, GroupRef},
+    db::{DatabaseOpenError, EntryId, EntryRef, GroupId, GroupRef, fields},
 };
+
+/// The six KeePass-standard string fields. Anything stored on `Entry.fields`
+/// outside this set is surfaced as a custom field — that's the same line
+/// KeePassXC draws between "main attributes" and "Additional attributes".
+pub(crate) const STANDARD_FIELDS: &[&str] = &[
+    fields::TITLE,
+    fields::USERNAME,
+    fields::PASSWORD,
+    fields::URL,
+    fields::NOTES,
+    fields::OTP,
+];
 use std::{
     collections::hash_map::DefaultHasher,
     fs::File,
@@ -215,6 +227,8 @@ fn entry_from_ref(
         favicon.image = Some(image);
     }
 
+    let custom_fields = collect_custom_fields(entry);
+
     VaultEntry {
         id: entry.id().to_string(),
         title,
@@ -235,7 +249,26 @@ fn entry_from_ref(
             .cloned()
             .collect(),
         in_recycle_bin,
+        custom_fields,
     }
+}
+
+/// Snapshot all non-standard string fields off the entry, sorted by key
+/// for stable rendering — KeePass's XML doesn't pin field order, so we
+/// can't trust whatever order the parser hands us.
+pub(crate) fn collect_custom_fields(entry: &EntryRef<'_>) -> Vec<CustomField> {
+    let mut fields_out: Vec<CustomField> = entry
+        .fields
+        .iter()
+        .filter(|(k, _)| !STANDARD_FIELDS.contains(&k.as_str()))
+        .map(|(k, v)| CustomField {
+            key: k.clone(),
+            value: v.get().clone(),
+            protected: v.is_protected(),
+        })
+        .collect();
+    fields_out.sort_by(|a, b| a.key.cmp(&b.key));
+    fields_out
 }
 
 fn synthesize_favicon(title: &str, url: &str, hash: u64) -> Favicon {

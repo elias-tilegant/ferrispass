@@ -37,6 +37,9 @@ use keepass::db::{
     AutoType, Color, CustomDataItem, Database, EntryId, EntryMut, EntryRef, GroupId, Times, fields,
 };
 
+use crate::domain::CustomField;
+use crate::keepass::repository::{STANDARD_FIELDS, collect_custom_fields};
+
 /// Value snapshot of an entry at the moment of diffing — owned, no borrows
 /// of the source `Database`. Safe to keep around in UI state for as long as
 /// the user is reviewing the conflict.
@@ -65,6 +68,12 @@ pub struct EntryView {
     /// KeePass clients (e.g. KeePassXC stores favorite-marker hashes here).
     /// Silently preserved across merges; not surfaced as a diff row.
     pub custom_data: HashMap<String, CustomDataItem>,
+    /// Non-standard string fields ("Additional attributes" in KeePassXC),
+    /// e.g. our `SAP_CONN`. Pre-fix `populate_from_view` only replayed
+    /// the six standard fields, so picking Remote silently wiped these
+    /// off the local entry. Carried through here so the conflict-pick
+    /// path round-trips them faithfully.
+    pub custom_fields: Vec<CustomField>,
     pub autotype: Option<AutoType>,
     pub foreground_color: Option<Color>,
     pub background_color: Option<Color>,
@@ -245,6 +254,7 @@ fn entry_to_view(e: &EntryRef<'_>) -> EntryView {
         // any subsequent save.
         tags: e.tags.clone(),
         custom_data: e.custom_data.clone(),
+        custom_fields: collect_custom_fields(e),
         autotype: e.autotype.clone(),
         foreground_color: e.foreground_color.clone(),
         background_color: e.background_color.clone(),
@@ -317,6 +327,31 @@ fn populate_from_view(entry: &mut EntryMut<'_>, view: &EntryView) {
     entry.set_unprotected(fields::NOTES, &view.notes);
     entry.tags = view.tags.clone();
     entry.custom_data = view.custom_data.clone();
+    // Replace non-standard fields wholesale: drop everything outside the
+    // standard set, then re-write from the view. Pre-fix this step was
+    // missing entirely and "pick remote" silently dropped any custom
+    // fields off the local entry — the SAP launcher's whole config
+    // would have evaporated on the next conflict resolution.
+    let drop: Vec<String> = entry
+        .fields
+        .keys()
+        .filter(|k| !STANDARD_FIELDS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    for key in drop {
+        entry.fields.remove(&key);
+    }
+    for cf in &view.custom_fields {
+        let key = cf.key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if cf.protected {
+            entry.set_protected(key, cf.value.clone());
+        } else {
+            entry.set_unprotected(key, cf.value.clone());
+        }
+    }
     entry.autotype = view.autotype.clone();
     entry.foreground_color = view.foreground_color.clone();
     entry.background_color = view.background_color.clone();
@@ -598,6 +633,71 @@ mod tests {
             entry.tags,
             vec!["work".to_string(), "shared".to_string()],
             "Picking Remote must transplant tags, not just the 5 standard fields"
+        );
+    }
+
+    /// Regression for the launch-feature precondition: pre-fix,
+    /// `populate_from_view` only replayed the six standard fields, so
+    /// any non-standard field on the local entry survived "pick remote"
+    /// even when the remote side had explicitly removed it — and any
+    /// remote-only custom field was silently lost. Either failure mode
+    /// would have evaporated SAP_CONN-style configs on the next sync.
+    #[test]
+    fn apply_picks_remote_pick_replaces_custom_fields() {
+        let mut local = Database::new();
+        let id = add(&mut local, "SAP DEV", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_unprotected("SAP_CONN", "/H/old.host/S/3200");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_unprotected("LOCAL_ONLY", "should-disappear");
+
+        let mut remote = fork(&local);
+        // Diverge passwords so a conflict gets surfaced (apply_picks only
+        // touches entries that actually appear in `report.conflicts`).
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "local-pw");
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "remote-pw");
+        // Remote keeps SAP_CONN but rewrites it, drops LOCAL_ONLY, and
+        // adds a brand-new protected field.
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_unprotected("SAP_CONN", "/H/new.host/S/3200");
+        remote.entry_mut(id).unwrap().fields.remove("LOCAL_ONLY");
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected("API_TOKEN", "sk-remote-only");
+
+        let report = diff(&local, &remote);
+        let mut picks = HashMap::new();
+        picks.insert(id.to_string(), Side::Remote);
+        let merged = apply_picks(&local, &remote, &picks, &report);
+        let entry = merged.entry(id).unwrap();
+
+        // Remote's value wins.
+        assert_eq!(entry.get("SAP_CONN"), Some("/H/new.host/S/3200"));
+        // Local-only field that remote dropped is gone from the merged result.
+        assert!(
+            entry.get("LOCAL_ONLY").is_none(),
+            "LOCAL_ONLY should not survive a pick-Remote when remote dropped it"
+        );
+        // Remote-only field made it across.
+        assert_eq!(entry.get("API_TOKEN"), Some("sk-remote-only"));
+        // And the protection bit on that new field is preserved.
+        let api_field = entry.fields.get("API_TOKEN").expect("API_TOKEN present");
+        assert!(
+            api_field.is_protected(),
+            "Protected bit must round-trip through the conflict-pick path"
         );
     }
 
