@@ -13,7 +13,10 @@
 //! them out without thinking in `/H/host/S/instance` terms:
 //!
 //! - `SAP_HOST`     — application server (e.g. `sap.example.com`)
-//! - `SAP_INSTANCE` — system / instance number (e.g. `3200`)
+//! - `SAP_INSTANCE` — 2-digit system number (e.g. `00`). The launcher
+//!   prefixes `32` to get the dispatcher port (`3200`). 4-digit values
+//!   (e.g. `3200`) and non-numeric values pass through unchanged for
+//!   non-standard setups.
 //! - `SAP_LANG`     — logon language (e.g. `DE`)
 //! - `SAP_CLIENT`   — SAP client / mandant (e.g. `100`)
 //! - `SAP_USER`     — *optional* username override; falls back to
@@ -69,7 +72,10 @@ pub const KEY_EXPERT: &str = "SAP_EXPERT";
 /// who need a different SAP user can still add SAP_USER manually.
 pub const QUICK_ADD_KEYS: &[(&str, &str)] = &[
     (KEY_HOST, "sap.example.com"),
-    (KEY_INSTANCE, "3200"),
+    // Placeholder is the 2-digit system number; the launcher
+    // prefixes "32" automatically. Anyone with a non-standard port
+    // can still type the full 4-digit value and we pass it through.
+    (KEY_INSTANCE, "00"),
     (KEY_LANG, "DE"),
     (KEY_CLIENT, "100"),
 ];
@@ -106,7 +112,7 @@ impl Launcher for SapGuiMacLauncher {
             .filter(|v| !v.is_empty())
             .ok_or(LaunchError::MissingField(KEY_HOST))?;
         let instance = lookup(ctx.custom_fields, KEY_INSTANCE)
-            .map(|v| v.trim().to_string())
+            .map(|v| resolve_instance_port(v.trim()))
             .filter(|v| !v.is_empty())
             .ok_or(LaunchError::MissingField(KEY_INSTANCE))?;
         let password = ctx.password.ok_or(LaunchError::NoPassword)?;
@@ -146,6 +152,32 @@ fn lookup(fields: &[CustomField], key: &str) -> Option<String> {
         .iter()
         .find(|f| f.key == key)
         .map(|f| f.value.clone())
+}
+
+/// Translate a `SAP_INSTANCE` field value to the dispatcher port that
+/// goes into `S/<port>` in the conn string.
+///
+/// SAP's standard convention: dispatcher port = `32 + <2-digit system
+/// number>`. So for system 00 the port is 3200, for 01 it's 3201, etc.
+/// The user shouldn't have to type the constant `32` every time —
+/// they think in terms of the system number their SAP admin gave them.
+///
+/// Heuristic, in order:
+/// - Exactly two ASCII digits (e.g. `"00"`, `"42"`) → prefix `32` →
+///   `"3200"`, `"3242"`. Covers the 99% case.
+/// - Four ASCII digits (e.g. `"3200"`) → use as-is. Lets users who
+///   already stored full ports keep working, and supports non-standard
+///   ports (message server `36xx`, gateway `33xx`, etc.).
+/// - Anything else → use as-is. Defensive: if someone has an exotic
+///   value we don't recognise, don't silently reshape it. Worst case
+///   the launch fails with a clear SAP-side error rather than us
+///   producing a wrong port behind their back.
+fn resolve_instance_port(raw: &str) -> String {
+    let is_all_digits = !raw.is_empty() && raw.chars().all(|c| c.is_ascii_digit());
+    match raw.len() {
+        2 if is_all_digits => format!("32{raw}"),
+        _ => raw.to_string(),
+    }
 }
 
 /// `SAP_EXPERT` is opt-OUT: explicit "false" / "0" / "no" turns it
@@ -356,6 +388,39 @@ mod tests {
             .unwrap_or_else(|| "primary-name".into());
         let body = render_sapc_body("h", "00", &user, "", "", "p", false);
         assert!(body.contains("&user=primary-name"));
+    }
+
+    /// 2-digit system numbers prefix to `32xx`. This is the whole
+    /// reason the user pointed out the redundancy: typing "3200"
+    /// every time when only the last two digits ever vary.
+    #[test]
+    fn resolve_instance_port_prefixes_two_digit_input() {
+        assert_eq!(resolve_instance_port("00"), "3200");
+        assert_eq!(resolve_instance_port("01"), "3201");
+        assert_eq!(resolve_instance_port("42"), "3242");
+        assert_eq!(resolve_instance_port("99"), "3299");
+    }
+
+    /// Already-resolved 4-digit ports pass through unchanged so users
+    /// who stored the full value before the heuristic existed don't
+    /// have their setups silently re-mangled.
+    #[test]
+    fn resolve_instance_port_preserves_four_digit_input() {
+        assert_eq!(resolve_instance_port("3200"), "3200");
+        assert_eq!(resolve_instance_port("3601"), "3601"); // message server
+        assert_eq!(resolve_instance_port("3300"), "3300"); // gateway
+    }
+
+    /// Non-numeric or otherwise non-conforming values pass through
+    /// untouched. We'd rather the launch fail with a clear SAP-side
+    /// error than guess the user's intent.
+    #[test]
+    fn resolve_instance_port_passes_unrecognised_through() {
+        assert_eq!(resolve_instance_port(""), "");
+        assert_eq!(resolve_instance_port("abc"), "abc");
+        assert_eq!(resolve_instance_port("3"), "3");
+        assert_eq!(resolve_instance_port("12345"), "12345");
+        assert_eq!(resolve_instance_port("0a"), "0a");
     }
 
     /// QUICK_ADD_KEYS is the public contract for the editor's
