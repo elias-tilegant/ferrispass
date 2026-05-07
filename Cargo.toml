@@ -50,6 +50,10 @@ sha2 = "0.10"
 # new build over HTTPS, atomic-replaces the .app and restarts.
 cargo-packager-updater = "0.2"
 semver = "1"
+# Used to wrap the embedded minisign public key in base64 at runtime.
+# `cargo-packager-updater` expects `Config::pubkey` as base64(file content),
+# not the raw minisign-pub.txt — see `update/client.rs::build_config`.
+base64 = "0.22"
 # Direct uuid dep so merge.rs can re-hydrate EntryId from a stringified
 # UUID (`EntryId::from_uuid(Uuid::parse_str(s)?)`). Same crate the keepass
 # dep already pulls in transitively; pinning major matches keepass-rs's

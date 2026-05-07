@@ -1823,6 +1823,7 @@ name = "ferrispass"
 version = "0.2.2"
 dependencies = [
  "anyhow",
+ "base64",
  "cargo-packager-updater",
  "chrono",
  "gpui",

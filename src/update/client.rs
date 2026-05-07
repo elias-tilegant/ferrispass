@@ -4,6 +4,8 @@
 //! is still in place (which would otherwise produce a confusing
 //! signature-verification error from a perfectly valid manifest).
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use cargo_packager_updater::{check_update, Config};
 use semver::Version;
 
@@ -59,10 +61,17 @@ where
 // ---------- internals ----------
 
 fn build_config() -> Result<Config, UpdateError> {
-    let pubkey = MINISIGN_PUBLIC_KEY.trim().to_string();
-    if pubkey.contains("PLACEHOLDER") || pubkey.contains("AAAAAAAAAAAA") {
+    let raw = MINISIGN_PUBLIC_KEY.trim();
+    if raw.contains("PLACEHOLDER") || raw.contains("AAAAAAAAAAAA") {
         return Err(UpdateError::PlaceholderKey);
     }
+
+    // `cargo-packager-updater` (Tauri-updater convention) expects `pubkey` as
+    // base64 of the entire minisign-pub.txt contents — internally it base64-
+    // decodes back to the original two-line file before calling
+    // `PublicKey::decode`. Embedding the raw file here would have it try to
+    // base64-decode "untrusted comment: …" and fail at the first space.
+    let pubkey = BASE64.encode(raw.as_bytes());
 
     let endpoint = UPDATE_ENDPOINT
         .parse()
