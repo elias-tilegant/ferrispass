@@ -184,13 +184,12 @@ impl VaultDocument {
             .ok_or(MutationError::GroupNotFound)?;
         let mut entry = group.add_entry();
         apply_draft_to_entry(&mut entry, draft);
-        // Tags + custom fields are an *initial* set on create —
-        // `apply_draft_to_entry` intentionally leaves them alone so
-        // updates don't wipe values the user entered in another
-        // KeePass client. `update_entry` will start writing custom
-        // fields once the editor (T10) produces authoritative drafts.
+        // Tags are an *initial* set on create — `apply_draft_to_entry`
+        // intentionally leaves them alone so updates don't wipe out
+        // tags the user entered in another KeePass client. Custom
+        // fields go through `apply_draft_to_entry` directly because
+        // the editor produces authoritative drafts on every save.
         entry.tags = draft.tags.clone();
-        apply_custom_fields(&mut entry, &draft.custom_fields);
         let id = entry.id().to_string();
         // Force the borrows to drop before we touch `self` again.
         drop(entry);
@@ -449,11 +448,13 @@ where
     // entry. `create_entry` initialises tags explicitly; updates leave
     // them untouched.
     //
-    // Custom fields follow the same rule until the editor lands (T10):
-    // wiping them on every save would silently drop SAP_CONN etc. from
-    // entries the user maintains in KeePassXC. `create_entry` writes
-    // them explicitly; `update_entry` will start writing them once the
-    // editor produces drafts that authoritatively reflect user intent.
+    // Custom fields, by contrast, *are* under the editor's control —
+    // the AddEntry/EditEntry modal populates `draft.custom_fields`
+    // from its row state on every save (including blank rows, which
+    // `apply_custom_fields` filters out). Removing a row in the
+    // editor must therefore propagate to the database, which is why
+    // we run the rewrite here on both create and update paths.
+    apply_custom_fields(entry, &draft.custom_fields);
     entry.times.last_modification = Some(keepass::db::Times::now());
 }
 
@@ -1225,6 +1226,81 @@ mod tests {
             "Protected bit must survive the save/reopen cycle",
         );
         assert_eq!(api_after.value, "sk-ze9y-zhg0-x");
+    }
+
+    /// `update_entry` must apply the draft's `custom_fields`
+    /// authoritatively — adding a row, editing an existing one, and
+    /// dropping one all flow through the editor → draft → save pipe.
+    /// Regression test for the T10 wire-up: pre-T10 we only wrote
+    /// custom fields on `create_entry`, so any edit silently lost
+    /// them. This test exercises all three transitions in one run.
+    #[test]
+    fn update_entry_rewrites_custom_fields_authoritatively() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        // Create with two custom fields.
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "SAP DEV".into(),
+                    custom_fields: vec![
+                        CustomField {
+                            key: "SAP_CONN".into(),
+                            value: "/H/old.host/S/3200".into(),
+                            protected: false,
+                        },
+                        CustomField {
+                            key: "TO_BE_DROPPED".into(),
+                            value: "remove me".into(),
+                            protected: false,
+                        },
+                    ],
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+
+        // Edit: change one value, drop one row, add a new protected one.
+        doc.update_entry(
+            &id,
+            &EntryDraft {
+                title: "SAP DEV".into(),
+                custom_fields: vec![
+                    CustomField {
+                        key: "SAP_CONN".into(),
+                        value: "/H/new.host/S/3200".into(),
+                        protected: false,
+                    },
+                    CustomField {
+                        key: "API_TOKEN".into(),
+                        value: "sk-fresh".into(),
+                        protected: true,
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .expect("update");
+
+        let fields = &doc.snapshot().find_entry(&id).expect("entry").custom_fields;
+        let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, vec!["API_TOKEN", "SAP_CONN"]);
+        assert_eq!(
+            fields.iter().find(|f| f.key == "SAP_CONN").unwrap().value,
+            "/H/new.host/S/3200"
+        );
+        assert!(
+            fields.iter().find(|f| f.key == "API_TOKEN").unwrap().protected,
+            "newly-added protected row must serialize as protected"
+        );
+        assert!(
+            fields.iter().all(|f| f.key != "TO_BE_DROPPED"),
+            "the row removed in the draft must be gone from the entry"
+        );
     }
 
     /// Standard fields (Title/UserName/Password/URL/Notes/otp) must NOT

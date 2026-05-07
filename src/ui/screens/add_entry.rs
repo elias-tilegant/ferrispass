@@ -352,7 +352,8 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 ),
                         )
                         .child(Input::new(&otp_input)),
-                ),
+                )
+                .child(custom_fields_editor(shell, cx)),
         )
         .child(
             // Match the parent modal's `rounded(10)` on the bottom edge so
@@ -380,6 +381,150 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .child(save_button),
         )
         .into_any_element()
+}
+
+/// Dynamic "Additional fields" section. One row per
+/// `CustomFieldDraftInputs` in `AppShell::new_entry_custom_fields`,
+/// plus a "+ Add field" button at the bottom. Each row has its own
+/// pair of `Input` widgets, a lock toggle (the `protected` flag),
+/// and a trash button to delete the row.
+///
+/// KeePass clients (KeePassXC's "Additional attributes") show these
+/// 1:1 — the user can pick the same key conventions there.
+fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
+    let rows = shell.new_entry_custom_fields();
+
+    let mut col = v_flex()
+        .gap_2()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_baseline()
+                .child(label("Additional fields"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(palette::text_faint())
+                        .child("(SAP_CONN, SAP_USER, SAP_LANG, …)"),
+                ),
+        );
+
+    for row in rows {
+        let id_for_remove = row.id;
+        let id_for_lock = row.id;
+        let key_input = row.key_input.clone();
+        let value_input = row.value_input.clone();
+        let protected = row.protected;
+        let row_id_remove = SharedString::from(format!("cf-row-remove-{}", row.id));
+        let row_id_lock = SharedString::from(format!("cf-row-lock-{}", row.id));
+
+        col = col.child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(Input::new(&key_input)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(Input::new(&value_input)),
+                )
+                .child(
+                    // Lock toggle: clicking flips the `protected` flag.
+                    // When set, the value is stored via `set_protected`
+                    // on save — KeePassXC renders such fields with a
+                    // `Protected="True"` attribute and masks them.
+                    div()
+                        .id(row_id_lock)
+                        .h(px(28.))
+                        .px_2()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if protected {
+                            palette::blue_border()
+                        } else {
+                            palette::border()
+                        })
+                        .bg(if protected {
+                            palette::blue_soft()
+                        } else {
+                            palette::sidebar()
+                        })
+                        .text_color(if protected {
+                            palette::blue()
+                        } else {
+                            palette::text_muted()
+                        })
+                        .text_xs()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            gpui_component::Icon::from(if protected {
+                                AppIcon::Key
+                            } else {
+                                AppIcon::Note
+                            })
+                            .with_size(gpui_component::Size::Size(px(12.))),
+                        )
+                        .on_click(cx.listener(
+                            move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                                shell.toggle_custom_field_protected(id_for_lock, cx);
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .id(row_id_remove)
+                        .h(px(28.))
+                        .px_2()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(palette::border())
+                        .bg(palette::sidebar())
+                        .text_color(palette::text_muted())
+                        .text_xs()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("✕")
+                        .on_click(cx.listener(
+                            move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                                shell.remove_custom_field_row(id_for_remove, cx);
+                            },
+                        )),
+                ),
+        );
+    }
+
+    col.child(
+        div()
+            .id("cf-row-add")
+            .h(px(28.))
+            .px_3()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(palette::border())
+            .bg(palette::sidebar())
+            .text_color(palette::text_muted())
+            .text_xs()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("+ Add field")
+            .on_click(
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.add_custom_field_row(window, cx);
+                }),
+            ),
+    )
+    .into_any_element()
 }
 
 /// Live generator card: draggable length slider + four class checkboxes,

@@ -41,6 +41,23 @@ struct EditPrefill {
     notes: String,
     password: String,
     otp: String,
+    custom_fields: Vec<crate::domain::CustomField>,
+}
+
+/// One row in the AddEntry / EditEntry modal's "Additional fields"
+/// section. Each row owns its own pair of `InputState` entities so
+/// the gpui input stack can track focus / cursor position
+/// independently — sharing them across rows would have selection
+/// jumping when the user reorders or deletes a row.
+pub struct CustomFieldDraftInputs {
+    /// Stable id used as the gpui element key. Monotonic counter via
+    /// `AppShell::next_custom_field_id` — never reused, so deleting
+    /// row 3 and adding a new one doesn't accidentally restore
+    /// stale gpui state for the old row.
+    pub id: usize,
+    pub key_input: Entity<InputState>,
+    pub value_input: Entity<InputState>,
+    pub protected: bool,
 }
 
 pub struct AppShell {
@@ -145,6 +162,14 @@ pub struct AppShell {
     /// currently expanded. Independent of `new_entry_target_group_id`
     /// so the user can flip it open without committing a change.
     new_entry_picker_open: bool,
+    /// Dynamic "Additional fields" rows in the AddEntry / EditEntry
+    /// modal. Reset by `clear_entry_form`, populated by
+    /// `prefill_edit_form`. Saved into `EntryDraft.custom_fields`.
+    new_entry_custom_fields: Vec<CustomFieldDraftInputs>,
+    /// Monotonic source for `CustomFieldDraftInputs.id`. Wraps to 0
+    /// on overflow, but at one increment per editor row that's never
+    /// going to happen in practice.
+    next_custom_field_id: usize,
     /// Live launches whose temp file is still on disk. Each handle owns
     /// its file (drop = unlink). Capped by paired entries in
     /// `launch_cleanup_tasks`, which drop the head of this Vec after
@@ -277,6 +302,8 @@ impl AppShell {
             settings_tab: SettingsTab::General,
             new_entry_target_group_id: None,
             new_entry_picker_open: false,
+            new_entry_custom_fields: Vec::new(),
+            next_custom_field_id: 0,
             pending_launches: Vec::new(),
             launch_cleanup_tasks: Vec::new(),
             _subscriptions,
@@ -541,6 +568,19 @@ impl AppShell {
     /// in the modal yet; we leave them empty so create_entry doesn't accidentally
     /// add ghost tags.
     pub fn collect_entry_draft(&self, cx: &gpui::App) -> crate::keepass::EntryDraft {
+        let custom_fields = self
+            .new_entry_custom_fields
+            .iter()
+            .map(|row| crate::domain::CustomField {
+                key: row.key_input.read(cx).value().to_string(),
+                value: row.value_input.read(cx).value().to_string(),
+                protected: row.protected,
+            })
+            // Empty-key rows are treated as "row the user added but
+            // never filled" — silently dropped on save rather than
+            // polluting the database with `""`-keyed attributes.
+            .filter(|f| !f.key.trim().is_empty())
+            .collect();
         crate::keepass::EntryDraft {
             title: self.new_entry_title_input.read(cx).value().to_string(),
             username: self.new_entry_username_input.read(cx).value().to_string(),
@@ -549,10 +589,48 @@ impl AppShell {
             notes: self.new_entry_notes_input.read(cx).value().to_string(),
             tags: Vec::new(),
             otp: self.new_entry_otp_input.read(cx).value().to_string(),
-            // T10 wires the editor's custom-fields rows into this slot.
-            // Until then, draft saves carry no custom-field changes; reads
-            // still surface anything the underlying entry already has.
-            custom_fields: Vec::new(),
+            custom_fields,
+        }
+    }
+
+    /// Read-only access to the live editor rows, used by the modal's
+    /// render code to lay out the inputs.
+    pub fn new_entry_custom_fields(&self) -> &[CustomFieldDraftInputs] {
+        &self.new_entry_custom_fields
+    }
+
+    /// Append a fresh empty row at the bottom of the editor. Returns
+    /// the new row's id so the click handler can focus it (future).
+    pub fn add_custom_field_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let id = self.next_custom_field_id;
+        self.next_custom_field_id = self.next_custom_field_id.wrapping_add(1);
+        let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Key"));
+        let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
+        self.new_entry_custom_fields.push(CustomFieldDraftInputs {
+            id,
+            key_input,
+            value_input,
+            protected: false,
+        });
+        cx.notify();
+        id
+    }
+
+    /// Remove a row by its stable id (the trash button on each row).
+    pub fn remove_custom_field_row(&mut self, id: usize, cx: &mut Context<Self>) {
+        self.new_entry_custom_fields.retain(|row| row.id != id);
+        cx.notify();
+    }
+
+    /// Flip the `protected` flag on a row. Used by the lock/unlock
+    /// toggle button in each editor row.
+    pub fn toggle_custom_field_protected(&mut self, id: usize, cx: &mut Context<Self>) {
+        for row in &mut self.new_entry_custom_fields {
+            if row.id == id {
+                row.protected = !row.protected;
+                cx.notify();
+                break;
+            }
         }
     }
 
@@ -573,6 +651,12 @@ impl AppShell {
         // from the current sidebar selection, and snap the picker shut.
         self.new_entry_target_group_id = None;
         self.new_entry_picker_open = false;
+        // Drop all custom-field rows. Their `Entity<InputState>`s are
+        // released on Vec drop; gpui will GC them once no view still
+        // references them. Don't reset `next_custom_field_id` — keeping
+        // it monotonic across opens guarantees stable element keys
+        // even when the user rapidly opens/closes the modal.
+        self.new_entry_custom_fields.clear();
     }
 
     /// User's explicit target-group pick for the AddEntry modal, if any.
@@ -982,6 +1066,7 @@ impl AppShell {
                 notes: e.notes.clone(),
                 password: password.unwrap_or_default(),
                 otp: otp.unwrap_or_default(),
+                custom_fields: e.custom_fields.clone(),
             })
         };
 
@@ -1002,6 +1087,26 @@ impl AppShell {
             .update(cx, |s, cx| s.set_value(&p.notes, window, cx));
         self.new_entry_otp_input
             .update(cx, |s, cx| s.set_value(&p.otp, window, cx));
+
+        // Rebuild the custom-fields editor rows from the entry. Each
+        // row gets a fresh Entity<InputState> with the current value
+        // pre-filled — necessary because `add_custom_field_row` only
+        // creates blank rows.
+        self.new_entry_custom_fields.clear();
+        for cf in p.custom_fields {
+            let id = self.next_custom_field_id;
+            self.next_custom_field_id = self.next_custom_field_id.wrapping_add(1);
+            let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Key"));
+            let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
+            key_input.update(cx, |s, cx| s.set_value(&cf.key, window, cx));
+            value_input.update(cx, |s, cx| s.set_value(&cf.value, window, cx));
+            self.new_entry_custom_fields.push(CustomFieldDraftInputs {
+                id,
+                key_input,
+                value_input,
+                protected: cf.protected,
+            });
+        }
 
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::EditEntry { entry_id: p.id }, cx);
