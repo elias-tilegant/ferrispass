@@ -1,14 +1,16 @@
 name: CodeQL
 
 on:
-  push:
-    branches: [master, main]
   pull_request:
     branches: [master, main]
   schedule:
-    # Weekly re-scan so freshly-published CodeQL rules surface against
-    # the existing tree without waiting for the next code change.
+    # Weekly re-scan covers `master` — push triggers were dropped because
+    # the Rust build inside CodeQL takes 5–15 min (KDF crates dominate)
+    # and adding that to every commit on master wasn't worth it. PRs
+    # still get a full scan before merge, and the cron picks up newly-
+    # published CodeQL rules against the existing tree.
     - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 permissions:
   actions: read
