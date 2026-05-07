@@ -181,6 +181,35 @@ impl VaultSnapshot {
             .filter(|entry| entry.has_otp)
             .collect()
     }
+
+    /// Walk the tree once and return the counts the sidebar header
+    /// chips render every frame. Replaces calling `entries_starred().len()`
+    /// + `entries_with_otp().len()` from the renderer, which allocated
+    /// two `Vec<&VaultEntry>`s and walked the tree twice on every tick.
+    pub fn library_counts(&self) -> LibraryCounts {
+        fn walk(group: &VaultGroup, counts: &mut LibraryCounts) {
+            for entry in &group.entries {
+                if entry.starred {
+                    counts.starred += 1;
+                }
+                if entry.has_otp {
+                    counts.with_otp += 1;
+                }
+            }
+            for child in &group.groups {
+                walk(child, counts);
+            }
+        }
+        let mut counts = LibraryCounts::default();
+        walk(&self.root, &mut counts);
+        counts
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LibraryCounts {
+    pub starred: usize,
+    pub with_otp: usize,
 }
 
 impl VaultGroup {

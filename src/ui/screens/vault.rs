@@ -72,11 +72,22 @@ fn sidebar(
     let provider = summary.provider.clone().unwrap_or_else(|| "Local".into());
     let synced_at = summary.synced_at.clone().unwrap_or_else(|| "—".into());
     let entry_count = summary.entries;
-    let starred_count = snapshot.map(|s| s.entries_starred().len()).unwrap_or(0);
-    let twofa_count = snapshot.map(|s| s.entries_with_otp().len()).unwrap_or(0);
+    // One walk over the tree per render instead of two; library_counts
+    // tallies starred + has_otp inline without allocating the
+    // `Vec<&VaultEntry>` that `entries_starred()`/`entries_with_otp()`
+    // would have produced just to take `.len()`.
+    let counts = snapshot
+        .map(VaultSnapshot::library_counts)
+        .unwrap_or_default();
+    let starred_count = counts.starred;
+    let twofa_count = counts.with_otp;
 
-    let root_group = snapshot.map(|s| s.root.clone());
-    let recycle_bin_id = snapshot.and_then(|s| s.recycle_bin_id.clone());
+    // Borrow root + recycle-bin-id directly off the snapshot — `snapshot`
+    // is held alive by the caller's `Arc<VaultSnapshot>`, so there's no
+    // need to deep-clone the entire group tree (3 500 entries × ~200 B
+    // per `VaultEntry` adds up fast on every frame).
+    let root_group = snapshot.map(|s| &s.root);
+    let recycle_bin_id = snapshot.and_then(|s| s.recycle_bin_id.as_deref());
 
     v_flex()
         .w(px(220.))
@@ -141,8 +152,8 @@ fn sidebar(
                     cx,
                 ))
                 .child(groups_section(
-                    root_group.as_ref(),
-                    recycle_bin_id.as_deref(),
+                    root_group,
+                    recycle_bin_id,
                     selection,
                     state_entity.clone(),
                     cx,
