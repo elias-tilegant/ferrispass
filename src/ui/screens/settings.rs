@@ -5,7 +5,8 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder,
+    px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
@@ -442,10 +443,36 @@ fn updates_section(
         }),
     );
 
+    // Action chip mirrors the welcome banner so users can install without
+    // closing their vault. Only present when there's something actionable
+    // (`Available` → Install, `ReadyToRestart` → no chip, status line
+    // already prompts for restart).
+    let action_chip: Option<AnyElement> = match update_status {
+        UpdateStatus::Available(_) => Some(
+            preset_chip(
+                "auto-update-install".into(),
+                "Install update".into(),
+                true,
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.state().clone().update(cx, |state, cx| {
+                        state.install_update(cx);
+                    });
+                }),
+            )
+            .into_any_element(),
+        ),
+        _ => None,
+    };
+
+    let action_row = h_flex()
+        .gap_2()
+        .child(check_now)
+        .when_some(action_chip, |row, chip| row.child(chip));
+
     let body = v_flex()
         .gap_3()
         .child(toggle_row)
-        .child(check_now)
+        .child(action_row)
         .child(
             div()
                 .text_xs()
