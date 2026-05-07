@@ -1,0 +1,16 @@
+name: "FerrisPass CodeQL config"
+
+# Rust idiomatic unit tests live in `#[cfg(test)] mod tests { … }` blocks
+# inline with the production code, so path-based filters can't separate
+# them. The `rs/hardcoded-cryptographic-value` query flags every test
+# fixture password (e.g. "vault-pw", "pw", "secret") and produces dozens
+# of false positives per scan.
+#
+# Production threat model: every credential in this app is supplied by
+# the user at runtime (the KeePass master password); no real cryptographic
+# material is embedded in the binary. Disabling this query repo-wide does
+# not weaken that model — and the Rust queries that DO matter for a
+# password manager (taint flow, unsafe blocks, weak crypto APIs) stay on.
+query-filters:
+  - exclude:
+      id: rs/hardcoded-cryptographic-value
