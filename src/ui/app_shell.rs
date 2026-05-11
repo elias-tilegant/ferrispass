@@ -430,12 +430,13 @@ impl AppShell {
     /// Reads the threshold inside the loop so settings changes apply
     /// at the next tick without restarting the task.
     fn sync_auto_lock_task(&mut self, cx: &mut Context<Self>) {
-        let vault_open = matches!(
-            self.state.read(cx).vault_status(),
-            crate::app::VaultStatus::Open { .. }
-        );
+        // "Any vault in memory" — keeps the timer ticking when the active
+        // slot is on the unlock screen but parked sessions are still
+        // decrypted. Global auto-lock semantics: a single idle timeout
+        // sweeps active + parked together via `AppState::lock_vault`.
+        let any_unlocked = self.state.read(cx).has_any_unlocked();
         let auto_lock_enabled = self.settings.auto_lock_secs.is_some();
-        let should_run = vault_open && auto_lock_enabled;
+        let should_run = any_unlocked && auto_lock_enabled;
 
         match (should_run, self.auto_lock_task.is_some()) {
             (true, false) => {
@@ -1599,21 +1600,43 @@ impl AppShell {
     /// it bypasses this).
     fn activate_vault_switcher_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.vault_switcher_input.read(cx).value().to_string();
-        let recents = self.state.read(cx).recents().to_vec();
-        let current = self.state.read(cx).current_vault_path();
-        let top = filter_recents(&recents, &query, current.as_deref())
-            .first()
-            .map(|e| e.path.clone());
-        match top {
-            Some(path) => {
-                self.state.update(cx, |state, cx| state.close_overlay(cx));
-                self.open_recent(path, window, cx);
-            }
-            None => {
-                // No matching recent — drop the user into the file dialog.
-                self.state.update(cx, |state, cx| state.close_overlay(cx));
-                self.prompt_for_vault_path(window, cx);
-            }
+        let needle = query.trim().to_lowercase();
+        let state = self.state.read(cx);
+        let recents = state.recents().to_vec();
+        let unlocked = state.unlocked_paths();
+        let active = state.current_vault_path();
+
+        // Prefer a parked-but-already-unlocked vault if the filter
+        // matches one — Enter then performs an instant switch instead
+        // of a cold password prompt.
+        let unlocked_top = unlocked
+            .iter()
+            .filter(|p| active.as_deref() != Some(p.as_path()))
+            .find(|p| matches_path_needle(p, &needle))
+            .cloned();
+        let recent_top = recents
+            .iter()
+            .filter(|entry| !unlocked.iter().any(|p| p == &entry.path))
+            .find(|entry| matches_path_needle(&entry.path, &needle))
+            .map(|entry| entry.path.clone());
+
+        if let Some(path) = unlocked_top.or(recent_top) {
+            self.state.update(cx, |state, cx| state.close_overlay(cx));
+            self.open_recent(path, window, cx);
+            return;
+        }
+
+        // No switchable target. If the only thing the filter found was
+        // the currently-active vault (e.g. the user typed its name),
+        // pressing Enter is a no-op — just close the switcher. The file
+        // dialog only opens when nothing in the visible list matched at
+        // all.
+        let active_matches = active
+            .as_deref()
+            .is_some_and(|p| matches_path_needle(p, &needle));
+        self.state.update(cx, |state, cx| state.close_overlay(cx));
+        if !active_matches {
+            self.prompt_for_vault_path(window, cx);
         }
     }
 
@@ -1684,7 +1707,21 @@ impl AppShell {
     /// has already been validated as a .kdbx by virtue of having been
     /// successfully opened before, so we go straight through
     /// `select_vault_path`.
+    ///
+    /// Fast path: if `path` is already unlocked (active or parked from a
+    /// previous switch in this session), swap the active vault without
+    /// re-prompting for the master password.
     pub fn open_recent(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let switched = self
+            .state
+            .update(cx, |state, cx| state.switch_to_unlocked(&path, cx));
+        if switched {
+            // Same-vault no-op or successful instant switch: clear any
+            // residual unlock inputs so a later cold-open starts clean.
+            self.password_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            return;
+        }
         self.select_vault_path(path, window, cx);
     }
 
@@ -1767,7 +1804,15 @@ impl AppShell {
 
         self.password_input
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.lock_vault(window, cx);
+        // Esc on the unlock screen: if the user had a vault open before
+        // and was just about to unlock another, snap back to the original
+        // instead of hard-locking everything.
+        let rehydrated = self
+            .state
+            .update(cx, |state, cx| state.rehydrate_most_recent_park(cx));
+        if !rehydrated {
+            self.lock_vault(window, cx);
+        }
     }
 
     pub fn lock_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2217,38 +2262,20 @@ impl Render for AppShell {
     }
 }
 
-/// Filter the recents list for the vault switcher. Match is case-insensitive
-/// against the file name *and* the parent directory so users can find a vault
-/// by either "personal" or "icloud". The currently-open vault is dropped from
-/// the list — switching to where you already are is a no-op the user
-/// shouldn't need to scan past.
-pub(crate) fn filter_recents<'a>(
-    recents: &'a [crate::app::RecentEntry],
-    query: &str,
-    current: Option<&std::path::Path>,
-) -> Vec<&'a crate::app::RecentEntry> {
-    let needle = query.trim().to_lowercase();
-    recents
-        .iter()
-        .filter(|entry| current.is_none_or(|c| c != entry.path.as_path()))
-        .filter(|entry| {
-            if needle.is_empty() {
-                return true;
-            }
-            let file_name = entry
-                .path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let parent = entry
-                .path
-                .parent()
-                .map(|p| p.display().to_string().to_lowercase())
-                .unwrap_or_default();
-            file_name.contains(&needle) || parent.contains(&needle)
-        })
-        .collect()
+fn matches_path_needle(path: &std::path::Path, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let parent = path
+        .parent()
+        .map(|p| p.display().to_string().to_lowercase())
+        .unwrap_or_default();
+    file_name.contains(needle) || parent.contains(needle)
 }
 
 fn is_kdbx_path(path: &std::path::Path) -> bool {
