@@ -430,31 +430,43 @@ fn replace_entry_fields(db: &mut Database, id: EntryId, view: &EntryView) {
 }
 
 fn add_entry_under(db: &mut Database, group_id: GroupId, view: &EntryView) {
-    let Some(mut group) = db.group_mut(group_id) else {
-        return;
-    };
-
     // Re-hydrate the original remote-side EntryId from its UUID string so
     // the imported entry keeps the identity other KeePass clients know it
     // by. Falls back to a fresh-UUID add if the string isn't a valid UUID
     // (shouldn't happen — `entry_to_view` produces these via
     // `EntryId::to_string` — but stay defensive rather than panic).
     let entry_id = match uuid::Uuid::parse_str(&view.id) {
-        Ok(uuid) => EntryId::from_uuid(uuid),
+        Ok(uuid) => Some(EntryId::from_uuid(uuid)),
         Err(_) => {
             eprintln!(
                 "merge: remote entry UUID unparseable, importing with fresh UUID: {}",
                 view.id
             );
-            let mut entry = group.add_entry();
-            populate_from_view(&mut entry, view);
-            entry.times.last_modification = Some(Times::now());
-            entry.times.creation = Some(Times::now());
-            return;
+            None
         }
     };
 
-    let mut entry = group.add_entry_with_id(entry_id);
+    // `remote_only` is computed from the *live* view of both sides — entries
+    // inside the recycle bin are filtered out of `live_entries`. An entry the
+    // local user trashed (still in their bin) AND that the remote has live
+    // would otherwise land here with an id that *does* collide with a row
+    // already in the cloned `merged` database. `add_entry_with_id` panics on
+    // that, so guard explicitly: if we already know this id, the local user
+    // has expressed an intent for it (trash). Skip the re-import rather than
+    // resurrect, matching the "last writer in *this* client wins" stance.
+    if let Some(id) = entry_id
+        && db.iter_all_entries().any(|e| e.id() == id)
+    {
+        return;
+    }
+
+    let Some(mut group) = db.group_mut(group_id) else {
+        return;
+    };
+    let mut entry = match entry_id {
+        Some(id) => group.add_entry_with_id(id),
+        None => group.add_entry(),
+    };
     populate_from_view(&mut entry, view);
     entry.times.last_modification = Some(Times::now());
     entry.times.creation = Some(Times::now());
@@ -925,6 +937,66 @@ mod tests {
             1,
             "round-trip should preserve entry count, not multiply it"
         );
+    }
+
+    /// Regression: local has an entry in its recycle bin while remote still
+    /// has the same id live. `live_entries` filters bin rows on both sides,
+    /// so the id appears in `remote_only` — but `merged = local.clone()`
+    /// preserves the bin row, and an unchecked `add_entry_with_id` would
+    /// panic with "Entry with ID ... already exists". The guard in
+    /// `add_entry_under` must catch this and skip the import.
+    #[test]
+    fn apply_picks_does_not_panic_when_remote_only_collides_with_local_bin() {
+        // Build local with one entry, then trash it (recycle bin) so it
+        // disappears from the live view but stays in `db.entries`.
+        let mut local = Database::new();
+        let id = add(&mut local, "WasTrashed", "x");
+        let bin_id = {
+            let mut root = local.root_mut();
+            let mut bin = root.add_group();
+            bin.name = "Recycle Bin".into();
+            let id = bin.id();
+            drop(bin);
+            drop(root);
+            local.meta.recyclebin_uuid = Some(id.uuid());
+            id
+        };
+        local.entry_mut(id).unwrap().move_to(bin_id).unwrap();
+
+        // Remote still has the same entry live — fork before the local
+        // trash, give it some content so the diff has something to do.
+        let mut remote = Database::new();
+        {
+            let mut root = remote.root_mut();
+            let mut e = root.add_entry_with_id(id);
+            e.set_unprotected(fields::TITLE, "WasTrashed");
+            e.set_unprotected(fields::USERNAME, "user");
+            e.set_protected(fields::PASSWORD, "x");
+        }
+
+        let report = diff(&local, &remote);
+        // Bug precondition: local has it in the bin (filtered), remote has
+        // it live → diff classifies as remote_only.
+        assert_eq!(report.remote_only.len(), 1);
+        assert_eq!(report.remote_only[0].id, id.to_string());
+
+        // Must not panic. The collision check skips the import, preserving
+        // the local user's "I trashed this" intent.
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
+        // Entry still exists exactly once — in the recycle bin.
+        let live_count = merged
+            .iter_all_entries()
+            .filter(|e| e.parent().id() != bin_id)
+            .count();
+        assert_eq!(
+            live_count, 0,
+            "trashed entry must not get resurrected by the import",
+        );
+        let bin_count = merged
+            .iter_all_entries()
+            .filter(|e| e.parent().id() == bin_id)
+            .count();
+        assert_eq!(bin_count, 1);
     }
 
     #[test]
