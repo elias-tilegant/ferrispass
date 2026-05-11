@@ -100,15 +100,31 @@ pub struct PerformInput<'a> {
 /// without touching `typer::DEFAULT_INTER_OP_MS`.
 pub const DEFAULT_INTER_OP: Duration = Duration::from_millis(typer::DEFAULT_INTER_OP_MS);
 
-/// Run the full auto-type pipeline once. Returns an `Outcome` that
-/// the caller surfaces in the UI. Never panics — every failure mode
-/// resolves to a specific `Outcome` variant.
-pub fn perform(input: PerformInput<'_>) -> Outcome {
+/// Ready-to-type bundle returned by `prepare`. Owned (`Vec<TypeOp>`,
+/// `String`) so it can cross a thread boundary — important because the
+/// UI runs the actual keystroke dispatch on a background task while
+/// keeping the foreground responsive. Carries the cleartext password
+/// inside one of the `TypeOp::Text` ops; callers should drop the
+/// `Plan` as soon as `execute` returns.
+#[derive(Debug)]
+pub struct TypePlan {
+    pub entry_title: String,
+    pub entry_id: String,
+    pub ops: Vec<sequence::TypeOp>,
+}
+
+/// Run every check that doesn't require key dispatch: permission probe,
+/// foreground sanity, entry selection (matcher or `force_entry_id`),
+/// password resolution, sequence parse + render. Splitting this off
+/// from `execute` lets the UI propagate accurate `Outcome` notifications
+/// — including `TypingFailed` — instead of fire-and-forget the typer
+/// and unconditionally claim success.
+pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
     if !permissions::is_trusted() {
-        return Outcome::NotTrusted;
+        return Err(Outcome::NotTrusted);
     }
     if input.foreground.is_self() {
-        return Outcome::SelfForeground;
+        return Err(Outcome::SelfForeground);
     }
 
     // Pick the entry: forced (in-app action) or top-ranked (hotkey
@@ -119,17 +135,17 @@ pub fn perform(input: PerformInput<'_>) -> Outcome {
         match input.snapshot.find_entry(forced) {
             Some(entry) if !entry.in_recycle_bin => (entry.id.clone(), entry.title.clone()),
             _ => {
-                return Outcome::NoMatch {
+                return Err(Outcome::NoMatch {
                     window_title: input.foreground.window_title.clone(),
-                };
+                });
             }
         }
     } else {
         let ranked = matcher::rank(input.snapshot, &input.foreground);
         let Some(top) = ranked.into_iter().next() else {
-            return Outcome::NoMatch {
+            return Err(Outcome::NoMatch {
                 window_title: input.foreground.window_title.clone(),
-            };
+            });
         };
         (top.id, top.title)
     };
@@ -142,13 +158,10 @@ pub fn perform(input: PerformInput<'_>) -> Outcome {
         .map(|e| e.username.clone())
         .unwrap_or_default();
     let Some(password) = (input.resolve_password)(&entry_id) else {
-        return Outcome::NoPassword;
+        return Err(Outcome::NoPassword);
     };
 
-    let tokens = match sequence::parse(input.sequence_template) {
-        Ok(t) => t,
-        Err(e) => return Outcome::BadSequence(e),
-    };
+    let tokens = sequence::parse(input.sequence_template).map_err(Outcome::BadSequence)?;
     let ops = sequence::render(
         &tokens,
         &RenderContext {
@@ -157,13 +170,42 @@ pub fn perform(input: PerformInput<'_>) -> Outcome {
         },
     );
 
-    match typer::perform(&ops, DEFAULT_INTER_OP) {
-        Ok(()) => Outcome::Typed { entry_title },
+    Ok(TypePlan {
+        entry_title,
+        entry_id,
+        ops,
+    })
+}
+
+/// Execute a previously-prepared plan. Translates the typer's result
+/// directly into the `Typed` / `TypingFailed` outcome so the caller
+/// can show a notification that reflects what *actually* happened.
+///
+/// ⚠️ `plan.ops` holds the cleartext password inside a `TypeOp::Text`.
+/// Drop the `Plan` (or let it go out of scope) immediately after this
+/// returns.
+pub fn execute(plan: TypePlan) -> Outcome {
+    match typer::perform(&plan.ops, DEFAULT_INTER_OP) {
+        Ok(()) => Outcome::Typed {
+            entry_title: plan.entry_title,
+        },
         Err(e) => Outcome::TypingFailed(e.to_string()),
     }
-    // `ops` (which holds the cleartext password inside `TypeOp::Text`)
-    // and `tokens` (which doesn't) go out of scope here. No explicit
-    // zeroize — the Rust strings will be deallocated, and the same
-    // cleartext password also lives in the open VaultDocument, so
-    // adding zeroize here without touching the rest would be theatre.
+    // `plan` (and the cleartext password inside) drops here.
+}
+
+/// Run the full auto-type pipeline once. Returns an `Outcome` that
+/// the caller surfaces in the UI. Never panics — every failure mode
+/// resolves to a specific `Outcome` variant.
+///
+/// Synchronous all the way through. The UI uses `prepare` + `execute`
+/// separately so it can off-load the (blocking) typer call onto a
+/// background task while keeping the foreground responsive; this
+/// `perform` wrapper exists for tests and callers that don't need
+/// that split.
+pub fn perform(input: PerformInput<'_>) -> Outcome {
+    match prepare(input) {
+        Ok(plan) => execute(plan),
+        Err(outcome) => outcome,
+    }
 }

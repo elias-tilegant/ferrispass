@@ -1108,21 +1108,22 @@ impl AppShell {
     /// Shared implementation between the global-hotkey and in-app
     /// routes. `force_entry_id` = `Some(id)` skips the URL-matching
     /// step and types the given entry's credentials regardless of
-    /// the foreground app. Both routes still require: Accessibility
-    /// trust, vault open, foreground not FerrisPass.
+    /// the foreground app.
+    ///
+    /// Two-phase flow against `autotype`'s orchestrator: `prepare`
+    /// validates everything and produces an owned `TypePlan` on the
+    /// foreground (cheap, must hold the AppState borrow to read the
+    /// cleartext password); `execute` runs the blocking typer on a
+    /// background task. The completion result is mapped back through
+    /// the same `Outcome` enum the orchestrator uses everywhere else
+    /// — so `TypingFailed` actually reaches the user instead of being
+    /// silently swallowed by a fire-and-forget spawn.
     fn perform_auto_type(
         &mut self,
         force_entry_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !autotype::permissions::is_trusted() {
-            window.push_notification(
-                "Auto-Type needs Accessibility access. Open Settings → Auto-Type to grant.",
-                cx,
-            );
-            return;
-        }
         let Some(foreground) = autotype::window::foreground() else {
             window.push_notification(
                 "Could not read the foreground window. Check Accessibility permission.",
@@ -1130,126 +1131,120 @@ impl AppShell {
             );
             return;
         };
-        if foreground.is_self() {
-            window.push_notification(
-                "Switch to your target window before triggering Auto-Type.",
-                cx,
-            );
-            return;
-        }
 
-        // Collect everything the background typer needs in a single
-        // borrow of AppState, then let the borrow end before we
-        // dispatch any UI-touching call (which needs `&mut cx`).
-        // Returning an enum keeps each preconditions-failed path
-        // distinct so the notification wording is specific.
-        enum Resolve {
-            Ok {
-                entry_id: String,
-                entry_title: String,
-                username: String,
-                password: String,
-            },
-            VaultLocked,
-            NoMatch,
-            NoPassword(String),
-        }
-        let resolution = {
+        // Build the orchestrator input under a single AppState read.
+        // The closure captures `&VaultDocument` for the password
+        // resolver — that borrow is alive only while `prepare` runs,
+        // which is synchronous.
+        let template = self.settings.auto_type_sequence.clone();
+        let prepared: Result<autotype::TypePlan, autotype::Outcome> = {
             let state = self.state.read(cx);
             match state.vault_status() {
                 crate::app::VaultStatus::Open { document, .. } => {
                     let snapshot = document.snapshot_rc();
-                    let chosen = match force_entry_id.as_deref() {
-                        Some(forced) => snapshot
-                            .find_entry(forced)
-                            .filter(|e| !e.in_recycle_bin)
-                            .map(|e| (e.id.clone(), e.title.clone(), e.username.clone())),
-                        None => autotype::matcher::rank(&snapshot, &foreground)
-                            .into_iter()
-                            .next()
-                            .and_then(|m| {
-                                snapshot.find_entry(&m.id).map(|e| {
-                                    (e.id.clone(), e.title.clone(), e.username.clone())
-                                })
-                            }),
-                    };
-                    match chosen {
-                        Some((id, title, username)) => {
-                            match document.password_for_entry(&id) {
-                                Some(password) => Resolve::Ok {
-                                    entry_id: id,
-                                    entry_title: title,
-                                    username,
-                                    password,
-                                },
-                                None => Resolve::NoPassword(title),
-                            }
-                        }
-                        None => Resolve::NoMatch,
-                    }
+                    autotype::prepare(autotype::PerformInput {
+                        foreground: foreground.clone(),
+                        snapshot: &snapshot,
+                        resolve_password: &|id: &str| document.password_for_entry(id),
+                        sequence_template: &template,
+                        force_entry_id,
+                    })
                 }
-                _ => Resolve::VaultLocked,
+                _ => Err(autotype::Outcome::VaultLocked),
             }
         };
 
-        let (entry_id, entry_title, username, password) = match resolution {
-            Resolve::Ok {
-                entry_id,
-                entry_title,
-                username,
-                password,
-            } => (entry_id, entry_title, username, password),
-            Resolve::VaultLocked => {
-                window.push_notification("Unlock the vault first.", cx);
-                return;
-            }
-            Resolve::NoMatch => {
-                window.push_notification(
-                    format!("No matching entry for \"{}\".", foreground.window_title),
-                    cx,
-                );
-                return;
-            }
-            Resolve::NoPassword(title) => {
-                window.push_notification(format!("No password set on {title}."), cx);
+        let plan = match prepared {
+            Ok(plan) => plan,
+            Err(outcome) => {
+                self.notify_auto_type_outcome(outcome, &foreground, window, cx);
                 return;
             }
         };
-
-        let template = self.settings.auto_type_sequence.clone();
-        let tokens = match autotype::sequence::parse(&template) {
-            Ok(t) => t,
-            Err(e) => {
-                // Cache for the Settings tab and surface inline so the
-                // user knows which knob to turn.
-                window.push_notification(format!("Auto-Type sequence invalid: {e}"), cx);
-                self.auto_type_sequence_error = Some(e);
-                return;
-            }
-        };
-        let ops = autotype::sequence::render(
-            &tokens,
-            &autotype::RenderContext {
-                username,
-                password,
-            },
-        );
 
         // Mark recently-used now — the typing succeeds asynchronously,
         // but from the user's perspective they've authenticated with
-        // this entry the moment they pressed the hotkey.
+        // this entry the moment they pressed the hotkey. (Background
+        // task failure still surfaces via the notification.)
         self.state
-            .update(cx, |state, _| state.mark_entry_used(&entry_id));
+            .update(cx, |state, _| state.mark_entry_used(&plan.entry_id));
 
-        let typed_title = entry_title.clone();
-        cx.background_spawn(async move {
-            // `ops` (which holds the cleartext password inside a
-            // `TypeOp::Text`) lives for exactly the duration of this
-            // background task — dropped on the next line.
-            let _ = autotype::typer::perform(&ops, autotype::DEFAULT_INTER_OP);
+        // Spawn the (blocking) typer on a background task. The plan
+        // — and the cleartext password it carries inside its TypeOps
+        // — is moved into the task and dropped when the task ends.
+        let task = cx.background_spawn(async move { autotype::execute(plan) });
+        let foreground_for_callback = foreground;
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.notify_auto_type_outcome(outcome, &foreground_for_callback, window, cx);
+            });
         })
         .detach();
-        window.push_notification(format!("Auto-typed {typed_title}."), cx);
+    }
+
+    /// Translate an `autotype::Outcome` into a single user-facing
+    /// toast. Centralised so the success and every failure path land
+    /// through the same wording table, which makes copy-edits a
+    /// one-place change and stops the UI from claiming success on a
+    /// typer error.
+    fn notify_auto_type_outcome(
+        &mut self,
+        outcome: autotype::Outcome,
+        foreground: &autotype::ForegroundInfo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use autotype::Outcome;
+        match outcome {
+            Outcome::Typed { entry_title } => {
+                window.push_notification(format!("Auto-typed {entry_title}."), cx);
+            }
+            Outcome::NotTrusted => {
+                window.push_notification(
+                    "Auto-Type needs Accessibility access. Open Settings → Auto-Type to grant.",
+                    cx,
+                );
+            }
+            Outcome::NoForeground => {
+                window.push_notification(
+                    "Could not read the foreground window. Check Accessibility permission.",
+                    cx,
+                );
+            }
+            Outcome::SelfForeground => {
+                window.push_notification(
+                    "Switch to your target window before triggering Auto-Type.",
+                    cx,
+                );
+            }
+            Outcome::VaultLocked => {
+                window.push_notification("Unlock the vault first.", cx);
+            }
+            Outcome::NoMatch { window_title } => {
+                let title = if window_title.is_empty() {
+                    foreground.window_title.clone()
+                } else {
+                    window_title
+                };
+                window.push_notification(format!("No matching entry for \"{title}\"."), cx);
+            }
+            Outcome::NoPassword => {
+                window.push_notification(
+                    "The matched entry has no password set.",
+                    cx,
+                );
+            }
+            Outcome::BadSequence(error) => {
+                // Cache for the Settings tab and surface inline so the
+                // user knows which knob to turn.
+                window.push_notification(format!("Auto-Type sequence invalid: {error}"), cx);
+                self.auto_type_sequence_error = Some(error);
+            }
+            Outcome::TypingFailed(message) => {
+                window.push_notification(format!("Auto-Type failed: {message}"), cx);
+            }
+        }
     }
 
     fn on_action_open_connect(

@@ -69,7 +69,20 @@ pub enum ParseError {
     /// failed to parse as a u64.
     #[error("invalid delay value: {0} (expected milliseconds as an integer)")]
     InvalidDelay(String),
+    /// `{DELAY <too-large>}` — caps the parameter so a typo or a
+    /// tampered `settings.json` can't park an auto-type task asleep
+    /// for hours. Any wait beyond `MAX_DELAY_MS` is almost certainly
+    /// unintended.
+    #[error("delay too large: {0} ms (max {1} ms)")]
+    DelayTooLarge(u64, u64),
 }
+
+/// Hard ceiling on `{DELAY n}` (milliseconds). 30 s is well past any
+/// realistic "wait for the page to load" need; longer values are a
+/// typo or corruption guarantee. The cap runs at parse time so the
+/// Settings UI surfaces the error immediately, before the bad
+/// template is ever handed to the typer.
+pub const MAX_DELAY_MS: u64 = 30_000;
 
 /// The default sequence FerrisPass uses out of the box. Picked because
 /// it lines up with the overwhelming majority of HTML and native login
@@ -160,6 +173,9 @@ fn parse_token(body: &str) -> Result<Token, ParseError> {
         let ms: u64 = original_rest
             .parse()
             .map_err(|_| ParseError::InvalidDelay(original_rest.to_string()))?;
+        if ms > MAX_DELAY_MS {
+            return Err(ParseError::DelayTooLarge(ms, MAX_DELAY_MS));
+        }
         return Ok(Token::Delay(ms));
     }
     match upper.as_str() {
@@ -294,6 +310,21 @@ mod tests {
         // Empty delay is also rejected — `{DELAY}` with no number is
         // almost certainly a typo, not "delay zero ms".
         assert!(matches!(parse("{DELAY}"), Err(ParseError::InvalidDelay(_))));
+    }
+
+    #[test]
+    fn delay_above_cap_is_rejected() {
+        // A typo (`{DELAY 30000000}`) or a tampered settings.json could
+        // otherwise park the auto-type task asleep for hours. Surface
+        // the cap at parse time so the Settings UI can show it before
+        // anything reaches the typer.
+        let err = parse(&format!("{{DELAY {}}}", MAX_DELAY_MS + 1)).unwrap_err();
+        assert_eq!(err, ParseError::DelayTooLarge(MAX_DELAY_MS + 1, MAX_DELAY_MS));
+        // Boundary: exactly the cap is fine.
+        assert_eq!(
+            parse(&format!("{{DELAY {}}}", MAX_DELAY_MS)).unwrap(),
+            vec![Token::Delay(MAX_DELAY_MS)],
+        );
     }
 
     #[test]

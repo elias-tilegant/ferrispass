@@ -33,10 +33,18 @@ pub struct MatchedEntry {
     pub score: u32,
 }
 
+// URL-derived signals — the *only* class of signal that can carry an
+// entry onto the match list. Without one of these we refuse to surface
+// the entry, even if its title happens to be inside the foreground
+// window's text. See `score_entry` for the rationale.
 const SCORE_HOSTNAME_IN_TITLE: u32 = 100;
+const SCORE_HOSTNAME_IN_APP_NAME: u32 = 90;
 const SCORE_REGISTRABLE_IN_TITLE: u32 = 80;
-const SCORE_TITLE_IN_FOREGROUND: u32 = 40;
-const SCORE_APP_NAME_MATCH: u32 = 20;
+
+// Tie-breaker only — applied *on top* of a URL signal to disambiguate
+// when several entries share the same host (e.g. multiple GitHub
+// accounts named `personal` / `work`). Never qualifies on its own.
+const SCORE_TITLE_TIEBREAKER: u32 = 10;
 
 /// Rank every entry in the snapshot against the foreground window.
 /// Entries in the Recycle Bin are skipped — surfacing a trashed
@@ -71,37 +79,61 @@ pub fn rank(snapshot: &VaultSnapshot, foreground: &ForegroundInfo) -> Vec<Matche
     matches
 }
 
+/// Score an entry against the foreground window. A URL-derived signal
+/// (hostname, registrable form, or hostname-in-app-name) is **required**
+/// for any non-zero score — title-only or app-name-only matches are
+/// deliberately suppressed because they're the dominant source of
+/// "credentials typed into the wrong site" bugs: a generic entry
+/// titled `Login`, `Mail`, `Admin`, or `Google` would otherwise score
+/// against any window containing that word.
+///
+/// The title-substring signal is preserved purely as a *tie-breaker*
+/// (`SCORE_TITLE_TIEBREAKER`) so that when two entries share a host
+/// (e.g. `github.com` personal + work) the one whose title matches
+/// the page title floats up — but a title alone can never get an entry
+/// onto the match list.
+///
+/// In-app auto-type (⌘⇧T, `force_entry_id` path) bypasses this entirely
+/// — the user is explicitly naming the entry, so URL relevance doesn't
+/// apply.
 fn score_entry(entry: &VaultEntry, title_haystack: &str, app_haystack: &str) -> u32 {
-    let mut score = 0u32;
+    let mut url_score = 0u32;
 
     if let Some(host) = host_of(&entry.url) {
         let host_lower = host.to_lowercase();
         if !host_lower.is_empty() && title_haystack.contains(&host_lower) {
-            score += SCORE_HOSTNAME_IN_TITLE;
+            url_score += SCORE_HOSTNAME_IN_TITLE;
+        }
+        if !host_lower.is_empty() && app_haystack.contains(&host_lower) {
+            url_score += SCORE_HOSTNAME_IN_APP_NAME;
         }
         // Also try the "registrable" form (everything from the last
         // two dot-separated labels). Helps when the URL is
-        // `accounts.google.com` but the title only says `Google`.
+        // `accounts.google.com` but the title shows `google.com`.
         // Crude — we don't want a PSL crate dep for this — but the
-        // false-positive cost is bounded by the lower score weight.
+        // false-positive cost is bounded because we still require a
+        // dot-bearing match (`google.com`, not just `google`).
         if let Some(short) = trim_to_registrable(&host_lower)
             && short != host_lower
             && title_haystack.contains(&short)
         {
-            score += SCORE_REGISTRABLE_IN_TITLE;
+            url_score += SCORE_REGISTRABLE_IN_TITLE;
         }
     }
 
+    if url_score == 0 {
+        return 0;
+    }
+
+    // Title tie-breaker — only ever adds to an entry that already
+    // qualified via URL. A long entry title (≥4 chars) avoids hits
+    // on generic words like `App` / `Web` in browser-decorated titles.
     let title_lower = entry.title.to_lowercase();
-    if !title_lower.is_empty() && title_haystack.contains(&title_lower) {
-        score += SCORE_TITLE_IN_FOREGROUND;
+    if title_lower.chars().count() >= 4 && title_haystack.contains(&title_lower) {
+        return url_score + SCORE_TITLE_TIEBREAKER;
     }
 
-    if !title_lower.is_empty() && app_haystack.contains(&title_lower) {
-        score += SCORE_APP_NAME_MATCH;
-    }
-
-    score
+    url_score
 }
 
 /// Extract a host string from an entry URL. Handles three input shapes:
@@ -218,17 +250,74 @@ mod tests {
     }
 
     #[test]
-    fn ranks_hostname_match_above_title_match() {
+    fn url_bearing_entry_wins_and_titleless_entry_is_dropped() {
+        // Conservative match policy: title-only entries never qualify
+        // — they're the dominant source of false-positive credential
+        // injection (a "Login" entry typing into any sign-in page).
         let snap = snapshot_with(vec![
             entry("a", "GitHub", "alice", "https://github.com/login"),
             entry("b", "Login", "bob", ""),
         ]);
         let ranked = rank(&snap, &fg("Safari", "Sign in to GitHub · github.com"));
-        // Hostname match beats title-substring match.
+        assert_eq!(ranked.len(), 1, "title-only entry must not surface");
         assert_eq!(ranked[0].id, "a");
         assert_eq!(ranked[0].title, "GitHub");
-        // The bare title-only entry shouldn't outrank a URL-bearing one.
-        assert!(ranked[0].score > ranked.get(1).map(|m| m.score).unwrap_or(0));
+    }
+
+    #[test]
+    fn generic_title_only_entry_is_never_matched() {
+        // Regression: a vault row called `Login` / `Mail` / `Admin`
+        // (very common — users name catch-all secrets that way) used
+        // to score against any window containing that word, typing
+        // credentials into the wrong site.
+        let snap = snapshot_with(vec![
+            entry("a", "Login", "alice", ""),
+            entry("b", "Mail", "bob", ""),
+            entry("c", "Admin", "carol", ""),
+        ]);
+        for window_title in &[
+            "Sign in to GitHub",
+            "Login — Acme Corp",
+            "Inbox · Mail",
+            "Admin Panel — Stripe",
+        ] {
+            let ranked = rank(&snap, &fg("Safari", window_title));
+            assert!(
+                ranked.is_empty(),
+                "title-only auto-type must not fire on '{window_title}', got {ranked:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn title_tiebreaker_disambiguates_within_url_matches() {
+        // Two GitHub entries (personal + work). With identical URLs
+        // they get the same URL score; the one whose title appears in
+        // the foreground window wins the tie-breaker.
+        let snap = snapshot_with(vec![
+            entry("z", "Personal", "alice", "https://github.com/login"),
+            entry("y", "Work", "alice@corp", "https://github.com/login"),
+        ]);
+        let ranked = rank(
+            &snap,
+            &fg("Safari", "Sign in to GitHub — Work account · github.com"),
+        );
+        assert_eq!(ranked.first().map(|m| m.id.as_str()), Some("y"));
+        // Both still surface; the "Personal" row is a legitimate
+        // alternate target, just not the top suggestion here.
+        assert_eq!(ranked.len(), 2);
+    }
+
+    #[test]
+    fn hostname_in_app_name_qualifies() {
+        // Native apps often expose the service host as the app name
+        // (e.g. Slack desktop wrapper has the workspace host in the
+        // process name). Treat that as a URL signal so a `slack.com`
+        // entry matches against Slack itself.
+        let snap = snapshot_with(vec![entry("s", "Slack", "u", "https://slack.com")]);
+        let ranked = rank(&snap, &fg("slack.com", "Untitled window"));
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].id, "s");
     }
 
     #[test]
@@ -251,12 +340,28 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_url_still_matches_short_title() {
-        // KeePass entry `accounts.google.com` vs window title `Google`.
-        // The registrable-form match (`google.com`) doesn't trigger
-        // because the title is shorter, but the entry's title `Google`
-        // matches the foreground title — the cheap title-substring
-        // signal catches it.
+    fn subdomain_url_matches_when_registrable_in_title() {
+        // KeePass entry `accounts.google.com` vs a title that contains
+        // `google.com`. The registrable-form match catches it without
+        // needing the (false-positive prone) title-substring fallback.
+        let snap = snapshot_with(vec![entry(
+            "g",
+            "Google",
+            "u",
+            "https://accounts.google.com/signin",
+        )]);
+        let ranked = rank(&snap, &fg("Chrome", "Sign in · accounts.google.com"));
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].id, "g");
+    }
+
+    #[test]
+    fn subdomain_url_with_brand_only_title_does_not_match() {
+        // Conservative trade-off: if the browser title only shows
+        // `Google Account · Sign in` (no `.com`) then we'd rather miss
+        // and let the user invoke ⌘⇧T on the selected entry than guess
+        // and risk typing into a Google-impersonating page. KeePassXC
+        // ships the same conservative default.
         let snap = snapshot_with(vec![entry(
             "g",
             "Google",
@@ -264,8 +369,7 @@ mod tests {
             "https://accounts.google.com/signin",
         )]);
         let ranked = rank(&snap, &fg("Chrome", "Google Account · Sign in"));
-        assert_eq!(ranked.len(), 1);
-        assert_eq!(ranked[0].id, "g");
+        assert!(ranked.is_empty());
     }
 
     #[test]
