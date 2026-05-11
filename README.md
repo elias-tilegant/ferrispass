@@ -15,6 +15,7 @@ Reads and writes KDBX 4 files (AES-256 + Argon2id), interoperable with KeePassXC
 - **QOL**: click-on-field to copy, password reveal toggle, click-on-URL to open in browser, copy-toast notifications
 - **Auto-lock**: idle-timeout configurable in Settings (default 4 min, "Never" supported)
 - **Clipboard auto-clear**: configurable wipe after copy (default 10 s, "Never" supported); also wipes on lock
+- **Auto-Type**: global hotkey (default ⌃⌥⌘V) types `{USERNAME}{TAB}{PASSWORD}{ENTER}` into the previously-focused window; foreground app is matched to a vault entry by URL hostname. Off by default — enable in Settings → Auto-Type. Requires the macOS Accessibility permission.
 - **Resume**: most-recently-opened vault auto-loads at startup; Recents list on the welcome screen
 - **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, three-way merge) — see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) for the connect walkthrough
 - **Theming**: light + dark mode (⌘⇧D)
@@ -120,6 +121,8 @@ If you'd rather keep signing material off GitHub, leave the secrets unset and ru
 | Copy password | ⌘⇧P |
 | Copy username | ⌘⇧U |
 | Copy URL | ⌘⇧L |
+| Auto-Type selected entry (3 s countdown) | ⌘⇧T |
+| Auto-Type matching entry into focused window | ⌃⌥⌘V (configurable, off by default) |
 | Quit | ⌘Q |
 
 ## Security notes

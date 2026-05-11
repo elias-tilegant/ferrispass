@@ -41,6 +41,27 @@ pub struct AppSettings {
     /// settings file can't disable cleanup or set an absurd window.
     #[serde(default = "default_launch_cleanup_secs")]
     pub launch_cleanup_secs: u32,
+    /// Master switch for KeePass-style auto-type. Off by default
+    /// because the feature pops a system permission prompt on first
+    /// use — surfacing that to users who didn't ask for it would be
+    /// surprising. `#[serde(default)]` so pre-feature settings.json
+    /// files deserialize cleanly (= `false`, matching the cold-start
+    /// behaviour).
+    #[serde(default)]
+    pub auto_type_enabled: bool,
+    /// User-tunable global hotkey combo, in `global-hotkey` parse
+    /// format (e.g. `ctrl+alt+super+KeyV`). The default matches
+    /// KeePassXC's macOS default. Validated at registration time —
+    /// a bad combo leaves the feature off with a Settings-tab error.
+    #[serde(default = "default_auto_type_hotkey")]
+    pub auto_type_hotkey: String,
+    /// Auto-type sequence template (KeePass placeholder grammar). The
+    /// default mirrors `{USERNAME}{TAB}{PASSWORD}{ENTER}` — the
+    /// canonical login-form sequence used by ~every browser-form on
+    /// the web. Per-entry overrides are not in v1; this is the global
+    /// template.
+    #[serde(default = "default_auto_type_sequence")]
+    pub auto_type_sequence: String,
 }
 
 fn default_true() -> bool {
@@ -49,6 +70,14 @@ fn default_true() -> bool {
 
 fn default_launch_cleanup_secs() -> u32 {
     DEFAULT_LAUNCH_CLEANUP_SECS
+}
+
+fn default_auto_type_hotkey() -> String {
+    crate::autotype::hotkey::DEFAULT_HOTKEY.to_string()
+}
+
+fn default_auto_type_sequence() -> String {
+    crate::autotype::sequence::DEFAULT_SEQUENCE.to_string()
 }
 
 pub const DEFAULT_LAUNCH_CLEANUP_SECS: u32 = 30;
@@ -75,6 +104,9 @@ impl Default for AppSettings {
             clipboard_clear_secs: Some(10),
             auto_update_check_enabled: true,
             launch_cleanup_secs: DEFAULT_LAUNCH_CLEANUP_SECS,
+            auto_type_enabled: false,
+            auto_type_hotkey: default_auto_type_hotkey(),
+            auto_type_sequence: default_auto_type_sequence(),
         }
     }
 }
@@ -159,8 +191,8 @@ mod tests {
         let s = AppSettings {
             auto_lock_secs: Some(60),
             clipboard_clear_secs: None,
-            auto_update_check_enabled: true,
             launch_cleanup_secs: 45,
+            ..AppSettings::default()
         };
         save_in(dir.path(), &s).unwrap();
         let loaded = load_in(dir.path()).unwrap();
@@ -221,11 +253,29 @@ mod tests {
         let s = AppSettings {
             auto_lock_secs: None,
             clipboard_clear_secs: None,
-            auto_update_check_enabled: true,
-            launch_cleanup_secs: DEFAULT_LAUNCH_CLEANUP_SECS,
+            ..AppSettings::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"auto_lock_secs\":null"));
         assert!(json.contains("\"clipboard_clear_secs\":null"));
+    }
+
+    /// Old settings files (written before auto_type_* existed) must
+    /// deserialize cleanly with documented defaults applied. Same
+    /// shape as the launch_cleanup_secs back-compat check, but a
+    /// regression here would be louder: the feature would either
+    /// fail to load or default to the wrong combo on upgrade.
+    #[test]
+    fn missing_auto_type_fields_use_defaults() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join(FILE_NAME),
+            r#"{"auto_lock_secs":60,"clipboard_clear_secs":null,"auto_update_check_enabled":true,"launch_cleanup_secs":30}"#,
+        )
+        .unwrap();
+        let loaded = load_in(dir.path()).unwrap();
+        assert!(!loaded.auto_type_enabled, "opt-in default off");
+        assert_eq!(loaded.auto_type_hotkey, default_auto_type_hotkey());
+        assert_eq!(loaded.auto_type_sequence, default_auto_type_sequence());
     }
 }

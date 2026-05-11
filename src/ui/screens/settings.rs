@@ -38,6 +38,12 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             "Keep your encrypted vault in sync across devices via your own cloud storage.",
             crate::ui::screens::sync_settings::render_tab_body(shell, cx),
         ),
+        SettingsTab::AutoType => (
+            "Auto-Type",
+            "Press a global hotkey to type the matching entry's username and password into \
+             the previously-focused window — works in any app or browser.",
+            auto_type_tab_body(shell, cx).into_any_element(),
+        ),
     };
 
     h_flex()
@@ -57,7 +63,12 @@ fn sidebar(active: SettingsTab, cx: &mut Context<AppShell>) -> AnyElement {
         (AppIcon::Key, "General", Some(SettingsTab::General), true),
         (AppIcon::Shield, "Security", None, false),
         (AppIcon::Cloud, "Sync", Some(SettingsTab::Sync), true),
-        (AppIcon::Sync, "Auto-type", None, false),
+        (
+            AppIcon::Sync,
+            "Auto-type",
+            Some(SettingsTab::AutoType),
+            true,
+        ),
         (AppIcon::Note, "Backups", None, false),
         (AppIcon::Refresh, "Advanced", None, false),
     ];
@@ -417,6 +428,213 @@ fn favicon_section(
     };
 
     section_frame("Favicons", hint, button)
+}
+
+// --------------- Auto-Type tab body ---------------
+
+/// Three hotkey presets shipped with the v1 UI. Custom combos beyond
+/// these require editing `settings.json` directly until we ship a
+/// proper "press the keys" capture input — adding the InputState
+/// plumbing for an interactive combo picker is more work than this
+/// scope warrants. The presets all avoid macOS's reserved combos
+/// (Spotlight ⌘Space, Mission Control ⌃↑, Dock toggle ⌘⌥D).
+const AUTO_TYPE_HOTKEY_PRESETS: &[(&str, &str)] = &[
+    ("ctrl+alt+super+KeyV", "⌃⌥⌘V"),
+    ("alt+shift+KeyV", "⌥⇧V"),
+    ("ctrl+shift+KeyV", "⌃⇧V"),
+];
+
+fn auto_type_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoElement {
+    let settings = shell.settings().clone();
+    let trusted = shell.auto_type_is_trusted();
+    let hotkey_err = shell.auto_type_hotkey_error().map(String::from);
+    let sequence_err = shell
+        .auto_type_sequence_error()
+        .map(|e| format!("Sequence invalid: {e}"));
+
+    v_flex()
+        .gap_6()
+        .child(auto_type_toggle_section(&settings, cx))
+        .child(auto_type_hotkey_section(&settings, hotkey_err, cx))
+        .child(auto_type_sequence_section(&settings, sequence_err))
+        .child(auto_type_permission_section(trusted, cx))
+}
+
+fn auto_type_toggle_section(
+    settings: &AppSettings,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let enabled = settings.auto_type_enabled;
+    let on_baseline = settings.clone();
+    let off_baseline = settings.clone();
+    let row = h_flex()
+        .gap_2()
+        .child(preset_chip(
+            "auto-type-on".into(),
+            "On".into(),
+            enabled,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.update_settings(
+                    AppSettings {
+                        auto_type_enabled: true,
+                        ..on_baseline.clone()
+                    },
+                    cx,
+                );
+            }),
+        ))
+        .child(preset_chip(
+            "auto-type-off".into(),
+            "Off".into(),
+            !enabled,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.update_settings(
+                    AppSettings {
+                        auto_type_enabled: false,
+                        ..off_baseline.clone()
+                    },
+                    cx,
+                );
+            }),
+        ));
+    section_frame(
+        "Auto-Type",
+        "When on, FerrisPass registers a system-wide hotkey. Press it from any window to \
+         type the matching entry's credentials into the focused field.",
+        row,
+    )
+}
+
+fn auto_type_hotkey_section(
+    settings: &AppSettings,
+    error: Option<String>,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let current = settings.auto_type_hotkey.clone();
+    let mut row = h_flex().gap_2().flex_wrap();
+    for (idx, (combo, label)) in AUTO_TYPE_HOTKEY_PRESETS.iter().enumerate() {
+        let selected = current == *combo;
+        let baseline = settings.clone();
+        let combo_owned = combo.to_string();
+        row = row.child(preset_chip(
+            SharedString::from(format!("auto-type-hotkey-{idx}")),
+            SharedString::from(*label),
+            selected,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.update_settings(
+                    AppSettings {
+                        auto_type_hotkey: combo_owned.clone(),
+                        ..baseline.clone()
+                    },
+                    cx,
+                );
+            }),
+        ));
+    }
+
+    let body = v_flex().gap_2().child(row).when_some(error, |col, err| {
+        col.child(
+            div()
+                .text_xs()
+                .text_color(palette::red())
+                .child(format!("Hotkey registration failed: {err}")),
+        )
+    });
+
+    section_frame(
+        "Trigger hotkey",
+        "Pressed from any app or browser to launch Auto-Type. ⌃⌥⌘V is the KeePassXC \
+         default — choose another preset if it conflicts with something else on your Mac.",
+        body,
+    )
+}
+
+fn auto_type_sequence_section(
+    settings: &AppSettings,
+    error: Option<String>,
+) -> impl IntoElement {
+    let current = settings.auto_type_sequence.clone();
+    let display = h_flex()
+        .h(px(30.))
+        .px(px(12.))
+        .items_center()
+        .rounded(px(6.))
+        .bg(palette::sidebar())
+        .border_1()
+        .border_color(palette::border_strong())
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(palette::text())
+        .child(SharedString::from(current));
+
+    let body = v_flex().gap_2().child(display).when_some(error, |col, err| {
+        col.child(
+            div()
+                .text_xs()
+                .text_color(palette::red())
+                .child(err),
+        )
+    });
+
+    section_frame(
+        "Type sequence",
+        "Default: {USERNAME}{TAB}{PASSWORD}{ENTER}. Recognised placeholders: \
+         {USERNAME}, {PASSWORD}, {TAB}, {ENTER}, {DELAY 500}. \
+         Edit settings.json directly to customise — an in-app editor is on the roadmap.",
+        body,
+    )
+}
+
+fn auto_type_permission_section(
+    trusted: bool,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let (status_label, status_color) = if trusted {
+        (
+            SharedString::from("Granted — Auto-Type is ready to use."),
+            palette::text(),
+        )
+    } else {
+        (
+            SharedString::from(
+                "Not granted — Auto-Type cannot type into other apps until you allow access.",
+            ),
+            palette::text_muted(),
+        )
+    };
+    let body = v_flex()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .text_color(status_color)
+                .child(status_label),
+        )
+        .when(!trusted, |col| {
+            col.child(h_flex().gap_2().child(preset_chip(
+                "auto-type-grant-access".into(),
+                "Grant Accessibility access…".into(),
+                true,
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.auto_type_request_trust();
+                    // Re-render so the status line updates after the
+                    // system prompt closes. macOS only refreshes the
+                    // process trust bit on next launch, so the label
+                    // typically still says "Not granted" until the user
+                    // restarts — that's why the help text below mentions
+                    // restarting.
+                    cx.notify();
+                }),
+            )))
+        });
+
+    section_frame(
+        "macOS Accessibility access",
+        "Both keystroke simulation and reading the foreground window's title use the macOS \
+         Accessibility framework. After granting access in System Settings, restart FerrisPass \
+         so the new permission takes effect.",
+        body,
+    )
 }
 
 fn updates_section(

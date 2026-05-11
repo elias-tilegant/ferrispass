@@ -60,6 +60,22 @@ base64 = "0.22"
 # expectation (1.x).
 uuid = "1"
 
+# Auto-type stack. The crates encapsulate macOS FFI internally so our
+# workspace `unsafe_code = "forbid"` lint stays intact — `src/autotype/`
+# only ever calls into safe wrappers. global-hotkey is the Tauri team's
+# Carbon `RegisterEventHotKey` wrapper; enigo synthesises CGEvent
+# keystrokes; active-win-pos-rs reads NSWorkspace + AX for the
+# foreground window title; macos-accessibility-client wraps
+# `AXIsProcessTrustedWithOptions` so we can probe and request the TCC
+# Accessibility grant required for both keystroke synthesis and AX
+# window-title reads. All four compile on Linux (no-op'd at the
+# `cfg(target_os = "macos")` boundaries inside `src/autotype/`) so
+# `cargo check` on dev Linux boxes still works.
+global-hotkey = "0.8"
+enigo = "0.6"
+active-win-pos-rs = "0.10"
+macos-accessibility-client = "0.0"
+
 [dev-dependencies]
 tempfile = "3"
 

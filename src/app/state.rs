@@ -1371,10 +1371,19 @@ impl AppState {
             last_used,
             ..
         } = &mut self.vault
+            && let Some(id) = selected_entry_id.clone()
         {
-            if let Some(id) = selected_entry_id.clone() {
-                last_used.insert(id, Local::now());
-            }
+            last_used.insert(id, Local::now());
+        }
+    }
+
+    /// Same as `mark_selected_used` but for an explicit entry id —
+    /// used by the auto-type path, where the credential we just typed
+    /// is the foreground-matched entry, not necessarily the one the
+    /// user has selected in the sidebar.
+    pub fn mark_entry_used(&mut self, entry_id: &str) {
+        if let VaultStatus::Open { last_used, .. } = &mut self.vault {
+            last_used.insert(entry_id.to_string(), Local::now());
         }
     }
 

@@ -34,6 +34,19 @@ actions!(
         /// collide with future "Open in browser" / "Open in terminal"
         /// flavours.
         LaunchEntry,
+        /// Auto-type credentials into the foreground window. Dispatched
+        /// by the global hotkey listener when the user presses the
+        /// configured combo from any app. The handler matches the
+        /// foreground window to a vault entry by URL hostname and
+        /// types `{USERNAME}{TAB}{PASSWORD}{ENTER}` (or the user's
+        /// custom sequence).
+        PerformAutoType,
+        /// Auto-type credentials for the *currently-selected* entry,
+        /// after a short countdown that lets the user switch to the
+        /// target window. Bound to ⌘⇧T inside FerrisPass — distinct
+        /// from `PerformAutoType` (which runs from a global hotkey
+        /// and infers the entry from the foreground).
+        PerformAutoTypeForSelected,
     ]
 );
 
@@ -73,6 +86,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-s", SaveVault, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-e", EditEntry, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-backspace", DeleteEntry, Some(APP_CONTEXT)),
+        // ⌘⇧T triggers an in-app auto-type for the currently-selected
+        // entry with a 3-second countdown so the user has time to
+        // switch to the target window. The global hotkey (configured
+        // in Settings, default ⌃⌥⌘V) is the more common entry point
+        // and works from any app — `PerformAutoType` is dispatched by
+        // `AutoTypeService` directly, no KeyBinding here.
+        KeyBinding::new("cmd-shift-t", PerformAutoTypeForSelected, Some(APP_CONTEXT)),
         // No context filter — cmd-q should always quit, even if focus is in
         // some weird state (e.g. inside a modal or before the shell is wired).
         KeyBinding::new("cmd-q", Quit, None),

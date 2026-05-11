@@ -5,9 +5,11 @@ use crate::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
             DeleteEntry, DownloadFavicons, EditEntry, FocusSearch, LaunchEntry, LockVault,
             NewEntry, OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings, OpenVault,
-            OpenVaultSwitcher, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
+            OpenVaultSwitcher, PerformAutoType, PerformAutoTypeForSelected, SaveVault,
+            SubmitPassword, SyncNow, ToggleTheme,
         },
     },
+    autotype,
     keepass::KeePassRepository,
     launch::{self, LaunchContext, LaunchError, LaunchHandle},
 };
@@ -19,6 +21,7 @@ use crate::{
 pub enum SettingsTab {
     General,
     Sync,
+    AutoType,
 }
 use gpui::{
     AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
@@ -179,6 +182,30 @@ pub struct AppShell {
     /// keeps the timer alive; dropping it cancels (used when lock/quit
     /// purges everything early).
     launch_cleanup_tasks: Vec<Task<()>>,
+    /// Active global-hotkey registration for auto-type. `Some` only
+    /// when `settings.auto_type_enabled && settings.auto_type_hotkey`
+    /// parses & registers cleanly; dropped (= unregistered) when the
+    /// user toggles the feature off or changes the combo. The
+    /// matching poll loop in `auto_type_poll_task` reads the registered
+    /// id to filter events.
+    auto_type_listener: Option<autotype::HotkeyListener>,
+    /// Background task that polls the global-hotkey event channel at
+    /// ~30 Hz and dispatches `PerformAutoType` when our combo fires.
+    /// Dropped together with the listener — leaving it running with no
+    /// listener would still be safe (the poll would find no matching
+    /// events) but would burn cycles for no reason.
+    auto_type_poll_task: Option<Task<()>>,
+    /// Most recent parse-error from the user's auto-type sequence, or
+    /// `None` when the template is valid. Cached so the Settings UI
+    /// can surface it without re-parsing on every render. Cleared
+    /// when `update_settings` accepts a new template.
+    auto_type_sequence_error: Option<autotype::ParseError>,
+    /// Most recent registration / parse error from the user's auto-
+    /// type hotkey combo. Same caching rationale as
+    /// `auto_type_sequence_error`. The Settings UI uses this to
+    /// surface a clear "this combo is in use by another app" hint
+    /// rather than letting the feature silently appear broken.
+    auto_type_hotkey_error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -187,6 +214,21 @@ pub struct AppShell {
 /// so the lock always fires within this window of crossing the
 /// threshold.
 const AUTO_LOCK_TICK_SECS: u64 = 5;
+
+/// Polling interval for the global-hotkey event channel. ~30 Hz —
+/// fast enough that the user can't perceive any lag between the
+/// hotkey press and the auto-type firing, slow enough that the
+/// idle-app cost is negligible (the loop is two channel `try_recv`
+/// calls plus a sleep).
+const AUTO_TYPE_POLL_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Countdown for the in-app ⌘⇧T (PerformAutoTypeForSelected) route.
+/// Mirrors KeePass's classic "type-in-3-seconds" pattern: the user
+/// presses the shortcut from inside FerrisPass, switches to the
+/// target window before the countdown ends, and we type into
+/// whatever has focus then. 3 s is the KeePass default and feels
+/// right in practice.
+const AUTO_TYPE_COUNTDOWN_SECS: u64 = 3;
 
 impl AppShell {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -271,7 +313,7 @@ impl AppShell {
         // previous session that didn't shut down cleanly is gone.
         crate::launch::sweeper::sweep_stale(std::time::Duration::from_secs(60));
 
-        Self {
+        let mut shell = Self {
             state,
             password_input,
             keyfile_input,
@@ -306,8 +348,22 @@ impl AppShell {
             next_custom_field_id: 0,
             pending_launches: Vec::new(),
             launch_cleanup_tasks: Vec::new(),
+            auto_type_listener: None,
+            auto_type_poll_task: None,
+            auto_type_sequence_error: None,
+            auto_type_hotkey_error: None,
             _subscriptions,
-        }
+        };
+        // Bring up the global-hotkey registration immediately if the
+        // user has Auto-Type enabled. Done after Self is built (rather
+        // than starting the task during the struct literal) so the
+        // weak handle that `cx.spawn` captures resolves to the
+        // already-constructed entity. Idempotent if Auto-Type is off
+        // — `sync_auto_type_listener` is the only entry point and it
+        // no-ops cleanly when both desired-state and current-state are
+        // "no listener".
+        shell.sync_auto_type_listener(cx);
+        shell
     }
 
     pub fn settings_tab(&self) -> SettingsTab {
@@ -427,6 +483,110 @@ impl AppShell {
     fn auto_lock_now(&mut self, cx: &mut Context<Self>) {
         self.wipe_session_secrets(cx);
         self.state.update(cx, |state, cx| state.lock_vault(cx));
+    }
+
+    /// Reconcile the global-hotkey listener with the current settings.
+    /// Called from `new` (initial wire-up) and `update_settings`
+    /// (toggle / combo change). Idempotent on the no-change path.
+    ///
+    /// Failure modes are user-actionable, so we cache the error in
+    /// `auto_type_hotkey_error` for the Settings UI to display instead
+    /// of silently leaving the feature off — that's exactly the
+    /// "looks broken" state we want to avoid.
+    pub fn sync_auto_type_listener(&mut self, cx: &mut Context<Self>) {
+        // Validate the sequence regardless of `enabled` so the Settings
+        // UI can show a parse error even when the user is editing a
+        // disabled-but-being-set-up feature. Cheap: pure string work.
+        self.auto_type_sequence_error = autotype::sequence::parse(&self.settings.auto_type_sequence)
+            .err();
+
+        let want_listener = self.settings.auto_type_enabled;
+        let current_combo = self
+            .auto_type_listener
+            .as_ref()
+            .map(|l| l.id())
+            .unwrap_or(0);
+        let parsed = autotype::hotkey::parse_combo(&self.settings.auto_type_hotkey);
+        let target_id = parsed.as_ref().map(|h| h.id()).unwrap_or(0);
+
+        // No-op shortcut: feature on, combo unchanged, listener already
+        // registered. Saves the OS round-trip on every settings save.
+        if want_listener
+            && self.auto_type_listener.is_some()
+            && current_combo == target_id
+        {
+            self.auto_type_hotkey_error = None;
+            return;
+        }
+
+        // Tear down any existing listener+poll task. Drop order matters
+        // only insofar as the poll task should stop reading the channel
+        // before the registration is removed; in practice both are safe
+        // to drop concurrently because the channel is process-global.
+        self.auto_type_listener = None;
+        self.auto_type_poll_task = None;
+
+        if !want_listener {
+            self.auto_type_hotkey_error = None;
+            return;
+        }
+
+        match autotype::HotkeyListener::register(&self.settings.auto_type_hotkey) {
+            Ok(listener) => {
+                let expected_id = listener.id();
+                self.auto_type_listener = Some(listener);
+                self.auto_type_hotkey_error = None;
+                self.auto_type_poll_task = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(AUTO_TYPE_POLL_INTERVAL)
+                            .await;
+                        let dispatched = this.update(cx, |_shell, cx| {
+                            if autotype::hotkey::poll_pressed(expected_id) {
+                                // Dispatching the action keeps the
+                                // global-hotkey and ⌘⇧T paths sharing
+                                // the same handler — single code path
+                                // for "the hotkey fired, do the thing".
+                                cx.dispatch_action(&PerformAutoType);
+                            }
+                        });
+                        if dispatched.is_err() {
+                            break; // shell dropped
+                        }
+                    }
+                }));
+            }
+            Err(e) => {
+                self.auto_type_hotkey_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Read-only accessors for the Settings UI. Cached errors are
+    /// recomputed on every `update_settings` so the UI can render the
+    /// up-to-date status without re-parsing on every frame.
+    pub fn auto_type_hotkey_error(&self) -> Option<&str> {
+        self.auto_type_hotkey_error.as_deref()
+    }
+
+    pub fn auto_type_sequence_error(&self) -> Option<&autotype::ParseError> {
+        self.auto_type_sequence_error.as_ref()
+    }
+
+    /// `true` if the OS currently trusts FerrisPass to use the
+    /// Accessibility APIs. Probed live (not cached) because the user
+    /// can grant or revoke it at any time via System Settings.
+    pub fn auto_type_is_trusted(&self) -> bool {
+        autotype::permissions::is_trusted()
+    }
+
+    /// Trigger the system prompt that opens the Privacy → Accessibility
+    /// pane. Called from the "Grant access" button in Settings. The
+    /// return value isn't actionable here — even on grant, the macOS
+    /// trust bit only refreshes for new processes, so the user must
+    /// restart FerrisPass after granting.
+    pub fn auto_type_request_trust(&self) {
+        let _ = autotype::permissions::request_trust();
     }
 
     /// Drop reveal flag, cancel any pending clipboard-clear timer, and
@@ -877,6 +1037,218 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         self.launch_selected_entry(window, cx);
+    }
+
+    /// Global-hotkey route. Reads the foreground window the user just
+    /// left, finds the best-matching entry by URL hostname, and types
+    /// the configured sequence into it. All preconditions surface as
+    /// a toast notification — silent failure here would have the
+    /// feature looking broken (the user pressed the hotkey, nothing
+    /// happened, no clue why).
+    fn on_action_perform_auto_type(
+        &mut self,
+        _: &PerformAutoType,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.perform_auto_type(None, window, cx);
+    }
+
+    /// In-app ⌘⇧T route: types the *currently-selected* entry after a
+    /// short countdown. The countdown is what lets the user press the
+    /// shortcut from inside FerrisPass and still aim the keystrokes
+    /// at a different window — the global hotkey is the better
+    /// ergonomic, but this is the discoverable in-app entry point.
+    fn on_action_perform_auto_type_for_selected(
+        &mut self,
+        _: &PerformAutoTypeForSelected,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry_id) = self.selected_entry_id(cx) else {
+            window.push_notification("Select an entry first.", cx);
+            return;
+        };
+        // Quick preconditions check before we surface a countdown the
+        // user would be waiting for in vain. Permission + vault-open
+        // are the load-bearing ones; foreground is deferred to the
+        // moment the typing happens (it'll have changed by then).
+        if !autotype::permissions::is_trusted() {
+            window.push_notification(
+                "Auto-Type needs Accessibility access. Open Settings → Auto-Type to grant.",
+                cx,
+            );
+            return;
+        }
+        if !matches!(
+            self.state.read(cx).vault_status(),
+            crate::app::VaultStatus::Open { .. }
+        ) {
+            window.push_notification("Unlock the vault first.", cx);
+            return;
+        }
+        window.push_notification(
+            format!(
+                "Auto-Type starting in {AUTO_TYPE_COUNTDOWN_SECS} s — switch to the target window."
+            ),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(AUTO_TYPE_COUNTDOWN_SECS))
+                .await;
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.perform_auto_type(Some(entry_id.clone()), window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Shared implementation between the global-hotkey and in-app
+    /// routes. `force_entry_id` = `Some(id)` skips the URL-matching
+    /// step and types the given entry's credentials regardless of
+    /// the foreground app. Both routes still require: Accessibility
+    /// trust, vault open, foreground not FerrisPass.
+    fn perform_auto_type(
+        &mut self,
+        force_entry_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !autotype::permissions::is_trusted() {
+            window.push_notification(
+                "Auto-Type needs Accessibility access. Open Settings → Auto-Type to grant.",
+                cx,
+            );
+            return;
+        }
+        let Some(foreground) = autotype::window::foreground() else {
+            window.push_notification(
+                "Could not read the foreground window. Check Accessibility permission.",
+                cx,
+            );
+            return;
+        };
+        if foreground.is_self() {
+            window.push_notification(
+                "Switch to your target window before triggering Auto-Type.",
+                cx,
+            );
+            return;
+        }
+
+        // Collect everything the background typer needs in a single
+        // borrow of AppState, then let the borrow end before we
+        // dispatch any UI-touching call (which needs `&mut cx`).
+        // Returning an enum keeps each preconditions-failed path
+        // distinct so the notification wording is specific.
+        enum Resolve {
+            Ok {
+                entry_id: String,
+                entry_title: String,
+                username: String,
+                password: String,
+            },
+            VaultLocked,
+            NoMatch,
+            NoPassword(String),
+        }
+        let resolution = {
+            let state = self.state.read(cx);
+            match state.vault_status() {
+                crate::app::VaultStatus::Open { document, .. } => {
+                    let snapshot = document.snapshot_rc();
+                    let chosen = match force_entry_id.as_deref() {
+                        Some(forced) => snapshot
+                            .find_entry(forced)
+                            .filter(|e| !e.in_recycle_bin)
+                            .map(|e| (e.id.clone(), e.title.clone(), e.username.clone())),
+                        None => autotype::matcher::rank(&snapshot, &foreground)
+                            .into_iter()
+                            .next()
+                            .and_then(|m| {
+                                snapshot.find_entry(&m.id).map(|e| {
+                                    (e.id.clone(), e.title.clone(), e.username.clone())
+                                })
+                            }),
+                    };
+                    match chosen {
+                        Some((id, title, username)) => {
+                            match document.password_for_entry(&id) {
+                                Some(password) => Resolve::Ok {
+                                    entry_id: id,
+                                    entry_title: title,
+                                    username,
+                                    password,
+                                },
+                                None => Resolve::NoPassword(title),
+                            }
+                        }
+                        None => Resolve::NoMatch,
+                    }
+                }
+                _ => Resolve::VaultLocked,
+            }
+        };
+
+        let (entry_id, entry_title, username, password) = match resolution {
+            Resolve::Ok {
+                entry_id,
+                entry_title,
+                username,
+                password,
+            } => (entry_id, entry_title, username, password),
+            Resolve::VaultLocked => {
+                window.push_notification("Unlock the vault first.", cx);
+                return;
+            }
+            Resolve::NoMatch => {
+                window.push_notification(
+                    format!("No matching entry for \"{}\".", foreground.window_title),
+                    cx,
+                );
+                return;
+            }
+            Resolve::NoPassword(title) => {
+                window.push_notification(format!("No password set on {title}."), cx);
+                return;
+            }
+        };
+
+        let template = self.settings.auto_type_sequence.clone();
+        let tokens = match autotype::sequence::parse(&template) {
+            Ok(t) => t,
+            Err(e) => {
+                // Cache for the Settings tab and surface inline so the
+                // user knows which knob to turn.
+                window.push_notification(format!("Auto-Type sequence invalid: {e}"), cx);
+                self.auto_type_sequence_error = Some(e);
+                return;
+            }
+        };
+        let ops = autotype::sequence::render(
+            &tokens,
+            &autotype::RenderContext {
+                username,
+                password,
+            },
+        );
+
+        // Mark recently-used now — the typing succeeds asynchronously,
+        // but from the user's perspective they've authenticated with
+        // this entry the moment they pressed the hotkey.
+        self.state
+            .update(cx, |state, _| state.mark_entry_used(&entry_id));
+
+        let typed_title = entry_title.clone();
+        cx.background_spawn(async move {
+            // `ops` (which holds the cleartext password inside a
+            // `TypeOp::Text`) lives for exactly the duration of this
+            // background task — dropped on the next line.
+            let _ = autotype::typer::perform(&ops, autotype::DEFAULT_INTER_OP);
+        })
+        .detach();
+        window.push_notification(format!("Auto-typed {typed_title}."), cx);
     }
 
     fn on_action_open_connect(
@@ -1677,6 +2049,12 @@ impl AppShell {
         // or cancel the checker task immediately rather than waiting
         // for the next state notification.
         self.sync_auto_lock_task(cx);
+        // Same rule for auto-type: toggling the feature on, changing
+        // the combo, or editing the sequence template all need to
+        // re-evaluate the hotkey registration and parse-error cache
+        // synchronously so the Settings UI shows the right state on
+        // the very next render.
+        self.sync_auto_type_listener(cx);
         cx.background_spawn(async move {
             let _ = crate::app::settings::save(&new_settings);
         })
@@ -1826,6 +2204,8 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_save_vault))
             .on_action(cx.listener(Self::on_action_edit_entry))
             .on_action(cx.listener(Self::on_action_delete_entry))
+            .on_action(cx.listener(Self::on_action_perform_auto_type))
+            .on_action(cx.listener(Self::on_action_perform_auto_type_for_selected))
             .size_full()
             .relative()
             .overflow_hidden()

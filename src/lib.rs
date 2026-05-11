@@ -1,4 +1,5 @@
 pub mod app;
+pub mod autotype;
 pub mod domain;
 pub mod favicon;
 pub mod keepass;
