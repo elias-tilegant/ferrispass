@@ -82,6 +82,11 @@ pub struct AppShell {
     /// Cleared on every overlay-open so the picker always starts empty;
     /// Enter on the input opens whichever recent currently floats to the top.
     vault_switcher_input: Entity<InputState>,
+    /// Free-form text input for the Auto-Type sequence template. Lives
+    /// here (rather than being recreated per render) so the focus,
+    /// cursor position, and undo history persist across Settings
+    /// re-renders.
+    auto_type_sequence_input: Entity<InputState>,
     /// Length slider state for the AddEntry generator card. Range 4..64,
     /// default 18 (matches the prior hardcoded value the card used to display).
     /// We hold the entity so both the Slider widget and `generate_password`
@@ -255,6 +260,17 @@ impl AppShell {
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name or folder…"));
         let vault_switcher_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Switch vault — type to filter…"));
+        // Seed the sequence input with whatever's currently persisted —
+        // settings::load runs above in the field initializer below.
+        // We re-read here so the input's display value matches the
+        // canonical settings value from disk.
+        let seq_seed = crate::app::settings::load().auto_type_sequence;
+        let auto_type_sequence_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .placeholder("{USERNAME}{TAB}{PASSWORD}{ENTER}");
+            state.set_value(&seq_seed, window, cx);
+            state
+        });
 
         let gen_length_state = cx.new(|_| {
             SliderState::new()
@@ -299,6 +315,11 @@ impl AppShell {
                 window,
                 Self::on_vault_switcher_input_event,
             ),
+            cx.subscribe_in(
+                &auto_type_sequence_input,
+                window,
+                Self::on_auto_type_sequence_input_event,
+            ),
             // Re-render on slider drag so the "Length: N" label and the
             // strength preview update live alongside the thumb.
             cx.observe(&gen_length_state, |_shell: &mut AppShell, _, cx| {
@@ -326,6 +347,7 @@ impl AppShell {
             new_entry_otp_input,
             picker_query_input,
             vault_switcher_input,
+            auto_type_sequence_input,
             gen_length_state,
             gen_classes: crate::keepass::password_gen::CharClasses::default(),
             entry_list_scroll: VirtualListScrollHandle::new(),
@@ -682,6 +704,10 @@ impl AppShell {
 
     pub fn vault_switcher_input(&self) -> &Entity<InputState> {
         &self.vault_switcher_input
+    }
+
+    pub fn auto_type_sequence_input(&self) -> &Entity<InputState> {
+        &self.auto_type_sequence_input
     }
 
     /// Open a save-file picker prefilled with the picked file's name, then
@@ -1568,6 +1594,53 @@ impl AppShell {
             self.state
                 .update(cx, |state, cx| state.set_picker_query(q, cx));
         }
+    }
+
+    fn on_auto_type_sequence_input_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        // Mirror the typed value back into the persisted settings. The
+        // sync_auto_type_listener call inside `update_settings`
+        // re-parses + re-registers the hotkey, which also refreshes the
+        // `auto_type_sequence_error` cache for the inline error label.
+        let new_value = self.auto_type_sequence_input.read(cx).value().to_string();
+        if new_value == self.settings.auto_type_sequence {
+            return;
+        }
+        let new_settings = AppSettings {
+            auto_type_sequence: new_value,
+            ..self.settings.clone()
+        };
+        self.update_settings(new_settings, cx);
+    }
+
+    /// Programmatic setter for the Auto-Type sequence — used by the
+    /// preset chips in Settings. Updates both the input widget and the
+    /// persisted settings so the chip click feels instantaneous.
+    pub fn set_auto_type_sequence(
+        &mut self,
+        template: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.auto_type_sequence_input.read(cx).value().as_ref() == template {
+            return;
+        }
+        self.auto_type_sequence_input.update(cx, |state, cx| {
+            state.set_value(template, window, cx);
+        });
+        let new_settings = AppSettings {
+            auto_type_sequence: template.to_string(),
+            ..self.settings.clone()
+        };
+        self.update_settings(new_settings, cx);
     }
 
     fn on_vault_switcher_input_event(

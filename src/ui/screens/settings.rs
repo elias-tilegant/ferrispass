@@ -444,6 +444,17 @@ const AUTO_TYPE_HOTKEY_PRESETS: &[(&str, &str)] = &[
     ("ctrl+shift+KeyV", "⌃⇧V"),
 ];
 
+/// One-click templates for the sequence editor. Each is a working
+/// example the user can either accept verbatim or use as a starting
+/// point for free-form edits in the input below. Order matters —
+/// `Default` first because that's what 90% of users want.
+const AUTO_TYPE_SEQUENCE_PRESETS: &[(&str, &str)] = &[
+    ("Default", "{USERNAME}{TAB}{PASSWORD}{ENTER}"),
+    ("Username only", "{USERNAME}{ENTER}"),
+    ("With 250 ms delay", "{USERNAME}{TAB}{DELAY 250}{PASSWORD}{ENTER}"),
+    ("No Enter", "{USERNAME}{TAB}{PASSWORD}"),
+];
+
 fn auto_type_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoElement {
     let settings = shell.settings().clone();
     let trusted = shell.auto_type_is_trusted();
@@ -456,7 +467,7 @@ fn auto_type_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl Into
         .gap_6()
         .child(auto_type_toggle_section(&settings, cx))
         .child(auto_type_hotkey_section(&settings, hotkey_err, cx))
-        .child(auto_type_sequence_section(&settings, sequence_err))
+        .child(auto_type_sequence_section(shell, &settings, sequence_err, cx))
         .child(auto_type_permission_section(trusted, cx))
 }
 
@@ -550,37 +561,58 @@ fn auto_type_hotkey_section(
 }
 
 fn auto_type_sequence_section(
+    shell: &AppShell,
     settings: &AppSettings,
     error: Option<String>,
+    cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
     let current = settings.auto_type_sequence.clone();
-    let display = h_flex()
-        .h(px(30.))
-        .px(px(12.))
-        .items_center()
-        .rounded(px(6.))
-        .bg(palette::sidebar())
-        .border_1()
-        .border_color(palette::border_strong())
-        .text_xs()
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(palette::text())
-        .child(SharedString::from(current));
 
-    let body = v_flex().gap_2().child(display).when_some(error, |col, err| {
-        col.child(
-            div()
-                .text_xs()
-                .text_color(palette::red())
-                .child(err),
-        )
-    });
+    // Preset chips: clicking one sets both the input value and the
+    // persisted setting in one shot via `set_auto_type_sequence`. The
+    // `selected` flag highlights the chip whose template matches the
+    // current value exactly so the user can see what's active.
+    let mut presets_row = h_flex().gap_2().flex_wrap();
+    for (idx, (label, template)) in AUTO_TYPE_SEQUENCE_PRESETS.iter().enumerate() {
+        let selected = current == *template;
+        let template_owned = template.to_string();
+        presets_row = presets_row.child(preset_chip(
+            SharedString::from(format!("auto-type-sequence-preset-{idx}")),
+            SharedString::from(*label),
+            selected,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.set_auto_type_sequence(&template_owned, window, cx);
+            }),
+        ));
+    }
+
+    // Free-form input — same widget pattern the rest of FerrisPass uses
+    // (Input + InputState). The on-change subscription set up in
+    // AppShell::new pipes edits straight into settings via update_settings,
+    // which in turn re-parses the template and refreshes the error cache
+    // (`auto_type_sequence_error`) — so the inline red label below this
+    // input updates in real time as the user types.
+    let editor = div()
+        .w_full()
+        .child(gpui_component::input::Input::new(shell.auto_type_sequence_input()).cleanable(true));
+
+    let body = v_flex()
+        .gap_3()
+        .child(presets_row)
+        .child(editor)
+        .when_some(error, |col, err| {
+            col.child(
+                div()
+                    .text_xs()
+                    .text_color(palette::red())
+                    .child(err),
+            )
+        });
 
     section_frame(
         "Type sequence",
-        "Default: {USERNAME}{TAB}{PASSWORD}{ENTER}. Recognised placeholders: \
-         {USERNAME}, {PASSWORD}, {TAB}, {ENTER}, {DELAY 500}. \
-         Edit settings.json directly to customise — an in-app editor is on the roadmap.",
+        "Placeholders: {USERNAME}, {PASSWORD}, {TAB}, {ENTER}, {DELAY N} (max 30000 ms). \
+         Pick a preset to start, or edit the template below — changes save automatically.",
         body,
     )
 }
