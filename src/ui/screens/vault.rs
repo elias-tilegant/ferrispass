@@ -11,7 +11,7 @@ use gpui_component::{
 
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
-    actions::{LockVault, NewEntry, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SyncNow},
+    actions::{LockVault, NewEntry, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SyncNow},
 };
 use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
 use crate::ui::app_shell::AppShell;
@@ -182,28 +182,36 @@ fn sidebar(
                         .text_color(palette::blue()),
                 )
                 .child(
-                    h_flex()
+                    div()
+                        .id("sidebar-sync-chip")
+                        .cursor_pointer()
                         .flex_1()
                         .min_w(px(0.))
-                        .gap_1p5()
-                        .items_center()
-                        .child(format!("{provider} · {synced_at}"))
-                        .when_some(auto_merged, |this, n| {
-                            this.child(
-                                div()
-                                    .h(px(16.))
-                                    .px(px(5.))
-                                    .rounded(px(4.))
-                                    .bg(palette::blue_soft())
-                                    .text_color(palette::blue())
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(format!("+{n}")),
-                            )
-                        }),
+                        .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                            window.dispatch_action(Box::new(OpenSyncSettings), cx);
+                        }))
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .child(format!("{provider} · {synced_at}"))
+                                .when_some(auto_merged, |this, n| {
+                                    this.child(
+                                        div()
+                                            .h(px(16.))
+                                            .px(px(5.))
+                                            .rounded(px(4.))
+                                            .bg(palette::blue_soft())
+                                            .text_color(palette::blue())
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(format!("+{n}")),
+                                    )
+                                }),
+                        ),
                 )
                 .child(
                     div()
@@ -213,8 +221,12 @@ fn sidebar(
                                 .with_size(gpui_component::Size::Size(px(13.)))
                                 .text_color(palette::text_muted()),
                         )
+                        // Generic gear → General tab. The "go straight to
+                        // Sync" route stays available via ⌘⇧, and via
+                        // clicking the sync pill text on this same row
+                        // (wired just above).
                         .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                            window.dispatch_action(Box::new(OpenSyncSettings), cx);
+                            window.dispatch_action(Box::new(OpenSettings), cx);
                         })),
                 ),
         )
