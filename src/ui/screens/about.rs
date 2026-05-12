@@ -1,6 +1,8 @@
 //! "About FerrisPass" modal — small dialog with brand, version and a
-//! repo link. Reachable from the Welcome footer (clicking the version
-//! string) and the Settings → General section.
+//! repo link. Reachable from the macOS menu bar (FerrisPass → About
+//! FerrisPass) and from the Welcome footer by clicking the version
+//! string. The `OpenAbout` action can be dispatched from anywhere so
+//! adding further entry points is trivial.
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,

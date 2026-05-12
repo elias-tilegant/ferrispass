@@ -1337,7 +1337,20 @@ impl AppShell {
         // Same Settings overlay as ⌘, but jumps directly to the Sync
         // tab. Reachable from the vault-header sync chip and ⌘⇧, so
         // users can land where they were going without a tab click.
-        self.settings_tab = SettingsTab::Sync;
+        //
+        // Gate: Sync makes no sense without a decrypted vault — fall
+        // back to General so the keybinding still opens *something*
+        // useful from the locked perspective rather than dropping the
+        // user onto a tab they can't act on.
+        let vault_open = matches!(
+            self.state.read(cx).vault_status(),
+            crate::app::VaultStatus::Open { .. }
+        );
+        self.settings_tab = if vault_open {
+            SettingsTab::Sync
+        } else {
+            SettingsTab::General
+        };
         self.state
             .update(cx, |state, cx| state.open_overlay(Overlay::Settings, cx));
     }
@@ -2087,6 +2100,13 @@ impl AppShell {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        // If Settings was sitting on the Sync tab when the user locked,
+        // bounce them back to General — the sidebar will mark Sync
+        // disabled while locked, but the active-tab state should
+        // already match what's allowed.
+        if matches!(self.settings_tab, SettingsTab::Sync) {
+            self.settings_tab = SettingsTab::General;
+        }
         // Same secret-wipe as auto-lock: drop reveal, cancel pending
         // clipboard timer, flush clipboard if it still holds our copy.
         self.wipe_session_secrets(cx);

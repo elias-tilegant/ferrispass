@@ -25,9 +25,25 @@ const CLIPBOARD_CLEAR_PRESETS: &[Option<u64>] = &[Some(5), Some(10), Some(30), N
 const LAUNCH_CLEANUP_PRESETS: &[u32] = &[10, 30, 60];
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
+    // Cloud sync only makes sense once a vault is decrypted — we don't
+    // have document state to sync against otherwise, and exposing the
+    // OneDrive picker before unlock would invite users to authorise an
+    // account they then can't actually attach to anything. Sidebar
+    // renders Sync as disabled, and if the user somehow lands on the
+    // Sync tab (e.g. auto-lock while Settings is open) we silently
+    // fall back to the General body.
+    let vault_unlocked = matches!(
+        shell.state().read(cx).vault_status(),
+        VaultStatus::Open { .. }
+    );
     let active = shell.settings_tab();
+    let effective = if matches!(active, SettingsTab::Sync) && !vault_unlocked {
+        SettingsTab::General
+    } else {
+        active
+    };
 
-    let (title, subtitle, body) = match active {
+    let (title, subtitle, body) = match effective {
         SettingsTab::General => (
             "General",
             "Timeouts and behaviour for the running app. Apply immediately and save on disk.",
@@ -49,20 +65,26 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     h_flex()
         .size_full()
         .bg(cx.theme().background)
-        .child(sidebar(active, cx))
+        .child(sidebar(effective, vault_unlocked, cx))
         .child(content_panel(title, subtitle, body, cx))
         .into_any_element()
 }
 
 // --------------- chrome ---------------
 
-fn sidebar(active: SettingsTab, cx: &mut Context<AppShell>) -> AnyElement {
+fn sidebar(active: SettingsTab, vault_unlocked: bool, cx: &mut Context<AppShell>) -> AnyElement {
     // (icon, label, this-tab, enabled). Disabled stubs preserve the
     // visual roadmap from the original mock; they're not clickable.
+    // Sync is gated on `vault_unlocked` — see `render` for the rationale.
     let items: &[(AppIcon, &str, Option<SettingsTab>, bool)] = &[
         (AppIcon::Key, "General", Some(SettingsTab::General), true),
         (AppIcon::Shield, "Security", None, false),
-        (AppIcon::Cloud, "Sync", Some(SettingsTab::Sync), true),
+        (
+            AppIcon::Cloud,
+            "Sync",
+            Some(SettingsTab::Sync),
+            vault_unlocked,
+        ),
         (
             AppIcon::Sync,
             "Auto-type",
