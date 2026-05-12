@@ -6,7 +6,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use cargo_packager_updater::{check_update, Config};
+use cargo_packager_updater::{Config, check_update};
 use semver::Version;
 
 use super::info::{UpdateError, UpdateInfo};
@@ -40,7 +40,7 @@ pub fn check() -> Result<Option<UpdateInfo>, UpdateError> {
 ///
 /// `on_progress(downloaded, total)` fires periodically during download.
 /// `total` is `None` when the server didn't report `Content-Length`.
-pub fn install<F>(on_progress: F) -> Result<(), UpdateError>
+pub fn install<F>(on_progress: F) -> Result<UpdateInfo, UpdateError>
 where
     F: Fn(usize, Option<u64>) + Send + 'static,
 {
@@ -51,11 +51,17 @@ where
         .map_err(map_err)?
         .ok_or_else(|| UpdateError::Network("no update available at install time".into()))?;
 
+    let info = UpdateInfo {
+        version: update.version.clone(),
+        notes: update.body.clone().unwrap_or_default(),
+        pub_date: update.date.map(|d| d.to_string()),
+    };
+
     update
         .download_and_install_extended(on_progress, || {})
         .map_err(map_err)?;
 
-    Ok(())
+    Ok(info)
 }
 
 // ---------- internals ----------
@@ -97,10 +103,7 @@ fn map_err(e: cargo_packager_updater::Error) -> UpdateError {
     let msg = e.to_string();
     let lower = msg.to_lowercase();
 
-    if lower.contains("base64")
-        || lower.contains("invalid symbol")
-        || lower.contains("decode")
-    {
+    if lower.contains("base64") || lower.contains("invalid symbol") || lower.contains("decode") {
         UpdateError::Parse(msg)
     } else if lower.contains("signature") || lower.contains("pubkey") || lower.contains("verify") {
         UpdateError::SignatureInvalid
@@ -110,10 +113,7 @@ fn map_err(e: cargo_packager_updater::Error) -> UpdateError {
         || lower.contains("permission")
     {
         UpdateError::Install(msg)
-    } else if lower.contains("parse")
-        || lower.contains("json")
-        || lower.contains("deserialize")
-    {
+    } else if lower.contains("parse") || lower.contains("json") || lower.contains("deserialize") {
         UpdateError::Parse(msg)
     } else {
         UpdateError::Network(msg)

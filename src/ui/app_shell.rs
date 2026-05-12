@@ -3,10 +3,10 @@ use crate::{
         AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
-            DeleteEntry, DownloadFavicons, EditEntry, FocusSearch, LaunchEntry, LockVault,
-            NewEntry, OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings, OpenVault,
-            OpenVaultSwitcher, PerformAutoType, PerformAutoTypeForSelected, SaveVault,
-            SubmitPassword, SyncNow, ToggleTheme,
+            DeleteEntry, DownloadFavicons, EditEntry, FocusSearch, InstallUpdate, LaunchEntry,
+            LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings,
+            OpenVault, OpenVaultSwitcher, OpenWhatsNew, PerformAutoType,
+            PerformAutoTypeForSelected, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
         },
     },
     autotype,
@@ -273,8 +273,8 @@ impl AppShell {
         // canonical settings value from disk.
         let seq_seed = crate::app::settings::load().auto_type_sequence;
         let auto_type_sequence_input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx)
-                .placeholder("{USERNAME}{TAB}{PASSWORD}{ENTER}");
+            let mut state =
+                InputState::new(window, cx).placeholder("{USERNAME}{TAB}{PASSWORD}{ENTER}");
             state.set_value(&seq_seed, window, cx);
             state
         });
@@ -528,8 +528,8 @@ impl AppShell {
         // Validate the sequence regardless of `enabled` so the Settings
         // UI can show a parse error even when the user is editing a
         // disabled-but-being-set-up feature. Cheap: pure string work.
-        self.auto_type_sequence_error = autotype::sequence::parse(&self.settings.auto_type_sequence)
-            .err();
+        self.auto_type_sequence_error =
+            autotype::sequence::parse(&self.settings.auto_type_sequence).err();
 
         let want_listener = self.settings.auto_type_enabled;
         let current_combo = self
@@ -542,10 +542,7 @@ impl AppShell {
 
         // No-op shortcut: feature on, combo unchanged, listener already
         // registered. Saves the OS round-trip on every settings save.
-        if want_listener
-            && self.auto_type_listener.is_some()
-            && current_combo == target_id
-        {
+        if want_listener && self.auto_type_listener.is_some() && current_combo == target_id {
             self.auto_type_hotkey_error = None;
             return;
         }
@@ -835,11 +832,7 @@ impl AppShell {
     /// what to type. Skips any row whose key already exists in the
     /// editor — clicking the button twice is idempotent rather than
     /// producing duplicate rows.
-    pub fn add_sap_connection_template(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn add_sap_connection_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for (key, value_placeholder) in crate::launch::sap::QUICK_ADD_KEYS {
             // Idempotency: don't stack multiple SAP_HOST rows on
             // repeat clicks. Match against any existing row regardless
@@ -1282,10 +1275,7 @@ impl AppShell {
                 window.push_notification(format!("No matching entry for \"{title}\"."), cx);
             }
             Outcome::NoPassword => {
-                window.push_notification(
-                    "The matched entry has no password set.",
-                    cx,
-                );
+                window.push_notification("The matched entry has no password set.", cx);
             }
             Outcome::BadSequence(error) => {
                 // Cache for the Settings tab and surface inline so the
@@ -1335,6 +1325,24 @@ impl AppShell {
         self.settings_tab = SettingsTab::Sync;
         self.state
             .update(cx, |state, cx| state.open_overlay(Overlay::Settings, cx));
+    }
+
+    fn on_action_install_update(
+        &mut self,
+        _: &InstallUpdate,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.install_update(cx));
+    }
+
+    fn on_action_open_whats_new(
+        &mut self,
+        _: &OpenWhatsNew,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.open_whats_new(cx));
     }
 
     fn on_action_sync_now(&mut self, _: &SyncNow, window: &mut Window, cx: &mut Context<Self>) {
@@ -1944,8 +1952,7 @@ impl AppShell {
             // for the Recently-Used filter. URL copies don't — the
             // user might just be sharing a link, not authenticating.
             if matches!(kind, CopyValueKind::Password | CopyValueKind::Username) {
-                self.state
-                    .update(cx, |state, _| state.mark_selected_used());
+                self.state.update(cx, |state, _| state.mark_selected_used());
             }
             self.copy_with_auto_clear(value, copy_value_label(kind), window, cx);
         } else {
@@ -1973,8 +1980,7 @@ impl AppShell {
         // Mark the entry as recently-used too — copying a custom
         // field counts as authenticating with the entry, same rule
         // as for password / username copies.
-        self.state
-            .update(cx, |state, _| state.mark_selected_used());
+        self.state.update(cx, |state, _| state.mark_selected_used());
         self.copy_with_auto_clear(value, key, window, cx);
     }
 
@@ -2024,8 +2030,7 @@ impl AppShell {
                 // Treat a launch the same as a copy for the recently-
                 // used filter — the user just authenticated with this
                 // entry, even if no clipboard touch happened.
-                self.state
-                    .update(cx, |state, _| state.mark_selected_used());
+                self.state.update(cx, |state, _| state.mark_selected_used());
             }
             Err(LaunchError::NoPassword) => {
                 window.push_notification("No password set on this entry.", cx);
@@ -2046,9 +2051,8 @@ impl AppShell {
     /// payload unlinked. Each launch gets its own timer so multiple
     /// rapid launches don't share a deadline.
     fn schedule_launch_cleanup(&mut self, cx: &mut Context<Self>) {
-        let ttl = std::time::Duration::from_secs(
-            self.settings.launch_cleanup_secs_clamped() as u64,
-        );
+        let ttl =
+            std::time::Duration::from_secs(self.settings.launch_cleanup_secs_clamped() as u64);
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ttl).await;
             let _ = this.update(cx, |this, _| {
@@ -2226,6 +2230,9 @@ impl AppShell {
         // Settings is a global overlay — accessible regardless of
         // whether a vault is open (matches the Mac ⌘, convention of
         // Preferences always being reachable).
+        if matches!(overlay, Overlay::WhatsNew { .. }) {
+            return crate::ui::screens::whats_new::render(self, cx);
+        }
         if matches!(overlay, Overlay::Settings) {
             return crate::ui::screens::settings::render(self, cx);
         }
@@ -2334,6 +2341,8 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_open_connect))
             .on_action(cx.listener(Self::on_action_open_settings))
             .on_action(cx.listener(Self::on_action_open_sync_settings))
+            .on_action(cx.listener(Self::on_action_install_update))
+            .on_action(cx.listener(Self::on_action_open_whats_new))
             .on_action(cx.listener(Self::on_action_sync_now))
             .on_action(cx.listener(Self::on_action_download_favicons))
             .on_action(cx.listener(Self::on_action_new_entry))

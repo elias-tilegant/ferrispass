@@ -6,9 +6,10 @@
 //! into this `Clone + Send + Sync` struct so it can live inside `AppState`
 //! enum variants and survive the round-trip through GPUI subscriptions.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateInfo {
     /// Semver string of the upstream release (e.g. `"0.2.1"`).
     pub version: String,

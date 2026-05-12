@@ -5,7 +5,7 @@ use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, Vaul
 use crate::sync::auth::{AccessToken, DeviceCodeChallenge};
 use crate::sync::config::SyncConfig;
 use crate::sync::graph::DriveItemHit;
-use crate::update::UpdateStatus;
+use crate::update::{UpdateInfo, UpdateStatus};
 use chrono::{DateTime, Local};
 use gpui::{AppContext as _, Context};
 use keepass::db::Database;
@@ -43,6 +43,10 @@ pub struct AppState {
     /// Checking → Available → Downloading → ReadyToRestart on the happy path.
     /// Drives the welcome banner + the Settings → Updates row.
     update_status: UpdateStatus,
+    /// Release notes for the currently-running version, loaded from the
+    /// post-update handoff file. Used by Settings → "View What's New" even
+    /// after the one-shot startup overlay has been dismissed.
+    whats_new_info: Option<UpdateInfo>,
     /// Already-unlocked vaults that aren't the active one. Lets the user
     /// switch back without re-entering the master password. Populated by
     /// `park_active` whenever the active vault is bumped off-screen (⌘O
@@ -310,6 +314,9 @@ pub enum Overlay {
     /// Universal like `Settings`: reachable from any vault state, including
     /// Welcome and Unlock screens.
     VaultSwitcher,
+    /// Release notes for the version that was just installed. Universal like
+    /// Settings so it can appear on first launch before any vault is open.
+    WhatsNew { info: UpdateInfo },
 }
 
 impl Overlay {
@@ -396,9 +403,20 @@ impl AppState {
             })
             .unwrap_or_default();
 
+        let pending_whats_new = crate::update::load_whats_new_for_version(crate::app::APP_VERSION);
+        let whats_new_info = pending_whats_new
+            .as_ref()
+            .map(|pending| pending.info.clone());
+        let overlay = pending_whats_new
+            .filter(|pending| !pending.auto_shown)
+            .map(|pending| Overlay::WhatsNew { info: pending.info })
+            .unwrap_or_default();
+
         Self {
             vault: initial_vault,
+            overlay,
             recents: recents.entries,
+            whats_new_info,
             ..Self::default()
         }
     }
@@ -444,9 +462,13 @@ impl AppState {
             return false;
         }
         let leaving_connect = matches!(self.overlay, Overlay::Connect);
+        let leaving_whats_new = matches!(self.overlay, Overlay::WhatsNew { .. });
         self.overlay = Overlay::None;
         if leaving_connect {
             self.unwind_connect_flow();
+        }
+        if leaving_whats_new {
+            let _ = crate::update::mark_whats_new_auto_shown(crate::app::APP_VERSION);
         }
         cx.notify();
         true
@@ -650,12 +672,7 @@ impl AppState {
     /// vault — parked-vault status changes don't have an on-screen view
     /// to redraw. Drops the result silently if the vault was locked
     /// outright while the save was in flight.
-    fn apply_save_status(
-        &mut self,
-        target: &Path,
-        status: SaveStatus,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_save_status(&mut self, target: &Path, status: SaveStatus, cx: &mut Context<Self>) {
         if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
             self.save_status = status;
             cx.notify();
@@ -666,12 +683,7 @@ impl AppState {
 
     /// Mirror of `apply_save_status` for the cloud-sync lifecycle. Notifies
     /// only when the active vault was touched.
-    fn apply_sync_status(
-        &mut self,
-        target: &Path,
-        status: SyncStatus,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_sync_status(&mut self, target: &Path, status: SyncStatus, cx: &mut Context<Self>) {
         if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
             self.sync_status = status;
             cx.notify();
@@ -684,11 +696,7 @@ impl AppState {
     /// Used by sync callbacks to write back a refreshed access token /
     /// updated ETag against the vault that actually issued the upload,
     /// even after the user has switched away.
-    fn with_sync_binding_mut_for(
-        &mut self,
-        target: &Path,
-        f: impl FnOnce(&mut SyncBinding),
-    ) {
+    fn with_sync_binding_mut_for(&mut self, target: &Path, f: impl FnOnce(&mut SyncBinding)) {
         if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
             if let Some(b) = self.sync.as_mut() {
                 f(b);
@@ -942,6 +950,17 @@ impl AppState {
         &self.update_status
     }
 
+    pub fn whats_new_info(&self) -> Option<&UpdateInfo> {
+        self.whats_new_info.as_ref()
+    }
+
+    pub fn open_whats_new(&mut self, cx: &mut Context<Self>) {
+        let Some(info) = self.whats_new_info.clone() else {
+            return;
+        };
+        self.open_overlay(Overlay::WhatsNew { info }, cx);
+    }
+
     /// Kick off a background update check. No-op when one is already in
     /// flight or a download is running. Transitions:
     ///
@@ -953,7 +972,9 @@ impl AppState {
     pub fn start_update_check(&mut self, cx: &mut Context<Self>) {
         if matches!(
             self.update_status,
-            UpdateStatus::Checking | UpdateStatus::Downloading { .. }
+            UpdateStatus::Checking
+                | UpdateStatus::Downloading { .. }
+                | UpdateStatus::ReadyToRestart(_)
         ) {
             return;
         }
@@ -986,7 +1007,13 @@ impl AppState {
         if matches!(self.update_status, UpdateStatus::Downloading { .. }) {
             return;
         }
-        self.update_status = UpdateStatus::Downloading { progress: 0.0 };
+        let UpdateStatus::Available(info) = self.update_status.clone() else {
+            return;
+        };
+        self.update_status = UpdateStatus::Downloading {
+            info,
+            progress: 0.0,
+        };
         cx.notify();
 
         let task = cx.background_spawn(async move {
@@ -1000,7 +1027,11 @@ impl AppState {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
                 state.update_status = match result {
-                    Ok(()) => UpdateStatus::ReadyToRestart,
+                    Ok(info) => {
+                        let _ = crate::update::save_pending_whats_new(&info);
+                        state.whats_new_info = Some(info.clone());
+                        UpdateStatus::ReadyToRestart(info)
+                    }
                     Err(e) => UpdateStatus::Failed(e.to_string()),
                 };
                 cx.notify();
@@ -1266,9 +1297,7 @@ impl AppState {
                 // makes it to SharePoint.
                 if succeeded
                     && sync_after
-                    && state
-                        .snapshot_sync_inputs(&target_for_callback)
-                        .is_some()
+                    && state.snapshot_sync_inputs(&target_for_callback).is_some()
                 {
                     state.sync_now_for_path(&target_for_callback, cx);
                 }
@@ -1495,7 +1524,8 @@ impl AppState {
 
             mutate(document)?;
 
-            let entries = entries_for_selection(document.snapshot(), selection, search_query, last_used);
+            let entries =
+                entries_for_selection(document.snapshot(), selection, search_query, last_used);
             if selected_entry_id.as_deref() == Some(entry_id) {
                 *selected_entry_id = entries.first().map(|e| e.id.clone());
                 *selected_strength = selected_entry_id
@@ -1649,7 +1679,8 @@ impl AppState {
         }
 
         *search_query = query;
-        let entries = entries_for_selection(document.snapshot(), selection, search_query, last_used);
+        let entries =
+            entries_for_selection(document.snapshot(), selection, search_query, last_used);
         let selected_entry_is_visible = selected_entry_id
             .as_deref()
             .is_some_and(|id| entries.iter().any(|entry| entry.id == id));
@@ -2465,8 +2496,7 @@ impl AppState {
             // working without losing the merge.
             let task_config = config.clone();
             let network_task = cx.background_spawn(async move {
-                let token =
-                    crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
+                let token = crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
                 let bytes = crate::sync::service::read_local(&network_path)?;
                 let outcome = crate::sync::graph::upload_content(
                     &task_config.drive_id,
@@ -2522,11 +2552,7 @@ impl AppState {
                     }
                 }
                 Err(e) => {
-                    state.apply_sync_status(
-                        &callback_path,
-                        SyncStatus::Failed(e.to_string()),
-                        cx,
-                    );
+                    state.apply_sync_status(&callback_path, SyncStatus::Failed(e.to_string()), cx);
                 }
             });
         })
@@ -2575,11 +2601,7 @@ fn entries_for_selection(
                 .filter(|entry| last_used.contains_key(&entry.id))
                 .cloned()
                 .collect();
-            entries.sort_by(|a, b| {
-                last_used
-                    .get(&b.id)
-                    .cmp(&last_used.get(&a.id))
-            });
+            entries.sort_by(|a, b| last_used.get(&b.id).cmp(&last_used.get(&a.id)));
             entries
         }
         LibrarySelection::Trash => snapshot
@@ -2637,9 +2659,10 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
         // string by the sidebar pill. Keeping them separate stops the
         // pill from overflowing in narrow sidebars and lets the badge
         // be styled independently.
-        SyncStatus::Synced { at, .. } => {
-            Some(crate::app::time::relative_time_label_short(*at, Local::now()))
-        }
+        SyncStatus::Synced { at, .. } => Some(crate::app::time::relative_time_label_short(
+            *at,
+            Local::now(),
+        )),
         SyncStatus::Conflict(_) => Some("Conflict".into()),
         SyncStatus::Failed(_) => Some("Sync failed".into()),
         SyncStatus::Reconnect => Some("Sign-in expired".into()),

@@ -32,10 +32,15 @@
 
 mod client;
 mod info;
+mod notes;
 mod status;
 
 pub use client::{check, install};
 pub use info::{UpdateError, UpdateInfo};
+pub use notes::{PendingWhatsNew, load_for_version as load_whats_new_for_version};
+pub use notes::{
+    mark_auto_shown as mark_whats_new_auto_shown, save_pending as save_pending_whats_new,
+};
 pub use status::UpdateStatus;
 
 /// URL of the JSON manifest the updater fetches. The `/latest/download/...`

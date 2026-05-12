@@ -11,7 +11,9 @@ use gpui_component::{
 
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
-    actions::{LockVault, NewEntry, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SyncNow},
+    actions::{
+        LockVault, NewEntry, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SyncNow,
+    },
 };
 use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
 use crate::ui::app_shell::AppShell;
@@ -21,11 +23,13 @@ use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, section_heading, sta
 use crate::ui::widgets::brand::brand;
 use crate::ui::widgets::entry_chrome::favicon;
 use crate::ui::widgets::password::strength_card;
+use crate::ui::widgets::update_chip;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let state = shell.state().read(cx);
     let summary = state.summary();
     let save_status = state.save_status().clone();
+    let update_status = state.update_status().clone();
     let vault_status = state.vault_status();
     let is_busy = matches!(vault_status, VaultStatus::Opening { .. });
     let is_open = matches!(vault_status, VaultStatus::Open { .. });
@@ -49,8 +53,17 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         cx,
     )
     .into_any_element();
-    let workspace_el =
-        workspace(&summary, save_status, browser, shell, cx, is_busy, is_open).into_any_element();
+    let workspace_el = workspace(
+        &summary,
+        save_status,
+        &update_status,
+        browser,
+        shell,
+        cx,
+        is_busy,
+        is_open,
+    )
+    .into_any_element();
 
     h_flex()
         .size_full()
@@ -656,13 +669,14 @@ fn nav_pill_icon(icon: AppIcon, icon_image: Option<&FaviconImage>, icon_color: H
 fn workspace(
     summary: &VaultSummary,
     save_status: SaveStatus,
+    update_status: &crate::update::UpdateStatus,
     browser: Option<VaultBrowserModel>,
     shell: &AppShell,
     cx: &mut Context<AppShell>,
     is_busy: bool,
     is_open: bool,
 ) -> impl gpui::IntoElement {
-    let toolbar = workspace_toolbar(summary, shell, is_open, cx).into_any_element();
+    let toolbar = workspace_toolbar(summary, update_status, shell, is_open, cx).into_any_element();
 
     let content: AnyElement = if let Some(browser) = browser {
         vault_split(browser, shell, cx).into_any_element()
@@ -687,6 +701,7 @@ fn workspace(
 
 fn workspace_toolbar(
     _summary: &VaultSummary,
+    update_status: &crate::update::UpdateStatus,
     shell: &AppShell,
     is_open: bool,
     cx: &mut Context<AppShell>,
@@ -724,6 +739,7 @@ fn workspace_toolbar(
                 })),
         )
         .child(div().flex_1())
+        .children(update_chip(update_status, cx))
         .child(
             div()
                 .w(px(280.))
@@ -1826,11 +1842,11 @@ fn entry_detail_body(
             .border_t_1()
             .border_color(palette::border())
             .when_some(launcher, |this, l| {
-                this.child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .child(launch_action_button(l.label(), AppIcon::Cloud, cx)),
-                )
+                this.child(h_flex().flex_shrink_0().child(launch_action_button(
+                    l.label(),
+                    AppIcon::Cloud,
+                    cx,
+                )))
             })
             .child(action_row)
             .into_any_element()
@@ -1854,10 +1870,7 @@ fn entry_detail_body(
 ///
 /// Hidden when the entry has no custom fields (the caller gates the
 /// whole section behind `.when(!entry.custom_fields.is_empty(), …)`).
-fn custom_fields_section(
-    entry: &VaultEntry,
-    cx: &mut Context<AppShell>,
-) -> impl gpui::IntoElement {
+fn custom_fields_section(entry: &VaultEntry, cx: &mut Context<AppShell>) -> impl gpui::IntoElement {
     let mut col = v_flex().gap_1().child(label("Additional fields"));
     for (idx, cf) in entry.custom_fields.iter().enumerate() {
         let key_label: SharedString = cf.key.clone().into();
@@ -1872,41 +1885,39 @@ fn custom_fields_section(
         let field_key = cf.key.clone();
         let copyable = !cf.value.is_empty();
         let row_id = SharedString::from(format!("detail-cf-{idx}"));
-        let mut row = div()
-            .id(row_id)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .h(px(34.))
-                    .px_3()
-                    .rounded(px(6.))
-                    .bg(palette::panel())
-                    .border_1()
-                    .border_color(palette::border())
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(palette::text_muted())
-                            .min_w(px(110.))
-                            .child(key_label),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_xs()
-                            .text_color(if copyable {
-                                palette::text()
-                            } else {
-                                palette::text_faint()
-                            })
-                            .font_family("JetBrains Mono")
-                            .child(display),
-                    ),
-            );
+        let mut row = div().id(row_id).child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .h(px(34.))
+                .px_3()
+                .rounded(px(6.))
+                .bg(palette::panel())
+                .border_1()
+                .border_color(palette::border())
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(palette::text_muted())
+                        .min_w(px(110.))
+                        .child(key_label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(if copyable {
+                            palette::text()
+                        } else {
+                            palette::text_faint()
+                        })
+                        .font_family("JetBrains Mono")
+                        .child(display),
+                ),
+        );
         if copyable {
             row = row.on_click(cx.listener(
                 move |shell: &mut AppShell, _: &ClickEvent, window, cx| {

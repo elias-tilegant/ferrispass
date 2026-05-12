@@ -17,6 +17,9 @@ actions!(
         OpenConnect,
         OpenSettings,
         OpenSyncSettings,
+        InstallUpdate,
+        RestartToUpdate,
+        OpenWhatsNew,
         SyncNow,
         DownloadFavicons,
         NewEntry,
@@ -62,6 +65,11 @@ pub fn init(cx: &mut App) {
         // between sessions.
         crate::launch::sweeper::purge_all();
         cx.quit();
+    });
+
+    cx.on_action(|_: &RestartToUpdate, cx: &mut App| {
+        crate::launch::sweeper::purge_all();
+        cx.restart();
     });
 
     cx.bind_keys([

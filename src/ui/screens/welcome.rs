@@ -12,6 +12,7 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::brand::brand;
+use crate::ui::widgets::update_chip;
 use crate::update::UpdateStatus;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
@@ -134,51 +135,18 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 }
 
 fn update_banner(status: &UpdateStatus, cx: &mut Context<AppShell>) -> AnyElement {
-    let (label, action_label, clickable) = match status {
-        UpdateStatus::Available(info) => (
-            SharedString::from(format!("Update available: FerrisPass {}", info.version)),
-            Some(SharedString::from("Install")),
-            true,
-        ),
-        UpdateStatus::Downloading { .. } => (
-            "Downloading update…".into(),
-            None,
-            false,
-        ),
-        UpdateStatus::ReadyToRestart => (
-            "Update installed. Restart FerrisPass to apply.".into(),
-            None,
-            false,
-        ),
+    let label = match status {
+        UpdateStatus::Available(info) => {
+            SharedString::from(format!("FerrisPass {} is available.", info.version))
+        }
+        UpdateStatus::Downloading { .. } => "Downloading update...".into(),
+        UpdateStatus::ReadyToRestart(_) => "Update installed. Restart FerrisPass to apply.".into(),
         // Other variants don't pass `has_visible_update`, but match
         // exhaustively so a future variant can't sneak through silently.
         UpdateStatus::Idle | UpdateStatus::Checking | UpdateStatus::Failed(_) => {
             return div().into_any_element();
         }
     };
-
-    let action_button = action_label.map(|label| {
-        div()
-            .id("welcome-update-install")
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.85))
-            .h(px(28.))
-            .px(px(12.))
-            .rounded(px(6.))
-            .bg(palette::blue())
-            .text_color(palette::panel())
-            .text_xs()
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(label)
-            .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                shell.state().clone().update(cx, |state, cx| {
-                    state.install_update(cx);
-                });
-            }))
-    });
 
     let row = h_flex()
         .gap_3()
@@ -198,14 +166,7 @@ fn update_banner(status: &UpdateStatus, cx: &mut Context<AppShell>) -> AnyElemen
                 .child(label),
         );
 
-    let row = if let Some(button) = action_button {
-        row.child(button)
-    } else {
-        row
-    };
-
-    let _ = clickable;
-    row.into_any_element()
+    row.children(update_chip(status, cx)).into_any_element()
 }
 
 fn choice_row<F>(

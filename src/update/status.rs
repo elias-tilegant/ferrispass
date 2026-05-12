@@ -22,10 +22,10 @@ pub enum UpdateStatus {
     Available(UpdateInfo),
     /// Download in progress after the user clicked Install. `progress` is
     /// 0.0..=1.0 if the underlying API reports it; otherwise stays at 0.0.
-    Downloading { progress: f32 },
+    Downloading { info: UpdateInfo, progress: f32 },
     /// New version is in place on disk; the running process needs to
     /// restart for it to take effect. UI prompts "Restart now".
-    ReadyToRestart,
+    ReadyToRestart(UpdateInfo),
     /// Last attempt failed. The string is a human-readable reason; the
     /// flow drops back to `Idle` on the next user-initiated check.
     Failed(String),
@@ -36,7 +36,9 @@ impl UpdateStatus {
     pub fn has_visible_update(&self) -> bool {
         matches!(
             self,
-            UpdateStatus::Available(_) | UpdateStatus::Downloading { .. } | UpdateStatus::ReadyToRestart
+            UpdateStatus::Available(_)
+                | UpdateStatus::Downloading { .. }
+                | UpdateStatus::ReadyToRestart(_)
         )
     }
 }

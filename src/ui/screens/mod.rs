@@ -7,3 +7,4 @@ pub mod unlock;
 pub mod vault;
 pub mod vault_switcher;
 pub mod welcome;
+pub mod whats_new;

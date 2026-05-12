@@ -5,12 +5,12 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder,
-    px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder, px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
-use crate::app::actions::DownloadFavicons;
+use crate::app::actions::{DownloadFavicons, InstallUpdate, OpenWhatsNew, RestartToUpdate};
 use crate::app::{AppSettings, FaviconDownloadStatus, VaultStatus};
 use crate::ui::app_shell::{AppShell, SettingsTab};
 use crate::ui::icons::AppIcon;
@@ -243,6 +243,7 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
     let state = shell.state().read(cx);
     let favicon_status = state.favicon_status().clone();
     let update_status = state.update_status().clone();
+    let whats_new_available = state.whats_new_info().is_some();
     let vault_open = matches!(state.vault_status(), VaultStatus::Open { .. });
     v_flex()
         .gap_6()
@@ -250,7 +251,12 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
         .child(clipboard_section(&settings, cx))
         .child(launch_cleanup_section(&settings, cx))
         .child(favicon_section(&favicon_status, vault_open, cx))
-        .child(updates_section(&settings, &update_status, cx))
+        .child(updates_section(
+            &settings,
+            &update_status,
+            whats_new_available,
+            cx,
+        ))
 }
 
 fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
@@ -316,10 +322,7 @@ fn clipboard_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl
 /// shape of the clipboard picker — three preset chips, the selected
 /// one highlighted. Range is clamped on read in `AppSettings` so a
 /// hand-edited settings file can't push the timer outside 10..=60 s.
-fn launch_cleanup_section(
-    settings: &AppSettings,
-    cx: &mut Context<AppShell>,
-) -> impl IntoElement {
+fn launch_cleanup_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
     let current = settings.launch_cleanup_secs_clamped();
     let mut row = h_flex().gap_2().flex_wrap();
     for (idx, preset) in LAUNCH_CLEANUP_PRESETS.iter().enumerate() {
@@ -451,7 +454,10 @@ const AUTO_TYPE_HOTKEY_PRESETS: &[(&str, &str)] = &[
 const AUTO_TYPE_SEQUENCE_PRESETS: &[(&str, &str)] = &[
     ("Default", "{USERNAME}{TAB}{PASSWORD}{ENTER}"),
     ("Username only", "{USERNAME}{ENTER}"),
-    ("With 250 ms delay", "{USERNAME}{TAB}{DELAY 250}{PASSWORD}{ENTER}"),
+    (
+        "With 250 ms delay",
+        "{USERNAME}{TAB}{DELAY 250}{PASSWORD}{ENTER}",
+    ),
     ("No Enter", "{USERNAME}{TAB}{PASSWORD}"),
 ];
 
@@ -467,7 +473,12 @@ fn auto_type_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl Into
         .gap_6()
         .child(auto_type_toggle_section(&settings, cx))
         .child(auto_type_hotkey_section(&settings, hotkey_err, cx))
-        .child(auto_type_sequence_section(shell, &settings, sequence_err, cx))
+        .child(auto_type_sequence_section(
+            shell,
+            &settings,
+            sequence_err,
+            cx,
+        ))
         .child(auto_type_permission_section(trusted, cx))
 }
 
@@ -601,12 +612,7 @@ fn auto_type_sequence_section(
         .child(presets_row)
         .child(editor)
         .when_some(error, |col, err| {
-            col.child(
-                div()
-                    .text_xs()
-                    .text_color(palette::red())
-                    .child(err),
-            )
+            col.child(div().text_xs().text_color(palette::red()).child(err))
         });
 
     section_frame(
@@ -617,10 +623,7 @@ fn auto_type_sequence_section(
     )
 }
 
-fn auto_type_permission_section(
-    trusted: bool,
-    cx: &mut Context<AppShell>,
-) -> impl IntoElement {
+fn auto_type_permission_section(trusted: bool, cx: &mut Context<AppShell>) -> impl IntoElement {
     let (status_label, status_color) = if trusted {
         (
             SharedString::from("Granted — Auto-Type is ready to use."),
@@ -636,12 +639,7 @@ fn auto_type_permission_section(
     };
     let body = v_flex()
         .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .text_color(status_color)
-                .child(status_label),
-        )
+        .child(div().text_xs().text_color(status_color).child(status_label))
         .when(!trusted, |col| {
             col.child(h_flex().gap_2().child(preset_chip(
                 "auto-type-grant-access".into(),
@@ -672,6 +670,7 @@ fn auto_type_permission_section(
 fn updates_section(
     settings: &AppSettings,
     update_status: &UpdateStatus,
+    whats_new_available: bool,
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
     let auto_check = settings.auto_update_check_enabled;
@@ -686,7 +685,7 @@ fn updates_section(
             SharedString::from(format!("Update available: FerrisPass {}", info.version))
         }
         UpdateStatus::Downloading { .. } => "Downloading update…".into(),
-        UpdateStatus::ReadyToRestart => "Update installed. Restart FerrisPass to apply.".into(),
+        UpdateStatus::ReadyToRestart(_) => "Update installed. Restart FerrisPass to apply.".into(),
         UpdateStatus::Failed(msg) => SharedString::from(format!("Update check failed: {msg}")),
     };
 
@@ -736,20 +735,25 @@ fn updates_section(
         }),
     );
 
-    // Action chip mirrors the welcome banner so users can install without
-    // closing their vault. Only present when there's something actionable
-    // (`Available` → Install, `ReadyToRestart` → no chip, status line
-    // already prompts for restart).
     let action_chip: Option<AnyElement> = match update_status {
         UpdateStatus::Available(_) => Some(
             preset_chip(
                 "auto-update-install".into(),
                 "Install update".into(),
                 true,
-                cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                    shell.state().clone().update(cx, |state, cx| {
-                        state.install_update(cx);
-                    });
+                cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(InstallUpdate), cx);
+                }),
+            )
+            .into_any_element(),
+        ),
+        UpdateStatus::ReadyToRestart(_) => Some(
+            preset_chip(
+                "auto-update-restart".into(),
+                "Restart to Update".into(),
+                true,
+                cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(RestartToUpdate), cx);
                 }),
             )
             .into_any_element(),
@@ -757,21 +761,30 @@ fn updates_section(
         _ => None,
     };
 
+    let whats_new_chip = whats_new_available.then(|| {
+        preset_chip(
+            "auto-update-whats-new".into(),
+            "View What's New".into(),
+            false,
+            cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(OpenWhatsNew), cx);
+            }),
+        )
+        .into_any_element()
+    });
+
     let action_row = h_flex()
         .gap_2()
         .child(check_now)
-        .when_some(action_chip, |row, chip| row.child(chip));
+        .when_some(action_chip, |row, chip| row.child(chip))
+        .when_some(whats_new_chip, |row, chip| row.child(chip));
 
-    let body = v_flex()
-        .gap_3()
-        .child(toggle_row)
-        .child(action_row)
-        .child(
-            div()
-                .text_xs()
-                .text_color(palette::text_muted())
-                .child(status_label),
-        );
+    let body = v_flex().gap_3().child(toggle_row).child(action_row).child(
+        div()
+            .text_xs()
+            .text_color(palette::text_muted())
+            .child(status_label),
+    );
 
     section_frame(
         "Updates",
