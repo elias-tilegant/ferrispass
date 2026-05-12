@@ -345,10 +345,7 @@ mod tests {
         );
 
         entry.custom_fields.push(cf(KEY_INSTANCE, "3200"));
-        assert!(
-            SAP_GUI_MAC.supports(&entry),
-            "host + instance → supported"
-        );
+        assert!(SAP_GUI_MAC.supports(&entry), "host + instance → supported");
     }
 
     /// Whitespace-only fields don't count as set — the editor leaves

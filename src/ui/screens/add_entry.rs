@@ -394,20 +394,18 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let rows = shell.new_entry_custom_fields();
 
-    let mut col = v_flex()
-        .gap_2()
-        .child(
-            h_flex()
-                .gap_1()
-                .items_baseline()
-                .child(label("Additional fields"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(palette::text_faint())
-                        .child("(SAP_CONN, SAP_USER, SAP_LANG, …)"),
-                ),
-        );
+    let mut col = v_flex().gap_2().child(
+        h_flex()
+            .gap_1()
+            .items_baseline()
+            .child(label("Additional fields"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette::text_faint())
+                    .child("(SAP_CONN, SAP_USER, SAP_LANG, …)"),
+            ),
+    );
 
     for row in rows {
         let id_for_remove = row.id;
@@ -422,18 +420,8 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
             h_flex()
                 .gap_2()
                 .items_center()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(Input::new(&key_input)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(Input::new(&value_input)),
-                )
+                .child(div().flex_1().min_w(px(0.)).child(Input::new(&key_input)))
+                .child(div().flex_1().min_w(px(0.)).child(Input::new(&value_input)))
                 .child(
                     // Lock toggle: clicking flips the `protected` flag.
                     // When set, the value is stored via `set_protected`
@@ -526,11 +514,11 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                     .items_center()
                     .justify_center()
                     .child("+ Add field")
-                    .on_click(cx.listener(
-                        |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    .on_click(
+                        cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                             shell.add_custom_field_row(window, cx);
-                        },
-                    )),
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -548,11 +536,11 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                     .items_center()
                     .justify_center()
                     .child("+ Add SAP connection")
-                    .on_click(cx.listener(
-                        |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    .on_click(
+                        cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                             shell.add_sap_connection_template(window, cx);
-                        },
-                    )),
+                        }),
+                    ),
             ),
     )
     .into_any_element()

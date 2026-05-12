@@ -1024,7 +1024,9 @@ mod tests {
         let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
         let root_id = doc.database.root().id().to_string();
 
-        let err = doc.delete_group(&root_id).expect_err("root cannot be deleted");
+        let err = doc
+            .delete_group(&root_id)
+            .expect_err("root cannot be deleted");
         assert!(matches!(err, MutationError::CannotDeleteRoot));
     }
 
@@ -1450,8 +1452,8 @@ mod tests {
         // broken if we'd written `set_unprotected` for the protected
         // value, since kdbx stores them in different XML positions.)
         doc.save_payload().save_to(&path).expect("save");
-        let reopened = crate::keepass::KeePassRepository::open(&path, "vault-pw", None)
-            .expect("reopen");
+        let reopened =
+            crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("reopen");
         let after = &reopened
             .snapshot()
             .find_entry(&id)
@@ -1531,7 +1533,11 @@ mod tests {
             "/H/new.host/S/3200"
         );
         assert!(
-            fields.iter().find(|f| f.key == "API_TOKEN").unwrap().protected,
+            fields
+                .iter()
+                .find(|f| f.key == "API_TOKEN")
+                .unwrap()
+                .protected,
             "newly-added protected row must serialize as protected"
         );
         assert!(

@@ -4,10 +4,10 @@ use crate::{
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
             DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch, InstallUpdate,
-            LaunchEntry, LockVault, NewEntry, NewGroup, NewSubgroup, OpenConflictDemo,
-            OpenConnect, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher,
-            OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected, RenameGroupOp, SaveVault,
-            SubmitPassword, SyncNow, ToggleTheme,
+            LaunchEntry, LockVault, NewEntry, NewGroup, NewSubgroup, OpenConflictDemo, OpenConnect,
+            OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, OpenWhatsNew,
+            PerformAutoType, PerformAutoTypeForSelected, RenameGroupOp, SaveVault, SubmitPassword,
+            SyncNow, ToggleTheme,
         },
     },
     autotype,
@@ -336,11 +336,7 @@ impl AppShell {
                 window,
                 Self::on_auto_type_sequence_input_event,
             ),
-            cx.subscribe_in(
-                &new_group_name_input,
-                window,
-                Self::on_new_group_name_event,
-            ),
+            cx.subscribe_in(&new_group_name_input, window, Self::on_new_group_name_event),
             // Re-render on slider drag so the "Length: N" label and the
             // strength preview update live alongside the thumb.
             cx.observe(&gen_length_state, |_shell: &mut AppShell, _, cx| {
@@ -1496,7 +1492,11 @@ impl AppShell {
             .state
             .read(cx)
             .vault_browser()
-            .and_then(|b| b.snapshot.find_group(&action.group_id).map(|g| g.name.clone()))
+            .and_then(|b| {
+                b.snapshot
+                    .find_group(&action.group_id)
+                    .map(|g| g.name.clone())
+            })
             .unwrap_or_default();
         self.new_group_name_input
             .update(cx, |s, cx| s.set_value(&current_name, window, cx));
@@ -1556,8 +1556,9 @@ impl AppShell {
         let state = self.state.clone();
         match overlay {
             Overlay::AddGroup { parent_group_id } => {
-                let result =
-                    state.update(cx, |state, cx| state.create_group(&parent_group_id, &trimmed, cx));
+                let result = state.update(cx, |state, cx| {
+                    state.create_group(&parent_group_id, &trimmed, cx)
+                });
                 match result {
                     Ok(_) => {
                         self.state

@@ -406,11 +406,9 @@ fn groups_section(
                             gpui_component::Icon::from(gpui_component::IconName::Plus)
                                 .with_size(gpui_component::Size::Size(px(12.))),
                         )
-                        .on_click(cx.listener(
-                            |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                                window.dispatch_action(Box::new(NewGroup), cx);
-                            },
-                        )),
+                        .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                            window.dispatch_action(Box::new(NewGroup), cx);
+                        })),
                 ),
         ),
     );

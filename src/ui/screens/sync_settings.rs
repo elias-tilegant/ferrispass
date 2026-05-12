@@ -69,7 +69,11 @@ fn render_connected(
                 // merge module auto-resolves those). "merged" covers both
                 // cases — "pulled in N new entries" was misleading after
                 // last-write-wins landed.
-                let noun = if *auto_merged == 1 { "entry" } else { "entries" };
+                let noun = if *auto_merged == 1 {
+                    "entry"
+                } else {
+                    "entries"
+                };
                 format!("{base} · merged {auto_merged} {noun} from remote")
             } else {
                 base

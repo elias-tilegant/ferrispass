@@ -18,10 +18,7 @@
 
 use std::str::FromStr;
 
-use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-    hotkey::HotKey,
-};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -71,8 +68,7 @@ impl HotkeyListener {
     /// `AppShell::new`, which is itself main-threaded.
     pub fn register(combo: &str) -> Result<Self, HotkeyError> {
         let hotkey = parse_combo(combo)?;
-        let manager = GlobalHotKeyManager::new()
-            .map_err(|e| HotkeyError::Init(e.to_string()))?;
+        let manager = GlobalHotKeyManager::new().map_err(|e| HotkeyError::Init(e.to_string()))?;
         manager
             .register(hotkey)
             .map_err(|e| HotkeyError::Register(e.to_string()))?;

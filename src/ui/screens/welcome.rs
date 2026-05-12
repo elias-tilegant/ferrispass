@@ -168,17 +168,21 @@ fn recents_section(recents: &[RecentEntry], cx: &mut Context<AppShell>) -> impl 
         .child(
             v_flex()
                 .gap_1()
-                .children(recents.iter().take(RECENTS_LIMIT).enumerate().map(
-                    |(idx, entry)| {
-                        let path_for_listener = entry.path.clone();
-                        let on_click = cx.listener(
-                            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                                shell.open_recent(path_for_listener.clone(), window, cx);
-                            },
-                        );
-                        recent_row(idx, entry, now, on_click).into_any_element()
-                    },
-                )),
+                .children(
+                    recents
+                        .iter()
+                        .take(RECENTS_LIMIT)
+                        .enumerate()
+                        .map(|(idx, entry)| {
+                            let path_for_listener = entry.path.clone();
+                            let on_click = cx.listener(
+                                move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                                    shell.open_recent(path_for_listener.clone(), window, cx);
+                                },
+                            );
+                            recent_row(idx, entry, now, on_click).into_any_element()
+                        }),
+                ),
         )
 }
 

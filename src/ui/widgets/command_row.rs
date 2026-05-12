@@ -70,7 +70,8 @@ where
                     if is_primary {
                         s.border_color(palette::blue())
                     } else {
-                        s.bg(palette::sidebar()).border_color(palette::border_strong())
+                        s.bg(palette::sidebar())
+                            .border_color(palette::border_strong())
                     }
                 })
                 .child(

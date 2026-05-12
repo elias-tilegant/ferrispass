@@ -162,13 +162,7 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
     };
 
     let tokens = sequence::parse(input.sequence_template).map_err(Outcome::BadSequence)?;
-    let ops = sequence::render(
-        &tokens,
-        &RenderContext {
-            username,
-            password,
-        },
-    );
+    let ops = sequence::render(&tokens, &RenderContext { username, password });
 
     Ok(TypePlan {
         entry_title,

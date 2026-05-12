@@ -45,8 +45,8 @@ pub const DEFAULT_INTER_OP_MS: u64 = 25;
 /// app has time to process — typing a 16-char password in 16 ms is
 /// faster than the keyboard buffer of most browsers.
 pub fn perform(ops: &[TypeOp], inter_op: Duration) -> Result<(), TyperError> {
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| TyperError::Init(e.to_string()))?;
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| TyperError::Init(e.to_string()))?;
 
     for (idx, op) in ops.iter().enumerate() {
         if idx > 0 {

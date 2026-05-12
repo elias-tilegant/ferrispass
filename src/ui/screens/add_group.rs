@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gpui_component::{Sizable as _, h_flex, input::Input, v_flex};
 
@@ -114,9 +114,11 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::panel()),
         )
         .child("Save")
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-            shell.submit_group_form(window, cx);
-        }));
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.submit_group_form(window, cx);
+            }),
+        );
 
     v_flex()
         .w(px(380.))

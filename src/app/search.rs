@@ -94,14 +94,8 @@ impl Field {
     }
 }
 
-pub(crate) fn ranked_entries<'a>(
-    snapshot: &'a VaultSnapshot,
-    query: &str,
-) -> Vec<&'a VaultEntry> {
-    let tokens: Vec<String> = query
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .collect();
+pub(crate) fn ranked_entries<'a>(snapshot: &'a VaultSnapshot, query: &str) -> Vec<&'a VaultEntry> {
+    let tokens: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     if tokens.is_empty() {
         return Vec::new();
     }
@@ -328,12 +322,7 @@ fn levenshtein_within(a: &str, b: &str, max: usize) -> Option<usize> {
 /// That's the robust filter against scattered-subsequence noise — it
 /// argues geometrically about the match's compactness instead of relying
 /// on score thresholds that drift between nucleo versions.
-fn fuzzy_score(
-    token: &str,
-    haystack: &str,
-    matcher: &mut Matcher,
-    needle_len: usize,
-) -> u32 {
+fn fuzzy_score(token: &str, haystack: &str, matcher: &mut Matcher, needle_len: usize) -> u32 {
     let mut needle_buf: Vec<char> = Vec::new();
     let mut hay_buf: Vec<char> = Vec::new();
     let needle = Utf32Str::new(token, &mut needle_buf);

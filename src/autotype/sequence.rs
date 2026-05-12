@@ -300,7 +300,10 @@ mod tests {
     fn unbalanced_brace_is_rejected() {
         // Lenient parsing here (typing the `{` as literal) would silently
         // mask user typos — strict surfaces the mistake.
-        assert_eq!(parse("oops {USERNAME").unwrap_err(), ParseError::UnbalancedBrace);
+        assert_eq!(
+            parse("oops {USERNAME").unwrap_err(),
+            ParseError::UnbalancedBrace
+        );
     }
 
     #[test]
@@ -319,7 +322,10 @@ mod tests {
         // the cap at parse time so the Settings UI can show it before
         // anything reaches the typer.
         let err = parse(&format!("{{DELAY {}}}", MAX_DELAY_MS + 1)).unwrap_err();
-        assert_eq!(err, ParseError::DelayTooLarge(MAX_DELAY_MS + 1, MAX_DELAY_MS));
+        assert_eq!(
+            err,
+            ParseError::DelayTooLarge(MAX_DELAY_MS + 1, MAX_DELAY_MS)
+        );
         // Boundary: exactly the cap is fine.
         assert_eq!(
             parse(&format!("{{DELAY {}}}", MAX_DELAY_MS)).unwrap(),
@@ -334,10 +340,7 @@ mod tests {
         let tokens = parse("{{user}} = {USERNAME}").unwrap();
         assert_eq!(
             tokens,
-            vec![
-                Token::Literal("{user} = ".into()),
-                Token::Username,
-            ],
+            vec![Token::Literal("{user} = ".into()), Token::Username,],
         );
     }
 
