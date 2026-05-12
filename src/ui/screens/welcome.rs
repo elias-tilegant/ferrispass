@@ -1,11 +1,12 @@
 use gpui::{
-    AnyElement, App, ClickEvent, Context, IntoElement, ParentElement as _, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use crate::app::RecentEntry;
-use crate::app::actions::{CreateVault, OpenConnect};
+use crate::app::actions::{CreateVault, OpenAbout, OpenConnect};
 use crate::app::time::relative_time_label;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
@@ -38,7 +39,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     this.child(recents_section(&recents, cx))
                 })
                 .child(actions_section(cx))
-                .child(footer()),
+                .child(footer(cx)),
         )
         .into_any_element()
 }
@@ -221,14 +222,23 @@ where
     )
 }
 
-fn footer() -> AnyElement {
+fn footer(cx: &mut Context<AppShell>) -> AnyElement {
     h_flex()
         .items_center()
         .justify_between()
         .pt_2()
         .text_xs()
         .text_color(palette::text_faint())
-        .child(format!("v{} · KDBX 4.1", crate::app::APP_VERSION))
+        .child(
+            div()
+                .id("welcome-about-trigger")
+                .cursor_pointer()
+                .hover(|s| s.text_color(palette::text_muted()))
+                .child(format!("v{} · KDBX 4.1", crate::app::APP_VERSION))
+                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(OpenAbout), cx);
+                })),
+        )
         .child(
             h_flex()
                 .gap_1()

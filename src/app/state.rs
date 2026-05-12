@@ -324,6 +324,9 @@ pub enum Overlay {
     /// Release notes for the version that was just installed. Universal like
     /// Settings so it can appear on first launch before any vault is open.
     WhatsNew { info: UpdateInfo },
+    /// "About FerrisPass" modal — version, tagline, repo link. Universal
+    /// like Settings so it's reachable from any vault state.
+    About,
 }
 
 impl Overlay {
@@ -966,6 +969,10 @@ impl AppState {
             return;
         };
         self.open_overlay(Overlay::WhatsNew { info }, cx);
+    }
+
+    pub fn open_about(&mut self, cx: &mut Context<Self>) {
+        self.open_overlay(Overlay::About, cx);
     }
 
     /// Kick off a background update check. No-op when one is already in

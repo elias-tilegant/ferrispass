@@ -1,3 +1,4 @@
+pub mod about;
 pub mod add_entry;
 pub mod add_group;
 pub mod conflict;

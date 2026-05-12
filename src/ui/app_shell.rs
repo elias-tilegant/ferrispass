@@ -5,7 +5,7 @@ use crate::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
             DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch, InstallUpdate,
             LaunchEntry, LockVault, NewEntry, NewGroup, NewSubgroup, OpenConflictDemo, OpenConnect,
-            OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, OpenWhatsNew,
+            OpenAbout, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, OpenWhatsNew,
             PerformAutoType, PerformAutoTypeForSelected, RenameGroupOp, SaveVault, SubmitPassword,
             SyncNow, ToggleTheme,
         },
@@ -1360,6 +1360,15 @@ impl AppShell {
         self.state.update(cx, |state, cx| state.open_whats_new(cx));
     }
 
+    fn on_action_open_about(
+        &mut self,
+        _: &OpenAbout,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.open_about(cx));
+    }
+
     fn on_action_sync_now(&mut self, _: &SyncNow, window: &mut Window, cx: &mut Context<Self>) {
         use crate::app::SyncStatus;
 
@@ -2430,6 +2439,9 @@ impl AppShell {
         if matches!(overlay, Overlay::WhatsNew { .. }) {
             return Some(crate::ui::screens::whats_new::render(self, cx));
         }
+        if matches!(overlay, Overlay::About) {
+            return Some(crate::ui::screens::about::render(self, cx));
+        }
         None
     }
 
@@ -2504,6 +2516,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_open_sync_settings))
             .on_action(cx.listener(Self::on_action_install_update))
             .on_action(cx.listener(Self::on_action_open_whats_new))
+            .on_action(cx.listener(Self::on_action_open_about))
             .on_action(cx.listener(Self::on_action_sync_now))
             .on_action(cx.listener(Self::on_action_download_favicons))
             .on_action(cx.listener(Self::on_action_new_entry))

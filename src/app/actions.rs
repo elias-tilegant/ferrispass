@@ -1,4 +1,4 @@
-use gpui::{App, KeyBinding, actions};
+use gpui::{App, KeyBinding, Menu, MenuItem, actions};
 
 pub const APP_CONTEXT: &str = "FerrisPass";
 
@@ -20,6 +20,7 @@ actions!(
         InstallUpdate,
         RestartToUpdate,
         OpenWhatsNew,
+        OpenAbout,
         SyncNow,
         DownloadFavicons,
         NewEntry,
@@ -134,5 +135,47 @@ pub fn init(cx: &mut App) {
         // No context filter — cmd-q should always quit, even if focus is in
         // some weird state (e.g. inside a modal or before the shell is wired).
         KeyBinding::new("cmd-q", Quit, None),
+    ]);
+
+    install_app_menus(cx);
+}
+
+/// Register the application-level menu bar. On macOS this populates the
+/// standard `FerrisPass` menu shown next to the Apple logo (About,
+/// Preferences, Quit, …). On Linux and Windows the GPUI platform layer
+/// treats `set_menus` as a no-op, so calling it unconditionally is safe
+/// and the same action dispatches still work — the items are simply not
+/// rendered in a system menu bar.
+fn install_app_menus(cx: &mut App) {
+    cx.set_menus([
+        Menu::new("FerrisPass").items([
+            MenuItem::action("About FerrisPass", OpenAbout),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Lock Vault", LockVault),
+            MenuItem::separator(),
+            MenuItem::action("Quit FerrisPass", Quit),
+        ]),
+        Menu::new("File").items([
+            MenuItem::action("New Vault…", CreateVault),
+            MenuItem::action("Open Vault…", OpenVaultSwitcher),
+            MenuItem::separator(),
+            MenuItem::action("Save Vault", SaveVault),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::action("New Entry", NewEntry),
+            MenuItem::action("Edit Entry", EditEntry),
+            MenuItem::action("Delete Entry", DeleteEntry),
+            MenuItem::separator(),
+            MenuItem::action("Copy Username", CopyUsername),
+            MenuItem::action("Copy Password", CopyPassword),
+            MenuItem::action("Copy URL", CopyUrl),
+        ]),
+        Menu::new("View").items([
+            MenuItem::action("Find in Vault", FocusSearch),
+            MenuItem::action("Toggle Theme", ToggleTheme),
+        ]),
+        Menu::new("Help").items([MenuItem::action("What's New", OpenWhatsNew)]),
     ]);
 }
