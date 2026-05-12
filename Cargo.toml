@@ -76,6 +76,10 @@ enigo = "0.6"
 active-win-pos-rs = "0.10"
 macos-accessibility-client = "0.0"
 
+# Local fuzzy search ranker for the entry list. Pure in-memory, no index on
+# disk — keeps with the rule that no plaintext vault metadata may be persisted.
+nucleo-matcher = "0.3"
+
 [dev-dependencies]
 tempfile = "3"
 

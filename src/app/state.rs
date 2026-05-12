@@ -2540,13 +2540,11 @@ fn entries_for_selection(
     search_query: &str,
     last_used: &HashMap<String, DateTime<Local>>,
 ) -> Vec<VaultEntry> {
-    let query = search_query.trim().to_lowercase();
+    let query = search_query.trim();
 
     if !query.is_empty() {
-        return snapshot
-            .entries_recursive()
+        return super::search::ranked_entries(snapshot, query)
             .into_iter()
-            .filter(|entry| entry_matches_query(entry, &query))
             .cloned()
             .collect();
     }
@@ -2612,16 +2610,6 @@ fn selection_label_for(selection: &LibrarySelection, snapshot: &VaultSnapshot) -
         LibrarySelection::Tag(name) => format!("Tag · {name}"),
         LibrarySelection::TotpEnabled => "2FA enabled".to_string(),
     }
-}
-
-fn entry_matches_query(entry: &VaultEntry, query: &str) -> bool {
-    entry.title.to_lowercase().contains(query)
-        || entry.username.to_lowercase().contains(query)
-        || entry.url.to_lowercase().contains(query)
-        || entry
-            .tags
-            .iter()
-            .any(|tag| tag.to_lowercase().contains(query))
 }
 
 fn non_empty_copy(value: String) -> Option<String> {

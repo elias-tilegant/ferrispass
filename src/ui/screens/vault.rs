@@ -1021,45 +1021,55 @@ fn entry_list(
     // Rc<Vec<VaultEntry>> rather than cloning each entry — keeps per-frame allocation
     // proportional to the number of rows, not the size of each entry's strings.
     let mut rows: Vec<ListRow> = Vec::with_capacity(total + 2);
-    let mut starred_count = 0;
-    let mut rest_count = 0;
-    for entry in entries.iter() {
-        if entry.starred {
-            starred_count += 1;
-        } else {
-            rest_count += 1;
-        }
-    }
 
-    if starred_count > 0 {
-        rows.push(ListRow::Header {
-            label: "Pinned",
-            count: starred_count,
-        });
-        rows.extend(
-            entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.starred)
-                .map(|(ix, _)| ListRow::Entry(ix)),
-        );
-    }
-    if rest_count > 0 {
-        rows.push(ListRow::Header {
-            label: if showing_search {
-                "Results"
+    if showing_search {
+        // During search the list is already sorted by relevance — splitting
+        // out pinned entries first would scramble that order and bury the
+        // best match below an unrelated starred entry.
+        if total > 0 {
+            rows.push(ListRow::Header {
+                label: "Results",
+                count: total,
+            });
+            rows.extend((0..total).map(ListRow::Entry));
+        }
+    } else {
+        let mut starred_count = 0;
+        let mut rest_count = 0;
+        for entry in entries.iter() {
+            if entry.starred {
+                starred_count += 1;
             } else {
-                "All entries"
-            },
-            count: rest_count,
-        });
-        rows.extend(
-            entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| !e.starred)
-                .map(|(ix, _)| ListRow::Entry(ix)),
-        );
+                rest_count += 1;
+            }
+        }
+
+        if starred_count > 0 {
+            rows.push(ListRow::Header {
+                label: "Pinned",
+                count: starred_count,
+            });
+            rows.extend(
+                entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.starred)
+                    .map(|(ix, _)| ListRow::Entry(ix)),
+            );
+        }
+        if rest_count > 0 {
+            rows.push(ListRow::Header {
+                label: "All entries",
+                count: rest_count,
+            });
+            rows.extend(
+                entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| !e.starred)
+                    .map(|(ix, _)| ListRow::Entry(ix)),
+            );
+        }
     }
 
     let item_sizes: std::rc::Rc<Vec<gpui::Size<gpui::Pixels>>> = std::rc::Rc::new(

@@ -2,6 +2,7 @@ pub mod actions;
 pub mod assets;
 
 mod recents;
+mod search;
 pub mod settings;
 mod state;
 pub(crate) mod time;
