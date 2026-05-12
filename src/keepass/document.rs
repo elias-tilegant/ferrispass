@@ -378,6 +378,99 @@ impl VaultDocument {
         Ok(())
     }
 
+    /// Create a new group under `parent_id_str` and return its stringified id.
+    /// Trims the name and rejects empty values up front so we don't end up
+    /// with anonymous rows in the sidebar. Caller is expected to schedule a
+    /// background save afterwards.
+    pub fn create_group(
+        &mut self,
+        parent_id_str: &str,
+        name: &str,
+    ) -> Result<String, MutationError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(MutationError::GroupNameEmpty);
+        }
+        let parent_id =
+            find_group_id(&self.database, parent_id_str).ok_or(MutationError::GroupNotFound)?;
+        let mut parent = self
+            .database
+            .group_mut(parent_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        let mut new_group = parent.add_group();
+        new_group.name = name.to_string();
+        new_group.times.last_modification = Some(keepass::db::Times::now());
+        let id = new_group.id().to_string();
+        drop(new_group);
+        drop(parent);
+        self.refresh_snapshot();
+        Ok(id)
+    }
+
+    /// Rename an existing group. Empty names are rejected (would leave a
+    /// blank row in the sidebar). Bumps `last_modification` so other
+    /// KeePass clients see the change on the next sync.
+    pub fn rename_group(
+        &mut self,
+        group_id_str: &str,
+        new_name: &str,
+    ) -> Result<(), MutationError> {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(MutationError::GroupNameEmpty);
+        }
+        let group_id =
+            find_group_id(&self.database, group_id_str).ok_or(MutationError::GroupNotFound)?;
+        let mut group = self
+            .database
+            .group_mut(group_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        group.name = new_name.to_string();
+        group.times.last_modification = Some(keepass::db::Times::now());
+        drop(group);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
+    /// Soft-delete a group: move the entire subtree to the Recycle Bin.
+    /// Mirrors `delete_entry`'s contract — reversible via the Trash view.
+    /// Refuses to delete the root, the Recycle Bin itself, or any group
+    /// whose subtree contains the Recycle Bin (the latter only happens
+    /// when another client moved RB under a sub-group; `move_to` would
+    /// otherwise return `WouldCreateCycle` which we surface as a clearer
+    /// error message).
+    pub fn delete_group(&mut self, group_id_str: &str) -> Result<(), MutationError> {
+        let root_id = self.database.root().id();
+        if root_id.to_string() == group_id_str {
+            return Err(MutationError::CannotDeleteRoot);
+        }
+        if let Some(rb) = self.database.recycle_bin() {
+            if rb.id().to_string() == group_id_str {
+                return Err(MutationError::CannotDeleteRecycleBin);
+            }
+        }
+        let group_id =
+            find_group_id(&self.database, group_id_str).ok_or(MutationError::GroupNotFound)?;
+        if let Some(rb_id) = self.database.recycle_bin().map(|g| g.id())
+            && let Some(target) = self.database.root().group(group_id)
+            && subtree_contains(&target, rb_id)
+        {
+            return Err(MutationError::CannotDeleteRecycleBin);
+        }
+        let recycle_bin_id = self.ensure_recycle_bin();
+        let mut group = self
+            .database
+            .group_mut(group_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        group.move_to(recycle_bin_id).map_err(|e| match e {
+            keepass::db::MoveGroupError::CannotMoveRoot => MutationError::CannotDeleteRoot,
+            _ => MutationError::RecycleBinUnavailable,
+        })?;
+        drop(group);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
     /// Returns the recycle-bin group id, creating one under the root if the
     /// database doesn't already have one set in `meta.recyclebin_uuid`.
     fn ensure_recycle_bin(&mut self) -> keepass::db::GroupId {
@@ -491,6 +584,13 @@ where
     }
 }
 
+fn subtree_contains(root: &keepass::db::GroupRef<'_>, target: keepass::db::GroupId) -> bool {
+    if root.id() == target {
+        return true;
+    }
+    root.groups().any(|child| subtree_contains(&child, target))
+}
+
 fn set_or_clear_unprotected<E>(entry: &mut E, key: &str, value: &str)
 where
     E: std::ops::DerefMut<Target = keepass::db::Entry>,
@@ -510,6 +610,12 @@ pub enum MutationError {
     EntryNotFound,
     #[error("recycle bin is unavailable in this database")]
     RecycleBinUnavailable,
+    #[error("group name must not be empty")]
+    GroupNameEmpty,
+    #[error("the root group cannot be deleted")]
+    CannotDeleteRoot,
+    #[error("the Recycle Bin cannot be deleted")]
+    CannotDeleteRecycleBin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -831,6 +937,137 @@ mod tests {
                 .unwrap_or(false),
             "deleted entry is now in the recycle bin"
         );
+    }
+
+    #[test]
+    fn create_group_adds_under_parent() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        let id = doc
+            .create_group(&root_id, "  Work  ")
+            .expect("create_group");
+
+        let group = doc.snapshot().find_group(&id).expect("new group visible");
+        assert_eq!(group.name, "Work", "name is trimmed");
+        assert!(
+            doc.snapshot().root.groups.iter().any(|g| g.id == id),
+            "child of root"
+        );
+    }
+
+    #[test]
+    fn rename_group_updates_name() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let id = doc.create_group(&root_id, "Old").expect("create");
+
+        doc.rename_group(&id, " New ").expect("rename");
+
+        assert_eq!(doc.snapshot().find_group(&id).unwrap().name, "New");
+    }
+
+    #[test]
+    fn delete_group_moves_subtree_to_recycle_bin() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let parent = doc.create_group(&root_id, "Parent").expect("parent");
+        let child = doc.create_group(&parent, "Child").expect("child");
+        let entry_id = doc
+            .create_entry(
+                &child,
+                &EntryDraft {
+                    title: "Inside".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("entry");
+
+        doc.delete_group(&parent).expect("delete");
+
+        // The parent (and its subtree) should be reachable via the recycle bin.
+        let bin = doc.database.recycle_bin().expect("rb created");
+        let bin_id = bin.id().to_string();
+        let rb_group = doc.snapshot().find_group(&bin_id).expect("rb in snapshot");
+        let trashed_parent = rb_group
+            .groups
+            .iter()
+            .find(|g| g.id == parent)
+            .expect("parent under rb");
+        let trashed_child = trashed_parent
+            .groups
+            .iter()
+            .find(|g| g.id == child)
+            .expect("child still nested under parent");
+        assert!(
+            trashed_child.entries.iter().any(|e| e.id == entry_id),
+            "entry still inside child"
+        );
+
+        // And it must be gone from the visible (non-trash) tree.
+        assert!(
+            !doc.snapshot().root.groups.iter().any(|g| g.id == parent),
+            "parent removed from root"
+        );
+    }
+
+    #[test]
+    fn delete_root_rejected() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        let err = doc.delete_group(&root_id).expect_err("root cannot be deleted");
+        assert!(matches!(err, MutationError::CannotDeleteRoot));
+    }
+
+    #[test]
+    fn delete_recycle_bin_rejected() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        // Force the recycle bin into existence by deleting a throwaway entry.
+        let throwaway = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "tmp".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("entry");
+        doc.delete_entry(&throwaway).expect("trash entry");
+
+        let bin_id = doc.database.recycle_bin().unwrap().id().to_string();
+        let err = doc.delete_group(&bin_id).expect_err("rb cannot be deleted");
+        assert!(matches!(err, MutationError::CannotDeleteRecycleBin));
+    }
+
+    #[test]
+    fn empty_group_name_rejected() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+
+        assert!(matches!(
+            doc.create_group(&root_id, "   "),
+            Err(MutationError::GroupNameEmpty)
+        ));
+        let g = doc.create_group(&root_id, "Real").expect("create");
+        assert!(matches!(
+            doc.rename_group(&g, ""),
+            Err(MutationError::GroupNameEmpty)
+        ));
     }
 
     #[test]

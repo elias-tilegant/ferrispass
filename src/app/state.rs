@@ -308,6 +308,13 @@ pub enum Overlay {
     /// what to update; same modal layout as `AddEntry`, just a different
     /// header + save action.
     EditEntry { entry_id: String },
+    /// Add a new group under `parent_group_id`. When the parent is the
+    /// database root id the modal is presented as "New group"; otherwise
+    /// "New subgroup".
+    AddGroup { parent_group_id: String },
+    /// Rename an existing group. Carries the id so the Save handler
+    /// knows which document method to call.
+    RenameGroup { group_id: String },
     /// Three-way conflict resolution.
     Conflict,
     /// Quick vault picker — recents list + filter + "Browse other…" row.
@@ -1453,6 +1460,124 @@ impl AppState {
                 search_query,
                 last_used,
             ));
+        }
+        cx.notify();
+        self.save_async(cx);
+        Ok(())
+    }
+
+    /// Create a new group under `parent_id` and select it so the user
+    /// lands on the freshly-created (empty) group. Real content mutation
+    /// — uses the full `save_async` path so the change syncs to the
+    /// cloud, unlike the cosmetic `toggle_group_expanded`.
+    pub fn create_group(
+        &mut self,
+        parent_id: &str,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, MutationError> {
+        let new_id = {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                last_used,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::GroupNotFound);
+            };
+
+            let new_id = document.create_group(parent_id, name)?;
+            *selection = LibrarySelection::Group(new_id.clone());
+            search_query.clear();
+            *selected_entry_id = None;
+            *selected_strength = None;
+            let entries = entries_for_selection(document.snapshot(), selection, "", last_used);
+            *visible_entries = Rc::new(entries);
+            new_id
+        };
+        cx.notify();
+        self.save_async(cx);
+        Ok(new_id)
+    }
+
+    /// Rename an existing group. Refreshes `visible_entries` because
+    /// `EntryRow::group_path` carries the group names and would
+    /// otherwise render stale text in the entry list.
+    pub fn rename_group(
+        &mut self,
+        group_id: &str,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        {
+            let VaultStatus::Open {
+                document,
+                selection,
+                search_query,
+                visible_entries,
+                last_used,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::GroupNotFound);
+            };
+
+            document.rename_group(group_id, name)?;
+            *visible_entries = Rc::new(entries_for_selection(
+                document.snapshot(),
+                selection,
+                search_query,
+                last_used,
+            ));
+        }
+        cx.notify();
+        self.save_async(cx);
+        Ok(())
+    }
+
+    /// Soft-delete a group: hand off to `VaultDocument::delete_group`,
+    /// then if the deleted group was the active selection, snap back to
+    /// the root so the entry list isn't pointing at a now-orphaned id.
+    pub fn delete_group(
+        &mut self,
+        group_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                last_used,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::GroupNotFound);
+            };
+
+            document.delete_group(group_id)?;
+
+            let snapshot = document.snapshot();
+            if let LibrarySelection::Group(sel_id) = selection.clone()
+                && sel_id == group_id
+            {
+                *selection = LibrarySelection::Group(snapshot.root.id.clone());
+            }
+            search_query.clear();
+            let entries = entries_for_selection(snapshot, selection, "", last_used);
+            *selected_entry_id = entries.first().map(|e| e.id.clone());
+            *selected_strength = selected_entry_id
+                .as_deref()
+                .and_then(|id| document.strength_for_entry(id));
+            *visible_entries = Rc::new(entries);
         }
         cx.notify();
         self.save_async(cx);

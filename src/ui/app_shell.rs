@@ -3,10 +3,11 @@ use crate::{
         AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
-            DeleteEntry, DownloadFavicons, EditEntry, FocusSearch, InstallUpdate, LaunchEntry,
-            LockVault, NewEntry, OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings,
-            OpenVault, OpenVaultSwitcher, OpenWhatsNew, PerformAutoType,
-            PerformAutoTypeForSelected, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
+            DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch, InstallUpdate,
+            LaunchEntry, LockVault, NewEntry, NewGroup, NewSubgroup, OpenConflictDemo,
+            OpenConnect, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher,
+            OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected, RenameGroupOp, SaveVault,
+            SubmitPassword, SyncNow, ToggleTheme,
         },
     },
     autotype,
@@ -74,6 +75,12 @@ pub struct AppShell {
     new_entry_url_input: Entity<InputState>,
     new_entry_notes_input: Entity<InputState>,
     new_entry_otp_input: Entity<InputState>,
+    /// Single text input shared by the Add-group and Rename-group
+    /// overlays. Prefilled with the current name for Rename; cleared on
+    /// open for Add. Only one of those overlays is active at a time, so
+    /// reusing one input keeps `AppShell` from accumulating identical
+    /// fields.
+    new_group_name_input: Entity<InputState>,
     /// Live filter for the Connect overlay's "Pick a file" step. We
     /// subscribe to `Change` events and forward the value to AppState
     /// (which keeps the filtered list in `connect_flow.Picking.query`).
@@ -263,6 +270,8 @@ impl AppShell {
             cx.new(|cx| InputState::new(window, cx).placeholder("Notes (optional)"));
         let new_entry_otp_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("otpauth://… or base32 secret"));
+        let new_group_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let picker_query_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name or folder…"));
         let vault_switcher_input =
@@ -327,6 +336,11 @@ impl AppShell {
                 window,
                 Self::on_auto_type_sequence_input_event,
             ),
+            cx.subscribe_in(
+                &new_group_name_input,
+                window,
+                Self::on_new_group_name_event,
+            ),
             // Re-render on slider drag so the "Length: N" label and the
             // strength preview update live alongside the thumb.
             cx.observe(&gen_length_state, |_shell: &mut AppShell, _, cx| {
@@ -352,6 +366,7 @@ impl AppShell {
             new_entry_url_input,
             new_entry_notes_input,
             new_entry_otp_input,
+            new_group_name_input,
             picker_query_input,
             vault_switcher_input,
             auto_type_sequence_input,
@@ -719,6 +734,10 @@ impl AppShell {
 
     pub fn new_entry_otp_input(&self) -> &Entity<InputState> {
         &self.new_entry_otp_input
+    }
+
+    pub fn new_group_name_input(&self) -> &Entity<InputState> {
+        &self.new_group_name_input
     }
 
     pub fn picker_query_input(&self) -> &Entity<InputState> {
@@ -1444,6 +1463,142 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         self.delete_selected_entry(window, cx);
+    }
+
+    fn on_action_new_group(&mut self, _: &NewGroup, window: &mut Window, cx: &mut Context<Self>) {
+        let root_id = self
+            .state
+            .read(cx)
+            .vault_browser()
+            .map(|b| b.snapshot.root.id.clone());
+        let Some(root_id) = root_id else {
+            return;
+        };
+        self.begin_add_group(root_id, window, cx);
+    }
+
+    fn on_action_new_subgroup(
+        &mut self,
+        action: &NewSubgroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_add_group(action.parent_group_id.clone(), window, cx);
+    }
+
+    fn on_action_rename_group_op(
+        &mut self,
+        action: &RenameGroupOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current_name = self
+            .state
+            .read(cx)
+            .vault_browser()
+            .and_then(|b| b.snapshot.find_group(&action.group_id).map(|g| g.name.clone()))
+            .unwrap_or_default();
+        self.new_group_name_input
+            .update(cx, |s, cx| s.set_value(&current_name, window, cx));
+        let group_id = action.group_id.clone();
+        self.state.clone().update(cx, |state, cx| {
+            state.open_overlay(Overlay::RenameGroup { group_id }, cx)
+        });
+    }
+
+    fn on_action_delete_group(
+        &mut self,
+        action: &DeleteGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group_id = action.group_id.clone();
+        let result = self
+            .state
+            .clone()
+            .update(cx, |state, cx| state.delete_group(&group_id, cx));
+        match result {
+            Ok(()) => window.push_notification("Group moved to Trash.", cx),
+            Err(crate::keepass::MutationError::CannotDeleteRoot) => {
+                window.push_notification("The root group cannot be deleted.", cx)
+            }
+            Err(crate::keepass::MutationError::CannotDeleteRecycleBin) => {
+                window.push_notification("The Recycle Bin cannot be deleted.", cx)
+            }
+            Err(e) => window.push_notification(format!("Could not delete group: {e}"), cx),
+        }
+    }
+
+    fn begin_add_group(
+        &mut self,
+        parent_group_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_group_name_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.state.clone().update(cx, |state, cx| {
+            state.open_overlay(Overlay::AddGroup { parent_group_id }, cx)
+        });
+    }
+
+    /// Snapshot the group-form input and dispatch to the right
+    /// `AppState` mutation based on the active overlay variant. Toasts
+    /// on success/failure and closes the overlay on success.
+    pub fn submit_group_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.new_group_name_input.read(cx).value().to_string();
+        let trimmed = name.trim().to_string();
+        if trimmed.is_empty() {
+            window.push_notification("Group name is required.", cx);
+            return;
+        }
+        let overlay = self.state.read(cx).overlay().clone();
+        let state = self.state.clone();
+        match overlay {
+            Overlay::AddGroup { parent_group_id } => {
+                let result =
+                    state.update(cx, |state, cx| state.create_group(&parent_group_id, &trimmed, cx));
+                match result {
+                    Ok(_) => {
+                        self.state
+                            .clone()
+                            .update(cx, |state, cx| state.close_overlay(cx));
+                        window.push_notification("Group created.", cx);
+                    }
+                    Err(e) => {
+                        window.push_notification(format!("Could not create group: {e}"), cx);
+                    }
+                }
+            }
+            Overlay::RenameGroup { group_id } => {
+                let result =
+                    state.update(cx, |state, cx| state.rename_group(&group_id, &trimmed, cx));
+                match result {
+                    Ok(()) => {
+                        self.state
+                            .clone()
+                            .update(cx, |state, cx| state.close_overlay(cx));
+                        window.push_notification("Group renamed.", cx);
+                    }
+                    Err(e) => {
+                        window.push_notification(format!("Could not rename group: {e}"), cx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_new_group_name_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::PressEnter { .. }) {
+            self.submit_group_form(window, cx);
+        }
     }
 
     /// Move the currently-selected entry to the Recycle Bin. No confirmation
@@ -2259,6 +2414,9 @@ impl AppShell {
                     // tells the inner save handler which AppState method to call.
                     crate::ui::screens::add_entry::render(self, cx)
                 }
+                Overlay::AddGroup { .. } | Overlay::RenameGroup { .. } => {
+                    crate::ui::screens::add_group::render(self, cx)
+                }
                 _ => crate::ui::screens::vault::render(self, cx),
             },
             crate::app::VaultStatus::Error { .. } => crate::ui::screens::vault::render(self, cx),
@@ -2352,6 +2510,10 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_save_vault))
             .on_action(cx.listener(Self::on_action_edit_entry))
             .on_action(cx.listener(Self::on_action_delete_entry))
+            .on_action(cx.listener(Self::on_action_new_group))
+            .on_action(cx.listener(Self::on_action_new_subgroup))
+            .on_action(cx.listener(Self::on_action_rename_group_op))
+            .on_action(cx.listener(Self::on_action_delete_group))
             .on_action(cx.listener(Self::on_action_perform_auto_type))
             .on_action(cx.listener(Self::on_action_perform_auto_type_for_selected))
             .size_full()

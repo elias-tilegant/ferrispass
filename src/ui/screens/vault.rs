@@ -6,13 +6,15 @@ use gpui::{
 use gpui_component::{
     Sizable as _, h_flex,
     input::{Input, InputState},
+    menu::ContextMenuExt as _,
     v_flex,
 };
 
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{
-        LockVault, NewEntry, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, SyncNow,
+        DeleteGroup, LockVault, NewEntry, NewGroup, NewSubgroup, OpenSettings, OpenSyncSettings,
+        OpenVault, OpenVaultSwitcher, RenameGroupOp, SyncNow,
     },
 };
 use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
@@ -383,10 +385,35 @@ fn groups_section(
     ];
     let selected_group = selection.group_id().unwrap_or_default().to_string();
 
-    let mut col = v_flex()
-        .gap_0p5()
-        .pb_2()
-        .child(div().px_3p5().pb_1().child(section_heading("Groups")));
+    let mut col = v_flex().gap_0p5().pb_2().child(
+        div().px_3p5().pb_1().child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .child(section_heading("Groups"))
+                .child(
+                    div()
+                        .id("groups-add-btn")
+                        .w(px(20.))
+                        .h(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .text_color(palette::text_muted())
+                        .hover(|s| s.text_color(palette::text()).bg(palette::panel()))
+                        .child(
+                            gpui_component::Icon::from(gpui_component::IconName::Plus)
+                                .with_size(gpui_component::Size::Size(px(12.))),
+                        )
+                        .on_click(cx.listener(
+                            |_: &mut AppShell, _: &ClickEvent, window, cx| {
+                                window.dispatch_action(Box::new(NewGroup), cx);
+                            },
+                        )),
+                ),
+        ),
+    );
 
     for (i, (depth, group)) in flat.iter().enumerate() {
         let depth = *depth;
@@ -416,6 +443,7 @@ fn groups_section(
         // level lines up with the icon column and produces a readable
         // indent without eating the 220 px sidebar width even for
         // moderately deep trees (4–5 levels still fit).
+        let group_id_for_menu = group.id.clone();
         let chevron_id = gpui::SharedString::from(format!("group-chev-{}", group.id));
         let chevron = if has_children {
             div()
@@ -479,7 +507,25 @@ fn groups_section(
                             state.select_group(id, cx);
                         });
                     }),
-                ))),
+                )))
+                .context_menu(move |menu, _, _| {
+                    let gid = group_id_for_menu.clone();
+                    menu.menu(
+                        "New subgroup…",
+                        Box::new(NewSubgroup {
+                            parent_group_id: gid.clone(),
+                        }),
+                    )
+                    .separator()
+                    .menu(
+                        "Rename…",
+                        Box::new(RenameGroupOp {
+                            group_id: gid.clone(),
+                        }),
+                    )
+                    .separator()
+                    .menu("Delete", Box::new(DeleteGroup { group_id: gid }))
+                }),
         );
     }
     col

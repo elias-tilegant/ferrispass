@@ -53,6 +53,36 @@ actions!(
     ]
 );
 
+/// Open the "New group" modal targeting the database root. Dispatched by
+/// the `+` button next to the "Groups" section heading.
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = ferrispass, no_json)]
+pub struct NewGroup;
+
+/// Open the "New subgroup" modal targeting a specific parent group.
+/// Dispatched from the right-click context menu on a group row.
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = ferrispass, no_json)]
+pub struct NewSubgroup {
+    pub parent_group_id: String,
+}
+
+/// Open the "Rename group" modal for a specific group. Suffixed with `Op`
+/// to keep the action name out of the way of `Overlay::RenameGroup`.
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = ferrispass, no_json)]
+pub struct RenameGroupOp {
+    pub group_id: String,
+}
+
+/// Soft-delete a group: move the subtree to the Recycle Bin. Dispatched
+/// from the group row context menu.
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = ferrispass, no_json)]
+pub struct DeleteGroup {
+    pub group_id: String,
+}
+
 pub fn init(cx: &mut App) {
     // App-global Quit handler. Wired here (not on AppShell) so the action fires
     // independently of whatever view currently holds focus.

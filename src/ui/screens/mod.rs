@@ -1,4 +1,5 @@
 pub mod add_entry;
+pub mod add_group;
 pub mod conflict;
 pub mod connect;
 pub mod settings;
