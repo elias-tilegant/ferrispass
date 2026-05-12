@@ -1282,12 +1282,24 @@ impl AppShell {
                 window.push_notification("Unlock the vault first.", cx);
             }
             Outcome::NoMatch { window_title } => {
+                // Prefer the window title; fall back to the app name so
+                // the user at least sees what FerrisPass detected.
+                // Browsers/apps that don't expose a title via the
+                // Accessibility API would otherwise produce "No matching
+                // entry for """, which looks like a bug.
                 let title = if window_title.is_empty() {
                     foreground.window_title.clone()
                 } else {
                     window_title
                 };
-                window.push_notification(format!("No matching entry for \"{title}\"."), cx);
+                let message = if !title.is_empty() {
+                    format!("No matching entry for \"{title}\".")
+                } else if !foreground.app_name.is_empty() {
+                    format!("No matching entry for {}.", foreground.app_name)
+                } else {
+                    "No matching entry for the foreground window.".to_string()
+                };
+                window.push_notification(message, cx);
             }
             Outcome::NoPassword => {
                 window.push_notification("The matched entry has no password set.", cx);
