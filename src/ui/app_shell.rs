@@ -2391,13 +2391,6 @@ impl AppShell {
         if matches!(overlay, Overlay::Settings) {
             return crate::ui::screens::settings::render(self, cx);
         }
-        // Vault switcher is global too — ⌘O works on Welcome / Unlock /
-        // Open alike, so the user can always re-route to a different
-        // database.
-        if matches!(overlay, Overlay::VaultSwitcher) {
-            return crate::ui::screens::vault_switcher::render(self, cx);
-        }
-
         match vault_status {
             crate::app::VaultStatus::Empty if matches!(overlay, Overlay::Connect) => {
                 crate::ui::screens::connect::render(self, cx)
@@ -2431,6 +2424,14 @@ impl Focusable for AppShell {
 }
 
 impl AppShell {
+    fn render_modal_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let overlay = self.state.read(cx).overlay();
+        if matches!(overlay, Overlay::VaultSwitcher) {
+            return Some(crate::ui::screens::vault_switcher::render(self, cx));
+        }
+        None
+    }
+
     /// Tiny pill in the bottom-right corner that counts down the
     /// remaining seconds until the clipboard auto-clear fires. `None`
     /// when no clear is pending or the deadline has lapsed (the wipe
@@ -2472,6 +2473,7 @@ impl Render for AppShell {
         // gpui-component story-shell pattern.
         let notification_layer = Root::render_notification_layer(window, cx);
         let clipboard_pill = self.render_clipboard_pill();
+        let modal_overlay = self.render_modal_overlay(cx);
 
         div()
             .key_context(APP_CONTEXT)
@@ -2522,6 +2524,7 @@ impl Render for AppShell {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(body)
+            .children(modal_overlay)
             .children(clipboard_pill)
             .children(notification_layer)
     }

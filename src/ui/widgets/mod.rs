@@ -1,6 +1,7 @@
 pub mod atoms;
 pub mod brand;
 pub mod buttons;
+pub mod command_row;
 pub mod entry_chrome;
 pub mod password;
 pub mod provider_row;
@@ -11,6 +12,7 @@ pub mod update_chip;
 pub use atoms::*;
 pub use brand::*;
 pub use buttons::*;
+pub use command_row::*;
 pub use entry_chrome::*;
 pub use password::*;
 pub use provider_row::*;
