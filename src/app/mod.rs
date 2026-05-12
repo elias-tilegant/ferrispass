@@ -5,6 +5,7 @@ mod recents;
 mod search;
 pub mod settings;
 mod state;
+pub mod sync_history;
 pub(crate) mod time;
 
 pub use recents::{RecentEntry, RecentsError};
@@ -14,6 +15,7 @@ pub use state::{
     Overlay, SaveStatus, SyncBinding, SyncStatus, UnlockPrompt, VaultBrowserModel, VaultStatus,
     VaultSummary,
 };
+pub use sync_history::{SyncChangeKind, SyncHistoryEntry};
 
 use crate::ui::{AppShell, theme as ui_theme};
 use gpui::{

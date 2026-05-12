@@ -13,16 +13,20 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    prelude::FluentBuilder as _, px,
 };
-use gpui_component::{Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::{Sizable as _, WindowExt as _, h_flex, scroll::ScrollableElement as _, v_flex};
 
 use crate::app::actions::OpenConnect;
-use crate::app::{SyncBinding, SyncStatus};
+use crate::app::time::relative_time_label;
+use crate::app::{SyncBinding, SyncChangeKind, SyncHistoryEntry, SyncStatus};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip};
+
+const HISTORY_VISIBLE_LIMIT: usize = 12;
 
 /// Render the Sync tab body — content only, no chrome. The unified
 /// Settings overlay (`screens::settings`) wraps this with the sidebar
@@ -33,10 +37,11 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
     let snapshot = state_handle.read(cx);
     let binding = snapshot.sync_binding().cloned_for_render();
     let status = snapshot.sync_status().clone();
+    let history: Vec<SyncHistoryEntry> = snapshot.sync_history().to_vec();
 
     match (&binding, &status) {
         (_, SyncStatus::Reconnect) => render_reconnect(cx),
-        (Some(b), _) => render_connected(b, &status, cx),
+        (Some(b), _) => render_connected(b, &status, &history, cx),
         (None, _) => render_disconnected(cx),
     }
 }
@@ -46,6 +51,7 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
 fn render_connected(
     binding: &BindingSnapshot,
     status: &SyncStatus,
+    history: &[SyncHistoryEntry],
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     let provider_name = match binding.provider {
@@ -156,6 +162,128 @@ fn render_connected(
                         )
                         .child(sync_now_button(cx)),
                 ),
+        )
+        .when(!history.is_empty(), |this| this.child(history_section(history)))
+        .into_any_element()
+}
+
+fn history_section(history: &[SyncHistoryEntry]) -> AnyElement {
+    let total = history.len();
+    let now = chrono::Local::now();
+    // Most recent first — visually matches the "latest at the top" reading
+    // order users expect from activity logs.
+    let rows: Vec<AnyElement> = history
+        .iter()
+        .rev()
+        .take(HISTORY_VISIBLE_LIMIT)
+        .enumerate()
+        .map(|(idx, entry)| history_row(idx, entry, now))
+        .collect();
+    let header_meta: Option<SharedString> = if total > HISTORY_VISIBLE_LIMIT {
+        Some(format!("Showing {HISTORY_VISIBLE_LIMIT} of {total}").into())
+    } else if total > 0 {
+        Some(format!("{total} change{}", if total == 1 { "" } else { "s" }).into())
+    } else {
+        None
+    };
+
+    v_flex()
+        .gap_2()
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(palette::text_muted())
+                        .child("Recent activity"),
+                )
+                .when_some(header_meta, |this, meta| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(palette::text_faint())
+                            .child(meta),
+                    )
+                }),
+        )
+        .child(
+            v_flex()
+                .id("sync-history-list")
+                .gap_1()
+                .max_h(px(240.))
+                .overflow_y_scrollbar()
+                .pr_1()
+                .children(rows),
+        )
+        .into_any_element()
+}
+
+fn history_row(
+    idx: usize,
+    entry: &SyncHistoryEntry,
+    now: chrono::DateTime<chrono::Local>,
+) -> AnyElement {
+    let (dot_color, kind_label) = match entry.kind {
+        SyncChangeKind::AddedFromRemote => (palette::green(), "Added"),
+        SyncChangeKind::UpdatedFromRemote => (palette::blue(), "Updated"),
+        SyncChangeKind::ResolvedKeptRemote => (palette::orange(), "Resolved → remote"),
+        SyncChangeKind::ResolvedKeptLocal => (palette::text_faint(), "Resolved → local"),
+    };
+    let title: SharedString = if entry.entry_title.trim().is_empty() {
+        "(Untitled)".into()
+    } else {
+        entry.entry_title.clone().into()
+    };
+    let elapsed: SharedString = relative_time_label(entry.at, now).into();
+    // GPUI tracks hover state only on *stateful* (id'd) interactive
+    // elements — without the id the row repaints only when something
+    // else nudges the tree (e.g. a click), which surfaces as
+    // "hover only shows up after I click and is laggy".
+    let id: SharedString = format!("sync-history-row-{idx}").into();
+
+    h_flex()
+        .id(id)
+        .gap_2p5()
+        .items_center()
+        .h(px(28.))
+        .px_2()
+        .rounded(px(5.))
+        .hover(|s| s.bg(palette::sidebar()))
+        .child(
+            div()
+                .flex_shrink_0()
+                .size(px(6.))
+                .rounded_full()
+                .bg(dot_color),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(120.))
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(palette::text_muted())
+                .child(kind_label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_xs()
+                .text_color(palette::text())
+                .font_family("JetBrains Mono")
+                .child(title),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(palette::text_faint())
+                .child(elapsed),
         )
         .into_any_element()
 }

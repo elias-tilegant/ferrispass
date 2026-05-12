@@ -2,6 +2,7 @@ use crate::app::recents::{self, RecentEntry};
 use crate::domain::{VaultEntry, VaultSnapshot};
 use crate::keepass::merge::{ConflictReport, Side};
 use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
+use crate::app::sync_history::{self, SyncHistoryEntry};
 use crate::sync::auth::{AccessToken, DeviceCodeChallenge};
 use crate::sync::config::SyncConfig;
 use crate::sync::graph::DriveItemHit;
@@ -28,6 +29,13 @@ pub struct AppState {
     /// User-facing sync state. Drives the status pill, the SyncSettings card
     /// content, and whether the Conflict overlay opens.
     sync_status: SyncStatus,
+    /// Session-scoped log of entries that flowed in from remote (silent
+    /// merges + user-resolved conflicts). Surfaced as the "Recent
+    /// activity" list in Settings → Sync. Cleared on lock and on sync
+    /// disconnect; capped at `sync_history::MAX_SYNC_HISTORY`. Not
+    /// persisted — entry titles are sensitive, see the module-level
+    /// note on `app::sync_history` for the reasoning.
+    sync_history: Vec<SyncHistoryEntry>,
     /// Active during the multi-step Connect overlay (provider pick → URL →
     /// device code → download). `None` when overlay isn't Connect.
     connect_flow: Option<ConnectFlow>,
@@ -78,6 +86,10 @@ pub struct ParkedSession {
     pub save_status: SaveStatus,
     pub sync: Option<SyncBinding>,
     pub sync_status: SyncStatus,
+    /// Per-vault sync activity log. Mirrors `AppState::sync_history`
+    /// across park/unpark so each vault keeps the events that
+    /// happened while it was active.
+    pub sync_history: Vec<SyncHistoryEntry>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -632,6 +644,7 @@ impl AppState {
             save_status: std::mem::take(&mut self.save_status),
             sync: self.sync.take(),
             sync_status: std::mem::take(&mut self.sync_status),
+            sync_history: std::mem::take(&mut self.sync_history),
         };
         // Refresh order — if this vault was parked before (shouldn't be,
         // but defend), move it to the tail.
@@ -659,6 +672,7 @@ impl AppState {
             save_status,
             sync,
             sync_status,
+            sync_history,
         } = session;
         self.vault = VaultStatus::Open {
             path: path.to_path_buf(),
@@ -673,6 +687,7 @@ impl AppState {
         self.save_status = save_status;
         self.sync = sync;
         self.sync_status = sync_status;
+        self.sync_history = sync_history;
         true
     }
 
@@ -1117,11 +1132,37 @@ impl AppState {
         self.save_status = SaveStatus::Idle;
         self.sync = None;
         self.sync_status = SyncStatus::Disconnected;
+        // Clear with the rest of the session secrets — entry titles in
+        // the history would otherwise outlive the unlocked DB they came
+        // from, which contradicts the rest of the lock contract.
+        self.sync_history.clear();
         // Global auto-lock semantics: any parked vault gets wiped too so
         // a single idle timeout sweeps every decrypted session at once.
         self.parked.clear();
         self.parked_order.clear();
         cx.notify();
+    }
+
+    pub fn sync_history(&self) -> &[SyncHistoryEntry] {
+        &self.sync_history
+    }
+
+    /// Append already-computed history entries to whichever slot
+    /// (active vault or parked session) currently owns `target`. Mirrors
+    /// the routing done by `apply_sync_status` / `with_sync_binding_mut_for`
+    /// so a sync that completes after the user switched away still logs
+    /// against the vault it actually changed. Vaults that were locked
+    /// between dispatch and callback are dropped silently — there's no
+    /// active session to surface the history against.
+    fn append_sync_history_for(&mut self, target: &Path, entries: Vec<SyncHistoryEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
+            sync_history::append_capped(&mut self.sync_history, entries);
+        } else if let Some(parked) = self.parked.get_mut(target) {
+            sync_history::append_capped(&mut parked.sync_history, entries);
+        }
     }
 
     pub fn save_status(&self) -> &SaveStatus {
@@ -2083,6 +2124,11 @@ impl AppState {
             return;
         };
         self.sync_status = SyncStatus::Disconnected;
+        // Activity log is tied to the connected sync — once the user
+        // disconnects, the events refer to a relationship that no
+        // longer exists. Clearing avoids stale "Updated from remote"
+        // lines hanging around after a fresh Connect.
+        self.sync_history.clear();
         cx.notify();
         cx.background_spawn(async move {
             let _ = crate::sync::service::disconnect(&binding.config);
@@ -2447,6 +2493,16 @@ impl AppState {
                 // "Synced · N merged" badge in the status pill.
                 if report.conflicts.is_empty() {
                     let auto_merged_count = report.remote_only.len() + report.auto_resolved.len();
+                    // Snapshot the change list now (silent path → empty
+                    // picks), but defer the actual append until the
+                    // local save phase inside commit_merged_for has
+                    // succeeded. That way a save/reload failure doesn't
+                    // leave phantom rows in the activity log.
+                    let history_entries = sync_history::entries_from_report(
+                        &report,
+                        &HashMap::new(),
+                        chrono::Local::now(),
+                    );
                     let merged = crate::keepass::merge::apply_picks(
                         &local_db,
                         &remote_db,
@@ -2459,6 +2515,7 @@ impl AppState {
                         remote_etag,
                         master_password,
                         auto_merged_count,
+                        history_entries,
                         cx,
                     );
                     return;
@@ -2540,11 +2597,29 @@ impl AppState {
         let remote_etag = state.remote_etag.clone();
         let master_password = document.password().to_string();
         let target = path.clone();
+        // Translate report + picks into history entries up front so the
+        // borrow on `state.sync_status` drops cleanly. Append happens
+        // inside commit_merged_for once the merged DB is actually on
+        // disk and re-read into memory — see the "defer until success"
+        // note on the silent-merge call site.
+        let history_entries = sync_history::entries_from_report(
+            &state.report,
+            &state.picks,
+            chrono::Local::now(),
+        );
 
         // User-driven resolution — the "Synced · N merged" badge is reserved
         // for git-style silent merges where the user got no overlay at all.
         // Manual resolution always reports auto_merged = 0.
-        self.commit_merged_for(&target, merged, remote_etag, master_password, 0, cx);
+        self.commit_merged_for(
+            &target,
+            merged,
+            remote_etag,
+            master_password,
+            0,
+            history_entries,
+            cx,
+        );
     }
 
     /// Save a merged Database locally, reload the in-memory document from
@@ -2558,6 +2633,13 @@ impl AppState {
     ///
     /// `auto_merged` is the count surfaced in the "Synced · N merged" badge —
     /// non-zero only on the silent-merge path.
+    ///
+    /// `history_entries` are the pre-computed activity-log rows for this
+    /// merge. They're appended to the target vault's history only after
+    /// the local save + reload succeeds (phase 1) — so a save failure
+    /// can't leave phantom rows referencing changes that never
+    /// actually committed.
+    #[allow(clippy::too_many_arguments)]
     fn commit_merged_for(
         &mut self,
         target: &Path,
@@ -2565,6 +2647,7 @@ impl AppState {
         remote_etag: String,
         master_password: String,
         auto_merged: usize,
+        history_entries: Vec<SyncHistoryEntry>,
         cx: &mut Context<Self>,
     ) {
         // Pull config + token + keyfile path from whichever slot owns
@@ -2617,6 +2700,11 @@ impl AppState {
         let callback_path = local_path;
 
         cx.spawn(async move |this, cx| {
+            // Wrapped in an Option so the inner FnOnce can `.take()` it
+            // on the success branch without forcing the whole closure to
+            // `move` (which would also consume `callback_path`, still
+            // needed by phase 2 below).
+            let mut history_slot = Some(history_entries);
             let local_save_result = local_save_task.await;
             let proceed = this
                 .update(cx, |state, cx| {
@@ -2644,6 +2732,14 @@ impl AppState {
                             // vault between the merge and the reload, we
                             // simply drop and let the next open re-read.
                             state.replace_document_for(&callback_path, reloaded, cx);
+                            // History is appended *here*, after the local
+                            // DB genuinely reflects the merge. Earlier
+                            // (pre-save) would risk phantom rows; later
+                            // (post-upload) would lose them on network
+                            // failure even though the local change stuck.
+                            if let Some(entries) = history_slot.take() {
+                                state.append_sync_history_for(&callback_path, entries);
+                            }
                             true
                         }
                         Err(_) => {
