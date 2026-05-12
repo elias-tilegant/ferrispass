@@ -24,9 +24,9 @@ pub enum SettingsTab {
     AutoType,
 }
 use gpui::{
-    AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, ParentElement as _, PathPromptOptions, Render, ScrollStrategy,
-    SharedString, Styled as _, Subscription, Task, Window, div, px,
+    AnyWindowHandle, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
+    Focusable, InteractiveElement as _, ParentElement as _, PathPromptOptions, Render,
+    ScrollStrategy, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
@@ -211,6 +211,13 @@ pub struct AppShell {
     /// surface a clear "this combo is in use by another app" hint
     /// rather than letting the feature silently appear broken.
     auto_type_hotkey_error: Option<String>,
+    /// Handle to the window that hosts this shell. Captured at
+    /// construction so the global-hotkey poll task can dispatch
+    /// `perform_auto_type` directly into this window's context — bypassing
+    /// `App::dispatch_action`, which routes through `active_window()` and
+    /// no-ops when FerrisPass isn't the OS-focused app (exactly the
+    /// case a global hotkey is for).
+    window_handle: AnyWindowHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -374,6 +381,7 @@ impl AppShell {
             auto_type_poll_task: None,
             auto_type_sequence_error: None,
             auto_type_hotkey_error: None,
+            window_handle: window.window_handle(),
             _subscriptions,
         };
         // Bring up the global-hotkey registration immediately if the
@@ -557,6 +565,7 @@ impl AppShell {
         match autotype::HotkeyListener::register(&self.settings.auto_type_hotkey) {
             Ok(listener) => {
                 let expected_id = listener.id();
+                let window_handle = self.window_handle;
                 self.auto_type_listener = Some(listener);
                 self.auto_type_hotkey_error = None;
                 self.auto_type_poll_task = Some(cx.spawn(async move |this, cx| {
@@ -564,17 +573,34 @@ impl AppShell {
                         cx.background_executor()
                             .timer(AUTO_TYPE_POLL_INTERVAL)
                             .await;
-                        let dispatched = this.update(cx, |_shell, cx| {
-                            if autotype::hotkey::poll_pressed(expected_id) {
-                                // Dispatching the action keeps the
-                                // global-hotkey and ⌘⇧T paths sharing
-                                // the same handler — single code path
-                                // for "the hotkey fired, do the thing".
-                                cx.dispatch_action(&PerformAutoType);
-                            }
+                        // Liveness check + non-blocking drain on the
+                        // entity context (cheap; no window borrow needed).
+                        let fired = this.update(cx, |_shell, _cx| {
+                            autotype::hotkey::poll_pressed(expected_id)
                         });
-                        if dispatched.is_err() {
-                            break; // shell dropped
+                        let fired = match fired {
+                            Ok(f) => f,
+                            Err(_) => break, // shell dropped
+                        };
+                        if !fired {
+                            continue;
+                        }
+                        // Hotkey fired. We dispatch into the window
+                        // directly — `App::dispatch_action` would route
+                        // through `active_window()`, which is `None`
+                        // while another app holds OS focus, and would
+                        // then fall back to `dispatch_global_action`
+                        // (skipping our element-tree handler entirely).
+                        // Going through the window handle gives us a
+                        // real `&mut Window` regardless of focus.
+                        let entered = window_handle.update(cx, |_root, window, app| {
+                            this.update(app, |shell, cx| {
+                                shell.perform_auto_type(None, window, cx);
+                            })
+                            .ok();
+                        });
+                        if entered.is_err() {
+                            break; // window closed
                         }
                     }
                 }));
