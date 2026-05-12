@@ -20,6 +20,29 @@ Reads and writes KDBX 4 files (AES-256 + Argon2id), interoperable with KeePassXC
 - **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, three-way merge) — see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) for the connect walkthrough
 - **Theming**: light + dark mode (⌘⇧D)
 
+## Feature matrix
+
+FerrisPass is still young, so this matrix is intentionally honest about what is already there and what is not.
+
+| Capability | FerrisPass | [KeePassXC](https://keepassxc.org/) | [KeePassium](https://keepassium.com/) | [Strongbox](https://strongboxsafe.com/) |
+|---|---|---|---|---|
+| Platform focus | macOS, Apple Silicon | Windows, macOS, Linux | iPhone, iPad, Mac | iPhone, iPad, Mac, Apple Watch |
+| License / source model | GPL-3.0-or-later, open source | GPLv3, open source | GPLv3, open source | Open source, commercial Pro tier |
+| KDBX read/write | Yes, KDBX 4 | Yes | Yes, KDB/KDBX | Yes, plus Password Safe |
+| Password generator | Yes | Yes | Yes | Yes |
+| TOTP / one-time codes | Yes | Yes | Yes | Yes |
+| Favorites / tags | Yes, via `Favorite` tag | Yes | Yes | Yes |
+| Search and basic entry editing | Yes | Yes | Yes | Yes |
+| Browser or OS AutoFill | Not yet | Browser extension | iOS/macOS AutoFill | iOS/macOS AutoFill and browser extensions |
+| Auto-Type | Yes, global hotkey | Yes | Not a primary feature | Not a primary feature |
+| Cloud sync | SharePoint only | File-based / bring your own sync | Broad Files app and direct cloud support | Broad cloud, WebDAV, SFTP support |
+| Conflict handling / merge | Three-way merge for SharePoint | KeeShare / database tools | Merge support | Advanced sync and merge |
+| Passkeys | Not yet | Yes | Yes | Yes |
+| Hardware keys | Not yet | YubiKey / OnlyKey challenge-response | YubiKey | YubiKey |
+| Password auditing | Not yet | Yes | Premium leak audit | Yes |
+| SSH agent | Not yet | Yes | No | macOS Pro |
+| In-app updates | Yes, signed GitHub Releases | Platform/package dependent | App Store | App Store |
+
 ## Structure
 
 ```text
