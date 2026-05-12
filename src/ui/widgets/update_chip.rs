@@ -17,12 +17,19 @@ pub fn update_chip(status: &UpdateStatus, cx: &mut Context<AppShell>) -> Option<
                 ChipTone::Blue,
                 Some(UpdateAction::Install),
             ),
-            UpdateStatus::Downloading { .. } => (
-                "update-chip-downloading",
-                "Downloading...".into(),
-                ChipTone::Muted,
-                None,
-            ),
+            UpdateStatus::Downloading { progress, .. } => {
+                let label = if *progress > 0.0 {
+                    format!("Downloading… {}%", (progress * 100.0).round() as u32)
+                } else {
+                    "Downloading…".into()
+                };
+                (
+                    "update-chip-downloading",
+                    label.into(),
+                    ChipTone::Muted,
+                    None,
+                )
+            }
             UpdateStatus::ReadyToRestart(_) => (
                 "update-chip-restart",
                 "Restart to Update".into(),
@@ -61,22 +68,21 @@ pub fn update_chip(status: &UpdateStatus, cx: &mut Context<AppShell>) -> Option<
         )
         .child(div().whitespace_nowrap().child(label));
 
-    let chip =
-        match action {
-            Some(UpdateAction::Install) => chip
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.88))
-                .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
-                    window.dispatch_action(Box::new(InstallUpdate), cx);
-                })),
-            Some(UpdateAction::Restart) => chip
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.88))
-                .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
-                    window.dispatch_action(Box::new(RestartToUpdate), cx);
-                })),
-            None => chip,
-        };
+    let chip = match action {
+        Some(UpdateAction::Install) => chip
+            .cursor_pointer()
+            .hover(|s| s.bg(palette::blue_hover()))
+            .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
+                window.dispatch_action(Box::new(InstallUpdate), cx);
+            })),
+        Some(UpdateAction::Restart) => chip
+            .cursor_pointer()
+            .hover(|s| s.bg(palette::blue_hover()))
+            .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
+                window.dispatch_action(Box::new(RestartToUpdate), cx);
+            })),
+        None => chip,
+    };
 
     Some(chip.into_any_element())
 }

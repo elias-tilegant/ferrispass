@@ -2386,9 +2386,6 @@ impl AppShell {
         // Settings is a global overlay — accessible regardless of
         // whether a vault is open (matches the Mac ⌘, convention of
         // Preferences always being reachable).
-        if matches!(overlay, Overlay::WhatsNew { .. }) {
-            return crate::ui::screens::whats_new::render(self, cx);
-        }
         if matches!(overlay, Overlay::Settings) {
             return crate::ui::screens::settings::render(self, cx);
         }
@@ -2429,6 +2426,9 @@ impl AppShell {
         let overlay = self.state.read(cx).overlay();
         if matches!(overlay, Overlay::VaultSwitcher) {
             return Some(crate::ui::screens::vault_switcher::render(self, cx));
+        }
+        if matches!(overlay, Overlay::WhatsNew { .. }) {
+            return Some(crate::ui::screens::whats_new::render(self, cx));
         }
         None
     }

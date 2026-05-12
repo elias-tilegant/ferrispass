@@ -1008,9 +1008,16 @@ impl AppState {
     /// calling — we don't pre-check, the underlying library re-fetches the
     /// manifest as part of `download_and_install`.
     ///
-    /// Live progress isn't surfaced in v0.2.0; the UI shows an indeterminate
-    /// "Downloading…" state until the install completes (or fails).
+    /// Progress is reported via shared atomics: the blocking download
+    /// callback writes byte counters from the background thread, and a
+    /// foreground poll loop translates them into `UpdateStatus::Downloading
+    /// { progress }` updates roughly every 150ms. When the server omits
+    /// `Content-Length` we keep `progress` at 0 — the UI then shows an
+    /// indeterminate "Downloading…" rather than a fake percentage.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::time::Duration;
+
         if matches!(self.update_status, UpdateStatus::Downloading { .. }) {
             return;
         }
@@ -1023,13 +1030,50 @@ impl AppState {
         };
         cx.notify();
 
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let total = Arc::new(AtomicU64::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let downloaded_bg = downloaded.clone();
+        let total_bg = total.clone();
+        let done_bg = done.clone();
         let task = cx.background_spawn(async move {
-            crate::update::install(|_downloaded, _total| {
-                // Progress wiring deferred — see UpdateStatus::Downloading
-                // doc comment. Atomics + a periodic UI tick would be the
-                // straightforward path when we want to add it.
-            })
+            let result = crate::update::install(move |bytes, content_length| {
+                downloaded_bg.store(bytes as u64, Ordering::Relaxed);
+                if let Some(len) = content_length {
+                    total_bg.store(len, Ordering::Relaxed);
+                }
+            });
+            done_bg.store(true, Ordering::Relaxed);
+            result
         });
+
+        let downloaded_poll = downloaded.clone();
+        let total_poll = total.clone();
+        let done_poll = done.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                if done_poll.load(Ordering::Relaxed) {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let bytes = downloaded_poll.load(Ordering::Relaxed);
+                let len = total_poll.load(Ordering::Relaxed);
+                if let Some(progress) = (len > 0).then(|| (bytes as f32 / len as f32).clamp(0.0, 1.0)) {
+                    let _ = this.update(cx, |state, cx| {
+                        if let UpdateStatus::Downloading { info, .. } = &state.update_status {
+                            let info = info.clone();
+                            state.update_status = UpdateStatus::Downloading { info, progress };
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+        })
+        .detach();
+
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
