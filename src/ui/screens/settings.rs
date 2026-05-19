@@ -4,19 +4,19 @@
 //! visual hierarchy doesn't change as we fill them in.
 
 use gpui::{
-    div, prelude::FluentBuilder, px, AnyElement, ClickEvent, Context, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder, px,
 };
-use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use crate::app::actions::{DownloadFavicons, InstallUpdate, OpenWhatsNew, RestartToUpdate};
 use crate::app::{AppSettings, FaviconDownloadStatus, VaultStatus};
 use crate::ui::app_shell::{AppShell, SettingsTab};
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::atoms::{chip, ChipTone};
+use crate::ui::widgets::atoms::{ChipTone, chip};
 use crate::ui::widgets::settings_form::{
-    action_button, option_group, section_card, segment_item, setting_switch, ActionKind,
+    ActionKind, action_button, option_group, section_card, segment_item, setting_switch,
 };
 use crate::update::UpdateStatus;
 

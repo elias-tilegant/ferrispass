@@ -12,11 +12,11 @@
 //! them as live data is a future job (would need a sync-event log).
 
 use gpui::{
-    div, prelude::FluentBuilder as _, px, AnyElement, ClickEvent, Context, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
+    px,
 };
-use gpui_component::{h_flex, v_flex, Sizable as _, WindowExt as _};
+use gpui_component::{Sizable as _, WindowExt as _, h_flex, v_flex};
 
 use crate::app::actions::OpenConnect;
 use crate::app::time::relative_time_label;
@@ -24,7 +24,7 @@ use crate::app::{SyncBinding, SyncChangeKind, SyncHistoryEntry, SyncStatus};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::atoms::{chip, ChipTone};
+use crate::ui::widgets::atoms::{ChipTone, chip};
 
 /// Render the Sync tab body — content only, no chrome. The unified
 /// Settings overlay (`screens::settings`) wraps this with the sidebar

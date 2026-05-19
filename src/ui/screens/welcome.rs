@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};

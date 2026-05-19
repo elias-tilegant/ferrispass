@@ -447,6 +447,8 @@ mod tests {
     fn inline_picks_up_bare_url() {
         let segs = parse_inline("visit https://example.com for info");
         assert_eq!(segs.len(), 3);
-        assert!(matches!(&segs[1], InlineSegment::Link { url, .. } if url == "https://example.com"));
+        assert!(
+            matches!(&segs[1], InlineSegment::Link { url, .. } if url == "https://example.com")
+        );
     }
 }

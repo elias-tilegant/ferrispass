@@ -190,27 +190,19 @@ where
     let label = label.into();
     let (bg, fg, border) = match (kind, enabled) {
         (ActionKind::Primary, true) => (palette::blue(), palette::panel(), palette::blue_hover()),
-        (ActionKind::Primary, false) => (
-            palette::sidebar(),
-            palette::text_faint(),
-            palette::border(),
-        ),
+        (ActionKind::Primary, false) => {
+            (palette::sidebar(), palette::text_faint(), palette::border())
+        }
         (ActionKind::Secondary, true) => (
             palette::blue_soft(),
             palette::blue(),
             palette::blue_border(),
         ),
-        (ActionKind::Secondary, false) => (
-            palette::sidebar(),
-            palette::text_muted(),
-            palette::border(),
-        ),
+        (ActionKind::Secondary, false) => {
+            (palette::sidebar(), palette::text_muted(), palette::border())
+        }
         (ActionKind::Ghost, true) => (palette::panel(), palette::text(), palette::border_strong()),
-        (ActionKind::Ghost, false) => (
-            palette::panel(),
-            palette::text_faint(),
-            palette::border(),
-        ),
+        (ActionKind::Ghost, false) => (palette::panel(), palette::text_faint(), palette::border()),
     };
 
     // Note on sizing: callers placing `action_button` as the sole body of
