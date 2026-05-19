@@ -1,27 +1,87 @@
 //! Vault switcher command modal. It overlays the current screen so ⌘O
 //! feels like a route picker, not a navigation away from the active task.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, Window, div, px,
 };
-use gpui_component::{h_flex, input::Input, v_flex};
+use gpui_component::{
+    h_flex,
+    input::{Input, InputEvent, InputState},
+    v_flex,
+};
 
-use crate::app::RecentEntry;
 use crate::app::time::relative_time_label;
+use crate::app::{AppState, RecentEntry};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::command_row::{RowTone, command_row};
 
-pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
-    let state = shell.state().read(cx);
+pub struct VaultSwitcher {
+    shell: WeakEntity<AppShell>,
+    state: Entity<AppState>,
+    input: Entity<InputState>,
+    _subscriptions: Vec<gpui::Subscription>,
+}
+
+impl VaultSwitcher {
+    pub fn new(
+        shell: WeakEntity<AppShell>,
+        state: Entity<AppState>,
+        input: Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let _subscriptions = vec![
+            cx.subscribe_in(&input, window, Self::on_input_event),
+            cx.observe(&state, |_: &mut Self, _, cx| cx.notify()),
+        ];
+
+        Self {
+            shell,
+            state,
+            input,
+            _subscriptions,
+        }
+    }
+
+    fn on_input_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => cx.notify(),
+            InputEvent::PressEnter { .. } => {
+                let _ = self.shell.update_in(cx, |shell, window, cx| {
+                    shell.activate_vault_switcher_top(window, cx);
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Render for VaultSwitcher {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_switcher(self, cx)
+    }
+}
+
+fn render_switcher(switcher: &VaultSwitcher, cx: &mut Context<VaultSwitcher>) -> AnyElement {
+    let state = switcher.state.read(cx);
     let recents: Vec<RecentEntry> = state.recents().to_vec();
-    let unlocked: Vec<PathBuf> = state.unlocked_paths();
+    let unlocked = state.unlocked_paths();
+    let unlocked_set: HashSet<&Path> = unlocked.iter().map(PathBuf::as_path).collect();
     let active_path = state.current_vault_path();
-    let query = shell.vault_switcher_input().read(cx).value().to_string();
+    let query = switcher.input.read(cx).value().to_string();
     let needle = query.trim().to_lowercase();
     let now = chrono::Local::now();
 
@@ -32,7 +92,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .collect();
     let recents_filtered: Vec<&RecentEntry> = recents
         .iter()
-        .filter(|entry| !unlocked.iter().any(|p| p == &entry.path))
+        .filter(|entry| !unlocked_set.contains(entry.path.as_path()))
         .filter(|entry| matches_needle(&entry.path, &needle))
         .collect();
 
@@ -49,6 +109,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                             idx,
                             path,
                             active_path.as_deref() == Some(path.as_path()),
+                            &switcher.shell,
                             cx,
                         )
                         .into_any_element()
@@ -65,7 +126,9 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 recents_filtered
                     .iter()
                     .enumerate()
-                    .map(|(idx, entry)| recent_row(idx, entry, now, cx).into_any_element())
+                    .map(|(idx, entry)| {
+                        recent_row(idx, entry, now, &switcher.shell, cx).into_any_element()
+                    })
                     .collect(),
             )
             .into_any_element(),
@@ -87,12 +150,13 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .left_0()
         .bg(palette::transparent_overlay())
         .occlude()
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            shell
-                .state()
-                .clone()
-                .update(cx, |state, cx| state.close_overlay(cx));
-        }))
+        .on_click(
+            cx.listener(|switcher: &mut VaultSwitcher, _: &ClickEvent, _, cx| {
+                switcher
+                    .state
+                    .update(cx, |state, cx| state.close_overlay(cx));
+            }),
+        )
         .flex()
         .items_start()
         .justify_center()
@@ -115,7 +179,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     div()
                         .px_4()
                         .pb_3()
-                        .child(Input::new(shell.vault_switcher_input()).cleanable(true)),
+                        .child(Input::new(&switcher.input).cleanable(true)),
                 )
                 .child(
                     v_flex()
@@ -187,9 +251,11 @@ fn open_row(
     idx: usize,
     path: &Path,
     is_active: bool,
-    cx: &mut Context<AppShell>,
+    shell: &WeakEntity<AppShell>,
+    cx: &mut Context<VaultSwitcher>,
 ) -> impl IntoElement {
     let path_owned = path.to_path_buf();
+    let shell = shell.clone();
     let file_name: SharedString = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -214,13 +280,15 @@ fn open_row(
             RowTone::Default
         },
         Some(badge),
-        cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+        cx.listener(move |_: &mut VaultSwitcher, _: &ClickEvent, _window, cx| {
             let path = path_owned.clone();
-            shell
-                .state()
-                .clone()
-                .update(cx, |state, cx| state.close_overlay(cx));
-            shell.open_recent(path, window, cx);
+            let _ = shell.update_in(cx, |shell, window, cx| {
+                shell
+                    .state()
+                    .clone()
+                    .update(cx, |state, cx| state.close_overlay(cx));
+                shell.open_recent(path, window, cx);
+            });
         }),
     )
 }
@@ -229,9 +297,11 @@ fn recent_row(
     idx: usize,
     entry: &RecentEntry,
     now: chrono::DateTime<chrono::Local>,
-    cx: &mut Context<AppShell>,
+    shell: &WeakEntity<AppShell>,
+    cx: &mut Context<VaultSwitcher>,
 ) -> impl IntoElement {
     let path = entry.path.clone();
+    let shell = shell.clone();
     let file_name: SharedString = entry
         .path
         .file_name()
@@ -254,13 +324,15 @@ fn recent_row(
         parent,
         RowTone::Default,
         Some(elapsed),
-        cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+        cx.listener(move |_: &mut VaultSwitcher, _: &ClickEvent, _window, cx| {
             let path = path.clone();
-            shell
-                .state()
-                .clone()
-                .update(cx, |state, cx| state.close_overlay(cx));
-            shell.open_recent(path, window, cx);
+            let _ = shell.update_in(cx, |shell, window, cx| {
+                shell
+                    .state()
+                    .clone()
+                    .update(cx, |state, cx| state.close_overlay(cx));
+                shell.open_recent(path, window, cx);
+            });
         }),
     )
 }

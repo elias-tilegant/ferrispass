@@ -26,8 +26,8 @@ pub enum SettingsTab {
 }
 use gpui::{
     AnyWindowHandle, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
-    Focusable, InteractiveElement as _, ParentElement as _, PathPromptOptions, Render,
-    ScrollStrategy, SharedString, Styled as _, Subscription, Task, Window, div, px,
+    Focusable, InteractiveElement as _, IntoElement as _, ParentElement as _, PathPromptOptions,
+    Render, ScrollStrategy, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
@@ -89,6 +89,9 @@ pub struct AppShell {
     /// Cleared on every overlay-open so the picker always starts empty;
     /// Enter on the input opens whichever recent currently floats to the top.
     vault_switcher_input: Entity<InputState>,
+    /// Isolated overlay view for the vault switcher. Its input changes only
+    /// re-render this child view, not the whole vault browser behind it.
+    vault_switcher: Entity<crate::ui::screens::vault_switcher::VaultSwitcher>,
     /// Free-form text input for the Auto-Type sequence template. Lives
     /// here (rather than being recreated per render) so the focus,
     /// cursor position, and undo history persist across Settings
@@ -302,6 +305,19 @@ impl AppShell {
         // user clicks something, and key dispatch has no path to walk.
         window.focus(&focus_handle, cx);
 
+        let shell = cx.weak_entity();
+        let vault_switcher = cx.new(
+            |cx: &mut Context<crate::ui::screens::vault_switcher::VaultSwitcher>| {
+                crate::ui::screens::vault_switcher::VaultSwitcher::new(
+                    shell,
+                    state.clone(),
+                    vault_switcher_input.clone(),
+                    window,
+                    cx,
+                )
+            },
+        );
+
         let _subscriptions = vec![
             cx.observe(&state, |shell: &mut AppShell, state, cx| {
                 // Re-render whenever AppState notifies AND keep the
@@ -326,11 +342,6 @@ impl AppShell {
             cx.subscribe_in(&keyfile_input, window, Self::on_keyfile_input_event),
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
             cx.subscribe_in(&picker_query_input, window, Self::on_picker_query_event),
-            cx.subscribe_in(
-                &vault_switcher_input,
-                window,
-                Self::on_vault_switcher_input_event,
-            ),
             cx.subscribe_in(
                 &auto_type_sequence_input,
                 window,
@@ -365,6 +376,7 @@ impl AppShell {
             new_group_name_input,
             picker_query_input,
             vault_switcher_input,
+            vault_switcher,
             auto_type_sequence_input,
             gen_length_state,
             gen_classes: crate::keepass::password_gen::CharClasses::default(),
@@ -1890,30 +1902,15 @@ impl AppShell {
         self.update_settings(new_settings, cx);
     }
 
-    fn on_vault_switcher_input_event(
-        &mut self,
-        _: &Entity<InputState>,
-        event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            // Re-render the filtered list. Filtering itself is computed at
-            // render time from the current input value; here we just nudge.
-            InputEvent::Change => cx.notify(),
-            // Enter activates the current top match. If the filter eliminated
-            // every recent, fall through to the file dialog so the user
-            // doesn't get stuck on an empty list.
-            InputEvent::PressEnter { .. } => self.activate_vault_switcher_top(window, cx),
-            _ => {}
-        }
-    }
-
     /// Snapshot the current filter, intersect it with the recents list, and
     /// open the top match. Used by Enter on the filter input *and* the
     /// "Switch" button on each row (the row click takes a path directly so
     /// it bypasses this).
-    fn activate_vault_switcher_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn activate_vault_switcher_top(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let query = self.vault_switcher_input.read(cx).value().to_string();
         let needle = query.trim().to_lowercase();
         let state = self.state.read(cx);
@@ -2489,7 +2486,7 @@ impl AppShell {
     fn render_modal_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let overlay = self.state.read(cx).overlay();
         if matches!(overlay, Overlay::VaultSwitcher) {
-            return Some(crate::ui::screens::vault_switcher::render(self, cx));
+            return Some(self.vault_switcher.clone().into_any_element());
         }
         if matches!(overlay, Overlay::AddVault) {
             return Some(crate::ui::screens::add_vault::render(cx));
