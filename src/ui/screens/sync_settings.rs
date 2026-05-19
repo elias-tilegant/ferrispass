@@ -12,11 +12,11 @@
 //! them as live data is a future job (would need a sync-event log).
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px,
+    div, prelude::FluentBuilder as _, px, AnyElement, ClickEvent, Context, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _,
 };
-use gpui_component::{Sizable as _, WindowExt as _, h_flex, scroll::ScrollableElement as _, v_flex};
+use gpui_component::{h_flex, v_flex, Sizable as _, WindowExt as _};
 
 use crate::app::actions::OpenConnect;
 use crate::app::time::relative_time_label;
@@ -24,9 +24,7 @@ use crate::app::{SyncBinding, SyncChangeKind, SyncHistoryEntry, SyncStatus};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::atoms::{ChipTone, chip};
-
-const HISTORY_VISIBLE_LIMIT: usize = 12;
+use crate::ui::widgets::atoms::{chip, ChipTone};
 
 /// Render the Sync tab body — content only, no chrome. The unified
 /// Settings overlay (`screens::settings`) wraps this with the sidebar
@@ -163,7 +161,9 @@ fn render_connected(
                         .child(sync_now_button(cx)),
                 ),
         )
-        .when(!history.is_empty(), |this| this.child(history_section(history)))
+        .when(!history.is_empty(), |this| {
+            this.child(history_section(history))
+        })
         .into_any_element()
 }
 
@@ -175,13 +175,10 @@ fn history_section(history: &[SyncHistoryEntry]) -> AnyElement {
     let rows: Vec<AnyElement> = history
         .iter()
         .rev()
-        .take(HISTORY_VISIBLE_LIMIT)
         .enumerate()
         .map(|(idx, entry)| history_row(idx, entry, now))
         .collect();
-    let header_meta: Option<SharedString> = if total > HISTORY_VISIBLE_LIMIT {
-        Some(format!("Showing {HISTORY_VISIBLE_LIMIT} of {total}").into())
-    } else if total > 0 {
+    let header_meta: Option<SharedString> = if total > 0 {
         Some(format!("{total} change{}", if total == 1 { "" } else { "s" }).into())
     } else {
         None
@@ -214,7 +211,7 @@ fn history_section(history: &[SyncHistoryEntry]) -> AnyElement {
                 .id("sync-history-list")
                 .gap_1()
                 .max_h(px(240.))
-                .overflow_y_scrollbar()
+                .overflow_y_scroll()
                 .pr_1()
                 .children(rows),
         )
