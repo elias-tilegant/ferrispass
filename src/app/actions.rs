@@ -7,6 +7,8 @@ actions!(
     [
         OpenVault,
         OpenVaultSwitcher,
+        OpenAddVault,
+        AddSharePointVault,
         SubmitPassword,
         CancelUnlock,
         LockVault,

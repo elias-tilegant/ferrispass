@@ -1,6 +1,7 @@
 pub mod about;
 pub mod add_entry;
 pub mod add_group;
+pub mod add_vault;
 pub mod conflict;
 pub mod connect;
 pub mod settings;

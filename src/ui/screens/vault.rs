@@ -13,8 +13,8 @@ use gpui_component::{
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{
-        DeleteGroup, LockVault, NewEntry, NewGroup, NewSubgroup, OpenSettings, OpenSyncSettings,
-        OpenVault, OpenVaultSwitcher, RenameGroupOp, SyncNow,
+        DeleteGroup, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAddVault, OpenSettings,
+        OpenSyncSettings, OpenVault, OpenVaultSwitcher, RenameGroupOp, SyncNow,
     },
 };
 use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
@@ -151,6 +151,32 @@ fn sidebar(
                     gpui_component::Icon::from(gpui_component::IconName::ChevronDown)
                         .with_size(gpui_component::Size::Size(px(12.)))
                         .text_color(palette::text_muted()),
+                )
+                .child(
+                    div()
+                        .id("sidebar-add-vault")
+                        .size(px(24.))
+                        .flex_shrink_0()
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(palette::border())
+                        .bg(palette::panel())
+                        .text_color(palette::text_muted())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| {
+                            s.border_color(palette::border_strong())
+                                .text_color(palette::text())
+                        })
+                        .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                            window.dispatch_action(Box::new(OpenAddVault), cx);
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            gpui_component::Icon::from(gpui_component::IconName::Plus)
+                                .with_size(gpui_component::Size::Size(px(13.))),
+                        ),
                 ),
         )
         .child(

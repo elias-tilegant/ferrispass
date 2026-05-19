@@ -1,8 +1,8 @@
 use crate::app::recents::{self, RecentEntry};
+use crate::app::sync_history::{self, SyncHistoryEntry};
 use crate::domain::{VaultEntry, VaultSnapshot};
 use crate::keepass::merge::{ConflictReport, Side};
 use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
-use crate::app::sync_history::{self, SyncHistoryEntry};
 use crate::sync::auth::{AccessToken, DeviceCodeChallenge};
 use crate::sync::config::SyncConfig;
 use crate::sync::graph::DriveItemHit;
@@ -39,6 +39,11 @@ pub struct AppState {
     /// Active during the multi-step Connect overlay (provider pick → URL →
     /// device code → download). `None` when overlay isn't Connect.
     connect_flow: Option<ConnectFlow>,
+    /// SharePoint binding created by the Connect flow for a vault that has
+    /// been downloaded locally but not unlocked yet. Installed only after
+    /// the matching vault unlock succeeds so the previously-active vault's
+    /// binding is never overwritten while adding a second cloud vault.
+    pending_sync: Option<PendingSync>,
     /// In-memory mirror of the on-disk recents list. Loaded once at
     /// construction (`with_resume`), prepended on every successful unlock,
     /// persisted async. Most-recent first.
@@ -113,6 +118,12 @@ pub enum SaveStatus {
 pub struct SyncBinding {
     pub config: SyncConfig,
     pub access_token: AccessToken,
+}
+
+#[derive(Debug)]
+struct PendingSync {
+    local_path: PathBuf,
+    binding: SyncBinding,
 }
 
 /// User-facing sync lifecycle. Mirrors the SaveStatus shape so the UI
@@ -333,6 +344,9 @@ pub enum Overlay {
     /// Universal like `Settings`: reachable from any vault state, including
     /// Welcome and Unlock screens.
     VaultSwitcher,
+    /// Separate entrypoint for opening another vault. Keeps switching
+    /// between known vaults distinct from adding local / SharePoint vaults.
+    AddVault,
     /// Release notes for the version that was just installed. Universal like
     /// Settings so it can appear on first launch before any vault is open.
     WhatsNew { info: UpdateInfo },
@@ -518,6 +532,7 @@ impl AppState {
     }
 
     pub fn request_password(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.clear_pending_sync_unless(&path);
         // Already looking at an unlocked vault? Park it so the user can
         // come back without re-typing their master password. The
         // cold-unlock screen we're about to render points at a *different*
@@ -571,6 +586,7 @@ impl AppState {
     /// Used by Esc-on-unlock to undo a request_password that the user
     /// decided against. Returns `true` when something was rehydrated.
     pub fn rehydrate_most_recent_park(&mut self, cx: &mut Context<Self>) -> bool {
+        self.pending_sync = None;
         let Some(path) = self.parked_order.last().cloned() else {
             return false;
         };
@@ -733,6 +749,54 @@ impl AppState {
         }
     }
 
+    fn is_unlocked_path(&self, target: &Path) -> bool {
+        matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target)
+            || self.parked.contains_key(target)
+    }
+
+    fn clear_pending_sync_unless(&mut self, target: &Path) {
+        if self
+            .pending_sync
+            .as_ref()
+            .is_some_and(|pending| pending.local_path != target)
+        {
+            self.pending_sync = None;
+        }
+    }
+
+    fn install_pending_sync_for(&mut self, opened: &Path) -> bool {
+        if !self
+            .pending_sync
+            .as_ref()
+            .is_some_and(|pending| pending.local_path == opened)
+        {
+            return false;
+        }
+        let pending = self.pending_sync.take().expect("checked above");
+        self.sync = Some(pending.binding);
+        self.sync_status = SyncStatus::Synced {
+            at: chrono::Local::now(),
+            auto_merged: 0,
+        };
+        true
+    }
+
+    fn has_open_sync_remote(&self, drive_id: &str, item_id: &str) -> bool {
+        let matches_remote = |binding: &SyncBinding| {
+            binding.config.drive_id == drive_id && binding.config.item_id == item_id
+        };
+        self.sync.as_ref().is_some_and(matches_remote)
+            || self.parked.values().any(|session| {
+                session.sync.as_ref().is_some_and(|binding| {
+                    binding.config.drive_id == drive_id && binding.config.item_id == item_id
+                })
+            })
+            || self.pending_sync.as_ref().is_some_and(|pending| {
+                pending.binding.config.drive_id == drive_id
+                    && pending.binding.config.item_id == item_id
+            })
+    }
+
     /// Snapshot just enough state to run a sync against `target` from a
     /// background task — works whether `target` is the active vault or
     /// one we parked away from. Returns `None` when the vault is locked
@@ -888,6 +952,10 @@ impl AppState {
             // Remember the vault for next launch's auto-resume + the
             // Welcome screen's Recents list.
             self.push_recent(opened.clone(), cx);
+            if self.install_pending_sync_for(&opened) {
+                cx.notify();
+                return;
+            }
             // If a sync config exists for this path, rebuild the
             // SyncBinding using the keychain refresh token. No-op for
             // local-only vaults.
@@ -1083,7 +1151,9 @@ impl AppState {
                     .await;
                 let bytes = downloaded_poll.load(Ordering::Relaxed);
                 let len = total_poll.load(Ordering::Relaxed);
-                if let Some(progress) = (len > 0).then(|| (bytes as f32 / len as f32).clamp(0.0, 1.0)) {
+                if let Some(progress) =
+                    (len > 0).then(|| (bytes as f32 / len as f32).clamp(0.0, 1.0))
+                {
                     let _ = this.update(cx, |state, cx| {
                         if let UpdateStatus::Downloading { info, .. } = &state.update_status {
                             let info = info.clone();
@@ -1132,6 +1202,7 @@ impl AppState {
         self.save_status = SaveStatus::Idle;
         self.sync = None;
         self.sync_status = SyncStatus::Disconnected;
+        self.pending_sync = None;
         // Clear with the rest of the session secrets — entry titles in
         // the history would otherwise outlive the unlocked DB they came
         // from, which contradicts the rest of the lock contract.
@@ -2140,10 +2211,6 @@ impl AppState {
     /// button + the Escape key.
     pub fn cancel_connect(&mut self, cx: &mut Context<Self>) {
         self.connect_flow = None;
-        self.sync_status = match &self.sync {
-            Some(_) => SyncStatus::Idle,
-            None => SyncStatus::Disconnected,
-        };
         cx.notify();
     }
 
@@ -2153,9 +2220,6 @@ impl AppState {
     /// No URL/path is needed up front — the user picks a file *after*
     /// signing in (see `Picking`).
     pub fn start_sharepoint_connect(&mut self, cx: &mut Context<Self>) {
-        self.sync_status = SyncStatus::Connecting;
-        cx.notify();
-
         let task = cx.background_spawn(async move { crate::sync::service::request_device_code() });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -2170,7 +2234,6 @@ impl AppState {
                 Err(e) => {
                     let msg = e.to_string();
                     state.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
-                    state.sync_status = SyncStatus::Failed(msg);
                     cx.notify();
                 }
             });
@@ -2201,7 +2264,6 @@ impl AppState {
                     let _ = this.update(cx, |s, cx| {
                         let msg = "Device code expired before sign-in.".to_string();
                         s.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
-                        s.sync_status = SyncStatus::Failed(msg);
                         cx.notify();
                     });
                     return;
@@ -2245,7 +2307,6 @@ impl AppState {
                         let msg = e.to_string();
                         let _ = this.update(cx, |s, cx| {
                             s.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
-                            s.sync_status = SyncStatus::Failed(msg);
                             cx.notify();
                         });
                         return;
@@ -2310,6 +2371,22 @@ impl AppState {
         local_path: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        if self.is_unlocked_path(&local_path) {
+            self.connect_flow = Some(ConnectFlow::Failed(
+                "That local vault is already open. Use the Vaults switcher to switch to it."
+                    .to_string(),
+            ));
+            cx.notify();
+            return;
+        }
+        if self.has_open_sync_remote(&hit.drive_id, &hit.item_id) {
+            self.connect_flow = Some(ConnectFlow::Failed(
+                "That SharePoint vault is already open. Use the Vaults switcher to switch to it."
+                    .to_string(),
+            ));
+            cx.notify();
+            return;
+        }
         // The picker holds the access token; capture it before transitioning
         // out of Picking (which drops the token).
         let token = match &self.connect_flow {
@@ -2340,27 +2417,19 @@ impl AppState {
                 Ok(connect_result) => {
                     state.connect_flow = None;
                     state.overlay = Overlay::None;
-                    // request_password parks whichever vault is currently
-                    // active *with its own sync binding*. The new
-                    // SharePoint binding for the freshly-downloaded file
-                    // gets installed *after* the park happens so it
-                    // doesn't leak into the parked session's `sync`
-                    // slot.
-                    state.request_password(final_path, cx);
-                    state.sync = Some(SyncBinding {
-                        config: connect_result.config,
-                        access_token: connect_result.access_token,
+                    state.pending_sync = Some(PendingSync {
+                        local_path: final_path.clone(),
+                        binding: SyncBinding {
+                            config: connect_result.config,
+                            access_token: connect_result.access_token,
+                        },
                     });
-                    state.sync_status = SyncStatus::Synced {
-                        at: chrono::Local::now(),
-                        auto_merged: 0,
-                    };
+                    state.request_password(final_path, cx);
                     cx.notify();
                 }
                 Err(e) => {
                     let msg = e.to_string();
                     state.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
-                    state.sync_status = SyncStatus::Failed(msg);
                     cx.notify();
                 }
             });
@@ -2602,11 +2671,8 @@ impl AppState {
         // inside commit_merged_for once the merged DB is actually on
         // disk and re-read into memory — see the "defer until success"
         // note on the silent-merge call site.
-        let history_entries = sync_history::entries_from_report(
-            &state.report,
-            &state.picks,
-            chrono::Local::now(),
-        );
+        let history_entries =
+            sync_history::entries_from_report(&state.report, &state.picks, chrono::Local::now());
 
         // User-driven resolution — the "Synced · N merged" badge is reserved
         // for git-style silent merges where the user got no overlay at all.
@@ -3082,6 +3148,110 @@ mod park_tests {
                 expires_at: SystemTime::now() + Duration::from_secs(3600),
             },
         }
+    }
+
+    fn fake_binding_for(email: &str, local_path: PathBuf, item_id: &str) -> SyncBinding {
+        SyncBinding {
+            config: SyncConfig {
+                provider: SyncProvider::SharePoint,
+                account_email: email.to_string(),
+                site_id: "site".into(),
+                drive_id: "drive".into(),
+                item_id: item_id.into(),
+                last_etag: "etag-0".into(),
+                local_path,
+                remote_url: format!("https://example.invalid/{item_id}.kdbx"),
+            },
+            access_token: AccessToken {
+                access_token: "token-0".into(),
+                refresh_token: "refresh-0".into(),
+                expires_at: SystemTime::now() + Duration::from_secs(3600),
+            },
+        }
+    }
+
+    #[test]
+    fn pending_sync_installs_after_matching_unlock_without_stomping_parked_vault() {
+        let mut state = AppState::default();
+        let vault_a = PathBuf::from("/tmp/a.kdbx");
+        let vault_b = PathBuf::from("/tmp/b.kdbx");
+
+        fresh_open(&mut state, vault_a.clone(), "pw-A");
+        state.sync = Some(fake_binding_for(
+            "alice@example.invalid",
+            vault_a.clone(),
+            "item-a",
+        ));
+        state.sync_status = SyncStatus::Idle;
+
+        state.pending_sync = Some(PendingSync {
+            local_path: vault_b.clone(),
+            binding: fake_binding_for("alice@example.invalid", vault_b.clone(), "item-b"),
+        });
+        state.park_active();
+        fresh_open(&mut state, vault_b.clone(), "pw-B");
+        assert!(state.install_pending_sync_for(&vault_b));
+
+        assert!(matches!(&state.vault, VaultStatus::Open { path, .. } if path == &vault_b));
+        assert_eq!(
+            state.sync.as_ref().map(|b| b.config.item_id.as_str()),
+            Some("item-b")
+        );
+        assert!(state.pending_sync.is_none());
+        assert_eq!(
+            state
+                .parked
+                .get(&vault_a)
+                .and_then(|session| session.sync.as_ref())
+                .map(|b| b.config.item_id.as_str()),
+            Some("item-a")
+        );
+    }
+
+    #[test]
+    fn request_password_for_other_path_drops_pending_sync() {
+        let mut state = AppState::default();
+        let pending_path = PathBuf::from("/tmp/pending.kdbx");
+        let other_path = PathBuf::from("/tmp/other.kdbx");
+        state.pending_sync = Some(PendingSync {
+            local_path: pending_path.clone(),
+            binding: fake_binding_for("alice@example.invalid", pending_path, "item-pending"),
+        });
+
+        state.clear_pending_sync_unless(&other_path);
+
+        assert!(state.pending_sync.is_none());
+    }
+
+    #[test]
+    fn has_open_sync_remote_checks_active_parked_and_pending() {
+        let mut state = AppState::default();
+        let active_path = PathBuf::from("/tmp/active.kdbx");
+        let parked_path = PathBuf::from("/tmp/parked.kdbx");
+        let pending_path = PathBuf::from("/tmp/pending.kdbx");
+
+        fresh_open(&mut state, parked_path.clone(), "pw-parked");
+        state.sync = Some(fake_binding_for(
+            "alice@example.invalid",
+            parked_path,
+            "item-parked",
+        ));
+        state.park_active();
+        fresh_open(&mut state, active_path.clone(), "pw-active");
+        state.sync = Some(fake_binding_for(
+            "alice@example.invalid",
+            active_path,
+            "item-active",
+        ));
+        state.pending_sync = Some(PendingSync {
+            local_path: pending_path.clone(),
+            binding: fake_binding_for("alice@example.invalid", pending_path, "item-pending"),
+        });
+
+        assert!(state.has_open_sync_remote("drive", "item-active"));
+        assert!(state.has_open_sync_remote("drive", "item-parked"));
+        assert!(state.has_open_sync_remote("drive", "item-pending"));
+        assert!(!state.has_open_sync_remote("drive", "item-missing"));
     }
 
     #[test]

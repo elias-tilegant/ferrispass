@@ -2,12 +2,12 @@ use crate::{
     app::{
         AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
-            APP_CONTEXT, CancelUnlock, CopyPassword, CopyUrl, CopyUsername, CreateVault,
-            DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch, InstallUpdate,
-            LaunchEntry, LockVault, NewEntry, NewGroup, NewSubgroup, OpenConflictDemo, OpenConnect,
-            OpenAbout, OpenSettings, OpenSyncSettings, OpenVault, OpenVaultSwitcher, OpenWhatsNew,
-            PerformAutoType, PerformAutoTypeForSelected, RenameGroupOp, SaveVault, SubmitPassword,
-            SyncNow, ToggleTheme,
+            APP_CONTEXT, AddSharePointVault, CancelUnlock, CopyPassword, CopyUrl, CopyUsername,
+            CreateVault, DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch,
+            InstallUpdate, LaunchEntry, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAbout,
+            OpenAddVault, OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings, OpenVault,
+            OpenVaultSwitcher, OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected,
+            RenameGroupOp, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
         },
     },
     autotype,
@@ -1020,6 +1020,16 @@ impl AppShell {
         });
     }
 
+    fn on_action_open_add_vault(
+        &mut self,
+        _: &OpenAddVault,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |state, cx| state.open_overlay(Overlay::AddVault, cx));
+    }
+
     fn on_action_submit_password(
         &mut self,
         _: &SubmitPassword,
@@ -1325,6 +1335,19 @@ impl AppShell {
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::Connect, cx);
             state.begin_connect_flow(cx);
+        });
+    }
+
+    fn on_action_add_sharepoint_vault(
+        &mut self,
+        _: &AddSharePointVault,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.open_overlay(Overlay::Connect, cx);
+            state.begin_connect_flow(cx);
+            state.start_sharepoint_connect(cx);
         });
     }
 
@@ -2430,10 +2453,10 @@ impl AppShell {
         if matches!(overlay, Overlay::Settings) {
             return crate::ui::screens::settings::render(self, cx);
         }
+        if matches!(overlay, Overlay::Connect) {
+            return crate::ui::screens::connect::render(self, cx);
+        }
         match vault_status {
-            crate::app::VaultStatus::Empty if matches!(overlay, Overlay::Connect) => {
-                crate::ui::screens::connect::render(self, cx)
-            }
             crate::app::VaultStatus::Empty => crate::ui::screens::welcome::render(self, cx),
             crate::app::VaultStatus::AwaitingPassword { .. } => {
                 crate::ui::screens::unlock::render(self, cx)
@@ -2467,6 +2490,9 @@ impl AppShell {
         let overlay = self.state.read(cx).overlay();
         if matches!(overlay, Overlay::VaultSwitcher) {
             return Some(crate::ui::screens::vault_switcher::render(self, cx));
+        }
+        if matches!(overlay, Overlay::AddVault) {
+            return Some(crate::ui::screens::add_vault::render(cx));
         }
         if matches!(overlay, Overlay::WhatsNew { .. }) {
             return Some(crate::ui::screens::whats_new::render(self, cx));
@@ -2535,6 +2561,7 @@ impl Render for AppShell {
             }))
             .on_action(cx.listener(Self::on_action_open_vault))
             .on_action(cx.listener(Self::on_action_open_vault_switcher))
+            .on_action(cx.listener(Self::on_action_open_add_vault))
             .on_action(cx.listener(Self::on_action_submit_password))
             .on_action(cx.listener(Self::on_action_cancel_unlock))
             .on_action(cx.listener(Self::on_action_lock_vault))
@@ -2544,6 +2571,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_copy_password))
             .on_action(cx.listener(Self::on_action_launch_entry))
             .on_action(cx.listener(Self::on_action_open_connect))
+            .on_action(cx.listener(Self::on_action_add_sharepoint_vault))
             .on_action(cx.listener(Self::on_action_open_settings))
             .on_action(cx.listener(Self::on_action_open_sync_settings))
             .on_action(cx.listener(Self::on_action_install_update))

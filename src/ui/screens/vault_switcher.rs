@@ -10,7 +10,6 @@ use gpui::{
 use gpui_component::{h_flex, input::Input, v_flex};
 
 use crate::app::RecentEntry;
-use crate::app::actions::OpenVault;
 use crate::app::time::relative_time_label;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
@@ -129,7 +128,6 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .pb_3()
                         .child(list_body),
                 )
-                .child(div().px_4().pb_4().child(browse_row(cx)))
                 .child(footer()),
         )
         .into_any_element()
@@ -151,27 +149,9 @@ fn header() -> AnyElement {
             div()
                 .text_xs()
                 .text_color(palette::text_muted())
-                .child("Open vaults switch instantly. Recent vaults ask for the password."),
+                .child("Switch to an unlocked vault, or reopen a recent vault."),
         )
         .into_any_element()
-}
-
-fn browse_row(cx: &mut Context<AppShell>) -> AnyElement {
-    command_row(
-        "vault-switcher-browse",
-        AppIcon::Cloud,
-        "Browse other vault...",
-        "Pick a .kdbx file from disk",
-        RowTone::Default,
-        Some("Browse".into()),
-        cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-            shell
-                .state()
-                .clone()
-                .update(cx, |state, cx| state.close_overlay(cx));
-            window.dispatch_action(Box::new(OpenVault), cx);
-        }),
-    )
 }
 
 fn matches_needle(path: &Path, needle: &str) -> bool {
@@ -287,9 +267,9 @@ fn recent_row(
 
 fn empty_state(no_query: bool) -> impl IntoElement {
     let message = if no_query {
-        "No vaults yet. Browse to add one below."
+        "No vaults to switch to. Use + to open another vault."
     } else {
-        "No vaults match the filter. Press Enter to browse."
+        "No vaults match the filter."
     };
     div()
         .h(px(74.))
@@ -315,7 +295,7 @@ fn footer() -> AnyElement {
         .py_3()
         .text_xs()
         .text_color(palette::text_faint())
-        .child("Enter to open")
+        .child("Click a vault to switch")
         .child("Esc to cancel")
         .into_any_element()
 }
