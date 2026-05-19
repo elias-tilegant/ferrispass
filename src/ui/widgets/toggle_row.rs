@@ -36,7 +36,7 @@ pub fn toggle_row(label: &'static str, detail: &'static str, on: bool, last: boo
         .into_any_element()
 }
 
-fn switch_visual(on: bool) -> AnyElement {
+pub(crate) fn switch_visual(on: bool) -> AnyElement {
     div()
         .relative()
         .w(px(32.))

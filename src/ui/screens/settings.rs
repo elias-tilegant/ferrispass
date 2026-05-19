@@ -4,17 +4,20 @@
 //! visual hierarchy doesn't change as we fill them in.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder, px,
+    div, prelude::FluentBuilder, px, AnyElement, ClickEvent, Context, InteractiveElement as _,
+    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
 };
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
 
 use crate::app::actions::{DownloadFavicons, InstallUpdate, OpenWhatsNew, RestartToUpdate};
 use crate::app::{AppSettings, FaviconDownloadStatus, VaultStatus};
 use crate::ui::app_shell::{AppShell, SettingsTab};
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
+use crate::ui::widgets::atoms::{chip, ChipTone};
+use crate::ui::widgets::settings_form::{
+    action_button, option_group, section_card, segment_item, setting_switch, ActionKind,
+};
 use crate::update::UpdateStatus;
 
 const AUTO_LOCK_PRESETS: &[Option<u64>] = &[Some(60), Some(240), Some(900), None];
@@ -149,9 +152,14 @@ fn sidebar_item(
         palette::text_faint()
     };
 
+    // Stub tabs (Security/Backups/Advanced) carry `tab: None` and
+    // `enabled: false`. Render a "Soon" pill next to them so users see
+    // a roadmap signal instead of unexplained greyed-out rows.
+    let is_stub = tab.is_none() && !enabled;
     let row = h_flex()
         .gap_2()
         .items_center()
+        .justify_between()
         .h(px(28.))
         .mx(px(6.))
         .px_3p5()
@@ -160,11 +168,17 @@ fn sidebar_item(
         .text_color(fg)
         .text_sm()
         .child(
-            gpui_component::Icon::from(icon)
-                .with_size(gpui_component::Size::Size(px(13.)))
-                .text_color(icon_color),
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    gpui_component::Icon::from(icon)
+                        .with_size(gpui_component::Size::Size(px(13.)))
+                        .text_color(icon_color),
+                )
+                .child(label),
         )
-        .child(label);
+        .when(is_stub, |row| row.child(chip("Soon", ChipTone::Gray)));
 
     if let (true, Some(target)) = (enabled, tab) {
         let id = SharedString::from(format!("settings-tab-{label}"));
@@ -192,10 +206,13 @@ fn content_panel(
     v_flex()
         .flex_1()
         .min_w(px(0.))
+        .min_h(px(0.))
         .h_full()
         .bg(palette::panel())
+        .overflow_hidden()
         .child(
             v_flex()
+                .flex_shrink_0()
                 .gap_1()
                 .px_8()
                 .pt_5()
@@ -219,7 +236,17 @@ fn content_panel(
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child(title),
                         )
-                        .child(close_button(cx)),
+                        .child(action_button(
+                            "close-settings",
+                            "Close",
+                            ActionKind::Ghost,
+                            true,
+                            cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                                shell.state().clone().update(cx, |state, cx| {
+                                    let _ = state.close_overlay(cx);
+                                });
+                            }),
+                        )),
                 )
                 .child(
                     div()
@@ -228,33 +255,23 @@ fn content_panel(
                         .child(subtitle),
                 ),
         )
-        .child(v_flex().flex_1().min_h(px(0.)).gap_6().p_8().child(body))
-        .into_any_element()
-}
-
-fn close_button(cx: &mut Context<AppShell>) -> AnyElement {
-    div()
-        .id("close-settings")
-        .h(px(28.))
-        .px(px(10.))
-        .rounded(px(5.))
-        .bg(palette::panel())
-        .border_1()
-        .border_color(palette::border_strong())
-        .text_xs()
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(palette::text())
-        .flex()
-        .items_center()
-        .justify_center()
-        .child("Close")
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.85))
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            shell.state().clone().update(cx, |state, cx| {
-                let _ = state.close_overlay(cx);
-            });
-        }))
+        .child(
+            // Body is scrollable: the General + Auto-Type tabs already
+            // overflow the panel on the default ~720 px window height
+            // (Updates section is the casualty), and stub-tab content
+            // added later will grow longer too. `min_h(0)` is the usual
+            // flexbox shrink fix so this child can actually shrink below
+            // its content size; without it the scrollbar never engages.
+            v_flex()
+                .id("settings-body-scroll")
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .gap_4()
+                .p_8()
+                .overflow_y_scroll()
+                .child(body),
+        )
         .into_any_element()
 }
 
@@ -268,7 +285,7 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
     let whats_new_available = state.whats_new_info().is_some();
     let vault_open = matches!(state.vault_status(), VaultStatus::Open { .. });
     v_flex()
-        .gap_6()
+        .gap_4()
         .child(auto_lock_section(&settings, cx))
         .child(clipboard_section(&settings, cx))
         .child(launch_cleanup_section(&settings, cx))
@@ -283,60 +300,64 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
 
 fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
     let current = settings.auto_lock_secs;
-    let mut row = h_flex().gap_2().flex_wrap();
-    for (idx, preset) in AUTO_LOCK_PRESETS.iter().enumerate() {
-        let preset_value = *preset;
-        let selected = preset_value == current;
-        let baseline = settings.clone();
-        row = row.child(preset_chip(
-            SharedString::from(format!("auto-lock-preset-{idx}")),
-            format_auto_lock_label(preset_value),
-            selected,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                shell.update_settings(
-                    AppSettings {
-                        auto_lock_secs: preset_value,
-                        ..baseline.clone()
-                    },
-                    cx,
-                );
-            }),
-        ));
-    }
-    section_frame(
+    let items: Vec<_> = AUTO_LOCK_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(idx, preset)| {
+            let preset_value = *preset;
+            let baseline = settings.clone();
+            segment_item(
+                SharedString::from(format!("auto-lock-preset-{idx}")),
+                format_auto_lock_label(preset_value),
+                preset_value == current,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.update_settings(
+                        AppSettings {
+                            auto_lock_secs: preset_value,
+                            ..baseline.clone()
+                        },
+                        cx,
+                    );
+                }),
+            )
+        })
+        .collect();
+    section_card(
         "Auto-lock vault",
         "Lock the vault after this much idle time without keyboard or mouse activity.",
-        row,
+        option_group(items),
     )
 }
 
 fn clipboard_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
     let current = settings.clipboard_clear_secs;
-    let mut row = h_flex().gap_2().flex_wrap();
-    for (idx, preset) in CLIPBOARD_CLEAR_PRESETS.iter().enumerate() {
-        let preset_value = *preset;
-        let selected = preset_value == current;
-        let baseline = settings.clone();
-        row = row.child(preset_chip(
-            SharedString::from(format!("clipboard-clear-preset-{idx}")),
-            format_clipboard_label(preset_value),
-            selected,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                shell.update_settings(
-                    AppSettings {
-                        clipboard_clear_secs: preset_value,
-                        ..baseline.clone()
-                    },
-                    cx,
-                );
-            }),
-        ));
-    }
-    section_frame(
+    let items: Vec<_> = CLIPBOARD_CLEAR_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(idx, preset)| {
+            let preset_value = *preset;
+            let baseline = settings.clone();
+            segment_item(
+                SharedString::from(format!("clipboard-clear-preset-{idx}")),
+                format_clipboard_label(preset_value),
+                preset_value == current,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.update_settings(
+                        AppSettings {
+                            clipboard_clear_secs: preset_value,
+                            ..baseline.clone()
+                        },
+                        cx,
+                    );
+                }),
+            )
+        })
+        .collect();
+    section_card(
         "Clear clipboard after copy",
         "Wipe a copied password / username / TOTP after this many seconds. \
          The clipboard always wipes when you lock the vault.",
-        row,
+        option_group(items),
     )
 }
 
@@ -346,32 +367,34 @@ fn clipboard_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl
 /// hand-edited settings file can't push the timer outside 10..=60 s.
 fn launch_cleanup_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
     let current = settings.launch_cleanup_secs_clamped();
-    let mut row = h_flex().gap_2().flex_wrap();
-    for (idx, preset) in LAUNCH_CLEANUP_PRESETS.iter().enumerate() {
-        let preset_value = *preset;
-        let selected = preset_value == current;
-        let baseline = settings.clone();
-        row = row.child(preset_chip(
-            SharedString::from(format!("launch-cleanup-preset-{idx}")),
-            SharedString::from(format!("{preset_value} s")),
-            selected,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                shell.update_settings(
-                    AppSettings {
-                        launch_cleanup_secs: preset_value,
-                        ..baseline.clone()
-                    },
-                    cx,
-                );
-            }),
-        ));
-    }
-    section_frame(
+    let items: Vec<_> = LAUNCH_CLEANUP_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(idx, preset)| {
+            let preset_value = *preset;
+            let baseline = settings.clone();
+            segment_item(
+                SharedString::from(format!("launch-cleanup-preset-{idx}")),
+                SharedString::from(format!("{preset_value} s")),
+                preset_value == current,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.update_settings(
+                        AppSettings {
+                            launch_cleanup_secs: preset_value,
+                            ..baseline.clone()
+                        },
+                        cx,
+                    );
+                }),
+            )
+        })
+        .collect();
+    section_card(
         "Auto-clean launch payloads",
         "How long the temp file used to launch external apps (e.g. SAP GUI) \
          lives before FerrisPass deletes it. The file is also removed when \
          you lock the vault or quit.",
-        row,
+        option_group(items),
     )
 }
 
@@ -397,41 +420,18 @@ fn favicon_section(
         }
     };
 
-    let mut button = h_flex()
-        .id("download-favicons")
-        .h(px(28.))
-        .px_3()
-        .gap_2()
-        .items_center()
-        .rounded(px(6.))
-        .border_1()
-        .border_color(if enabled {
-            palette::blue_border()
-        } else {
-            palette::border()
-        })
-        .bg(if enabled {
-            palette::blue_soft()
-        } else {
-            palette::sidebar()
-        })
-        .text_xs()
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(if enabled {
-            palette::blue()
-        } else {
-            palette::text_muted()
-        })
-        .child(
-            gpui_component::Icon::from(AppIcon::Cloud)
-                .with_size(gpui_component::Size::Size(px(12.))),
-        )
-        .child(label);
-    if enabled {
-        button = button.on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+    // Wrap the lone button in a row so it doesn't stretch to the full
+    // card width (it sits in a v_flex card body whose default
+    // `items: stretch` would otherwise expand it).
+    let button = h_flex().self_start().child(action_button(
+        "download-favicons",
+        label,
+        ActionKind::Secondary,
+        enabled,
+        cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
             window.dispatch_action(Box::new(DownloadFavicons), cx);
-        }));
-    }
+        }),
+    ));
 
     let hint = match (vault_open, status) {
         (false, _) => "Open a vault first — favicons are stored inside the database.",
@@ -452,7 +452,7 @@ fn favicon_section(
         }
     };
 
-    section_frame("Favicons", hint, button)
+    section_card("Favicons", hint, button)
 }
 
 // --------------- Auto-Type tab body ---------------
@@ -492,7 +492,7 @@ fn auto_type_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl Into
         .map(|e| format!("Sequence invalid: {e}"));
 
     v_flex()
-        .gap_6()
+        .gap_4()
         .child(auto_type_toggle_section(&settings, cx))
         .child(auto_type_hotkey_section(&settings, hotkey_err, cx))
         .child(auto_type_sequence_section(
@@ -509,43 +509,24 @@ fn auto_type_toggle_section(
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
     let enabled = settings.auto_type_enabled;
-    let on_baseline = settings.clone();
-    let off_baseline = settings.clone();
-    let row = h_flex()
-        .gap_2()
-        .child(preset_chip(
-            "auto-type-on".into(),
-            "On".into(),
+    let baseline = settings.clone();
+    section_card(
+        "Auto-Type",
+        "When on, FerrisPass registers a system-wide hotkey. Press it from any window to \
+         type the matching entry's credentials into the focused field.",
+        setting_switch(
+            "auto-type-toggle",
             enabled,
             cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                 shell.update_settings(
                     AppSettings {
-                        auto_type_enabled: true,
-                        ..on_baseline.clone()
+                        auto_type_enabled: !enabled,
+                        ..baseline.clone()
                     },
                     cx,
                 );
             }),
-        ))
-        .child(preset_chip(
-            "auto-type-off".into(),
-            "Off".into(),
-            !enabled,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                shell.update_settings(
-                    AppSettings {
-                        auto_type_enabled: false,
-                        ..off_baseline.clone()
-                    },
-                    cx,
-                );
-            }),
-        ));
-    section_frame(
-        "Auto-Type",
-        "When on, FerrisPass registers a system-wide hotkey. Press it from any window to \
-         type the matching entry's credentials into the focused field.",
-        row,
+        ),
     )
 }
 
@@ -555,37 +536,42 @@ fn auto_type_hotkey_section(
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
     let current = settings.auto_type_hotkey.clone();
-    let mut row = h_flex().gap_2().flex_wrap();
-    for (idx, (combo, label)) in AUTO_TYPE_HOTKEY_PRESETS.iter().enumerate() {
-        let selected = current == *combo;
-        let baseline = settings.clone();
-        let combo_owned = combo.to_string();
-        row = row.child(preset_chip(
-            SharedString::from(format!("auto-type-hotkey-{idx}")),
-            SharedString::from(*label),
-            selected,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                shell.update_settings(
-                    AppSettings {
-                        auto_type_hotkey: combo_owned.clone(),
-                        ..baseline.clone()
-                    },
-                    cx,
-                );
-            }),
-        ));
-    }
+    let items: Vec<_> = AUTO_TYPE_HOTKEY_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(idx, (combo, label))| {
+            let baseline = settings.clone();
+            let combo_owned = combo.to_string();
+            segment_item(
+                SharedString::from(format!("auto-type-hotkey-{idx}")),
+                SharedString::from(*label),
+                current == *combo,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.update_settings(
+                        AppSettings {
+                            auto_type_hotkey: combo_owned.clone(),
+                            ..baseline.clone()
+                        },
+                        cx,
+                    );
+                }),
+            )
+        })
+        .collect();
 
-    let body = v_flex().gap_2().child(row).when_some(error, |col, err| {
-        col.child(
-            div()
-                .text_xs()
-                .text_color(palette::red())
-                .child(format!("Hotkey registration failed: {err}")),
-        )
-    });
+    let body = v_flex()
+        .gap_2()
+        .child(option_group(items))
+        .when_some(error, |col, err| {
+            col.child(
+                div()
+                    .text_xs()
+                    .text_color(palette::red())
+                    .child(format!("Hotkey registration failed: {err}")),
+            )
+        });
 
-    section_frame(
+    section_card(
         "Trigger hotkey",
         "Pressed from any app or browser to launch Auto-Type. ⌃⌥⌘V is the KeePassXC \
          default — choose another preset if it conflicts with something else on your Mac.",
@@ -601,23 +587,26 @@ fn auto_type_sequence_section(
 ) -> impl IntoElement {
     let current = settings.auto_type_sequence.clone();
 
-    // Preset chips: clicking one sets both the input value and the
+    // Preset segments: clicking one sets both the input value and the
     // persisted setting in one shot via `set_auto_type_sequence`. The
-    // `selected` flag highlights the chip whose template matches the
+    // `selected` flag highlights the segment whose template matches the
     // current value exactly so the user can see what's active.
-    let mut presets_row = h_flex().gap_2().flex_wrap();
-    for (idx, (label, template)) in AUTO_TYPE_SEQUENCE_PRESETS.iter().enumerate() {
-        let selected = current == *template;
-        let template_owned = template.to_string();
-        presets_row = presets_row.child(preset_chip(
-            SharedString::from(format!("auto-type-sequence-preset-{idx}")),
-            SharedString::from(*label),
-            selected,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                shell.set_auto_type_sequence(&template_owned, window, cx);
-            }),
-        ));
-    }
+    let preset_items: Vec<_> = AUTO_TYPE_SEQUENCE_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, template))| {
+            let template_owned = template.to_string();
+            segment_item(
+                SharedString::from(format!("auto-type-sequence-preset-{idx}")),
+                SharedString::from(*label),
+                current == *template,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.set_auto_type_sequence(&template_owned, window, cx);
+                }),
+            )
+        })
+        .collect();
+    let presets_row = option_group(preset_items);
 
     // Free-form input — same widget pattern the rest of FerrisPass uses
     // (Input + InputState). The on-change subscription set up in
@@ -637,7 +626,7 @@ fn auto_type_sequence_section(
             col.child(div().text_xs().text_color(palette::red()).child(err))
         });
 
-    section_frame(
+    section_card(
         "Type sequence",
         "Placeholders: {USERNAME}, {PASSWORD}, {TAB}, {ENTER}, {DELAY N} (max 30000 ms). \
          Pick a preset to start, or edit the template below — changes save automatically.",
@@ -663,9 +652,10 @@ fn auto_type_permission_section(trusted: bool, cx: &mut Context<AppShell>) -> im
         .gap_2()
         .child(div().text_xs().text_color(status_color).child(status_label))
         .when(!trusted, |col| {
-            col.child(h_flex().gap_2().child(preset_chip(
-                "auto-type-grant-access".into(),
-                "Grant Accessibility access…".into(),
+            col.child(h_flex().self_start().child(action_button(
+                "auto-type-grant-access",
+                "Grant Accessibility access…",
+                ActionKind::Primary,
                 true,
                 cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
                     shell.auto_type_request_trust();
@@ -680,7 +670,7 @@ fn auto_type_permission_section(trusted: bool, cx: &mut Context<AppShell>) -> im
             )))
         });
 
-    section_frame(
+    section_card(
         "macOS Accessibility access",
         "Both keystroke simulation and reading the foreground window's title use the macOS \
          Accessibility framework. After granting access in System Settings, restart FerrisPass \
@@ -711,45 +701,38 @@ fn updates_section(
         UpdateStatus::Failed(msg) => SharedString::from(format!("Update check failed: {msg}")),
     };
 
-    // Toggle: On/Off chip pair. Mirrors the auto-lock preset row visually.
-    let on_baseline = settings.clone();
-    let off_baseline = settings.clone();
+    // Real toggle switch — same affordance as Auto-Type On/Off.
+    let baseline = settings.clone();
+    let toggle = setting_switch(
+        "auto-update-toggle",
+        auto_check,
+        cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            shell.update_settings(
+                AppSettings {
+                    auto_update_check_enabled: !auto_check,
+                    ..baseline.clone()
+                },
+                cx,
+            );
+        }),
+    );
     let toggle_row = h_flex()
-        .gap_2()
-        .child(preset_chip(
-            "auto-update-on".into(),
-            "On".into(),
-            auto_check,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                shell.update_settings(
-                    AppSettings {
-                        auto_update_check_enabled: true,
-                        ..on_baseline.clone()
-                    },
-                    cx,
-                );
-            }),
-        ))
-        .child(preset_chip(
-            "auto-update-off".into(),
-            "Off".into(),
-            !auto_check,
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                shell.update_settings(
-                    AppSettings {
-                        auto_update_check_enabled: false,
-                        ..off_baseline.clone()
-                    },
-                    cx,
-                );
-            }),
-        ));
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .flex_1()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child("Automatically check on launch (once per day)."),
+        )
+        .child(toggle);
 
-    // "Check now" — manual trigger regardless of auto-check setting.
-    let check_now = preset_chip(
-        "auto-update-check-now".into(),
-        "Check now".into(),
-        false,
+    let check_now = action_button(
+        "auto-update-check-now",
+        "Check now",
+        ActionKind::Secondary,
+        true,
         cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
             shell.state().clone().update(cx, |state, cx| {
                 state.start_update_check(cx);
@@ -758,41 +741,37 @@ fn updates_section(
     );
 
     let action_chip: Option<AnyElement> = match update_status {
-        UpdateStatus::Available(_) => Some(
-            preset_chip(
-                "auto-update-install".into(),
-                "Install update".into(),
-                true,
-                cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                    window.dispatch_action(Box::new(InstallUpdate), cx);
-                }),
-            )
-            .into_any_element(),
-        ),
-        UpdateStatus::ReadyToRestart(_) => Some(
-            preset_chip(
-                "auto-update-restart".into(),
-                "Restart to Update".into(),
-                true,
-                cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                    window.dispatch_action(Box::new(RestartToUpdate), cx);
-                }),
-            )
-            .into_any_element(),
-        ),
+        UpdateStatus::Available(_) => Some(action_button(
+            "auto-update-install",
+            "Install update",
+            ActionKind::Primary,
+            true,
+            cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(InstallUpdate), cx);
+            }),
+        )),
+        UpdateStatus::ReadyToRestart(_) => Some(action_button(
+            "auto-update-restart",
+            "Restart to Update",
+            ActionKind::Primary,
+            true,
+            cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(RestartToUpdate), cx);
+            }),
+        )),
         _ => None,
     };
 
     let whats_new_chip = whats_new_available.then(|| {
-        preset_chip(
-            "auto-update-whats-new".into(),
-            "View What's New".into(),
-            false,
+        action_button(
+            "auto-update-whats-new",
+            "View What's New",
+            ActionKind::Secondary,
+            true,
             cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                 window.dispatch_action(Box::new(OpenWhatsNew), cx);
             }),
         )
-        .into_any_element()
     });
 
     let action_row = h_flex()
@@ -808,76 +787,13 @@ fn updates_section(
             .child(status_label),
     );
 
-    section_frame(
+    section_card(
         "Updates",
         "FerrisPass checks GitHub for new releases on launch (rate-limited \
          to once per day). Update bundles are verified against an embedded \
          Ed25519 public key before install.",
         body,
     )
-}
-
-fn section_frame(
-    title: &'static str,
-    description: &'static str,
-    chips: impl IntoElement,
-) -> impl IntoElement {
-    v_flex()
-        .gap_2()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(title),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(palette::text_muted())
-                .child(description),
-        )
-        .child(chips)
-}
-
-fn preset_chip<F>(
-    id: SharedString,
-    label: SharedString,
-    selected: bool,
-    on_click: F,
-) -> impl IntoElement
-where
-    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-{
-    let (bg, fg, border) = if selected {
-        (palette::blue(), palette::panel(), palette::blue_hover())
-    } else {
-        (
-            palette::sidebar(),
-            palette::text(),
-            palette::border_strong(),
-        )
-    };
-
-    div()
-        .id(id)
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.85))
-        .on_click(on_click)
-        .child(
-            h_flex()
-                .h(px(30.))
-                .px(px(14.))
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .bg(bg)
-                .text_color(fg)
-                .border_1()
-                .border_color(border)
-                .text_xs()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(label),
-        )
 }
 
 fn format_auto_lock_label(secs: Option<u64>) -> SharedString {
