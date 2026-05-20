@@ -25,7 +25,7 @@ pub fn check() -> Result<Option<UpdateInfo>, UpdateError> {
     Ok(update.map(|u| UpdateInfo {
         version: u.version,
         notes: u.body.unwrap_or_default(),
-        pub_date: u.date.map(|d| d.to_string()),
+        pub_date: u.date.map(|d| format!("{} {}, {}", d.month(), d.day(), d.year())),
     }))
 }
 
@@ -54,7 +54,9 @@ where
     let info = UpdateInfo {
         version: update.version.clone(),
         notes: update.body.clone().unwrap_or_default(),
-        pub_date: update.date.map(|d| d.to_string()),
+        pub_date: update
+            .date
+            .map(|d| format!("{} {}, {}", d.month(), d.day(), d.year())),
     };
 
     update

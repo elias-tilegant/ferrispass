@@ -158,6 +158,17 @@ jobs:
             echo 'RELEASE_NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Inject release notes into update manifest
+        # build-mac.sh writes update.json without a `notes` field, so the
+        # in-app "What's new" modal shown after auto-update displays a
+        # "No release notes were included" fallback. Patch the manifest
+        # here, once git-cliff has produced the notes, before uploading.
+        run: |
+          set -euo pipefail
+          jq --rawfile notes RELEASE_NOTES.md '. + {notes: $notes}' \
+            dist/update.json > dist/update.json.tmp
+          mv dist/update.json.tmp dist/update.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
