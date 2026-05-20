@@ -54,13 +54,13 @@ impl VaultSwitcher {
         &mut self,
         _: &Entity<InputState>,
         event: &InputEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
             InputEvent::Change => cx.notify(),
             InputEvent::PressEnter { .. } => {
-                let _ = self.shell.update_in(cx, |shell, window, cx| {
+                let _ = self.shell.update(cx, move |shell, cx| {
                     shell.activate_vault_switcher_top(window, cx);
                 });
             }
@@ -280,9 +280,9 @@ fn open_row(
             RowTone::Default
         },
         Some(badge),
-        cx.listener(move |_: &mut VaultSwitcher, _: &ClickEvent, _window, cx| {
+        cx.listener(move |_: &mut VaultSwitcher, _: &ClickEvent, window, cx| {
             let path = path_owned.clone();
-            let _ = shell.update_in(cx, |shell, window, cx| {
+            let _ = shell.update(cx, move |shell, cx| {
                 shell
                     .state()
                     .clone()
@@ -324,9 +324,9 @@ fn recent_row(
         parent,
         RowTone::Default,
         Some(elapsed),
-        cx.listener(move |_: &mut VaultSwitcher, _: &ClickEvent, _window, cx| {
+        cx.listener(move |_: &mut VaultSwitcher, _: &ClickEvent, window, cx| {
             let path = path.clone();
-            let _ = shell.update_in(cx, |shell, window, cx| {
+            let _ = shell.update(cx, move |shell, cx| {
                 shell
                     .state()
                     .clone()
