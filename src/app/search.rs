@@ -1,9 +1,13 @@
 //! Local fuzzy entry search.
 //!
-//! Metadata-only: never reads `password`, `notes`, or `custom_fields` — those
-//! are either secret or noisy enough that searching them would surface results
-//! the user didn't expect. The opposite of a server-side index: in-memory,
-//! per-keystroke, no plaintext metadata ever touches disk.
+//! Matches an entry's title, URL host, full URL, username, tags, and the
+//! names of its ancestor groups (its `group_path`) — so searching a folder
+//! name like "acme" surfaces every entry filed under that group and its
+//! subgroups. Metadata-only: never reads `password`, `notes`, or
+//! `custom_fields` — those are either secret or noisy enough that searching
+//! them would surface results the user didn't expect. The opposite of a
+//! server-side index: in-memory, per-keystroke, no plaintext metadata ever
+//! touches disk.
 //!
 //! Match classes by needle length, ordered by priority:
 //!
@@ -71,6 +75,7 @@ enum Field {
     UrlFull,
     Username,
     Tag,
+    Group,
 }
 
 impl Field {
@@ -80,6 +85,10 @@ impl Field {
             Field::UrlHost => 0.85,
             Field::UrlFull => 0.65,
             Field::Username => 0.55,
+            // Folder/group names: a deliberate categorisation signal —
+            // slightly above a free-form tag, still below any direct
+            // field hit so an entry literally named for the query wins.
+            Field::Group => 0.45,
             Field::Tag => 0.40,
         }
     }
@@ -125,6 +134,10 @@ struct Haystacks {
     url_full: String,
     username: String,
     tags: Vec<String>,
+    /// Lowercased ancestor group names (the entry's `group_path`). Each
+    /// segment is matched independently — like tags — so an entry in
+    /// `Customers/Globex/Web` is found by "customers", "globex" *or* "web".
+    group_segments: Vec<String>,
 }
 
 fn build_haystacks(entry: &VaultEntry) -> Haystacks {
@@ -137,6 +150,11 @@ fn build_haystacks(entry: &VaultEntry) -> Haystacks {
             .tags
             .iter()
             .map(|t| t.to_lowercase())
+            .collect::<Vec<String>>(),
+        group_segments: entry
+            .group_path
+            .iter()
+            .map(|g| g.to_lowercase())
             .collect::<Vec<String>>(),
     }
 }
@@ -197,6 +215,9 @@ fn best_token_score(token: &str, h: &Haystacks, matcher: &mut Matcher) -> u32 {
     ));
     for tag in &h.tags {
         best = best.max(weighted(token, tag, Field::Tag, matcher, needle_len));
+    }
+    for segment in &h.group_segments {
+        best = best.max(weighted(token, segment, Field::Group, matcher, needle_len));
     }
     best
 }
@@ -611,13 +632,53 @@ mod tests {
     }
 
     #[test]
-    fn group_path_is_not_searched() {
+    fn group_path_is_searched() {
+        // The entry's folder names are matchable: someone who files
+        // everything for a client under one group can pull it all up by the
+        // group name even when that name appears in no other field.
         let mut e = entry("a", "Random title");
         e.group_path = vec!["Acme".into(), "Work".into()];
         let s = snapshot(vec![e]);
 
-        assert!(ranked_entries(&s, "acme").is_empty());
-        assert!(ranked_entries(&s, "work").is_empty());
+        assert_eq!(ids(&ranked_entries(&s, "acme")), vec!["a"]);
+        assert_eq!(ids(&ranked_entries(&s, "work")), vec!["a"]);
+    }
+
+    #[test]
+    fn group_name_matches_subgroup_entries() {
+        // A mid-path ancestor must match, not just the immediate parent —
+        // an entry in `Customers/Globex/Web` is "a Globex entry".
+        let mut e = entry("a", "Router admin");
+        e.group_path = vec!["Customers".into(), "Globex".into(), "Web".into()];
+        let s = snapshot(vec![e]);
+
+        assert_eq!(ids(&ranked_entries(&s, "globex")), vec!["a"]);
+    }
+
+    #[test]
+    fn group_match_ranks_below_title() {
+        // An entry literally titled for the query outranks one that merely
+        // lives in a folder of that name.
+        let by_title = entry("a", "globex");
+        let mut by_group = entry("b", "Other");
+        by_group.group_path = vec!["globex".into()];
+        let s = snapshot(vec![by_title, by_group]);
+
+        let result = ranked_entries(&s, "globex");
+        assert_eq!(ids(&result), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn group_plus_title_token_combo() {
+        // The all-tokens-must-match rule composes group + title for free:
+        // "globex vpn" narrows to the VPN entry inside the Globex group.
+        let mut vpn = entry("a", "VPN");
+        vpn.group_path = vec!["Globex".into()];
+        let mut mail = entry("b", "Mail");
+        mail.group_path = vec!["Globex".into()];
+        let s = snapshot(vec![vpn, mail]);
+
+        assert_eq!(ids(&ranked_entries(&s, "globex vpn")), vec!["a"]);
     }
 
     #[test]
