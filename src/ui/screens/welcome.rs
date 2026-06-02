@@ -12,6 +12,7 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::brand::brand;
+use crate::ui::widgets::interaction::Interaction as _;
 use crate::ui::widgets::command_row::{RowTone, command_row};
 use crate::ui::widgets::update_chip;
 use crate::update::UpdateStatus;
@@ -234,6 +235,7 @@ fn footer(cx: &mut Context<AppShell>) -> AnyElement {
                 .id("welcome-about-trigger")
                 .cursor_pointer()
                 .hover(|s| s.text_color(palette::text_muted()))
+                .pressable()
                 .child(format!("v{} · KDBX 4.1", crate::app::APP_VERSION))
                 .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                     window.dispatch_action(Box::new(OpenAbout), cx);

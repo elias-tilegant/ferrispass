@@ -15,6 +15,7 @@ use crate::ui::app_shell::{AppShell, SettingsTab};
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip};
+use crate::ui::widgets::interaction::Interaction as _;
 use crate::ui::widgets::settings_form::{
     ActionKind, action_button, option_group, section_card, segment_item, setting_switch,
 };
@@ -188,7 +189,7 @@ fn sidebar_item(
         let id = SharedString::from(format!("settings-tab-{label}"));
         div()
             .id(id)
-            .cursor_pointer()
+            .pressable_dim()
             .on_click(
                 cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                     shell.set_settings_tab(target, cx);

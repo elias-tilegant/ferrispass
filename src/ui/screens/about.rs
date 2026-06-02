@@ -13,6 +13,7 @@ use gpui_component::v_flex;
 use crate::ui::app_shell::AppShell;
 use crate::ui::palette;
 use crate::ui::widgets::brand::brand;
+use crate::ui::widgets::interaction::Interaction as _;
 
 const REPO_URL: &str = "https://github.com/elias-tilegant/ferrispass";
 
@@ -100,6 +101,7 @@ fn repo_link(cx: &mut Context<AppShell>) -> AnyElement {
         .text_color(palette::blue())
         .hover(|s| s.text_color(palette::blue_hover()))
         .cursor_pointer()
+        .pressable()
         .child("View on GitHub")
         .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, _, cx| {
             cx.open_url(REPO_URL);

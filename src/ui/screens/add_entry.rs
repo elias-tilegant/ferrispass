@@ -12,6 +12,7 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::label;
+use crate::ui::widgets::interaction::Interaction as _;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let underlay = crate::ui::screens::vault::render(shell, cx);
@@ -138,6 +139,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
+        .hover_press(palette::border())
         .child("Cancel")
         .on_click(
             cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
@@ -176,6 +178,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::panel()),
         )
         .child(save_label)
+        .hover_press(palette::blue_hover())
         .on_click(
             cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 let draft = shell.collect_entry_draft(cx);
@@ -221,6 +224,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 
     let generate_button_el = div()
         .id("add-generate")
+        .pressable_dim()
         .child(generate_button_visual())
         .on_click(
             cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
@@ -460,6 +464,11 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                             })
                             .with_size(gpui_component::Size::Size(px(12.))),
                         )
+                        .hover_press(if protected {
+                            palette::blue_border()
+                        } else {
+                            palette::border()
+                        })
                         .on_click(cx.listener(
                             move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                                 shell.toggle_custom_field_protected(id_for_lock, cx);
@@ -481,6 +490,8 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                         .items_center()
                         .justify_center()
                         .child("✕")
+                        .hover(|s| s.text_color(palette::red()))
+                        .pressable()
                         .on_click(cx.listener(
                             move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                                 shell.remove_custom_field_row(id_for_remove, cx);
@@ -514,6 +525,7 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                     .items_center()
                     .justify_center()
                     .child("+ Add field")
+                    .hover_press(palette::border())
                     .on_click(
                         cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                             shell.add_custom_field_row(window, cx);
@@ -536,6 +548,7 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                     .items_center()
                     .justify_center()
                     .child("+ Add SAP connection")
+                    .hover_press(palette::blue_border())
                     .on_click(
                         cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                             shell.add_sap_connection_template(window, cx);
@@ -664,6 +677,7 @@ fn target_group_chip(
         .text_xs()
         .text_color(palette::text_muted())
         .hover(|s| s.bg(palette::sidebar()).text_color(palette::text()))
+        .pressable()
         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
             shell.toggle_new_entry_picker(cx);
         }))
@@ -743,6 +757,7 @@ fn group_picker_panel(
                 .when(!is_selected, |this| {
                     this.hover(|s| s.bg(palette::sidebar()))
                 })
+                .pressable()
                 .on_click(
                     cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                         shell.set_new_entry_target_group(group_id.clone(), cx);

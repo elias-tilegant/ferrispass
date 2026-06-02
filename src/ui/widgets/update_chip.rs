@@ -5,6 +5,7 @@ use gpui::{
 use gpui_component::{Icon, Sizable as _, Size, h_flex};
 
 use crate::app::actions::{InstallUpdate, RestartToUpdate};
+use crate::ui::widgets::interaction::Interaction as _;
 use crate::ui::{AppShell, icons::AppIcon, palette};
 use crate::update::UpdateStatus;
 
@@ -70,14 +71,12 @@ pub fn update_chip(status: &UpdateStatus, cx: &mut Context<AppShell>) -> Option<
 
     let chip = match action {
         Some(UpdateAction::Install) => chip
-            .cursor_pointer()
-            .hover(|s| s.bg(palette::blue_hover()))
+            .hover_press(palette::blue_hover())
             .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
                 window.dispatch_action(Box::new(InstallUpdate), cx);
             })),
         Some(UpdateAction::Restart) => chip
-            .cursor_pointer()
-            .hover(|s| s.bg(palette::blue_hover()))
+            .hover_press(palette::blue_hover())
             .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
                 window.dispatch_action(Box::new(RestartToUpdate), cx);
             })),

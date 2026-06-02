@@ -12,6 +12,7 @@ use gpui_component::{Sizable as _, h_flex, scroll::ScrollableElement as _, v_fle
 use crate::app::Overlay;
 use crate::ui::app_shell::AppShell;
 use crate::ui::palette;
+use crate::ui::widgets::interaction::Interaction as _;
 use crate::update::UpdateInfo;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
@@ -112,6 +113,7 @@ fn close_icon(cx: &mut Context<AppShell>) -> AnyElement {
         .text_color(palette::text_muted())
         .hover(|s| s.bg(palette::sidebar()).text_color(palette::text()))
         .cursor_pointer()
+        .pressable()
         .child(
             gpui_component::Icon::from(gpui_component::IconName::Close)
                 .with_size(gpui_component::Size::Size(px(14.))),
@@ -149,6 +151,7 @@ fn done_button(cx: &mut Context<AppShell>) -> AnyElement {
         .justify_center()
         .cursor_pointer()
         .hover(|s| s.bg(palette::blue_hover()))
+        .pressable()
         .child("Done")
         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
             shell.state().clone().update(cx, |state, cx| {
@@ -294,6 +297,7 @@ fn link_span(
         .text_color(palette::blue())
         .hover(|s| s.text_color(palette::blue_hover()))
         .cursor_pointer()
+        .pressable()
         .child(label)
         .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
             cx.open_url(&url_for_click);

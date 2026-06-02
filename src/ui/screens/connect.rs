@@ -23,6 +23,7 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::buttons::step_indicator;
+use crate::ui::widgets::interaction::Interaction as _;
 use crate::ui::widgets::provider_row::{Provider, provider_row};
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
@@ -143,7 +144,10 @@ fn provider_row_button(
     enabled: bool,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
-    let row = div().id(provider.id.clone()).child(provider_row(provider));
+    let row = div()
+        .id(provider.id.clone())
+        .pressable_dim()
+        .child(provider_row(provider));
     if enabled {
         row.on_click(
             cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
@@ -216,6 +220,7 @@ fn render_signing_in(challenge: &DeviceCodeChallenge, cx: &mut Context<AppShell>
                                 .items_center()
                                 .justify_center()
                                 .child("Open in browser")
+                                .hover_press(palette::blue_hover())
                                 .on_click(cx.listener(
                                     move |_: &mut AppShell, _: &ClickEvent, _, _| {
                                         AppShell::open_browser(&verification_uri_for_open);
@@ -252,6 +257,7 @@ fn render_signing_in(challenge: &DeviceCodeChallenge, cx: &mut Context<AppShell>
                                 .items_center()
                                 .justify_center()
                                 .child("Copy code")
+                                .hover_press(palette::border())
                                 .on_click(cx.listener(
                                     move |_: &mut AppShell, _: &ClickEvent, window, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
@@ -416,6 +422,7 @@ fn picker_row(hit: DriveItemHit, last: bool, cx: &mut Context<AppShell>) -> AnyE
             this.border_b_1().border_color(palette::border())
         })
         .hover(|this| this.bg(palette::sidebar()))
+        .pressable()
         .child(
             div()
                 .size(px(28.))
@@ -631,6 +638,7 @@ fn footer(cx: &mut Context<AppShell>) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .child("Cancel")
+                .hover_press(palette::border())
                 .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                     window.dispatch_action(Box::new(CancelUnlock), cx);
                 })),
@@ -659,6 +667,7 @@ fn secondary_button(
         .items_center()
         .justify_center()
         .child(label)
+        .hover_press(palette::border())
         .on_click(
             cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                 shell

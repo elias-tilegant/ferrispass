@@ -8,6 +8,7 @@ use crate::app::Overlay;
 use crate::ui::app_shell::AppShell;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::label;
+use crate::ui::widgets::interaction::Interaction as _;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let underlay = crate::ui::screens::vault::render(shell, cx);
@@ -87,6 +88,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .items_center()
         .justify_center()
         .child("Cancel")
+        .hover_press(palette::border())
         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
             shell.state().clone().update(cx, |state, cx| {
                 let _ = state.close_overlay(cx);
@@ -114,6 +116,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::panel()),
         )
         .child("Save")
+        .hover_press(palette::blue_hover())
         .on_click(
             cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 shell.submit_group_form(window, cx);

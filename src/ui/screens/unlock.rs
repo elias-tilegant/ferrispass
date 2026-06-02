@@ -16,6 +16,7 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::label;
+use crate::ui::widgets::interaction::Interaction as _;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let state = shell.state().read(cx);
@@ -148,6 +149,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .child(
                     div()
                         .id("unlock-submit")
+                        .pressable_dim()
                         .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                             window.dispatch_action(Box::new(SubmitPassword), cx);
                         }))
@@ -176,6 +178,8 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                     div()
                                         .id("cancel-unlock")
                                         .text_color(palette::blue())
+                                        .hover(|s| s.text_color(palette::blue_hover()))
+                                        .pressable()
                                         .child("Cancel")
                                         .on_click(cx.listener(
                                             |_: &mut AppShell, _: &ClickEvent, window, cx| {
@@ -199,6 +203,7 @@ fn touch_id_enrollment_checkbox(
         .items_center()
         .text_xs()
         .text_color(palette::text_muted())
+        .pressable()
         .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
             window.dispatch_action(Box::new(ToggleBiometricEnrollment), cx);
         }))
@@ -249,9 +254,10 @@ fn touch_id_unlock_button(
     div()
         .id("biometric-unlock")
         .when(!in_flight, |this| {
-            this.on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                window.dispatch_action(Box::new(SubmitBiometricUnlock), cx);
-            }))
+            this.pressable_dim()
+                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(SubmitBiometricUnlock), cx);
+                }))
         })
         .child(secondary_button(label_text, icon, in_flight))
 }
@@ -273,6 +279,8 @@ fn footer_left(
         return div()
             .id("biometric-forget")
             .text_color(palette::blue())
+            .hover(|s| s.text_color(palette::blue_hover()))
+            .pressable()
             .child("Forget Touch ID")
             .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                 window.dispatch_action(Box::new(ForgetBiometric), cx);

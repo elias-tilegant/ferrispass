@@ -13,6 +13,7 @@ use gpui::{
 use gpui_component::{h_flex, v_flex};
 
 use crate::ui::palette;
+use crate::ui::widgets::interaction::{Interaction as _, mix};
 use crate::ui::widgets::toggle_row::switch_visual;
 
 /// Baseline height for interactive controls in the Settings overlay.
@@ -82,6 +83,15 @@ pub fn option_group(items: Vec<SegmentItem>) -> AnyElement {
         } else {
             (palette::panel(), palette::text())
         };
+        // Unselected segments recolour toward the sidebar tint on hover; the
+        // selected segment deepens to the blue hover token (its base is plain
+        // blue, so hovering to blue again would be a no-op). Both also get a
+        // press dim + pointer cursor via the shared interaction vocabulary.
+        let hover_bg = if selected {
+            palette::blue_hover()
+        } else {
+            palette::border()
+        };
         let mut seg = div()
             .id(id)
             .h_full()
@@ -93,8 +103,7 @@ pub fn option_group(items: Vec<SegmentItem>) -> AnyElement {
             .text_color(fg)
             .text_xs()
             .font_weight(gpui::FontWeight::MEDIUM)
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.85))
+            .hover_press(hover_bg)
             .on_click(on_click)
             .child(label);
         if !is_last {
@@ -152,8 +161,7 @@ where
 {
     div()
         .id(id.into())
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.85))
+        .pressable_dim()
         .on_click(on_click)
         .child(switch_visual(on))
         .into_any_element()
@@ -229,10 +237,15 @@ where
         .child(label);
 
     if enabled {
-        button = button
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.85))
-            .on_click(on_click);
+        // Each kind gets a hover fill that reads in both light and dark: the
+        // primary deepens to its hover token, the soft-blue secondary leans
+        // toward the accent, and the ghost picks up the sidebar tint.
+        let hover_bg = match kind {
+            ActionKind::Primary => palette::blue_hover(),
+            ActionKind::Secondary => mix(palette::blue_soft(), palette::blue(), 0.15),
+            ActionKind::Ghost => palette::border(),
+        };
+        button = button.hover_press(hover_bg).on_click(on_click);
     } else {
         // Make sure the listener gets dropped — important when callers
         // wrap a heavy closure (settings state etc.). Discarding it here

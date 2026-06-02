@@ -23,6 +23,7 @@ use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, section_heading, status_badge};
 use crate::ui::widgets::brand::brand;
+use crate::ui::widgets::interaction::{Interaction as _, darken};
 use crate::ui::widgets::entry_chrome::favicon;
 use crate::ui::widgets::password::strength_card;
 use crate::ui::widgets::update_chip;
@@ -121,6 +122,7 @@ fn sidebar(
                 .pt_3()
                 .pb_2()
                 .hover(|s| s.bg(palette::panel()))
+                .pressable()
                 .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                     window.dispatch_action(Box::new(OpenVaultSwitcher), cx);
                 }))
@@ -169,6 +171,7 @@ fn sidebar(
                             s.border_color(palette::border_strong())
                                 .text_color(palette::text())
                         })
+                        .pressable()
                         .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                             window.dispatch_action(Box::new(OpenAddVault), cx);
                             cx.stop_propagation();
@@ -225,9 +228,10 @@ fn sidebar(
                 .child(
                     div()
                         .id("sidebar-sync-chip")
-                        .cursor_pointer()
                         .flex_1()
                         .min_w(px(0.))
+                        .hover(|s| s.text_color(palette::text()))
+                        .pressable()
                         .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                             window.dispatch_action(Box::new(OpenSyncSettings), cx);
                         }))
@@ -257,6 +261,14 @@ fn sidebar(
                 .child(
                     div()
                         .id("sidebar-settings")
+                        .flex_shrink_0()
+                        .size(px(22.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .hover(|s| s.bg(palette::panel()))
+                        .pressable()
                         .child(
                             gpui_component::Icon::from(gpui_component::IconName::Settings)
                                 .with_size(gpui_component::Size::Size(px(13.)))
@@ -428,6 +440,7 @@ fn groups_section(
                         .rounded(px(4.))
                         .text_color(palette::text_muted())
                         .hover(|s| s.text_color(palette::text()).bg(palette::panel()))
+                        .pressable()
                         .child(
                             gpui_component::Icon::from(gpui_component::IconName::Plus)
                                 .with_size(gpui_component::Size::Size(px(12.))),
@@ -479,6 +492,7 @@ fn groups_section(
                 .justify_center()
                 .text_color(palette::text_muted())
                 .hover(|s| s.text_color(palette::text()))
+                .pressable()
                 .child(
                     gpui_component::Icon::from(if is_expanded {
                         gpui_component::IconName::ChevronDown
@@ -691,6 +705,7 @@ fn nav_pill(
             gpui::FontWeight::NORMAL
         })
         .when(!selected, |this| this.hover(|s| s.bg(palette::border())))
+        .pressable()
         .on_click(on_click)
         .child(nav_pill_icon(icon, icon_image, icon_resolved))
         .child(div().flex_1().min_w_0().truncate().child(label_owned))
@@ -786,28 +801,34 @@ fn workspace_toolbar(
         .border_b_1()
         .border_color(palette::border())
         .bg(palette::panel())
-        .child(
-            div()
-                .id("toolbar-new-entry")
-                .child(toolbar_button("New entry", Some(AppIcon::Key), true))
-                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                    window.dispatch_action(Box::new(NewEntry), cx);
-                })),
-        )
+        .child(toolbar_button(
+            "toolbar-new-entry",
+            "New entry",
+            Some(AppIcon::Key),
+            true,
+            cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(NewEntry), cx);
+            }),
+        ))
         .child(div().w(px(1.)).h(px(18.)).bg(palette::border()))
-        .child(
-            div()
-                .id("toolbar-group")
-                .child(toolbar_button("Group", Some(AppIcon::Note), false)),
-        )
-        .child(
-            div()
-                .id("toolbar-sync")
-                .child(toolbar_button("Sync", Some(AppIcon::Sync), false))
-                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                    window.dispatch_action(Box::new(SyncNow), cx);
-                })),
-        )
+        .child(toolbar_button(
+            "toolbar-group",
+            "Group",
+            Some(AppIcon::Note),
+            false,
+            cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(NewGroup), cx);
+            }),
+        ))
+        .child(toolbar_button(
+            "toolbar-sync",
+            "Sync",
+            Some(AppIcon::Sync),
+            false,
+            cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(SyncNow), cx);
+            }),
+        ))
         .child(div().flex_1())
         .children(update_chip(update_status, cx))
         .child(
@@ -815,46 +836,50 @@ fn workspace_toolbar(
                 .w(px(280.))
                 .child(Input::new(&search_input).cleanable(true)),
         )
-        .child(
-            div()
-                .id(if is_open {
-                    "toolbar-lock"
+        .child(toolbar_button(
+            if is_open { "toolbar-lock" } else { "toolbar-open" },
+            if is_open { "Lock" } else { "Open vault" },
+            Some(if is_open {
+                AppIcon::Lock
+            } else {
+                AppIcon::Unlock
+            }),
+            is_open,
+            cx.listener(move |_: &mut AppShell, _: &ClickEvent, window, cx| {
+                if is_open {
+                    window.dispatch_action(Box::new(LockVault), cx);
                 } else {
-                    "toolbar-open"
-                })
-                .child(toolbar_button(
-                    if is_open { "Lock" } else { "Open vault" },
-                    Some(if is_open {
-                        AppIcon::Lock
-                    } else {
-                        AppIcon::Unlock
-                    }),
-                    is_open,
-                ))
-                .on_click(
-                    cx.listener(move |_: &mut AppShell, _: &ClickEvent, window, cx| {
-                        if is_open {
-                            window.dispatch_action(Box::new(LockVault), cx);
-                        } else {
-                            window.dispatch_action(Box::new(OpenVault), cx);
-                        }
-                    }),
-                ),
-        )
+                    window.dispatch_action(Box::new(OpenVault), cx);
+                }
+            }),
+        ))
 }
 
 fn toolbar_button(
+    id: &'static str,
     text: &'static str,
     icon: Option<AppIcon>,
     primary: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl gpui::IntoElement {
-    let (bg, fg, bd) = if primary {
-        (palette::blue(), palette::panel(), palette::blue_hover())
+    let (bg, fg, bd, hover_bg) = if primary {
+        (
+            palette::blue(),
+            palette::panel(),
+            palette::blue_hover(),
+            palette::blue_hover(),
+        )
     } else {
-        (palette::panel(), palette::text(), palette::border_strong())
+        (
+            palette::panel(),
+            palette::text(),
+            palette::border_strong(),
+            palette::border(),
+        )
     };
 
     h_flex()
+        .id(id)
         .h(px(26.))
         .px(px(10.))
         .gap_1p5()
@@ -866,6 +891,8 @@ fn toolbar_button(
         .border_color(bd)
         .text_xs()
         .font_weight(gpui::FontWeight::MEDIUM)
+        .hover_press(hover_bg)
+        .on_click(on_click)
         .when_some(icon, |this, i| {
             this.child(
                 gpui_component::Icon::from(i)
@@ -898,9 +925,19 @@ fn footer_button(
     style: FooterStyle,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
-    let (bg, fg, bd) = match style {
-        FooterStyle::Default => (palette::panel(), palette::text(), palette::border_strong()),
-        FooterStyle::Danger => (palette::red(), palette::panel(), palette::red()),
+    let (bg, fg, bd, hover_bg) = match style {
+        FooterStyle::Default => (
+            palette::panel(),
+            palette::text(),
+            palette::border_strong(),
+            palette::border(),
+        ),
+        FooterStyle::Danger => (
+            palette::red(),
+            palette::panel(),
+            palette::red(),
+            darken(palette::red(), 0.10),
+        ),
     };
     div()
         .id(id)
@@ -916,6 +953,7 @@ fn footer_button(
         .flex()
         .items_center()
         .justify_center()
+        .hover_press(hover_bg)
         .child(text)
         .on_click(on_click)
         .into_any_element()
@@ -932,34 +970,32 @@ fn launch_action_button(
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let (bg, fg, bd) = (palette::panel(), palette::text(), palette::border_strong());
-    div()
+    h_flex()
         .id("detail-launch")
-        .child(
-            h_flex()
-                .h(px(28.))
-                .px(px(12.))
-                .gap_1p5()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .bg(bg)
-                .text_color(fg)
-                .border_1()
-                .border_color(bd)
-                .text_xs()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(
-                    gpui_component::Icon::from(icon)
-                        .with_size(gpui_component::Size::Size(px(12.)))
-                        .text_color(fg),
-                )
-                .child(label),
-        )
+        .h(px(28.))
+        .px(px(12.))
+        .gap_1p5()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(bg)
+        .text_color(fg)
+        .border_1()
+        .border_color(bd)
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .hover_press(palette::border())
         .on_click(
             cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 shell.launch_selected_entry(window, cx);
             }),
         )
+        .child(
+            gpui_component::Icon::from(icon)
+                .with_size(gpui_component::Size::Size(px(12.)))
+                .text_color(fg),
+        )
+        .child(label)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -989,41 +1025,53 @@ fn action_button(
         }
     };
 
-    let mut row = div().id(id);
-    if flex {
-        row = row.flex_1();
-    }
+    // Keeping `state_entity` in the signature avoids churn at the four call
+    // sites; the copy now routes through AppShell, so the handle is unused.
+    let _ = state_entity;
 
-    row.child(
-        h_flex()
-            .h(px(28.))
-            .px(px(12.))
-            .gap_1p5()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.))
-            .bg(bg)
-            .text_color(fg)
-            .border_1()
-            .border_color(bd)
-            .text_xs()
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .child(
-                gpui_component::Icon::from(icon)
-                    .with_size(gpui_component::Size::Size(px(12.)))
-                    .text_color(fg),
-            )
-            .child(text),
-    )
-    .when(enabled, move |this| {
-        let _ = state_entity; // routed through AppShell now; keeping the
-        // parameter avoids churn at the four call sites below.
-        this.on_click(
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                shell.copy_selected_value(kind, window, cx);
-            }),
+    // Feedback sits on the coloured element itself (it owns the `bg`), so the
+    // hover genuinely recolours the painted surface — a transparent wrapper
+    // would let the child paint over the hover fill, leaving no visible hover.
+    // The `flex` primary ("Copy password") fills the row so it reads as the
+    // emphasised action.
+    let mut button = h_flex()
+        .id(id)
+        .h(px(28.))
+        .px(px(12.))
+        .gap_1p5()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(bg)
+        .text_color(fg)
+        .border_1()
+        .border_color(bd)
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .child(
+            gpui_component::Icon::from(icon)
+                .with_size(gpui_component::Size::Size(px(12.)))
+                .text_color(fg),
         )
-    })
+        .child(text);
+    if flex {
+        button = button.flex_1();
+    }
+    if enabled {
+        // Default buttons sit on the sidebar-coloured detail footer, so they
+        // hover to `border()` (clearly darker than both white and the footer)
+        // rather than `sidebar()` (which would merge into the footer).
+        let hover_bg = match style {
+            ActionStyle::Primary => palette::blue_hover(),
+            ActionStyle::Default => palette::border(),
+        };
+        button = button.hover_press(hover_bg).on_click(cx.listener(
+            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.copy_selected_value(kind, window, cx);
+            },
+        ));
+    }
+    button
 }
 
 fn vault_split(
@@ -1368,6 +1416,7 @@ fn entry_row(
         .when(!selected, |this| {
             this.hover(|s| s.bg(palette::sidebar()).border_color(palette::border()))
         })
+        .pressable()
         .child(favicon(&fav, 28.))
         .child(
             v_flex()
@@ -1577,6 +1626,7 @@ fn entry_detail_body(
                         .p_1p5()
                         .rounded(px(6.))
                         .hover(|s| s.bg(palette::panel()))
+                        .pressable()
                         .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
                             let id = entry_id_for_star.clone();
                             state_for_star.update(cx, |state, cx| {
@@ -1684,9 +1734,8 @@ fn entry_detail_body(
                 .child(label(label_text))
                 .child({
                     // Single-line mono code box. Click → copy raw digits +
-                    // toast. Cursor stays the default pointer-style; if we
-                    // want a hand cursor later we can wire `.cursor_pointer()`
-                    // on the stateful div.
+                    // toast. When copyable it gets the hand cursor plus hover /
+                    // press feedback via `hover_press`.
                     let mut row = div()
                         .id("detail-totp-code")
                         .h(px(34.))
@@ -1704,7 +1753,7 @@ fn entry_detail_body(
                         .font_family("JetBrains Mono")
                         .child(display);
                     if copyable {
-                        row = row.on_click(cx.listener(
+                        row = row.hover_press(palette::panel()).on_click(cx.listener(
                             move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
                                 shell.copy_with_auto_clear(
                                     raw_for_clipboard.clone(),
@@ -1955,41 +2004,40 @@ fn custom_fields_section(entry: &VaultEntry, cx: &mut Context<AppShell>) -> impl
         let field_key = cf.key.clone();
         let copyable = !cf.value.is_empty();
         let row_id = SharedString::from(format!("detail-cf-{idx}"));
-        let mut row = div().id(row_id).child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .h(px(34.))
-                .px_3()
-                .rounded(px(6.))
-                .bg(palette::panel())
-                .border_1()
-                .border_color(palette::border())
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(palette::text_muted())
-                        .min_w(px(110.))
-                        .child(key_label),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_xs()
-                        .text_color(if copyable {
-                            palette::text()
-                        } else {
-                            palette::text_faint()
-                        })
-                        .font_family("JetBrains Mono")
-                        .child(display),
-                ),
-        );
+        let mut row = h_flex()
+            .id(row_id)
+            .gap_2()
+            .items_center()
+            .h(px(34.))
+            .px_3()
+            .rounded(px(6.))
+            .bg(palette::panel())
+            .border_1()
+            .border_color(palette::border())
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(palette::text_muted())
+                    .min_w(px(110.))
+                    .child(key_label),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(if copyable {
+                        palette::text()
+                    } else {
+                        palette::text_faint()
+                    })
+                    .font_family("JetBrains Mono")
+                    .child(display),
+            );
         if copyable {
-            row = row.on_click(cx.listener(
+            row = row.hover_press(palette::border()).on_click(cx.listener(
                 move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
                     shell.copy_custom_field(&entry_id, &field_key, window, cx);
                 },
@@ -2016,39 +2064,52 @@ fn clickable_field_row<F>(
 where
     F: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 {
-    let inner = div()
-        .h(px(34.))
-        .w_full()
-        .min_w(px(0.))
-        .rounded(px(6.))
-        .border_1()
-        .border_color(palette::border())
-        .bg(palette::sidebar())
-        .px_3()
-        .py_2()
-        .text_sm()
-        .text_color(if enabled {
-            palette::text()
-        } else {
-            palette::text_faint()
-        })
-        .truncate()
-        .when(mono, |this| this.font_family("JetBrains Mono"))
-        .child(display);
-
+    // The clickable value box owns its own `bg(sidebar())` on the *stateful*
+    // element so `hover_press` recolours the surface that's actually painted
+    // (the box sits on the same sidebar-coloured detail panel, so it only
+    // reads as interactive once it lightens to `panel()` on hover — matching
+    // the adjacent password value box).
     let mut row = div().id(id).child(label_widget(label_text));
     if enabled {
         row = row.child(
             div()
                 .id(gpui::SharedString::from(format!("{id}-inner")))
-                .cursor_pointer()
-                .hover(|s| s.bg(palette::panel()))
+                .h(px(34.))
+                .w_full()
+                .min_w(px(0.))
                 .rounded(px(6.))
+                .border_1()
+                .border_color(palette::border())
+                .bg(palette::sidebar())
+                .px_3()
+                .py_2()
+                .text_sm()
+                .text_color(palette::text())
+                .truncate()
+                .when(mono, |this| this.font_family("JetBrains Mono"))
+                .hover_press(palette::panel())
                 .on_click(on_click)
-                .child(inner),
+                .child(display),
         );
     } else {
-        row = row.child(inner);
+        let _ = on_click;
+        row = row.child(
+            div()
+                .h(px(34.))
+                .w_full()
+                .min_w(px(0.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(palette::border())
+                .bg(palette::sidebar())
+                .px_3()
+                .py_2()
+                .text_sm()
+                .text_color(palette::text_faint())
+                .truncate()
+                .when(mono, |this| this.font_family("JetBrains Mono"))
+                .child(display),
+        );
     }
     v_flex().gap_1().min_w(px(0.)).child(row).into_any_element()
 }
@@ -2096,8 +2157,7 @@ where
         .text_sm()
         .truncate()
         .font_family("JetBrains Mono")
-        .cursor_pointer()
-        .hover(|s| s.bg(palette::panel()))
+        .hover_press(palette::panel())
         .on_click(on_click_copy)
         .child(display);
 
@@ -2113,8 +2173,7 @@ where
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
-        .hover(|s| s.bg(palette::panel()))
+        .hover_press(palette::panel())
         .on_click(on_click_reveal)
         .child(
             gpui_component::Icon::from(if revealed {
@@ -2198,14 +2257,15 @@ fn empty_panel(summary: &VaultSummary, cx: &mut Context<AppShell>) -> impl gpui:
                 .text_color(palette::text_muted())
                 .child(summary.subtitle.clone()),
         )
-        .child(
-            div()
-                .id("empty-open-vault")
-                .child(toolbar_button("Open vault", Some(AppIcon::Unlock), true))
-                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                    window.dispatch_action(Box::new(OpenVault), cx);
-                })),
-        )
+        .child(toolbar_button(
+            "empty-open-vault",
+            "Open vault",
+            Some(AppIcon::Unlock),
+            true,
+            cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(OpenVault), cx);
+            }),
+        ))
 }
 
 fn opening_panel(summary: &VaultSummary) -> impl gpui::IntoElement {
@@ -2325,6 +2385,7 @@ fn save_status_pill(status: &SaveStatus, cx: &mut Context<AppShell>) -> impl gpu
                         .flex()
                         .items_center()
                         .justify_center()
+                        .hover_press(palette::border())
                         .child("Retry")
                         .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                             window.dispatch_action(Box::new(crate::app::actions::SaveVault), cx);

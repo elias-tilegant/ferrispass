@@ -7,6 +7,7 @@ use gpui_component::{Sizable as _, h_flex, v_flex};
 
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
+use crate::ui::widgets::interaction::Interaction as _;
 
 #[derive(Clone, Copy)]
 pub enum RowTone {
@@ -53,83 +54,85 @@ where
         palette::text()
     };
 
-    div()
+    // The `id`, hover and press feedback all live on this single styled row so
+    // GPUI tracks the interactive state reliably — splitting `id`/`on_click`
+    // onto an outer wrapper (the previous shape) left the hover on a non-stateful
+    // child, which only repainted when something else nudged the tree.
+    h_flex()
         .id(id.into())
+        .h(px(58.))
+        .gap_3()
+        .items_center()
+        .px_3()
+        .rounded(px(7.))
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .hover(|s| {
+            if is_primary {
+                s.border_color(palette::blue())
+            } else {
+                s.bg(palette::sidebar())
+                    .border_color(palette::border_strong())
+            }
+        })
+        .pressable()
         .on_click(on_click)
         .child(
-            h_flex()
-                .h(px(58.))
-                .gap_3()
-                .items_center()
-                .px_3()
-                .rounded(px(7.))
-                .bg(bg)
+            div()
+                .size(px(30.))
+                .flex_shrink_0()
+                .rounded(px(6.))
+                .bg(icon_bg)
+                .text_color(icon_fg)
                 .border_1()
-                .border_color(border)
-                .hover(|s| {
-                    if is_primary {
-                        s.border_color(palette::blue())
-                    } else {
-                        s.bg(palette::sidebar())
-                            .border_color(palette::border_strong())
-                    }
+                .border_color(if is_primary {
+                    palette::blue()
+                } else {
+                    palette::border()
                 })
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    gpui_component::Icon::from(icon)
+                        .with_size(gpui_component::Size::Size(px(14.))),
+                ),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .gap_0p5()
                 .child(
                     div()
-                        .size(px(30.))
-                        .flex_shrink_0()
-                        .rounded(px(6.))
-                        .bg(icon_bg)
-                        .text_color(icon_fg)
-                        .border_1()
-                        .border_color(if is_primary {
-                            palette::blue()
-                        } else {
-                            palette::border()
-                        })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            gpui_component::Icon::from(icon)
-                                .with_size(gpui_component::Size::Size(px(14.))),
-                        ),
+                        .truncate()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(title_color)
+                        .child(title.into()),
                 )
                 .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(title_color)
-                                .child(title.into()),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(palette::text_faint())
-                                .child(meta.into()),
-                        ),
-                )
-                .when_some(trailing, |this, trailing| {
-                    this.child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(if is_primary {
-                                palette::blue()
-                            } else {
-                                palette::text_faint()
-                            })
-                            .child(trailing),
-                    )
-                }),
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(palette::text_faint())
+                        .child(meta.into()),
+                ),
         )
+        .when_some(trailing, |this, trailing| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if is_primary {
+                        palette::blue()
+                    } else {
+                        palette::text_faint()
+                    })
+                    .child(trailing),
+            )
+        })
         .into_any_element()
 }

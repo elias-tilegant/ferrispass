@@ -19,6 +19,7 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip};
+use crate::ui::widgets::interaction::Interaction as _;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     // The conflict overlay outlives the `Conflict(state)` sync-status it
@@ -97,6 +98,7 @@ fn transitional_screen(
             .items_center()
             .justify_center()
             .child(label)
+            .hover_press(palette::blue_hover())
             .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
                 shell.state().clone().update(cx, |state, cx| {
                     let _ = state.close_overlay(cx);
@@ -379,13 +381,16 @@ fn column(
     // Click anywhere on the header → make this the picked side. Wrapping
     // the whole column with on_click is also tempting, but field-row clicks
     // would then accidentally toggle the pick. Header-only is safer.
-    col = col.on_click(
-        cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            shell.state().clone().update(cx, |state, cx| {
-                state.set_conflict_pick(&entry_id_for_click, side, cx);
-            });
-        }),
-    );
+    col = col
+        .hover(|s| s.border_color(palette::blue_border()))
+        .pressable()
+        .on_click(
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell.state().clone().update(cx, |state, cx| {
+                    state.set_conflict_pick(&entry_id_for_click, side, cx);
+                });
+            }),
+        );
 
     for (i, f) in fields.iter().enumerate() {
         let last = i == fields.len() - 1;
@@ -467,6 +472,7 @@ fn apply_button(cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::panel()),
         )
         .child("Apply resolution")
+        .hover_press(palette::blue_hover())
         .on_click(
             cx.listener(|shell: &mut AppShell, _: &ClickEvent, _window, cx| {
                 shell
@@ -494,6 +500,7 @@ fn cancel_button(cx: &mut Context<AppShell>) -> AnyElement {
         .items_center()
         .justify_center()
         .child("Cancel")
+        .hover_press(palette::border())
         .on_click(
             cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 shell.state().clone().update(cx, |state, cx| {

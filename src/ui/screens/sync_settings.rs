@@ -25,6 +25,7 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip};
+use crate::ui::widgets::interaction::Interaction as _;
 
 /// Render the Sync tab body — content only, no chrome. The unified
 /// Settings overlay (`screens::settings`) wraps this with the sidebar
@@ -396,6 +397,7 @@ fn render_disconnected(cx: &mut Context<AppShell>) -> AnyElement {
                         .text_color(palette::panel()),
                 )
                 .child("Connect to SharePoint")
+                .hover_press(palette::blue_hover())
                 .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                     window.dispatch_action(Box::new(OpenConnect), cx);
                 })),
@@ -447,6 +449,7 @@ fn render_reconnect(detail: Option<&str>, cx: &mut Context<AppShell>) -> AnyElem
                 .items_center()
                 .justify_center()
                 .child("Reconnect")
+                .hover_press(palette::blue_hover())
                 .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                     window.dispatch_action(Box::new(OpenConnect), cx);
                 })),
@@ -478,6 +481,7 @@ fn sync_now_button(cx: &mut Context<AppShell>) -> AnyElement {
                 .text_color(palette::text()),
         )
         .child("Sync now")
+        .hover_press(palette::border())
         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
             shell
                 .state()
@@ -503,6 +507,7 @@ fn disconnect_button(cx: &mut Context<AppShell>) -> AnyElement {
         .items_center()
         .justify_center()
         .child("Disconnect")
+        .hover_press(palette::border())
         .on_click(
             cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
                 shell.state().clone().update(cx, |state, cx| {
