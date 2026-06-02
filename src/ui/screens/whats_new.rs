@@ -242,18 +242,41 @@ fn inline_row(
 ) -> AnyElement {
     let segments = parse_inline(text);
     if segments.len() == 1 {
-        return match segments.into_iter().next().unwrap() {
-            InlineSegment::Text(t) => div().child(t).into_any_element(),
-            InlineSegment::Link { label, url } => link_span(label, url, line_idx, link_id, cx),
-        };
+        return render_segment(segments.into_iter().next().unwrap(), line_idx, link_id, cx);
     }
     h_flex()
         .flex_wrap()
-        .children(segments.into_iter().map(|seg| match seg {
-            InlineSegment::Text(t) => div().child(t).into_any_element(),
-            InlineSegment::Link { label, url } => link_span(label, url, line_idx, link_id, cx),
-        }))
+        .children(
+            segments
+                .into_iter()
+                .map(|seg| render_segment(seg, line_idx, link_id, cx)),
+        )
         .into_any_element()
+}
+
+fn render_segment(
+    seg: InlineSegment,
+    line_idx: usize,
+    link_id: &mut usize,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    match seg {
+        InlineSegment::Text(t) => div().child(t).into_any_element(),
+        InlineSegment::Strong(t) => div()
+            .font_weight(gpui::FontWeight::BOLD)
+            .child(t)
+            .into_any_element(),
+        InlineSegment::Emphasis(t) => div().italic().child(t).into_any_element(),
+        InlineSegment::Code(t) => div()
+            .font_family("JetBrains Mono")
+            .px(px(4.))
+            .rounded(px(4.))
+            .bg(palette::sidebar())
+            .text_color(palette::text())
+            .child(t)
+            .into_any_element(),
+        InlineSegment::Link { label, url } => link_span(label, url, line_idx, link_id, cx),
+    }
 }
 
 fn link_span(
@@ -314,54 +337,92 @@ fn parse_line(raw: &str) -> (LineKind, &str) {
 #[derive(Debug)]
 enum InlineSegment {
     Text(String),
+    Strong(String),
+    Emphasis(String),
+    Code(String),
     Link { label: String, url: String },
 }
 
-/// Parse `[label](url)` and bare `http(s)://...` URLs into segments. Bold,
-/// italics and inline code are intentionally skipped — GitHub release notes
-/// mostly need links + bullets, and a fuller Markdown pass would warrant a
-/// crate dependency. Everything that isn't a recognised link survives as
-/// plain text, so unknown syntax stays human-readable.
+/// Parse a single line of GitHub-style Markdown into styled segments. Handles
+/// `[label](url)` and bare `http(s)://...` links, `**bold**`/`__bold__`,
+/// `*italic*`/`_italic_` and `` `code` ``. Anything that isn't a recognised
+/// span survives as plain text, so unknown syntax stays human-readable.
 fn parse_inline(text: &str) -> Vec<InlineSegment> {
     let mut out: Vec<InlineSegment> = Vec::new();
     let mut buf = String::new();
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'['
-            && let Some((label, url, consumed)) = match_md_link(&text[i..])
+    let mut rest = text;
+    while let Some(ch) = rest.chars().next() {
+        if ch == '['
+            && let Some((label, url, consumed)) = match_md_link(rest)
         {
-            if !buf.is_empty() {
-                out.push(InlineSegment::Text(std::mem::take(&mut buf)));
-            }
+            flush(&mut out, &mut buf);
             out.push(InlineSegment::Link { label, url });
-            i += consumed;
+            rest = &rest[consumed..];
             continue;
         }
-        if (bytes[i] == b'h' || bytes[i] == b'H')
-            && let Some(consumed) = match_bare_url(&text[i..])
+        if (ch == 'h' || ch == 'H')
+            && let Some(consumed) = match_bare_url(rest)
         {
-            if !buf.is_empty() {
-                out.push(InlineSegment::Text(std::mem::take(&mut buf)));
-            }
-            let url = text[i..i + consumed].to_string();
+            flush(&mut out, &mut buf);
+            let url = rest[..consumed].to_string();
             out.push(InlineSegment::Link {
                 label: url.clone(),
                 url,
             });
-            i += consumed;
+            rest = &rest[consumed..];
             continue;
         }
-        buf.push(bytes[i] as char);
-        i += 1;
+        if let Some((content, consumed)) = match_delim(rest, "`") {
+            flush(&mut out, &mut buf);
+            out.push(InlineSegment::Code(content));
+            rest = &rest[consumed..];
+            continue;
+        }
+        // Underscores only delimit at a word boundary so `snake_case` stays
+        // intact, matching how GitHub renders release notes.
+        let underscore_ok = !buf.chars().next_back().is_some_and(char::is_alphanumeric);
+        let strong = match_delim(rest, "**")
+            .or_else(|| underscore_ok.then(|| match_delim(rest, "__")).flatten());
+        if let Some((content, consumed)) = strong {
+            flush(&mut out, &mut buf);
+            out.push(InlineSegment::Strong(content));
+            rest = &rest[consumed..];
+            continue;
+        }
+        let emphasis = match_delim(rest, "*")
+            .or_else(|| underscore_ok.then(|| match_delim(rest, "_")).flatten());
+        if let Some((content, consumed)) = emphasis {
+            flush(&mut out, &mut buf);
+            out.push(InlineSegment::Emphasis(content));
+            rest = &rest[consumed..];
+            continue;
+        }
+        buf.push(ch);
+        rest = &rest[ch.len_utf8()..];
     }
-    if !buf.is_empty() {
-        out.push(InlineSegment::Text(buf));
-    }
+    flush(&mut out, &mut buf);
     if out.is_empty() {
         out.push(InlineSegment::Text(String::new()));
     }
     out
+}
+
+fn flush(out: &mut Vec<InlineSegment>, buf: &mut String) {
+    if !buf.is_empty() {
+        out.push(InlineSegment::Text(std::mem::take(buf)));
+    }
+}
+
+/// Match a `delim … delim` span (e.g. `**bold**`). Returns the inner content
+/// and the byte length consumed, or `None` when the closing delimiter is
+/// missing or the content would be empty.
+fn match_delim(s: &str, delim: &str) -> Option<(String, usize)> {
+    let inner = s.strip_prefix(delim)?;
+    let close = inner.find(delim)?;
+    if close == 0 {
+        return None;
+    }
+    Some((inner[..close].to_string(), delim.len() + close + delim.len()))
 }
 
 fn match_md_link(s: &str) -> Option<(String, String, usize)> {
@@ -450,5 +511,55 @@ mod tests {
         assert!(
             matches!(&segs[1], InlineSegment::Link { url, .. } if url == "https://example.com")
         );
+    }
+
+    #[test]
+    fn inline_parses_bold() {
+        let segs = parse_inline("**Full Changelog**:");
+        assert_eq!(segs.len(), 2);
+        assert!(matches!(&segs[0], InlineSegment::Strong(t) if t == "Full Changelog"));
+        assert!(matches!(&segs[1], InlineSegment::Text(t) if t == ":"));
+    }
+
+    #[test]
+    fn inline_parses_underscore_bold() {
+        let segs = parse_inline("__loud__");
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], InlineSegment::Strong(t) if t == "loud"));
+    }
+
+    #[test]
+    fn inline_parses_italic_and_code() {
+        let segs = parse_inline("an *emphasised* `value` here");
+        assert!(matches!(&segs[1], InlineSegment::Emphasis(t) if t == "emphasised"));
+        assert!(matches!(&segs[3], InlineSegment::Code(t) if t == "value"));
+    }
+
+    #[test]
+    fn bold_wins_over_italic() {
+        let segs = parse_inline("**bold**");
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], InlineSegment::Strong(t) if t == "bold"));
+    }
+
+    #[test]
+    fn unmatched_delimiter_stays_plain() {
+        let segs = parse_inline("2 * 3 = 6");
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], InlineSegment::Text(t) if t == "2 * 3 = 6"));
+    }
+
+    #[test]
+    fn snake_case_underscores_stay_literal() {
+        let segs = parse_inline("call some_function_name now");
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], InlineSegment::Text(t) if t == "call some_function_name now"));
+    }
+
+    #[test]
+    fn multibyte_text_is_not_corrupted() {
+        let segs = parse_inline("Behoben: Größe geändert – ä ö ü ß");
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], InlineSegment::Text(t) if t == "Behoben: Größe geändert – ä ö ü ß"));
     }
 }
