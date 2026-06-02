@@ -70,16 +70,18 @@ pub fn update_chip(status: &UpdateStatus, cx: &mut Context<AppShell>) -> Option<
         .child(div().whitespace_nowrap().child(label));
 
     let chip = match action {
-        Some(UpdateAction::Install) => chip
-            .hover_press(palette::blue_hover())
-            .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
-                window.dispatch_action(Box::new(InstallUpdate), cx);
-            })),
-        Some(UpdateAction::Restart) => chip
-            .hover_press(palette::blue_hover())
-            .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
-                window.dispatch_action(Box::new(RestartToUpdate), cx);
-            })),
+        Some(UpdateAction::Install) => {
+            chip.hover_press(palette::blue_hover())
+                .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
+                    window.dispatch_action(Box::new(InstallUpdate), cx);
+                }))
+        }
+        Some(UpdateAction::Restart) => {
+            chip.hover_press(palette::blue_hover())
+                .on_click(cx.listener(|_: &mut AppShell, _, window: &mut Window, cx| {
+                    window.dispatch_action(Box::new(RestartToUpdate), cx);
+                }))
+        }
         None => chip,
     };
 

@@ -23,8 +23,8 @@ use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, section_heading, status_badge};
 use crate::ui::widgets::brand::brand;
-use crate::ui::widgets::interaction::{Interaction as _, darken};
 use crate::ui::widgets::entry_chrome::favicon;
+use crate::ui::widgets::interaction::{Interaction as _, darken};
 use crate::ui::widgets::password::strength_card;
 use crate::ui::widgets::update_chip;
 
@@ -837,7 +837,11 @@ fn workspace_toolbar(
                 .child(Input::new(&search_input).cleanable(true)),
         )
         .child(toolbar_button(
-            if is_open { "toolbar-lock" } else { "toolbar-open" },
+            if is_open {
+                "toolbar-lock"
+            } else {
+                "toolbar-open"
+            },
             if is_open { "Lock" } else { "Open vault" },
             Some(if is_open {
                 AppIcon::Lock

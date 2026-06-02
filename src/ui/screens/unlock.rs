@@ -254,10 +254,11 @@ fn touch_id_unlock_button(
     div()
         .id("biometric-unlock")
         .when(!in_flight, |this| {
-            this.pressable_dim()
-                .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+            this.pressable_dim().on_click(cx.listener(
+                |_: &mut AppShell, _: &ClickEvent, window, cx| {
                     window.dispatch_action(Box::new(SubmitBiometricUnlock), cx);
-                }))
+                },
+            ))
         })
         .child(secondary_button(label_text, icon, in_flight))
 }

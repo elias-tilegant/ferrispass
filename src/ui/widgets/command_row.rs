@@ -95,8 +95,7 @@ where
                 .items_center()
                 .justify_center()
                 .child(
-                    gpui_component::Icon::from(icon)
-                        .with_size(gpui_component::Size::Size(px(14.))),
+                    gpui_component::Icon::from(icon).with_size(gpui_component::Size::Size(px(14.))),
                 ),
         )
         .child(

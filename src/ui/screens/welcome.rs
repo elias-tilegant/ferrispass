@@ -12,8 +12,8 @@ use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::brand::brand;
-use crate::ui::widgets::interaction::Interaction as _;
 use crate::ui::widgets::command_row::{RowTone, command_row};
+use crate::ui::widgets::interaction::Interaction as _;
 use crate::ui::widgets::update_chip;
 use crate::update::UpdateStatus;
 
