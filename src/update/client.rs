@@ -25,7 +25,9 @@ pub fn check() -> Result<Option<UpdateInfo>, UpdateError> {
     Ok(update.map(|u| UpdateInfo {
         version: u.version,
         notes: u.body.unwrap_or_default(),
-        pub_date: u.date.map(|d| format!("{} {}, {}", d.month(), d.day(), d.year())),
+        pub_date: u
+            .date
+            .map(|d| format!("{} {}, {}", d.month(), d.day(), d.year())),
     }))
 }
 

@@ -138,6 +138,23 @@ impl ConflictReport {
         // `local_only` doesn't dirty the merge: those entries are already in
         // the local DB we'll start the merge from.
     }
+
+    /// True when applying this report changes the *remote* — i.e. the local
+    /// side contributes something the server doesn't already have. That's
+    /// either entries only we hold (`local_only`) or a field divergence our
+    /// side won (`auto_resolved` with `winner == Local`).
+    ///
+    /// When this is false the merge is a pure fast-forward (we only pulled
+    /// remote-side changes), so the post-merge DB already matches the server
+    /// and the caller can skip the upload — avoiding a redundant remote
+    /// version for what is really just someone else's change landing here.
+    pub fn has_local_contribution(&self) -> bool {
+        !self.local_only.is_empty()
+            || self
+                .auto_resolved
+                .iter()
+                .any(|r| matches!(r.winner, Side::Local))
+    }
 }
 
 /// Which side the user wants to keep for a given conflict.
@@ -520,6 +537,40 @@ mod tests {
         assert!(report.remote_only.is_empty());
         // Local-only doesn't require user decision — clean.
         assert!(report.is_clean());
+    }
+
+    #[test]
+    fn remote_only_pull_is_a_pure_fast_forward() {
+        // Remote gained an entry, local has nothing the server lacks. The
+        // merge should be flagged as needing no upload — otherwise auto-sync
+        // mints a redundant remote version just for pulling someone else's
+        // change.
+        let local = Database::new();
+        let mut remote = fork(&local);
+        add(&mut remote, "OnlyOnRemote", "x");
+
+        let report = diff(&local, &remote);
+        assert!(report.conflicts.is_empty());
+        assert!(
+            !report.has_local_contribution(),
+            "pure remote pull must not require an upload"
+        );
+    }
+
+    #[test]
+    fn local_only_entry_requires_upload() {
+        // We hold an entry the server doesn't — the merge must be pushed so
+        // the other devices get it.
+        let mut local = Database::new();
+        let remote = fork(&local);
+        add(&mut local, "OnlyHere", "x");
+
+        let report = diff(&local, &remote);
+        assert!(report.conflicts.is_empty());
+        assert!(
+            report.has_local_contribution(),
+            "a local-only entry must be uploaded"
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::update::{UpdateInfo, UpdateStatus};
 use chrono::{DateTime, Local};
 use gpui::{AppContext as _, Context};
 use keepass::db::Database;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -106,6 +106,13 @@ pub struct AppState {
     /// tell the two attempts apart, so a stale prompt resolving late
     /// could otherwise drive the newer screen.
     biometric_generation: u64,
+    /// Vault paths with a background auto-sync request currently in
+    /// flight. Without this a Graph call that stalls past the timer
+    /// interval would let the next tick spawn a *second* request for the
+    /// same vault — competing token refreshes, duplicate downloads, and
+    /// racy status writes. We insert before spawning and remove on
+    /// completion; the auto-sync tick skips any path already present.
+    auto_sync_in_flight: HashSet<PathBuf>,
 }
 
 /// Lifecycle of a single Touch ID unlock attempt. Drives the Unlock
@@ -171,6 +178,7 @@ impl Default for AppState {
             pending_biometric_enrollment: false,
             biometric_attempt: BiometricAttempt::default(),
             biometric_generation: 0,
+            auto_sync_in_flight: HashSet::new(),
         }
     }
 }
@@ -258,8 +266,11 @@ pub enum SyncStatus {
     Conflict(Box<ConflictState>),
     /// Last operation failed. Caller (UI) decides whether to retry.
     Failed(String),
-    /// Refresh token is gone or revoked — user must re-run Connect.
-    Reconnect,
+    /// Refresh token is gone or revoked — user must re-run Connect. The
+    /// optional `detail` carries the Azure `AADSTS…` reason (from
+    /// `AuthError::InvalidGrant`) so the reconnect screen can tell the
+    /// user *why* their sign-in expired instead of a generic message.
+    Reconnect { detail: Option<String> },
 }
 
 /// Lifecycle of the explicit "Download favicons" action. Surfaced in the
@@ -886,6 +897,35 @@ impl AppState {
         }
     }
 
+    /// Read a clone of the sync status for the vault at `target`, whether
+    /// it's the active vault or one the user parked. `None` when no such
+    /// vault is in memory. The auto-sync tick uses this to skip vaults
+    /// that are mid-operation (Syncing / Conflict / …) before spending a
+    /// Graph round-trip on them.
+    fn sync_status_for(&self, target: &Path) -> Option<SyncStatus> {
+        if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
+            return Some(self.sync_status.clone());
+        }
+        self.parked.get(target).map(|p| p.sync_status.clone())
+    }
+
+    /// `true` when at least one synced vault is in memory (active or
+    /// parked). Gates the AppShell auto-sync timer so it only ticks when
+    /// there's actually a binding to pull against / keep alive.
+    pub fn has_any_sync_binding(&self) -> bool {
+        self.sync.is_some() || self.parked.values().any(|s| s.sync.is_some())
+    }
+
+    /// `true` when the vault at `target` still has a live sync binding —
+    /// active or parked. Used to drop a background sync result whose vault
+    /// was disconnected (or never synced) while the request was in flight.
+    fn has_sync_binding_for(&self, target: &Path) -> bool {
+        if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
+            return self.sync.is_some();
+        }
+        self.parked.get(target).is_some_and(|p| p.sync.is_some())
+    }
+
     fn is_unlocked_path(&self, target: &Path) -> bool {
         matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target)
             || self.parked.contains_key(target)
@@ -1173,9 +1213,9 @@ impl AppState {
                     cx.notify();
                 }
                 Err(crate::sync::service::ServiceError::Auth(
-                    crate::sync::auth::AuthError::InvalidGrant,
+                    crate::sync::auth::AuthError::InvalidGrant(detail),
                 )) => {
-                    state.sync_status = SyncStatus::Reconnect;
+                    state.sync_status = SyncStatus::Reconnect { detail };
                     cx.notify();
                 }
                 Err(e) => {
@@ -2850,7 +2890,21 @@ impl AppState {
     /// (`vault` or `parked[target]`) holds the binding at completion
     /// time, so a sync that finishes after the user has switched away
     /// updates the saving vault, not whoever is now in focus.
+    ///
+    /// This is the *interactive* entry point (manual "Sync now" button,
+    /// on-save push, post-resolution re-sync) — a resulting conflict is
+    /// allowed to open the Conflict overlay. Background auto-sync uses
+    /// `sync_now_for_path_inner(.., false, ..)` so it can never do that.
     pub fn sync_now_for_path(&mut self, target: &Path, cx: &mut Context<Self>) {
+        self.sync_now_for_path_inner(target, true, cx);
+    }
+
+    fn sync_now_for_path_inner(
+        &mut self,
+        target: &Path,
+        interactive: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some((config, token, master_password)) = self.snapshot_sync_inputs(target) else {
             return;
         };
@@ -2903,19 +2957,196 @@ impl AppState {
                                 remote_bytes,
                                 remote_etag,
                                 master_password,
+                                interactive,
                                 cx,
                             );
                         }
                     }
                 }
                 Err(e) => {
-                    let status = match &e {
+                    let status = match e {
                         crate::sync::service::ServiceError::Auth(
-                            crate::sync::auth::AuthError::InvalidGrant,
-                        ) => SyncStatus::Reconnect,
-                        _ => SyncStatus::Failed(e.to_string()),
+                            crate::sync::auth::AuthError::InvalidGrant(detail),
+                        ) => SyncStatus::Reconnect { detail },
+                        other => SyncStatus::Failed(other.to_string()),
                     };
                     state.apply_sync_status(&callback_path, status, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Run a background auto-sync pull for every synced vault in memory —
+    /// the active one plus any the user parked. Driven by the AppShell's
+    /// auto-sync timer. Cheap when nothing changed remotely (one metadata
+    /// round-trip per vault); only downloads + merges the vaults whose
+    /// remote actually advanced.
+    pub fn auto_sync_all(&mut self, cx: &mut Context<Self>) {
+        let mut targets: Vec<PathBuf> = Vec::new();
+        if let VaultStatus::Open { path, .. } = &self.vault
+            && self.sync.is_some()
+        {
+            targets.push(path.clone());
+        }
+        for (path, session) in &self.parked {
+            if session.sync.is_some() {
+                targets.push(path.clone());
+            }
+        }
+        for target in targets {
+            self.auto_sync_for_path(&target, cx);
+        }
+    }
+
+    /// Background auto-sync *pull* for a single vault. Unlike
+    /// `sync_now_for_path` (which always re-uploads the local bytes), this
+    /// only ever writes to the server when there's genuinely something to
+    /// pull: it does a cheap metadata check (`refresh_check`) and only
+    /// downloads + merges when the remote moved ahead. That stops a
+    /// 15-minute timer from minting a fresh SharePoint version every tick
+    /// with byte-identical content.
+    ///
+    /// It doubles as the OAuth keep-alive: `ensure_fresh` refreshes the
+    /// access token when it's near expiry, and we write the fresh token
+    /// back into the binding — that refresh resets the refresh token's
+    /// sliding-inactivity window, which is the whole point of running on a
+    /// timer in the first place.
+    ///
+    /// Quiet by design. Transient failures (offline, a brief Graph blip)
+    /// leave the current status untouched rather than flapping the UI to
+    /// `Failed` on every tick. A terminal `InvalidGrant` does flip to
+    /// `Reconnect` (with the Azure reason) so the user discovers an expired
+    /// sign-in while the app is open — early enough to fix it before it
+    /// blocks a real save.
+    fn auto_sync_for_path(&mut self, target: &Path, cx: &mut Context<Self>) {
+        // Skip vaults mid-operation, and don't fire while the user is in a
+        // Connect / Conflict overlay — auto-merging underneath them would
+        // be jarring.
+        let status = self.sync_status_for(target);
+        let busy = matches!(
+            &status,
+            Some(
+                SyncStatus::Syncing
+                    | SyncStatus::Connecting
+                    | SyncStatus::Restoring
+                    | SyncStatus::Conflict(_)
+            )
+        );
+        if busy || matches!(self.overlay, Overlay::Conflict | Overlay::Connect) {
+            return;
+        }
+        // One auto-sync request per vault at a time. A stalled Graph call
+        // must not let the next tick start a competing one.
+        if self.auto_sync_in_flight.contains(target) {
+            return;
+        }
+        // Recover from a prior failed sync (e.g. a push that lost the
+        // network) with a full push retry — `sync_now_for_path` re-uploads
+        // local bytes and falls into the merge path on a 412, so it heals
+        // both stranded local edits and a half-finished merge. The cheap
+        // pull-check below would miss those because the remote ETag hasn't
+        // moved. `interactive: false` so a background retry of a *conflict*
+        // never pops the overlay unattended.
+        if matches!(&status, Some(SyncStatus::Failed(_))) {
+            self.sync_now_for_path_inner(target, false, cx);
+            return;
+        }
+        let Some((config, token, master_password)) = self.snapshot_sync_inputs(target) else {
+            return;
+        };
+
+        self.auto_sync_in_flight.insert(target.to_path_buf());
+        let task_config = config;
+        let task = cx.background_spawn(async move {
+            let token = crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
+            let pulled = match crate::sync::service::refresh_check(&task_config, &token)? {
+                crate::sync::service::RefreshCheck::Same => None,
+                crate::sync::service::RefreshCheck::RemoteAhead { .. } => {
+                    Some(crate::sync::service::download_remote(&task_config, &token)?)
+                }
+            };
+            Ok::<_, crate::sync::service::ServiceError>((token, pulled))
+        });
+
+        let callback_path = target.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| {
+                state.auto_sync_in_flight.remove(&callback_path);
+
+                // Revalidate: while this pull was in flight the user may have
+                // started a manual sync, hit a conflict, disconnected, or
+                // locked the vault. If the binding is gone, drop everything
+                // (incl. the refreshed token — there's nowhere to put it).
+                if !state.has_sync_binding_for(&callback_path) {
+                    return;
+                }
+
+                match result {
+                    Ok((fresh_token, pulled)) => {
+                        // Keep-alive: persist the (possibly refreshed) token
+                        // so the next tick rides on it and the inactivity
+                        // window stays reset.
+                        state.with_sync_binding_mut_for(&callback_path, |b| {
+                            b.access_token = fresh_token;
+                        });
+                        // Only act on the pull result from a healthy resting
+                        // state. If a manual sync moved us to Syncing, or a
+                        // conflict/reconnect arrived, this background result
+                        // is stale — drop it; the next tick re-checks. (The
+                        // token write above is always safe and worth keeping.)
+                        let resting = matches!(
+                            state.sync_status_for(&callback_path),
+                            Some(SyncStatus::Synced { .. } | SyncStatus::Idle)
+                        );
+                        if !resting {
+                            return;
+                        }
+                        match pulled {
+                            None => {
+                                // Up to date — stamp "synced just now" so the
+                                // UI shows the keep-alive ran.
+                                state.apply_sync_status(
+                                    &callback_path,
+                                    SyncStatus::Synced {
+                                        at: chrono::Local::now(),
+                                        auto_merged: 0,
+                                    },
+                                    cx,
+                                );
+                            }
+                            Some((remote_bytes, remote_etag)) => {
+                                // `interactive: false` — a background pull
+                                // silently auto-merges conflict-free changes
+                                // but must never replace whatever overlay the
+                                // user has open with the Conflict overlay; a
+                                // real conflict is deferred to a Failed hint
+                                // instead.
+                                state.handle_remote_conflict_for(
+                                    &callback_path,
+                                    remote_bytes,
+                                    remote_etag,
+                                    master_password,
+                                    false,
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                    Err(crate::sync::service::ServiceError::Auth(
+                        crate::sync::auth::AuthError::InvalidGrant(detail),
+                    )) => {
+                        state.apply_sync_status(
+                            &callback_path,
+                            SyncStatus::Reconnect { detail },
+                            cx,
+                        );
+                    }
+                    Err(_) => {
+                        // Transient — stay quiet; the next tick (or the next
+                        // manual save / sync) retries.
+                    }
                 }
             });
         })
@@ -2927,14 +3158,27 @@ impl AppState {
     /// (when `target` is the active vault) or mark the parked vault Failed
     /// so the user can resolve it after switching back. Auto-merge is run
     /// for both active and parked targets — silent merges don't need the UI.
+    ///
+    /// `interactive` gates the Conflict overlay: the user-driven paths pass
+    /// `true` and a real conflict opens the overlay; background auto-sync
+    /// passes `false` and a real conflict is deferred to a Failed hint
+    /// instead, so an unattended pull never hijacks whatever the user is
+    /// doing. Conflict-free silent merges run regardless of `interactive`.
     fn handle_remote_conflict_for(
         &mut self,
         target: &Path,
         remote_bytes: Vec<u8>,
         remote_etag: String,
         master_password: String,
+        interactive: bool,
         cx: &mut Context<Self>,
     ) {
+        // The binding can vanish between issuing the request and this
+        // callback (disconnect mid-flight). With no binding there's nothing
+        // to sync against, so don't decrypt/diff or surface a conflict.
+        if !self.has_sync_binding_for(target) {
+            return;
+        }
         let Some(local_db) = self.database_clone_for(target) else {
             // Vault was locked between issuing the upload and the 412
             // response landing — nothing to merge against. Drop silently.
@@ -2958,6 +3202,15 @@ impl AppState {
                 // "Synced · N merged" badge in the status pill.
                 if report.conflicts.is_empty() {
                     let auto_merged_count = report.remote_only.len() + report.auto_resolved.len();
+                    // Whether the merge actually changes the *remote*. A pure
+                    // fast-forward — we only pulled remote-only additions
+                    // and/or remote-wins resolutions — leaves the merged DB
+                    // logically equal to what's already on the server, so
+                    // there's nothing to push. Uploading anyway would mint a
+                    // redundant SharePoint version for someone else's change.
+                    // We must push only when the local side contributes:
+                    // entries only we have, or a divergence our side won.
+                    let needs_upload = report.has_local_contribution();
                     // Snapshot the change list now (silent path → empty
                     // picks), but defer the actual append until the
                     // local save phase inside commit_merged_for has
@@ -2980,6 +3233,7 @@ impl AppState {
                         remote_etag,
                         master_password,
                         auto_merged_count,
+                        needs_upload,
                         history_entries,
                         cx,
                     );
@@ -2996,6 +3250,17 @@ impl AppState {
                         SyncStatus::Failed(
                             "Remote conflict — switch back to this vault to resolve.".into(),
                         ),
+                        cx,
+                    );
+                    return;
+                }
+                // Background pull: never seize the screen. Defer to a Failed
+                // hint; the user resolves on their next explicit "Sync now",
+                // which runs interactively and opens the overlay.
+                if !interactive {
+                    self.apply_sync_status(
+                        target,
+                        SyncStatus::Failed("Remote conflict — choose Sync now to resolve.".into()),
                         cx,
                     );
                     return;
@@ -3072,13 +3337,16 @@ impl AppState {
 
         // User-driven resolution — the "Synced · N merged" badge is reserved
         // for git-style silent merges where the user got no overlay at all.
-        // Manual resolution always reports auto_merged = 0.
+        // Manual resolution always reports auto_merged = 0. It also always
+        // uploads: the user just chose sides, so the merged result is a
+        // deliberate new state that must reach the server.
         self.commit_merged_for(
             &target,
             merged,
             remote_etag,
             master_password,
             0,
+            true,
             history_entries,
             cx,
         );
@@ -3109,6 +3377,7 @@ impl AppState {
         remote_etag: String,
         master_password: String,
         auto_merged: usize,
+        needs_upload: bool,
         history_entries: Vec<SyncHistoryEntry>,
         cx: &mut Context<Self>,
     ) {
@@ -3224,6 +3493,30 @@ impl AppState {
                 return;
             }
 
+            // Pure fast-forward: the merge only pulled remote-side changes,
+            // so the merged DB already matches the server. Skip the upload
+            // entirely (no redundant remote version) and just adopt the
+            // remote ETag we merged against as our new baseline. Keep-alive
+            // isn't lost: the pull that produced these bytes already
+            // refreshed the token.
+            if !needs_upload {
+                let _ = this.update(cx, |state, cx| {
+                    state.with_sync_binding_mut_for(&callback_path, |b| {
+                        b.config.last_etag = if_match.clone();
+                        let _ = crate::sync::config::save(&b.config);
+                    });
+                    state.apply_sync_status(
+                        &callback_path,
+                        SyncStatus::Synced {
+                            at: chrono::Local::now(),
+                            auto_merged,
+                        },
+                        cx,
+                    );
+                });
+                return;
+            }
+
             // Phase 2: token refresh + upload. If anything in here fails,
             // the in-memory state is already aligned with disk (from phase
             // 1), so the user can dismiss the Failed status and keep
@@ -3286,7 +3579,17 @@ impl AppState {
                     }
                 }
                 Err(e) => {
-                    state.apply_sync_status(&callback_path, SyncStatus::Failed(e.to_string()), cx);
+                    // A refresh token that died mid-merge must surface as
+                    // Reconnect (with the Azure reason), same as the plain
+                    // sync paths — otherwise the user loses the one-click
+                    // reconnect affordance and just sees a generic failure.
+                    let status = match e {
+                        crate::sync::service::ServiceError::Auth(
+                            crate::sync::auth::AuthError::InvalidGrant(detail),
+                        ) => SyncStatus::Reconnect { detail },
+                        other => SyncStatus::Failed(other.to_string()),
+                    };
+                    state.apply_sync_status(&callback_path, status, cx);
                 }
             });
         })
@@ -3399,7 +3702,7 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
         )),
         SyncStatus::Conflict(_) => Some("Conflict".into()),
         SyncStatus::Failed(_) => Some("Sync failed".into()),
-        SyncStatus::Reconnect => Some("Sign-in expired".into()),
+        SyncStatus::Reconnect { .. } => Some("Sign-in expired".into()),
     }
 }
 
@@ -3537,6 +3840,7 @@ mod park_tests {
                 last_etag: "etag-0".into(),
                 local_path: PathBuf::from("/tmp/whatever.kdbx"),
                 remote_url: "https://example.invalid/foo.kdbx".into(),
+                authenticated_at: None,
             },
             access_token: AccessToken {
                 access_token: "token-0".into(),
@@ -3557,6 +3861,7 @@ mod park_tests {
                 last_etag: "etag-0".into(),
                 local_path,
                 remote_url: format!("https://example.invalid/{item_id}.kdbx"),
+                authenticated_at: None,
             },
             access_token: AccessToken {
                 access_token: "token-0".into(),

@@ -114,6 +114,7 @@ pub fn complete_connect_picked(
         last_etag: etag_from_download,
         local_path: local_path.to_path_buf(),
         remote_url: hit.web_url.clone(),
+        authenticated_at: now_unix(),
     };
     config::save(&cfg)?;
 
@@ -205,12 +206,34 @@ pub fn refresh_check(
     }
 }
 
+/// Download the current remote bytes plus the ETag that produced them.
+/// Used by the auto-sync *pull* path after `refresh_check` reports the
+/// server moved ahead — we fetch the body and hand it to the same merge
+/// machinery the 412-conflict path uses. Falls back to a metadata
+/// round-trip for the ETag on the rare occasion the content response
+/// omits the header (mirrors `upload_after_save`'s conflict branch).
+pub fn download_remote(
+    config: &SyncConfig,
+    token: &AccessToken,
+) -> Result<(Vec<u8>, String), ServiceError> {
+    let (bytes, etag) = graph::download_content(&config.drive_id, &config.item_id, token)?;
+    let etag = if etag.is_empty() {
+        graph::get_item_metadata(&config.drive_id, &config.item_id, token)?.etag
+    } else {
+        etag
+    };
+    Ok((bytes, etag))
+}
+
 /// Refresh the access token using the keychain-stored refresh token.
 /// On `InvalidGrant` the refresh token is gone forever — caller should
 /// transition the UI to "reconnect required".
 pub fn refresh_access_token(account_email: &str) -> Result<AccessToken, ServiceError> {
-    let refresh =
-        tokens::load(account_email)?.ok_or_else(|| ServiceError::Auth(AuthError::InvalidGrant))?;
+    let refresh = tokens::load(account_email)?.ok_or_else(|| {
+        ServiceError::Auth(AuthError::InvalidGrant(Some(
+            "no stored refresh token for this account".into(),
+        )))
+    })?;
     let token = auth::refresh(&refresh)?;
     // Microsoft sometimes rotates the refresh token; persist whatever came back.
     if token.refresh_token != refresh {
@@ -236,6 +259,16 @@ pub fn disconnect(config: &SyncConfig) -> Result<(), ServiceError> {
     tokens::delete(&config.account_email)?;
     config::delete(&config.local_path)?;
     Ok(())
+}
+
+/// Wall-clock "now" as Unix seconds, or `None` if the system clock is set
+/// before the epoch (effectively never). Stamped onto `SyncConfig` at
+/// interactive sign-in so the UI can show how long the grant has lived.
+fn now_unix() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 /// Helper for the AppState side: read local bytes for upload, surfacing a

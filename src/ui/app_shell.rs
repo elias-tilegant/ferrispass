@@ -163,6 +163,13 @@ pub struct AppShell {
     /// non-`None` timeout is configured (managed alongside `totp_tick`
     /// via the state observer). Drop = cancel.
     auto_lock_task: Option<Task<()>>,
+    /// Periodic background auto-sync + token keep-alive. Runs only while a
+    /// synced vault is in memory AND `settings.auto_sync_secs` is set
+    /// (managed alongside `auto_lock_task` via the state observer +
+    /// `update_settings`). Each tick pulls remote changes and refreshes
+    /// the OAuth token, keeping the refresh token's inactivity window
+    /// alive. Drop = cancel.
+    auto_sync_task: Option<Task<()>>,
     /// User-tunable timeouts (auto-lock, clipboard-clear). Loaded from
     /// `~/Library/Application Support/ferrispass/settings.json` at
     /// construction; mutated by the Settings overlay; persisted async
@@ -326,6 +333,9 @@ impl AppShell {
                 // sync with whether a vault is currently open.
                 shell.sync_totp_tick(cx);
                 shell.sync_auto_lock_task(cx);
+                // Start/stop the background auto-sync + keep-alive timer in
+                // step with whether a synced vault is currently in memory.
+                shell.sync_auto_sync_task(cx);
                 // Auto-mask: if the user moves to a different entry (or
                 // locks the vault), drop any reveal we held. Compared by
                 // id so re-renders against the same entry don't trigger.
@@ -393,6 +403,7 @@ impl AppShell {
             revealed_entry_id: None,
             last_activity: Instant::now(),
             auto_lock_task: None,
+            auto_sync_task: None,
             settings: crate::app::settings::load(),
             settings_tab: SettingsTab::General,
             new_entry_target_group_id: None,
@@ -525,6 +536,58 @@ impl AppShell {
             }
             (false, true) => {
                 self.auto_lock_task = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Sibling of `sync_auto_lock_task` for background auto-sync + token
+    /// keep-alive. Runs only while a synced vault is in memory AND
+    /// `auto_sync_secs` is set; cancelled (= dropped) otherwise. The task
+    /// sleeps for the configured interval, then runs a pull/keep-alive
+    /// pass over every synced vault. The interval is re-read each loop so
+    /// a settings change takes effect on the next cycle, and a `None`
+    /// (= "Never") read exits the loop so toggling the feature off stops
+    /// the timer promptly.
+    fn sync_auto_sync_task(&mut self, cx: &mut Context<Self>) {
+        let has_binding = self.state.read(cx).has_any_sync_binding();
+        let enabled = self.settings.auto_sync_secs_clamped().is_some();
+        let should_run = has_binding && enabled;
+
+        match (should_run, self.auto_sync_task.is_some()) {
+            (true, false) => {
+                self.auto_sync_task = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        // Read the interval before sleeping so a freshly
+                        // saved setting governs the very next wait.
+                        let interval = match this
+                            .update(cx, |shell, _| shell.settings.auto_sync_secs_clamped())
+                        {
+                            Ok(Some(secs)) => Duration::from_secs(secs),
+                            // Setting turned off, or the entity went away —
+                            // stop ticking.
+                            _ => break,
+                        };
+                        cx.background_executor().timer(interval).await;
+                        let kept_going = this.update(cx, |shell, cx| {
+                            // Bail if the feature was switched off while we
+                            // slept; the next observer pass will also clear
+                            // the task handle, but exiting here is prompt.
+                            if shell.settings.auto_sync_secs_clamped().is_none() {
+                                return false;
+                            }
+                            shell.state.update(cx, |state, cx| state.auto_sync_all(cx));
+                            true
+                        });
+                        match kept_going {
+                            Ok(true) => continue,
+                            Ok(false) | Err(_) => break,
+                        }
+                    }
+                }));
+            }
+            (false, true) => {
+                self.auto_sync_task = None;
             }
             _ => {}
         }
@@ -1488,7 +1551,7 @@ impl AppShell {
         match status {
             // Nothing to sync against — fall back to the Sync settings tab
             // so the user can connect or re-authenticate.
-            SyncStatus::Disconnected | SyncStatus::Reconnect => {
+            SyncStatus::Disconnected | SyncStatus::Reconnect { .. } => {
                 window.dispatch_action(Box::new(OpenSyncSettings), cx);
             }
             // Already in flight or awaiting user input — do nothing.
@@ -2599,6 +2662,10 @@ impl AppShell {
         // or cancel the checker task immediately rather than waiting
         // for the next state notification.
         self.sync_auto_lock_task(cx);
+        // Same for auto-sync: toggling the interval (including to/from
+        // "Never") must start or cancel the timer now, not on the next
+        // state notification.
+        self.sync_auto_sync_task(cx);
         // Same rule for auto-type: toggling the feature on, changing
         // the combo, or editing the sequence template all need to
         // re-evaluate the hotkey registration and parse-error cache

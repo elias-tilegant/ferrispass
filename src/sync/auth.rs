@@ -68,8 +68,14 @@ pub enum AuthError {
     #[error("device code expired before sign-in completed")]
     Expired,
 
-    #[error("refresh token is no longer valid; user must reconnect")]
-    InvalidGrant,
+    /// Refresh failed terminally — the user must re-run Connect. The
+    /// optional payload carries the Azure `error_description` (e.g. the
+    /// `AADSTS700082: …` line) so the UI and our diagnostics can tell
+    /// *why* the grant died: short inactivity window vs. a tenant
+    /// sign-in-frequency policy vs. a revoked token look identical
+    /// otherwise, and the AADSTS code is the only reliable discriminator.
+    #[error("refresh token is no longer valid; user must reconnect{}", match .0 { Some(d) => format!(" ({d})"), None => String::new() })]
+    InvalidGrant(Option<String>),
 }
 
 /// Result of a `request_device_code` call. Carries everything the user-facing
@@ -184,7 +190,7 @@ pub fn refresh(refresh_token: &str) -> Result<AccessToken, AuthError> {
             // from generic server errors so the caller can render a clear
             // "sign-in expired" message.
             if body.contains("\"invalid_grant\"") {
-                Err(AuthError::InvalidGrant)
+                Err(AuthError::InvalidGrant(extract_error_detail(&body)))
             } else {
                 Err(AuthError::Server(body))
             }
@@ -257,6 +263,29 @@ fn parse_token_response(body: &str) -> Result<AccessToken, AuthError> {
         refresh_token: resp.refresh_token,
         expires_at: SystemTime::now() + Duration::from_secs(resp.expires_in),
     })
+}
+
+/// Pull a short, human-readable reason out of an OAuth error body. Azure's
+/// `error_description` leads with the `AADSTS<code>: <message>` line we care
+/// about, then appends a multi-line trace dump we don't. Keep only the first
+/// line and cap the length so it fits a status pill / log line without
+/// leaking the full trace id into the UI.
+fn extract_error_detail(body: &str) -> Option<String> {
+    let desc = serde_json::from_str::<ErrorResponse>(body)
+        .ok()
+        .and_then(|e| e.error_description)?;
+    let first_line = desc.lines().next().unwrap_or(&desc).trim();
+    if first_line.is_empty() {
+        return None;
+    }
+    const MAX: usize = 200;
+    let trimmed = if first_line.chars().count() > MAX {
+        let head: String = first_line.chars().take(MAX).collect();
+        format!("{head}…")
+    } else {
+        first_line.to_string()
+    };
+    Some(trimmed)
 }
 
 #[derive(Deserialize)]
@@ -363,6 +392,25 @@ mod tests {
             PollOutcome::Failed(AuthError::Parse(_)) => {}
             other => panic!("expected Failed(Parse), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extract_error_detail_pulls_first_aadsts_line() {
+        // Azure's invalid_grant body leads with the AADSTS line we want,
+        // then dumps a multi-line trace we don't. Keep only the first line.
+        let body = r#"{"error":"invalid_grant","error_description":"AADSTS700082: The refresh token has expired due to inactivity.\r\nTrace ID: abc\r\nCorrelation ID: def"}"#;
+        let detail = extract_error_detail(body).expect("detail present");
+        assert_eq!(
+            detail,
+            "AADSTS700082: The refresh token has expired due to inactivity."
+        );
+        assert!(!detail.contains("Trace ID"));
+    }
+
+    #[test]
+    fn extract_error_detail_none_when_no_description() {
+        assert_eq!(extract_error_detail(r#"{"error":"invalid_grant"}"#), None);
+        assert_eq!(extract_error_detail("not json at all"), None);
     }
 
     #[test]

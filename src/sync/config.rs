@@ -45,6 +45,14 @@ pub struct SyncConfig {
     /// Original SharePoint URL the user pasted. Display-only; never used to
     /// rebuild Graph addresses (those use site_id + drive_id + item_id).
     pub remote_url: String,
+    /// Unix seconds of the last *interactive* sign-in (initial Connect or a
+    /// user-driven Reconnect). Display-only — drives the "Connected since …"
+    /// line in Settings → Sync so the user has a reference point for how
+    /// long the current grant has been alive. `#[serde(default)]` so configs
+    /// written before this field existed deserialise cleanly as `None`
+    /// ("Connected" with no date) instead of failing to load.
+    #[serde(default)]
+    pub authenticated_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +220,7 @@ mod tests {
             local_path: PathBuf::from(local_path),
             remote_url: "https://contoso.sharepoint.com/sites/MyTeam/Shared%20Documents/p.kdbx"
                 .into(),
+            authenticated_at: Some(1_700_000_000),
         }
     }
 
@@ -222,6 +231,27 @@ mod tests {
         save_in(dir.path(), &cfg).unwrap();
         let loaded = load_in(dir.path(), Path::new("/tmp/example.kdbx")).unwrap();
         assert_eq!(loaded.as_ref(), Some(&cfg));
+    }
+
+    /// A config written before `authenticated_at` existed must load with
+    /// the field defaulting to `None` (so the "Connected since" line is
+    /// simply omitted) rather than failing to parse and dropping the whole
+    /// sync binding on upgrade.
+    #[test]
+    fn pre_feature_config_loads_with_no_authenticated_at() {
+        let dir = TempDir::new().unwrap();
+        let cfg = fixture("/tmp/legacy.kdbx");
+        // Serialise, then strip the new field to mimic an older file.
+        let mut json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("authenticated_at");
+        let path = dir
+            .path()
+            .join(format!("{}.json", path_hash(&cfg.local_path)));
+        fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+        let loaded = load_in(dir.path(), &cfg.local_path).unwrap().unwrap();
+        assert_eq!(loaded.authenticated_at, None);
     }
 
     #[test]

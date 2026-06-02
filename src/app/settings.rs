@@ -88,6 +88,24 @@ pub struct AppSettings {
     /// the documented default rather than silently flipping off.
     #[serde(default = "default_true")]
     pub biometric_allow_passcode_fallback: bool,
+    /// How often FerrisPass checks the remote in the background and pulls
+    /// in changes from other devices, in seconds. `None` means "Never"
+    /// (auto-sync off).
+    ///
+    /// This doubles as the OAuth *keep-alive*: every tick refreshes the
+    /// access token when it's near expiry, and that refresh resets the
+    /// refresh token's sliding-inactivity window. Without it, a synced
+    /// vault left open but untouched for longer than the tenant's
+    /// inactivity window silently loses its refresh token and forces a
+    /// full reconnect — the exact pain this setting exists to prevent.
+    ///
+    /// `#[serde(default)]` so settings.json written by pre-auto-sync
+    /// builds deserialises cleanly with the documented default (on,
+    /// 15 min) rather than silently disabling the feature. Clamped to a
+    /// 60 s floor on read (`auto_sync_secs_clamped`) so a corrupt or
+    /// hand-edited file can't hammer Graph every second.
+    #[serde(default = "default_auto_sync_secs")]
+    pub auto_sync_secs: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -96,6 +114,10 @@ fn default_true() -> bool {
 
 fn default_launch_cleanup_secs() -> u32 {
     DEFAULT_LAUNCH_CLEANUP_SECS
+}
+
+fn default_auto_sync_secs() -> Option<u64> {
+    Some(DEFAULT_AUTO_SYNC_SECS)
 }
 
 fn default_auto_type_hotkey() -> String {
@@ -109,6 +131,16 @@ fn default_auto_type_sequence() -> String {
 pub const DEFAULT_LAUNCH_CLEANUP_SECS: u32 = 30;
 pub const LAUNCH_CLEANUP_SECS_RANGE: std::ops::RangeInclusive<u32> = 10..=60;
 
+/// Default background auto-sync cadence: 15 minutes. Frequent enough to
+/// keep the OAuth refresh token's inactivity window alive and devices
+/// reasonably in step, infrequent enough not to spam Graph or churn the
+/// battery on an idle laptop.
+pub const DEFAULT_AUTO_SYNC_SECS: u64 = 900;
+/// Lower bound applied on read. A timer faster than this would be
+/// pointless (a sync round-trip alone is often >1 s) and abusive toward
+/// Graph throttling.
+pub const AUTO_SYNC_SECS_FLOOR: u64 = 60;
+
 impl AppSettings {
     /// Read the launch-cleanup TTL with the documented clamp applied.
     /// Centralised so every consumer gets the same safety net rather
@@ -118,6 +150,15 @@ impl AppSettings {
             *LAUNCH_CLEANUP_SECS_RANGE.start(),
             *LAUNCH_CLEANUP_SECS_RANGE.end(),
         )
+    }
+
+    /// Auto-sync interval with the 60 s floor applied. `None` is passed
+    /// through unchanged — it means the feature is off, not "every 0 s".
+    /// Single choke-point so the timer task and any UI both agree on the
+    /// effective cadence even if the on-disk value was hand-edited below
+    /// the floor.
+    pub fn auto_sync_secs_clamped(&self) -> Option<u64> {
+        self.auto_sync_secs.map(|s| s.max(AUTO_SYNC_SECS_FLOOR))
     }
 }
 
@@ -134,6 +175,7 @@ impl Default for AppSettings {
             auto_type_hotkey: default_auto_type_hotkey(),
             auto_type_sequence: default_auto_type_sequence(),
             biometric_allow_passcode_fallback: true,
+            auto_sync_secs: default_auto_sync_secs(),
         }
     }
 }
@@ -307,6 +349,35 @@ mod tests {
         .unwrap();
         let loaded = load_in(dir.path()).unwrap();
         assert!(loaded.biometric_allow_passcode_fallback);
+    }
+
+    /// settings.json written before auto-sync shipped must deserialise
+    /// with the feature ON at the 15-min default — a regression here
+    /// would silently leave upgrading users with no keep-alive, which
+    /// is the precise failure mode the feature was added to fix.
+    #[test]
+    fn missing_auto_sync_secs_uses_default_on() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join(FILE_NAME),
+            r#"{"auto_lock_secs":60,"clipboard_clear_secs":null,"auto_update_check_enabled":true,"launch_cleanup_secs":30}"#,
+        )
+        .unwrap();
+        let loaded = load_in(dir.path()).unwrap();
+        assert_eq!(loaded.auto_sync_secs, Some(DEFAULT_AUTO_SYNC_SECS));
+    }
+
+    /// A hand-edited or corrupt sub-floor interval must be clamped up to
+    /// the 60 s floor, while `None` (= "Never") passes through untouched.
+    #[test]
+    fn auto_sync_secs_clamps_to_floor_but_keeps_none() {
+        let mut s = AppSettings::default();
+        s.auto_sync_secs = Some(1);
+        assert_eq!(s.auto_sync_secs_clamped(), Some(AUTO_SYNC_SECS_FLOOR));
+        s.auto_sync_secs = Some(1800);
+        assert_eq!(s.auto_sync_secs_clamped(), Some(1800));
+        s.auto_sync_secs = None;
+        assert_eq!(s.auto_sync_secs_clamped(), None);
     }
 
     #[test]

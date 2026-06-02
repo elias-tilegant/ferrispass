@@ -38,7 +38,7 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
     let history: Vec<SyncHistoryEntry> = snapshot.sync_history().to_vec();
 
     match (&binding, &status) {
-        (_, SyncStatus::Reconnect) => render_reconnect(cx),
+        (_, SyncStatus::Reconnect { detail }) => render_reconnect(detail.as_deref(), cx),
         (Some(b), _) => render_connected(b, &status, &history, cx),
         (None, _) => render_disconnected(cx),
     }
@@ -62,7 +62,7 @@ fn render_connected(
         SyncStatus::Failed(_) => chip("Failed", ChipTone::Orange),
         SyncStatus::Conflict(_) => chip("Conflict", ChipTone::Orange),
         SyncStatus::Connecting | SyncStatus::Restoring => chip("Connecting", ChipTone::Blue),
-        SyncStatus::Disconnected | SyncStatus::Reconnect => chip("Off", ChipTone::Gray),
+        SyncStatus::Disconnected | SyncStatus::Reconnect { .. } => chip("Off", ChipTone::Gray),
     };
     let last_sync = match status {
         SyncStatus::Synced { at, auto_merged } => {
@@ -147,6 +147,20 @@ fn render_connected(
                         .child(disconnect_button(cx)),
                 )
                 .child(file_card(binding))
+                // Reassures the user the sign-in is being kept alive: with
+                // auto-sync on, the grant is refreshed in the background, so
+                // a long-lived connection here is healthy, not a warning.
+                .when_some(
+                    connected_since_label(binding.authenticated_at),
+                    |this, label| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(palette::text_faint())
+                                .child(label),
+                        )
+                    },
+                )
                 .child(
                     h_flex()
                         .gap_2()
@@ -165,6 +179,19 @@ fn render_connected(
             this.child(history_section(history))
         })
         .into_any_element()
+}
+
+/// "Connected since 12 May 2026" from the stored interactive-sign-in
+/// timestamp. `None` when the config predates the field (pre-feature
+/// connect) or the timestamp is unrepresentable — the line is simply
+/// omitted in that case rather than showing a placeholder date.
+fn connected_since_label(authenticated_at: Option<u64>) -> Option<SharedString> {
+    let secs = authenticated_at?;
+    let when = chrono::DateTime::from_timestamp(secs as i64, 0)?.with_timezone(&chrono::Local);
+    Some(SharedString::from(format!(
+        "Connected since {}",
+        when.format("%-d %b %Y")
+    )))
 }
 
 fn history_section(history: &[SyncHistoryEntry]) -> AnyElement {
@@ -376,11 +403,12 @@ fn render_disconnected(cx: &mut Context<AppShell>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_reconnect(cx: &mut Context<AppShell>) -> AnyElement {
+fn render_reconnect(detail: Option<&str>, cx: &mut Context<AppShell>) -> AnyElement {
     v_flex()
         .gap_4()
         .child(
-            div()
+            v_flex()
+                .gap_1p5()
                 .p_4()
                 .rounded(px(10.))
                 .bg(palette::orange_soft())
@@ -391,7 +419,19 @@ fn render_reconnect(cx: &mut Context<AppShell>) -> AnyElement {
                         .text_sm()
                         .text_color(palette::text())
                         .child("Your Microsoft sign-in has expired — reconnect to keep syncing."),
-                ),
+                )
+                // Surface the exact Azure reason (e.g. the `AADSTS700082`
+                // inactivity line) when we have it — it's the only reliable
+                // signal of *why* the grant died, and lets the user (or us)
+                // tell a short inactivity window apart from a tenant policy.
+                .when_some(detail, |this, detail| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(palette::text_muted())
+                            .child(detail.to_string()),
+                    )
+                }),
         )
         .child(
             div()
@@ -486,6 +526,7 @@ struct BindingSnapshot {
     account_email: String,
     local_path_display: String,
     remote_url: String,
+    authenticated_at: Option<u64>,
 }
 
 trait BindingForRender {
@@ -498,6 +539,7 @@ impl BindingForRender for Option<&SyncBinding> {
             account_email: b.config.account_email.clone(),
             local_path_display: b.config.local_path.display().to_string(),
             remote_url: b.config.remote_url.clone(),
+            authenticated_at: b.config.authenticated_at,
         })
     }
 }

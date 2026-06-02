@@ -26,6 +26,10 @@ const CLIPBOARD_CLEAR_PRESETS: &[Option<u64>] = &[Some(5), Some(10), Some(30), N
 /// `LAUNCH_CLEANUP_SECS_RANGE` (10..=60) so any preset added here
 /// stays within the validated band.
 const LAUNCH_CLEANUP_PRESETS: &[u32] = &[10, 30, 60];
+/// Background auto-sync cadences offered in the UI. `None` = "Never"
+/// (auto-sync + token keep-alive off). All `Some` values sit at or above
+/// the 60 s floor `AppSettings::auto_sync_secs_clamped` enforces.
+const AUTO_SYNC_PRESETS: &[Option<u64>] = &[Some(300), Some(900), Some(1800), None];
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     // Cloud sync only makes sense once a vault is decrypted — we don't
@@ -296,6 +300,7 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
             this.child(touch_id_section(&settings, cx))
         })
         .child(clipboard_section(&settings, cx))
+        .child(auto_sync_section(&settings, cx))
         .child(launch_cleanup_section(&settings, cx))
         .child(favicon_section(&favicon_status, vault_open, cx))
         .child(updates_section(
@@ -376,6 +381,39 @@ fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl
     section_card(
         "Auto-lock vault",
         "Lock the vault after this much idle time without keyboard or mouse activity.",
+        option_group(items),
+    )
+}
+
+fn auto_sync_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
+    let current = settings.auto_sync_secs_clamped();
+    let items: Vec<_> = AUTO_SYNC_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(idx, preset)| {
+            let preset_value = *preset;
+            let baseline = settings.clone();
+            segment_item(
+                SharedString::from(format!("auto-sync-preset-{idx}")),
+                format_auto_sync_label(preset_value),
+                preset_value == current,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.update_settings(
+                        AppSettings {
+                            auto_sync_secs: preset_value,
+                            ..baseline.clone()
+                        },
+                        cx,
+                    );
+                }),
+            )
+        })
+        .collect();
+    section_card(
+        "Auto-sync with cloud",
+        "Check the remote this often and pull in changes from your other \
+         devices. This also keeps your Microsoft sign-in alive — leave it on \
+         to avoid the periodic reconnect.",
         option_group(items),
     )
 }
@@ -859,6 +897,15 @@ fn format_auto_lock_label(secs: Option<u64>) -> SharedString {
 fn format_clipboard_label(secs: Option<u64>) -> SharedString {
     match secs {
         None => SharedString::from("Never"),
+        Some(s) => SharedString::from(format!("{s} s")),
+    }
+}
+
+fn format_auto_sync_label(secs: Option<u64>) -> SharedString {
+    match secs {
+        None => SharedString::from("Never"),
+        Some(60) => SharedString::from("1 min"),
+        Some(s) if s % 60 == 0 => SharedString::from(format!("{} min", s / 60)),
         Some(s) => SharedString::from(format!("{s} s")),
     }
 }

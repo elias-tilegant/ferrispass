@@ -422,7 +422,10 @@ fn match_delim(s: &str, delim: &str) -> Option<(String, usize)> {
     if close == 0 {
         return None;
     }
-    Some((inner[..close].to_string(), delim.len() + close + delim.len()))
+    Some((
+        inner[..close].to_string(),
+        delim.len() + close + delim.len(),
+    ))
 }
 
 fn match_md_link(s: &str) -> Option<(String, String, usize)> {
@@ -560,6 +563,8 @@ mod tests {
     fn multibyte_text_is_not_corrupted() {
         let segs = parse_inline("Behoben: Größe geändert – ä ö ü ß");
         assert_eq!(segs.len(), 1);
-        assert!(matches!(&segs[0], InlineSegment::Text(t) if t == "Behoben: Größe geändert – ä ö ü ß"));
+        assert!(
+            matches!(&segs[0], InlineSegment::Text(t) if t == "Behoben: Größe geändert – ä ö ü ß")
+        );
     }
 }
