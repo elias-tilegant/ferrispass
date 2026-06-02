@@ -80,8 +80,44 @@ macos-accessibility-client = "0.0"
 # disk — keeps with the rule that no plaintext vault metadata may be persisted.
 nucleo-matcher = "0.3"
 
+# Biometric unlock. `zeroize` is used only on the cleartext-password buffer
+# between the OS keychain handing it back and `KeePassRepository::open`
+# consuming it — a narrow window that's worth wiping. `security-framework`
+# is macOS-only; non-Apple targets fall back to the noop store in
+# `src/biometric/noop.rs`, so cargo check still passes on Linux/Windows.
+zeroize = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+security-framework-sys = "2"
+core-foundation = "0.10"
+# Biometric verification for Touch ID. The keychain item itself lives in
+# the legacy file-based macOS keychain (no entitlement required); the
+# OS biometric prompt is driven separately via LAContext from this
+# crate. This split is the same pattern Bitwarden / 1Password use for
+# their Developer-ID-distributed Mac builds — the iOS-style
+# `kSecAttrAccessControl` ACL would force the data-protection keychain,
+# which isn't reachable without an App-Store provisioning profile.
+# `objc2-local-authentication` wraps the LocalAuthentication framework
+# on top of the `objc2` runtime we already pull in transitively via
+# gpui. The bindings still expose `unsafe fn` for ordinary calls, so
+# `src/biometric/macos.rs` opts into `#![allow(unsafe_code)]` for a
+# small, audited surface (LAContext construction + evaluatePolicy +
+# the NSError deref in the reply block); that's why the workspace lint
+# is `unsafe_code = "deny"` rather than `forbid`.
+objc2-local-authentication = "0.3"
+objc2-foundation = "0.3"
+objc2 = "0.6"
+block2 = "0.6"
+
 [dev-dependencies]
 tempfile = "3"
 
 [lints.rust]
-unsafe_code = "forbid"
+# `deny` (rather than `forbid`) so a single targeted module — currently
+# only `src/biometric/macos.rs`, which wraps LocalAuthentication FFI
+# whose bindings expose `unsafe fn` even for ordinary calls — can opt
+# in with a documented `#![allow(unsafe_code)]`. Every other file in
+# the workspace still fails the build on the first `unsafe` block; the
+# allow-list lives in code review.
+unsafe_code = "deny"

@@ -62,6 +62,32 @@ pub struct AppSettings {
     /// template.
     #[serde(default = "default_auto_type_sequence")]
     pub auto_type_sequence: String,
+    /// When `true`, the Touch ID unlock prompt also accepts the
+    /// user's macOS account password as a fallback (LAPolicy
+    /// `DeviceOwnerAuthentication`). Lets the user unlock the vault
+    /// in clamshell mode — the built-in Touch ID sensor is
+    /// unreachable when the MacBook lid is closed, and many users
+    /// have no Apple Watch fallback configured.
+    ///
+    /// **Security tradeoff:** with this on, anyone who knows the
+    /// user's macOS login password can unlock the vault even
+    /// without biometry. That's the same trust boundary 1Password
+    /// and Bitwarden offer as an opt-in for Mac users; the
+    /// alternative (strict biometry-only) blocks every clamshell
+    /// unlock attempt and forces the master vault password.
+    ///
+    /// Default `true` — the product call here is "convenience over
+    /// strict isolation": the user has already proven themselves
+    /// to macOS, and the threat of "someone with my Mac password
+    /// but not my fingerprint" is small versus the daily friction
+    /// in clamshell mode. Users who want the stricter posture
+    /// can turn it off in Settings → General.
+    ///
+    /// `#[serde(default = "default_true")]` so settings.json
+    /// written by pre-Touch-ID builds deserialise cleanly with
+    /// the documented default rather than silently flipping off.
+    #[serde(default = "default_true")]
+    pub biometric_allow_passcode_fallback: bool,
 }
 
 fn default_true() -> bool {
@@ -107,6 +133,7 @@ impl Default for AppSettings {
             auto_type_enabled: false,
             auto_type_hotkey: default_auto_type_hotkey(),
             auto_type_sequence: default_auto_type_sequence(),
+            biometric_allow_passcode_fallback: true,
         }
     }
 }
@@ -265,6 +292,23 @@ mod tests {
     /// shape as the launch_cleanup_secs back-compat check, but a
     /// regression here would be louder: the feature would either
     /// fail to load or default to the wrong combo on upgrade.
+    /// settings.json written before the Touch ID feature shipped
+    /// must deserialise cleanly with the documented default applied.
+    /// A regression here would silently flip every upgrading user
+    /// to "biometry-only" — breaking the clamshell-mode unlock
+    /// flow they may rely on without ever opening Settings.
+    #[test]
+    fn missing_biometric_fallback_uses_default_true() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join(FILE_NAME),
+            r#"{"auto_lock_secs":60,"clipboard_clear_secs":null,"auto_update_check_enabled":true,"launch_cleanup_secs":30,"auto_type_enabled":false,"auto_type_hotkey":"ctrl+alt+v","auto_type_sequence":"{USERNAME}"}"#,
+        )
+        .unwrap();
+        let loaded = load_in(dir.path()).unwrap();
+        assert!(loaded.biometric_allow_passcode_fallback);
+    }
+
     #[test]
     fn missing_auto_type_fields_use_defaults() {
         let dir = TempDir::new().unwrap();

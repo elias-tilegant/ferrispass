@@ -1,5 +1,9 @@
 use crate::app::recents::{self, RecentEntry};
 use crate::app::sync_history::{self, SyncHistoryEntry};
+use crate::biometric::{
+    BiometricEnrollment, BiometricError, BiometricRegistry, BiometricStore, EnrollmentId,
+    NoopBiometricStore,
+};
 use crate::domain::{VaultEntry, VaultSnapshot};
 use crate::keepass::merge::{ConflictReport, Side};
 use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
@@ -15,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AppState {
     vault: VaultStatus,
     overlay: Overlay,
@@ -72,6 +76,103 @@ pub struct AppState {
     /// right target for Esc-on-unlock and for picking a fallback when
     /// the active vault is closed.
     parked_order: Vec<PathBuf>,
+    /// Per-platform biometric backend. Production uses
+    /// `crate::biometric::default_store()` (Touch ID on macOS, noop
+    /// elsewhere); tests inject `InMemoryBiometricStore`. Held as
+    /// `Arc<dyn _>` so the same handle can be cloned into background
+    /// tasks that call `retrieve` (which blocks for as long as the
+    /// OS biometric prompt stays open).
+    biometric: Arc<dyn BiometricStore>,
+    /// Persistent record of which vaults have a Touch ID enrolment.
+    /// Loaded once in `with_resume`; written through `enroll_biometric`
+    /// / `forget_biometric`. Contents are deliberately metadata-only:
+    /// vault path, UUID, keyfile path. Passwords live in the OS
+    /// keychain under the UUID — never in this struct.
+    biometric_registry: BiometricRegistry,
+    /// Set by the Unlock screen's "Enable Touch ID" checkbox before
+    /// the user submits the password. Consumed by `finish_open_attempt`
+    /// on success and reset on every transition into `AwaitingPassword`.
+    pending_biometric_enrollment: bool,
+    /// In-flight / last-failure state for the Touch ID button on the
+    /// Unlock screen. Lives on the state rather than on AppShell so
+    /// re-renders driven by `cx.observe(&state, …)` show the spinner
+    /// and the error consistently.
+    biometric_attempt: BiometricAttempt,
+    /// Monotonic id stamped onto every `begin_biometric_unlock`. The
+    /// async retrieve carries its generation back; we only honour a
+    /// resolution whose generation still matches the current attempt.
+    /// Guards the race where the user cancels an attempt and starts a
+    /// new one for the *same* vault path — path equality alone can't
+    /// tell the two attempts apart, so a stale prompt resolving late
+    /// could otherwise drive the newer screen.
+    biometric_generation: u64,
+}
+
+/// Lifecycle of a single Touch ID unlock attempt. Drives the Unlock
+/// screen's Touch ID button — `Idle` shows the button armed, `InFlight`
+/// shows it disabled with a "Waiting for Touch ID…" hint, `Error`
+/// renders the message and keeps the password input available so the
+/// user can fall back.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum BiometricAttempt {
+    #[default]
+    Idle,
+    InFlight {
+        path: PathBuf,
+        /// Generation that produced this attempt — see
+        /// `AppState::biometric_generation`.
+        generation: u64,
+    },
+    Error {
+        path: PathBuf,
+        message: String,
+    },
+}
+
+/// Handle returned by `AppState::begin_biometric_unlock` for the
+/// `AppShell` to drive the OS call off-thread. Keeps every field the
+/// background task needs (so it doesn't have to re-borrow `AppState`
+/// across an await point) and a strong clone of the store handle.
+#[derive(Clone, Debug)]
+pub struct BiometricLaunch {
+    pub id: EnrollmentId,
+    pub path: PathBuf,
+    pub keyfile: Option<PathBuf>,
+    pub store: Arc<dyn BiometricStore>,
+    /// Generation stamped at launch; carried back through
+    /// `BiometricUnlockOutcome` so the resolution can be matched to
+    /// the attempt that started it (and ignored if superseded).
+    pub generation: u64,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        // Default uses the noop store so unit tests of unrelated
+        // methods (vault switching, sync, recents) don't need to
+        // construct a real Keychain client. `app::run` overrides
+        // this in `with_resume` via `default_store()`.
+        Self {
+            vault: VaultStatus::default(),
+            overlay: Overlay::default(),
+            save_status: SaveStatus::default(),
+            sync: None,
+            sync_status: SyncStatus::default(),
+            sync_history: Vec::new(),
+            connect_flow: None,
+            pending_sync: None,
+            recents: Vec::new(),
+            favicon_status: FaviconDownloadStatus::default(),
+            update_status: UpdateStatus::default(),
+            whats_new_info: None,
+            parked: HashMap::new(),
+            parked_order: Vec::new(),
+            biometric: Arc::new(NoopBiometricStore),
+            biometric_registry: BiometricRegistry::new(),
+            pending_biometric_enrollment: false,
+            biometric_attempt: BiometricAttempt::default(),
+            biometric_generation: 0,
+        }
+    }
 }
 
 /// A vault that the user has unlocked at some point during this session
@@ -453,8 +554,40 @@ impl AppState {
             overlay,
             recents: recents.entries,
             whats_new_info,
+            biometric: crate::biometric::default_store(),
+            biometric_registry: crate::biometric::registry::load_or_default(),
             ..Self::default()
         }
+    }
+
+    /// Test-friendly constructor: same field layout as `with_resume`
+    /// but takes the biometric store + registry explicitly so unit
+    /// tests can inject `InMemoryBiometricStore`. Skips the recents
+    /// auto-resume so tests start from a clean Welcome.
+    #[cfg(test)]
+    pub(crate) fn with_biometric(
+        biometric: Arc<dyn BiometricStore>,
+        biometric_registry: BiometricRegistry,
+    ) -> Self {
+        Self {
+            biometric,
+            biometric_registry,
+            ..Self::default()
+        }
+    }
+
+    /// Production wiring used by `app::run` after the AppState entity
+    /// has already been constructed (e.g. when we want to load the
+    /// registry off the UI thread). Not used today; included so
+    /// the indirection point is documented and future code can swap
+    /// the store without re-running `with_resume`.
+    pub fn install_biometric(
+        &mut self,
+        biometric: Arc<dyn BiometricStore>,
+        biometric_registry: BiometricRegistry,
+    ) {
+        self.biometric = biometric;
+        self.biometric_registry = biometric_registry;
     }
 
     pub fn vault_status(&self) -> &VaultStatus {
@@ -547,6 +680,10 @@ impl AppState {
             error: None,
         };
         self.overlay = Overlay::None;
+        // Every transition into AwaitingPassword starts a fresh Touch ID
+        // story — drop stale UI state from a previous vault's attempt.
+        self.clear_biometric_attempt();
+        self.pending_biometric_enrollment = false;
         cx.notify();
     }
 
@@ -899,14 +1036,22 @@ impl AppState {
         cx.notify();
     }
 
+    /// Returns `true` iff this call actually transitioned the active
+    /// slot to `Open` for `path`. Callers that fire post-unlock
+    /// side-effects which themselves persist secrets (e.g. Touch ID
+    /// enrolment) **must** gate on this — a `true` KDF result is not
+    /// enough, because the user may have cancelled or switched vaults
+    /// between the KDF finishing and this update landing, in which
+    /// case we no-op and the vault must stay closed.
+    #[must_use]
     pub fn finish_open_attempt(
         &mut self,
         path: PathBuf,
         result: Result<VaultDocument, String>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if !matches!(&self.vault, VaultStatus::Opening { path: active } if active == &path) {
-            return;
+            return false;
         }
 
         // Track whether the unlock succeeded so we can fire post-open
@@ -946,21 +1091,28 @@ impl AppState {
                 error: Some(message),
             },
         };
+        // Either branch ends the in-flight Touch ID attempt for this
+        // path: on success the unlock screen is gone anyway, on
+        // failure we replace any stale BiometricAttempt::Error with
+        // the fresh password-auth error.
+        self.clear_biometric_attempt();
         cx.notify();
 
+        let did_open = opened_path.is_some();
         if let Some(opened) = opened_path {
             // Remember the vault for next launch's auto-resume + the
             // Welcome screen's Recents list.
             self.push_recent(opened.clone(), cx);
             if self.install_pending_sync_for(&opened) {
                 cx.notify();
-                return;
+                return did_open;
             }
             // If a sync config exists for this path, rebuild the
             // SyncBinding using the keychain refresh token. No-op for
             // local-only vaults.
             self.try_restore_sync_binding(opened, cx);
         }
+        did_open
     }
 
     /// Prepend `path` to the in-memory recents list (dedup + truncate),
@@ -1211,6 +1363,11 @@ impl AppState {
         // a single idle timeout sweeps every decrypted session at once.
         self.parked.clear();
         self.parked_order.clear();
+        // Touch ID UI bits are session-scoped; drop them so the next
+        // unlock screen starts clean rather than re-showing a stale
+        // "Touch ID cancelled" toast from minutes ago.
+        self.clear_biometric_attempt();
+        self.pending_biometric_enrollment = false;
         cx.notify();
     }
 
@@ -1862,6 +2019,245 @@ impl AppState {
             }),
             _ => None,
         }
+    }
+
+    // -- Biometric unlock ---------------------------------------------------
+    //
+    // Methods grouped here so the read path (`biometric_*`-getters) and the
+    // write path (`begin/finish/complete`) are visible together. Production
+    // wiring (Touch ID prompt + background tasks) lives in `AppShell`; this
+    // module only ever sees the synchronous state transitions and the
+    // already-resolved password buffer.
+
+    pub fn biometric_store(&self) -> Arc<dyn BiometricStore> {
+        Arc::clone(&self.biometric)
+    }
+
+    pub fn biometric_registry(&self) -> &BiometricRegistry {
+        &self.biometric_registry
+    }
+
+    pub fn biometric_attempt(&self) -> &BiometricAttempt {
+        &self.biometric_attempt
+    }
+
+    pub fn pending_biometric_enrollment(&self) -> bool {
+        self.pending_biometric_enrollment
+    }
+
+    /// Toggle for the "Enable Touch ID" checkbox on the Unlock screen.
+    /// Pure state flip — the actual enrolment happens in
+    /// `complete_biometric_enrollment` after the password unlock succeeds.
+    pub fn set_pending_biometric_enrollment(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.pending_biometric_enrollment == on {
+            return;
+        }
+        self.pending_biometric_enrollment = on;
+        cx.notify();
+    }
+
+    /// Enrolment info for the *currently pending* vault, if any. Drives
+    /// whether the Unlock screen shows the Touch ID button or the
+    /// "Enable Touch ID" checkbox.
+    pub fn biometric_for_pending(&self) -> Option<&BiometricEnrollment> {
+        match &self.vault {
+            VaultStatus::AwaitingPassword { path, .. } => self.biometric_registry.get(path),
+            _ => None,
+        }
+    }
+
+    pub fn begin_biometric_unlock(&mut self, cx: &mut Context<Self>) -> Option<BiometricLaunch> {
+        // Only valid while sitting on the Unlock screen for a vault
+        // that has an enrolment. Anything else is the UI dispatching
+        // an action it shouldn't have offered — bail silently.
+        let (path, keyfile) = match &self.vault {
+            VaultStatus::AwaitingPassword { path, keyfile, .. } => (path.clone(), keyfile.clone()),
+            _ => return None,
+        };
+        let enrollment = self.biometric_registry.get(&path)?.clone();
+        // Prefer the keyfile the user had selected at enrolment time
+        // over whatever's currently in the Unlock form — the saved
+        // path is the one that successfully decrypted the vault back
+        // then. Falls back to the current pending value if absent
+        // (matches the back-compat path for older enrolments).
+        let resolved_keyfile = enrollment.keyfile.clone().or(keyfile);
+        // Stamp a fresh generation; any earlier in-flight attempt is
+        // now stale and its late resolution will be ignored.
+        self.biometric_generation = self.biometric_generation.wrapping_add(1);
+        let generation = self.biometric_generation;
+        self.biometric_attempt = BiometricAttempt::InFlight {
+            path: path.clone(),
+            generation,
+        };
+        // Clear any prior unlock error so the screen doesn't show two
+        // contradictory messages at once.
+        if let VaultStatus::AwaitingPassword { error, .. } = &mut self.vault {
+            *error = None;
+        }
+        cx.notify();
+        Some(BiometricLaunch {
+            id: enrollment.id,
+            path,
+            keyfile: resolved_keyfile,
+            store: Arc::clone(&self.biometric),
+            generation,
+        })
+    }
+
+    /// `true` iff `generation` matches the attempt currently in flight.
+    /// The AppShell success path gates `begin_open` on this so a stale
+    /// Touch ID prompt that resolves after the user cancelled and
+    /// re-armed for the same vault can't drive the newer screen.
+    pub fn biometric_unlock_is_current(&self, generation: u64) -> bool {
+        matches!(
+            &self.biometric_attempt,
+            BiometricAttempt::InFlight { generation: g, .. } if *g == generation
+        )
+    }
+
+    /// Called from the AppShell background task when the Touch ID
+    /// retrieval errors out. Success path skips this — it feeds the
+    /// password directly into `begin_open` + `finish_open_attempt`
+    /// without going back through state. `generation` is the launch's
+    /// stamp; a mismatch means a newer attempt superseded this one and
+    /// we drop the late error entirely.
+    pub fn fail_biometric_unlock(
+        &mut self,
+        path: PathBuf,
+        generation: u64,
+        error: BiometricError,
+        cx: &mut Context<Self>,
+    ) {
+        // Superseded by a newer attempt (or already cleared)? Ignore.
+        if !self.biometric_unlock_is_current(generation) {
+            return;
+        }
+        // If the user has moved on (different vault now pending, vault
+        // got unlocked another way), discard the late-arriving error so
+        // we don't render a stale "Touch ID cancelled" against the new
+        // screen.
+        let still_active = matches!(
+            &self.vault,
+            VaultStatus::AwaitingPassword { path: p, .. } if p == &path
+        );
+        if !still_active {
+            self.biometric_attempt = BiometricAttempt::Idle;
+            return;
+        }
+        // The keychain item is gone or unusable: drop the enrolment so
+        // the screen falls back to the "Enable Touch ID" checkbox. Only
+        // remove the registry pointer once the keychain delete is
+        // confirmed — an unconfirmed delete keeps the entry (re-`Forget`
+        // -able) rather than orphaning the stored password.
+        if matches!(
+            error,
+            BiometricError::Invalidated | BiometricError::NotFound
+        ) && let Some(entry) = self.biometric_registry.get(&path).cloned()
+            && self.biometric.forget(&entry.id).is_ok()
+        {
+            self.biometric_registry.remove(&path);
+            let _ = crate::biometric::registry::save(&self.biometric_registry);
+        }
+        self.biometric_attempt = BiometricAttempt::Error {
+            path,
+            message: error.to_string(),
+        };
+        cx.notify();
+    }
+
+    /// Reset to `Idle` once the unlock succeeded (or the user
+    /// navigated away). Called from `finish_open_attempt` and from
+    /// `lock_vault` for hygiene.
+    fn clear_biometric_attempt(&mut self) {
+        self.biometric_attempt = BiometricAttempt::Idle;
+    }
+
+    /// Public companion to `clear_biometric_attempt` for the
+    /// "Touch ID resolved successfully but the user already moved on"
+    /// case in `AppShell::submit_biometric_unlock`. No `cx.notify` —
+    /// whatever screen is up now wasn't observing this attempt anyway.
+    pub fn clear_biometric_attempt_public(&mut self) {
+        self.clear_biometric_attempt();
+    }
+
+    /// Persist a brand-new enrolment for `path`, transactionally: the
+    /// keychain write and the registry pointer must *both* land, or
+    /// neither does. The password is held only on the caller's stack
+    /// (via `&str`); we never copy it onto `AppState`.
+    ///
+    /// Failure modes are ordered so we never leave an orphan:
+    /// 1. keychain write fails → registry untouched, return Err.
+    /// 2. registry save fails → roll the keychain item back (delete it)
+    ///    so a master password can't sit in the keychain with no
+    ///    pointer, then return Err.
+    ///
+    /// The registry save is synchronous here (small file, rare action)
+    /// precisely so step 2 can observe the result and roll back.
+    pub fn complete_biometric_enrollment(
+        &mut self,
+        path: PathBuf,
+        keyfile: Option<PathBuf>,
+        password: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), BiometricError> {
+        // Overwrite-aware: if there's already an enrolment for this
+        // path, drop the old keychain item before installing the new
+        // one. Confirm the delete; if it can't be confirmed, abort
+        // rather than risk two keychain items for one vault.
+        if let Some(prior) = self.biometric_registry.get(&path).cloned() {
+            self.biometric.forget(&prior.id)?;
+            self.biometric_registry.remove(&path);
+        }
+        let id = EnrollmentId::new_random();
+        self.biometric.enroll(&id, password)?;
+
+        // Tentatively install the pointer, then persist. On a persist
+        // failure, roll back both the in-memory registry and the
+        // keychain item so the next render shows "Enable Touch ID"
+        // rather than a half-committed enrolment.
+        self.biometric_registry.upsert(
+            path.clone(),
+            BiometricEnrollment {
+                id: id.clone(),
+                keyfile,
+                enrolled_at: Local::now(),
+            },
+        );
+        if let Err(err) = crate::biometric::registry::save(&self.biometric_registry) {
+            self.biometric_registry.remove(&path);
+            let _ = self.biometric.forget(&id);
+            return Err(BiometricError::Backend(format!(
+                "could not persist Touch ID enrolment: {err}"
+            )));
+        }
+
+        self.pending_biometric_enrollment = false;
+        cx.notify();
+        Ok(())
+    }
+
+    /// Remove an enrolment in both the registry and the OS keychain.
+    /// Idempotent — calling on an absent path is a no-op. Order is
+    /// keychain-first: we only drop the registry pointer once the
+    /// keychain delete is confirmed, so a failed delete keeps the
+    /// entry visible (and re-`Forget`-able) instead of orphaning the
+    /// stored master password. Returns whether the enrolment is fully
+    /// gone.
+    pub fn forget_biometric(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        let Some(entry) = self.biometric_registry.get(path).cloned() else {
+            return true; // nothing enrolled — already "forgotten"
+        };
+        if self.biometric.forget(&entry.id).is_err() {
+            // Keychain item may still be present; keep the registry
+            // pointer so the UI doesn't claim Touch ID is gone while
+            // the password lingers in the keychain.
+            cx.notify();
+            return false;
+        }
+        self.biometric_registry.remove(path);
+        let _ = crate::biometric::registry::save(&self.biometric_registry);
+        cx.notify();
+        true
     }
 
     pub fn select_group(&mut self, group_id: impl Into<String>, cx: &mut Context<Self>) {
@@ -3402,4 +3798,229 @@ mod park_tests {
     // with_sync_binding_mut_for) never reach `cx.notify` when the target
     // is parked, so this never has a method called on it.
     struct DummyCx;
+}
+
+#[cfg(test)]
+mod biometric_tests {
+    //! State-machine coverage for the Touch ID surface. Like the
+    //! park-tests module above, we avoid the gpui `Context` and drive
+    //! the private fields directly — the cx-bearing methods are
+    //! exercised end-to-end in the manual verification script,
+    //! while these tests pin the invariants that don't need a window.
+    use super::*;
+    use crate::biometric::memory::InMemoryBiometricStore;
+    use std::path::PathBuf;
+
+    fn awaiting(path: &str) -> VaultStatus {
+        VaultStatus::AwaitingPassword {
+            path: PathBuf::from(path),
+            keyfile: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn default_state_uses_noop_store() {
+        let state = AppState::default();
+        assert!(
+            !state.biometric_store().is_available(),
+            "production default would override this; the bare default must stay capability-off so tests of unrelated paths don't accidentally hit a real keychain",
+        );
+        assert!(state.biometric_registry().is_empty());
+        assert!(!state.pending_biometric_enrollment());
+        assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
+    }
+
+    #[test]
+    fn biometric_for_pending_returns_none_when_not_enrolled() {
+        let store = Arc::new(InMemoryBiometricStore::available());
+        let mut state = AppState::with_biometric(store, BiometricRegistry::new());
+        state.vault = awaiting("/tmp/a.kdbx");
+        assert!(state.biometric_for_pending().is_none());
+    }
+
+    #[test]
+    fn biometric_for_pending_returns_the_matching_enrollment() {
+        let store = Arc::new(InMemoryBiometricStore::available());
+        let mut registry = BiometricRegistry::new();
+        let enrollment = BiometricEnrollment {
+            id: EnrollmentId::new_random(),
+            keyfile: Some(PathBuf::from("/tmp/a.key")),
+            enrolled_at: Local::now(),
+        };
+        registry.upsert(PathBuf::from("/tmp/a.kdbx"), enrollment.clone());
+        let mut state = AppState::with_biometric(store, registry);
+        state.vault = awaiting("/tmp/a.kdbx");
+        let got = state
+            .biometric_for_pending()
+            .expect("registry has an entry for this path");
+        assert_eq!(got.id, enrollment.id);
+        assert_eq!(got.keyfile, enrollment.keyfile);
+    }
+
+    #[test]
+    fn biometric_for_pending_returns_none_when_vault_is_not_awaiting_password() {
+        let store = Arc::new(InMemoryBiometricStore::available());
+        let mut registry = BiometricRegistry::new();
+        registry.upsert(
+            PathBuf::from("/tmp/a.kdbx"),
+            BiometricEnrollment {
+                id: EnrollmentId::new_random(),
+                keyfile: None,
+                enrolled_at: Local::now(),
+            },
+        );
+        let state = AppState::with_biometric(store, registry);
+        // Empty vault — even though the registry has an entry, the
+        // unlock screen isn't on the stage, so we must not surface
+        // the enrollment.
+        assert!(state.biometric_for_pending().is_none());
+    }
+
+    #[test]
+    fn lock_vault_pure_clears_biometric_session_state() {
+        // Mirrors the body of lock_vault() minus `cx.notify` — the
+        // public method needs a gpui Context which we can't build here.
+        // The invariant we care about is "session-scoped Touch ID UI
+        // bits get wiped along with the rest of the unlock state".
+        let store = Arc::new(InMemoryBiometricStore::available());
+        let mut state = AppState::with_biometric(store, BiometricRegistry::new());
+        state.pending_biometric_enrollment = true;
+        state.biometric_attempt = BiometricAttempt::Error {
+            path: PathBuf::from("/tmp/a.kdbx"),
+            message: "stale".into(),
+        };
+
+        // Same body as lock_vault, sans cx.notify.
+        state.vault = VaultStatus::Empty;
+        state.overlay = Overlay::None;
+        state.save_status = SaveStatus::Idle;
+        state.sync = None;
+        state.sync_status = SyncStatus::Disconnected;
+        state.pending_sync = None;
+        state.sync_history.clear();
+        state.parked.clear();
+        state.parked_order.clear();
+        state.clear_biometric_attempt();
+        state.pending_biometric_enrollment = false;
+
+        assert!(!state.pending_biometric_enrollment());
+        assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
+        // Registry survives the lock — enrollment is meant to outlive
+        // the session; otherwise Touch ID would be useless after the
+        // first auto-lock.
+        // (Registry was empty here, but the field type guarantees it
+        // is untouched by the body above.)
+        assert!(state.biometric_registry().is_empty());
+    }
+
+    /// The stale-Touch-ID-success guard in `submit_biometric_unlock`
+    /// branches on `pending_unlock_path()` matching the path the OS
+    /// prompt was started against. This test pins the read-side
+    /// contract that drives that guard: when the user has cancelled
+    /// the unlock (VaultStatus::Empty) or moved to another vault,
+    /// `pending_unlock_path()` no longer matches the original path.
+    #[test]
+    fn pending_unlock_path_changes_when_user_navigates_away() {
+        let store = Arc::new(InMemoryBiometricStore::available());
+        let mut state = AppState::with_biometric(store, BiometricRegistry::new());
+        let original = PathBuf::from("/tmp/original.kdbx");
+        state.vault = awaiting("/tmp/original.kdbx");
+        assert_eq!(
+            state.pending_unlock_path().as_deref(),
+            Some(original.as_path())
+        );
+
+        // User hit Esc → vault becomes Empty.
+        state.vault = VaultStatus::Empty;
+        assert_ne!(
+            state.pending_unlock_path().as_deref(),
+            Some(original.as_path())
+        );
+
+        // User picked a different vault to unlock.
+        state.vault = awaiting("/tmp/other.kdbx");
+        assert_ne!(
+            state.pending_unlock_path().as_deref(),
+            Some(original.as_path())
+        );
+    }
+
+    /// `clear_biometric_attempt_public` is the exit hatch the shell
+    /// takes when a late-arriving Touch ID success is discarded.
+    /// It must reset to `Idle` without panicking when the attempt
+    /// was already `Idle` or `Error` (the user could have hit Cancel,
+    /// which dropped the attempt before the prompt resolved).
+    #[test]
+    fn clear_biometric_attempt_public_is_idempotent() {
+        let store = Arc::new(InMemoryBiometricStore::available());
+        let mut state = AppState::with_biometric(store, BiometricRegistry::new());
+        state.clear_biometric_attempt_public();
+        assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
+
+        state.biometric_attempt = BiometricAttempt::Error {
+            path: PathBuf::from("/tmp/x.kdbx"),
+            message: "old".into(),
+        };
+        state.clear_biometric_attempt_public();
+        assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
+
+        state.biometric_attempt = BiometricAttempt::InFlight {
+            path: PathBuf::from("/tmp/x.kdbx"),
+            generation: 7,
+        };
+        state.clear_biometric_attempt_public();
+        assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
+    }
+
+    #[test]
+    fn biometric_unlock_is_current_matches_only_live_generation() {
+        let store = Arc::new(InMemoryBiometricStore::available());
+        let mut state = AppState::with_biometric(store, BiometricRegistry::new());
+        // No attempt in flight → nothing is current.
+        assert!(!state.biometric_unlock_is_current(1));
+
+        state.biometric_attempt = BiometricAttempt::InFlight {
+            path: PathBuf::from("/tmp/x.kdbx"),
+            generation: 5,
+        };
+        assert!(state.biometric_unlock_is_current(5));
+        // A stale (older) resolution must not match.
+        assert!(!state.biometric_unlock_is_current(4));
+
+        // Once the attempt is no longer InFlight, even the matching
+        // generation is stale.
+        state.biometric_attempt = BiometricAttempt::Idle;
+        assert!(!state.biometric_unlock_is_current(5));
+    }
+
+    /// Registry round-trip exercises `BiometricRegistry::remove`
+    /// returning the prior entry — the contract `complete_biometric_enrollment`
+    /// relies on to clean up the *old* keychain item before installing
+    /// a new one. A regression here would silently leak keychain
+    /// entries on re-enrolment.
+    #[test]
+    fn upsert_overwrite_returns_the_prior_entry_via_remove() {
+        let mut registry = BiometricRegistry::new();
+        let path = PathBuf::from("/tmp/a.kdbx");
+        let first = BiometricEnrollment {
+            id: EnrollmentId::new_random(),
+            keyfile: None,
+            enrolled_at: Local::now(),
+        };
+        registry.upsert(path.clone(), first.clone());
+
+        // Caller's protocol: take the prior entry, forget on the OS
+        // side, then upsert the replacement.
+        let prior = registry.remove(&path).expect("first upsert lives here");
+        assert_eq!(prior.id, first.id);
+
+        let second = BiometricEnrollment {
+            id: EnrollmentId::new_random(),
+            keyfile: None,
+            enrolled_at: Local::now(),
+        };
+        registry.upsert(path.clone(), second.clone());
+        assert_eq!(registry.get(&path).unwrap().id, second.id);
+    }
 }

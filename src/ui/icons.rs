@@ -16,6 +16,7 @@ pub enum AppIcon {
     Dot,
     Sync,
     Note,
+    Fingerprint,
 }
 
 impl IconNamed for AppIcon {
@@ -30,6 +31,7 @@ impl IconNamed for AppIcon {
             AppIcon::Dot => "icons/app/dot.svg",
             AppIcon::Sync => "icons/app/sync.svg",
             AppIcon::Note => "icons/app/note.svg",
+            AppIcon::Fingerprint => "icons/app/fingerprint.svg",
         }
         .into()
     }

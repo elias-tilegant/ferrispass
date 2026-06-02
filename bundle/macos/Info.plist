@@ -30,5 +30,7 @@
     <string>public.app-category.productivity</string>
     <key>NSHumanReadableCopyright</key>
     <string>© 2026 Elias Tilegant and FerrisPass contributors. Licensed under GPL-3.0-or-later.</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Use Touch ID to unlock your KeePass vaults without typing the master password.</string>
 </dict>
 </plist>

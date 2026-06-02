@@ -11,9 +11,9 @@ pub(crate) mod time;
 pub use recents::{RecentEntry, RecentsError};
 pub use settings::AppSettings;
 pub use state::{
-    AppState, ConflictState, ConnectFlow, CopyValueKind, FaviconDownloadStatus, LibrarySelection,
-    Overlay, SaveStatus, SyncBinding, SyncStatus, UnlockPrompt, VaultBrowserModel, VaultStatus,
-    VaultSummary,
+    AppState, BiometricAttempt, BiometricLaunch, ConflictState, ConnectFlow, CopyValueKind,
+    FaviconDownloadStatus, LibrarySelection, Overlay, SaveStatus, SyncBinding, SyncStatus,
+    UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary,
 };
 pub use sync_history::{SyncChangeKind, SyncHistoryEntry};
 

@@ -36,6 +36,7 @@ use gpui_component::{
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 struct EditPrefill {
     id: String,
@@ -1058,6 +1059,57 @@ impl AppShell {
         self.submit_password(window, cx);
     }
 
+    fn on_action_submit_biometric_unlock(
+        &mut self,
+        _: &crate::app::actions::SubmitBiometricUnlock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Same overlay gate as `submit_password`: don't fire while
+        // an overlay's own Input owns the keystroke.
+        if self.state.read(cx).overlay().is_active() {
+            return;
+        }
+        self.submit_biometric_unlock(window, cx);
+    }
+
+    fn on_action_toggle_biometric_enrollment(
+        &mut self,
+        _: &crate::app::actions::ToggleBiometricEnrollment,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let next = !self.state.read(cx).pending_biometric_enrollment();
+        self.state.update(cx, |state, cx| {
+            state.set_pending_biometric_enrollment(next, cx)
+        });
+    }
+
+    fn on_action_forget_biometric(
+        &mut self,
+        _: &crate::app::actions::ForgetBiometric,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.state.read(cx).pending_unlock_path() else {
+            return;
+        };
+        let removed = self
+            .state
+            .update(cx, |state, cx| state.forget_biometric(&path, cx));
+        if !removed {
+            // Keychain delete couldn't be confirmed — the registry
+            // pointer is kept on purpose so the password isn't
+            // orphaned. Tell the user rather than silently pretending
+            // it worked.
+            window.push_notification(
+                "Couldn't remove the Touch ID entry from the keychain. \
+                 The vault still has Touch ID enabled — try again.",
+                cx,
+            );
+        }
+    }
+
     fn on_action_cancel_unlock(
         &mut self,
         _: &CancelUnlock,
@@ -2073,7 +2125,11 @@ impl AppShell {
         };
         let keyfile = self.state.read(cx).pending_unlock_keyfile();
 
-        let password = self.password_input.read(cx).value().to_string();
+        // `Zeroizing` wipes our transient copies on drop. The opened
+        // vault still retains the master password in `VaultDocument`
+        // (same as any unlock); this only tightens the short-lived
+        // submit/enrol buffers.
+        let password = Zeroizing::new(self.password_input.read(cx).value().to_string());
         if password.is_empty() && keyfile.is_none() {
             self.state.update(cx, |state, cx| {
                 state.set_unlock_error("Enter the master password or pick a key file.", cx)
@@ -2083,6 +2139,13 @@ impl AppShell {
             return;
         }
 
+        // Snapshot the "Enable Touch ID" checkbox state *before* we
+        // clear the password input — by the time the open task
+        // completes the input has been wiped, and the password we
+        // need to enrol with is gone. Move it into the spawn closure
+        // alongside the path.
+        let enroll_after_unlock = self.state.read(cx).pending_biometric_enrollment();
+
         self.password_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.state
@@ -2091,18 +2154,145 @@ impl AppShell {
         let state = self.state.downgrade();
         let path_for_task = path.clone();
         let keyfile_for_task = keyfile.clone();
+        let password_for_task = password.clone();
+        let keyfile_for_enroll = keyfile.clone();
         let open_task = cx.background_spawn(async move {
-            let result =
-                KeePassRepository::open(&path_for_task, &password, keyfile_for_task.as_deref())
-                    .map_err(|error| error.to_string());
+            let result = KeePassRepository::open(
+                &path_for_task,
+                &password_for_task,
+                keyfile_for_task.as_deref(),
+            )
+            .map_err(|error| error.to_string());
 
             (path_for_task, result)
         });
 
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let (path, result) = open_task.await;
-            let _ = state.update(cx, |state, cx| {
-                state.finish_open_attempt(path, result, cx);
+            // Gate enrolment on whether the vault *actually* opened for
+            // this path — not merely on a successful KDF. The user may
+            // have cancelled or switched vaults between the KDF
+            // finishing and this update landing, in which case
+            // `finish_open_attempt` no-ops and we must not write this
+            // vault's master password to the keychain.
+            let did_open = state
+                .update(cx, |state, cx| {
+                    state.finish_open_attempt(path.clone(), result, cx)
+                })
+                .unwrap_or(false);
+            if did_open && enroll_after_unlock {
+                // Vault is `Open` now, so `set_unlock_error` would be a
+                // silent no-op; surface enrolment failure as an in-app
+                // notification instead.
+                let enroll_result = state.update(cx, |state, cx| {
+                    state.complete_biometric_enrollment(path, keyfile_for_enroll, &password, cx)
+                });
+                if let Ok(Err(err)) = enroll_result {
+                    let _ = this.update_in(cx, |_shell, window, cx| {
+                        window.push_notification(
+                            format!(
+                                "Touch ID enrolment failed: {err}. Vault is open; \
+                                 try enabling Touch ID again on the next unlock."
+                            ),
+                            cx,
+                        );
+                    });
+                }
+            }
+            // `password` (Zeroizing) is wiped here as the closure drops.
+        })
+        .detach();
+    }
+
+    /// Off-thread Touch ID unlock. Mirrors `submit_password` but:
+    /// (1) gets the password from the OS Keychain rather than the
+    /// text input, and (2) maps a `BiometricError` back to a state
+    /// transition the Unlock screen can render
+    /// (`BiometricAttempt::Error`).
+    ///
+    /// Note on the cleartext password: it's held in a `Zeroizing`
+    /// buffer inside the background task and fed straight into
+    /// `KeePassRepository::open`. It does *not* round-trip through
+    /// `AppState` as a bare value — but the *opened* vault
+    /// (`VaultDocument`) does retain the master password in memory
+    /// for the life of the session, same as a normally-typed unlock.
+    /// "Never crosses AppState" applies to the transient buffer, not
+    /// to the opened document.
+    pub fn submit_biometric_unlock(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(launch) = self
+            .state
+            .update(cx, |state, cx| state.begin_biometric_unlock(cx))
+        else {
+            return;
+        };
+
+        // begin_open clears VaultStatus to Opening{} only on the
+        // *successful* path; for a Touch ID retrieve we don't want
+        // to flip away from AwaitingPassword until the OS prompt
+        // actually resolves. So we postpone begin_open until after
+        // the retrieve returns.
+        let state = self.state.downgrade();
+        let id = launch.id.clone();
+        let path = launch.path.clone();
+        let keyfile = launch.keyfile.clone();
+        let store = launch.store;
+        let generation = launch.generation;
+        let prompt = format!("Unlock {}", file_name_for_prompt(&path));
+        // Read the per-app preference once, here on the foreground.
+        // The background task gets a plain bool — no AppSettings
+        // reference travels into the spawn closure.
+        let options = crate::biometric::RetrieveOptions {
+            allow_device_passcode: self.settings.biometric_allow_passcode_fallback,
+        };
+
+        let retrieve_task = cx.background_spawn(async move {
+            let outcome = store.retrieve(&id, &prompt, options);
+            match outcome {
+                Ok(password) => {
+                    let result = KeePassRepository::open(&path, &password, keyfile.as_deref())
+                        .map_err(|error| error.to_string());
+                    // `password` (Zeroizing) drops here, wiping the
+                    // transient buffer.
+                    BiometricUnlockOutcome::Open {
+                        path,
+                        result,
+                        generation,
+                    }
+                }
+                Err(err) => BiometricUnlockOutcome::Failed {
+                    path,
+                    err,
+                    generation,
+                },
+            }
+        });
+
+        cx.spawn(async move |_, cx| {
+            let outcome = retrieve_task.await;
+            let _ = state.update(cx, |state, cx| match outcome {
+                BiometricUnlockOutcome::Open {
+                    path,
+                    result,
+                    generation,
+                } => {
+                    // A Touch ID prompt the user satisfied *after*
+                    // cancelling / re-arming (even for the same vault
+                    // path) carries a stale generation; ignore it so
+                    // it can't drive the current screen.
+                    if !state.biometric_unlock_is_current(generation) {
+                        state.clear_biometric_attempt_public();
+                        return;
+                    }
+                    state.begin_open(path.clone(), cx);
+                    let _ = state.finish_open_attempt(path, result, cx);
+                }
+                BiometricUnlockOutcome::Failed {
+                    path,
+                    err,
+                    generation,
+                } => {
+                    state.fail_biometric_unlock(path, generation, err, cx);
+                }
             });
         })
         .detach();
@@ -2560,6 +2750,9 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_open_vault_switcher))
             .on_action(cx.listener(Self::on_action_open_add_vault))
             .on_action(cx.listener(Self::on_action_submit_password))
+            .on_action(cx.listener(Self::on_action_submit_biometric_unlock))
+            .on_action(cx.listener(Self::on_action_toggle_biometric_enrollment))
+            .on_action(cx.listener(Self::on_action_forget_biometric))
             .on_action(cx.listener(Self::on_action_cancel_unlock))
             .on_action(cx.listener(Self::on_action_lock_vault))
             .on_action(cx.listener(Self::on_action_focus_search))
@@ -2599,6 +2792,44 @@ impl Render for AppShell {
             .children(clipboard_pill)
             .children(notification_layer)
     }
+}
+
+/// Either-shaped result the biometric-unlock background task hands
+/// back to the foreground update. `Open` carries the KDF outcome so
+/// the success path runs the same `finish_open_attempt` codepath as a
+/// password-typed unlock; `Failed` carries the OS-side
+/// `BiometricError` so the Unlock screen can render the right error
+/// message and (when applicable) clear an invalidated enrolment.
+///
+/// The `Open` variant is large (it owns a `VaultDocument`) while
+/// `Failed` is small; we don't box it because the value is moved
+/// exactly once per unlock and the surrounding unlock path already
+/// passes `VaultDocument` by value.
+#[allow(clippy::large_enum_variant)]
+enum BiometricUnlockOutcome {
+    Open {
+        path: PathBuf,
+        result: Result<crate::keepass::VaultDocument, String>,
+        /// Generation of the launch that produced this outcome, so a
+        /// stale resolution can be discarded.
+        generation: u64,
+    },
+    Failed {
+        path: PathBuf,
+        err: crate::biometric::BiometricError,
+        generation: u64,
+    },
+}
+
+/// UI-friendly file name for the Touch ID prompt header. Strips the
+/// `.kdbx` suffix so the prompt reads "Unlock my-vault" rather than
+/// "Unlock my-vault.kdbx". Used only for human-facing strings — never
+/// as a keychain account or any other security-relevant identifier.
+fn file_name_for_prompt(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "vault".to_string())
 }
 
 fn matches_path_needle(path: &std::path::Path, needle: &str) -> bool {

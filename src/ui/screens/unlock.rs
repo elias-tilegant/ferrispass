@@ -8,7 +8,10 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app::actions::{CancelUnlock, SubmitPassword};
+use crate::app::BiometricAttempt;
+use crate::app::actions::{
+    CancelUnlock, ForgetBiometric, SubmitBiometricUnlock, SubmitPassword, ToggleBiometricEnrollment,
+};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
@@ -25,6 +28,32 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         (Some(provider), Some(synced)) => format!("{provider} · {synced}"),
         (Some(provider), None) => provider.clone(),
         _ => prompt.display_path.clone(),
+    };
+
+    // `available` = sensor reachable right now (Touch ID works this
+    // instant).
+    // `supported` = biometric hardware exists at all (drives the
+    // enrolment checkbox — enrolment writes to the keychain
+    // without touching the sensor, so a user in clamshell mode
+    // can still opt in for next time the lid opens).
+    let store = state.biometric_store();
+    let biometric_available = store.is_available();
+    let biometric_supported = store.is_supported();
+    let has_enrollment = state.biometric_for_pending().is_some();
+    // The passcode-fallback setting decides whether the OS prompt
+    // can also accept the macOS account password. When it's on, the
+    // unlock button is useful even with the sensor unreachable
+    // (clamshell mode) — the prompt falls back to the password
+    // field. So the button shows when biometry is reachable *or*
+    // the passcode fallback can carry the attempt.
+    let allow_passcode_fallback = shell.settings().biometric_allow_passcode_fallback;
+    let show_unlock_button = has_enrollment && (biometric_available || allow_passcode_fallback);
+    let attempt = state.biometric_attempt().clone();
+    let enrollment_pending = state.pending_biometric_enrollment();
+    let biometric_in_flight = matches!(attempt, BiometricAttempt::InFlight { .. });
+    let biometric_error = match &attempt {
+        BiometricAttempt::Error { message, .. } => Some(message.clone()),
+        _ => None,
     };
 
     div()
@@ -99,27 +128,21 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         )
                         .child(input_box(shell.keyfile_input())),
                 )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .text_xs()
-                        .text_color(palette::text_muted())
-                        .child(
-                            div()
-                                .size(px(14.))
-                                .rounded(px(3.))
-                                .bg(palette::blue())
-                                .text_color(palette::panel())
-                                .text_xs()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child("✓"),
-                        )
-                        .child("Remember in keychain for 8 hours"),
-                )
+                // Conditional Touch-ID enrolment checkbox: shown
+                // for any vault that's not yet enrolled, as long
+                // as the device *has* Touch ID hardware — even if
+                // the sensor isn't reachable in the current
+                // physical setup (clamshell mode etc.). Enrolment
+                // writes to the keychain without a prompt, so the
+                // user can opt in here and the unlock button
+                // appears next time the sensor is reachable.
+                .when(biometric_supported && !has_enrollment, |this| {
+                    this.child(touch_id_enrollment_checkbox(enrollment_pending, cx))
+                })
                 .when_some(prompt.error.clone(), |this, error| {
+                    this.child(div().text_sm().text_color(palette::red()).child(error))
+                })
+                .when_some(biometric_error, |this, error| {
                     this.child(div().text_sm().text_color(palette::red()).child(error))
                 })
                 .child(
@@ -130,6 +153,13 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         }))
                         .child(primary_button("Unlock vault", AppIcon::Unlock)),
                 )
+                .when(show_unlock_button, |this| {
+                    this.child(touch_id_unlock_button(
+                        biometric_in_flight,
+                        biometric_available,
+                        cx,
+                    ))
+                })
                 .child(
                     div()
                         .pt_4()
@@ -141,7 +171,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .justify_between()
                                 .text_xs()
                                 .text_color(palette::text_faint())
-                                .child("Touch ID available")
+                                .child(footer_left(biometric_supported, has_enrollment, cx))
                                 .child(
                                     div()
                                         .id("cancel-unlock")
@@ -157,6 +187,102 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+fn touch_id_enrollment_checkbox(
+    checked: bool,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    h_flex()
+        .id("biometric-enrol-toggle")
+        .gap_2()
+        .items_center()
+        .text_xs()
+        .text_color(palette::text_muted())
+        .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+            window.dispatch_action(Box::new(ToggleBiometricEnrollment), cx);
+        }))
+        .child(
+            div()
+                .size(px(14.))
+                .rounded(px(3.))
+                .border_1()
+                .border_color(palette::border_strong())
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(checked, |this| {
+                    this.bg(palette::blue())
+                        .border_color(palette::blue())
+                        .text_color(palette::panel())
+                        .text_xs()
+                        .child("✓")
+                }),
+        )
+        .child("Enable Touch ID for this vault")
+}
+
+fn touch_id_unlock_button(
+    in_flight: bool,
+    sensor_available: bool,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    // Honest label: when the sensor is reachable the OS prompt leads
+    // with Touch ID, so "Unlock with Touch ID" is accurate. When it
+    // isn't (clamshell mode, or a Mac with no Touch ID hardware) the
+    // button is only shown because the passcode-fallback setting is
+    // on — the prompt will present the macOS account password — so we
+    // say that instead of mislabeling a password unlock as biometric.
+    let label_text = if in_flight {
+        "Waiting…"
+    } else if sensor_available {
+        "Unlock with Touch ID"
+    } else {
+        "Unlock with macOS password"
+    };
+    let icon = if sensor_available {
+        AppIcon::Fingerprint
+    } else {
+        AppIcon::Unlock
+    };
+
+    div()
+        .id("biometric-unlock")
+        .when(!in_flight, |this| {
+            this.on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(SubmitBiometricUnlock), cx);
+            }))
+        })
+        .child(secondary_button(label_text, icon, in_flight))
+}
+
+/// Bottom-left status: hint text describing the current biometric
+/// state. Doubles as a "Forget" affordance when enrolled — keeps the
+/// footer compact (still one row) while exposing the un-enrol path
+/// without needing the Settings page (which lands in a later phase).
+///
+/// Note: `supported` is used (not `available`) so an enrolled user
+/// in clamshell mode still sees and can click "Forget Touch ID" —
+/// dropping an enrolment doesn't need the sensor to be reachable.
+fn footer_left(
+    supported: bool,
+    enrolled: bool,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    if enrolled {
+        return div()
+            .id("biometric-forget")
+            .text_color(palette::blue())
+            .child("Forget Touch ID")
+            .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(ForgetBiometric), cx);
+            }))
+            .into_any_element();
+    }
+    if !supported {
+        return div().child("Touch ID not available").into_any_element();
+    }
+    div().child("Touch ID available").into_any_element()
 }
 
 fn input_box(state: &gpui::Entity<InputState>) -> impl gpui::IntoElement {
@@ -182,6 +308,38 @@ fn primary_button(label: &'static str, icon: AppIcon) -> impl gpui::IntoElement 
             gpui_component::Icon::from(icon)
                 .with_size(gpui_component::Size::Size(px(14.)))
                 .text_color(palette::panel()),
+        )
+        .child(label)
+}
+
+/// Secondary, outlined variant of `primary_button` used for the
+/// Touch-ID action. Distinct visual weight signals that password
+/// remains the canonical path while Touch ID is the convenience
+/// shortcut.
+fn secondary_button(label: &'static str, icon: AppIcon, disabled: bool) -> impl gpui::IntoElement {
+    let (bg, fg, border) = if disabled {
+        (palette::panel(), palette::text_muted(), palette::border())
+    } else {
+        (palette::panel(), palette::blue(), palette::blue_border())
+    };
+    h_flex()
+        .h(px(36.))
+        .w_full()
+        .px_4()
+        .rounded(px(6.))
+        .gap_2()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_color(fg)
+        .text_sm()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .child(
+            gpui_component::Icon::from(icon)
+                .with_size(gpui_component::Size::Size(px(14.)))
+                .text_color(fg),
         )
         .child(label)
 }

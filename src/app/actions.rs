@@ -10,6 +10,19 @@ actions!(
         OpenAddVault,
         AddSharePointVault,
         SubmitPassword,
+        /// Triggered by the "Unlock with Touch ID" button on the Unlock
+        /// screen. Runs the OS biometric prompt off-thread and feeds the
+        /// retrieved password directly into the existing open flow.
+        SubmitBiometricUnlock,
+        /// Toggle bound to the "Enable Touch ID for this vault"
+        /// checkbox on the Unlock screen. Pure state flip; the actual
+        /// enrolment happens after the password unlock succeeds.
+        ToggleBiometricEnrollment,
+        /// Drop the Touch ID enrolment for the currently-pending vault
+        /// (both the keychain item and the registry entry). Wired
+        /// from the Unlock screen when the OS reports the ACL was
+        /// invalidated, and from the Settings page in a future phase.
+        ForgetBiometric,
         CancelUnlock,
         LockVault,
         FocusSearch,

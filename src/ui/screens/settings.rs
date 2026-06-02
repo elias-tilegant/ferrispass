@@ -284,9 +284,17 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
     let update_status = state.update_status().clone();
     let whats_new_available = state.whats_new_info().is_some();
     let vault_open = matches!(state.vault_status(), VaultStatus::Open { .. });
+    // Touch ID section is only useful on Macs where biometric auth
+    // is plausibly reachable; on Linux/Windows the noop backend
+    // returns `false` and we hide the whole section so the panel
+    // doesn't show a setting the user can't make anything of.
+    let biometric_supported = state.biometric_store().is_supported();
     v_flex()
         .gap_4()
         .child(auto_lock_section(&settings, cx))
+        .when(biometric_supported, |this| {
+            this.child(touch_id_section(&settings, cx))
+        })
         .child(clipboard_section(&settings, cx))
         .child(launch_cleanup_section(&settings, cx))
         .child(favicon_section(&favicon_status, vault_open, cx))
@@ -296,6 +304,49 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
             whats_new_available,
             cx,
         ))
+}
+
+fn touch_id_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
+    let allow_fallback = settings.biometric_allow_passcode_fallback;
+    let baseline = settings.clone();
+    let toggle = setting_switch(
+        "biometric-passcode-fallback-toggle",
+        allow_fallback,
+        cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            shell.update_settings(
+                AppSettings {
+                    biometric_allow_passcode_fallback: !allow_fallback,
+                    ..baseline.clone()
+                },
+                cx,
+            );
+        }),
+    );
+    let toggle_row = h_flex()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .flex_1()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(
+                    "Accept your macOS account password as a fallback when Touch ID isn't \
+                     reachable (e.g. MacBook lid closed at a docking station).",
+                ),
+        )
+        .child(toggle);
+
+    section_card(
+        "Touch ID",
+        "Touch ID unlock is opt-in per vault from the unlock screen. \
+         With the fallback off, the prompt only accepts Touch ID. \
+         With it on, the prompt also accepts your macOS account \
+         password — the same surface macOS itself uses for \
+         system-level Touch ID dialogs — which is what lets you \
+         unlock in clamshell mode where the sensor is unreachable.",
+        toggle_row,
+    )
 }
 
 fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
