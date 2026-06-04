@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_component::{Sizable as _, WindowExt as _, h_flex, v_flex};
 
-use crate::app::actions::OpenConnect;
+use crate::app::actions::{OpenConnect, OpenReconnect};
 use crate::app::time::relative_time_label;
 use crate::app::{SyncBinding, SyncChangeKind, SyncHistoryEntry, SyncStatus};
 use crate::ui::app_shell::AppShell;
@@ -451,7 +451,10 @@ fn render_reconnect(detail: Option<&str>, cx: &mut Context<AppShell>) -> AnyElem
                 .child("Reconnect")
                 .hover_press(palette::blue_hover())
                 .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                    window.dispatch_action(Box::new(OpenConnect), cx);
+                    // OpenReconnect (not OpenConnect): re-auth the EXISTING
+                    // vault binding instead of running the file-picker flow,
+                    // which would download a duplicate local copy.
+                    window.dispatch_action(Box::new(OpenReconnect), cx);
                 })),
         )
         .into_any_element()

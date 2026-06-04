@@ -11,7 +11,7 @@ use gpui_component::{
 };
 
 use crate::app::{
-    AppState, CopyValueKind, SaveStatus, VaultBrowserModel, VaultStatus, VaultSummary,
+    AppState, CopyValueKind, SaveStatus, SyncTone, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{
         DeleteGroup, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAddVault, OpenSettings,
         OpenSyncSettings, OpenVault, OpenVaultSwitcher, RenameGroupOp, SyncNow,
@@ -87,6 +87,31 @@ fn sidebar(
     // / "—" pair rather than showing stale OneDrive copy.
     let provider = summary.provider.clone().unwrap_or_else(|| "Local".into());
     let synced_at = summary.synced_at.clone().unwrap_or_else(|| "—".into());
+    // Header status dot + label now track the real sync health (via
+    // summary.sync_tone) instead of always showing a green "Synced" the
+    // moment a vault is open — so the header agrees with the bottom chip
+    // and the Settings → Sync card. For Attention we reuse the live status
+    // text ("Sign-in expired" / "Sync failed" / "Conflict") from synced_at.
+    let (header_dot, header_label): (Hsla, SharedString) = match summary.sync_tone {
+        SyncTone::Synced => (palette::green(), "Synced".into()),
+        SyncTone::Connecting => (palette::blue(), "Syncing…".into()),
+        SyncTone::Attention => (
+            palette::orange(),
+            summary
+                .synced_at
+                .clone()
+                .map(Into::into)
+                .unwrap_or_else(|| "Needs attention".into()),
+        ),
+        SyncTone::Neutral => (
+            palette::text_muted(),
+            if summary.is_open {
+                "Local".into()
+            } else {
+                "Locked".into()
+            },
+        ),
+    };
     let auto_merged = summary.auto_merged;
     let entry_count = summary.entries;
     // One walk over the tree per render instead of two; library_counts
@@ -144,9 +169,9 @@ fn sidebar(
                                 .gap_1()
                                 .items_center()
                                 .text_xs()
-                                .text_color(palette::green())
-                                .child(dot(palette::green(), 6.0))
-                                .child(if summary.is_open { "Synced" } else { "Locked" }),
+                                .text_color(header_dot)
+                                .child(dot(header_dot, 6.0))
+                                .child(header_label),
                         ),
                 )
                 .child(

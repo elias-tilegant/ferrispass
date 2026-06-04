@@ -5,9 +5,10 @@ use crate::{
             APP_CONTEXT, AddSharePointVault, CancelUnlock, CopyPassword, CopyUrl, CopyUsername,
             CreateVault, DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch,
             InstallUpdate, LaunchEntry, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAbout,
-            OpenAddVault, OpenConflictDemo, OpenConnect, OpenSettings, OpenSyncSettings, OpenVault,
-            OpenVaultSwitcher, OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected,
-            RenameGroupOp, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
+            OpenAddVault, OpenConflictDemo, OpenConnect, OpenReconnect, OpenSettings,
+            OpenSyncSettings, OpenVault, OpenVaultSwitcher, OpenWhatsNew, PerformAutoType,
+            PerformAutoTypeForSelected, RenameGroupOp, SaveVault, SubmitPassword, SyncNow,
+            ToggleTheme,
         },
     },
     autotype,
@@ -1465,6 +1466,20 @@ impl AppShell {
         });
     }
 
+    fn on_action_open_reconnect(
+        &mut self,
+        _: &OpenReconnect,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Token-only re-auth of the active synced vault — NOT the full
+        // picker-driven connect flow (which would download a duplicate
+        // local copy). `start_sharepoint_reconnect` reuses the existing
+        // on-disk SyncConfig and opens straight onto the device-code step.
+        self.state
+            .update(cx, |state, cx| state.start_sharepoint_reconnect(cx));
+    }
+
     fn on_action_add_sharepoint_vault(
         &mut self,
         _: &AddSharePointVault,
@@ -2828,6 +2843,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_copy_password))
             .on_action(cx.listener(Self::on_action_launch_entry))
             .on_action(cx.listener(Self::on_action_open_connect))
+            .on_action(cx.listener(Self::on_action_open_reconnect))
             .on_action(cx.listener(Self::on_action_add_sharepoint_vault))
             .on_action(cx.listener(Self::on_action_open_settings))
             .on_action(cx.listener(Self::on_action_open_sync_settings))

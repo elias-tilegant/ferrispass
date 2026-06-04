@@ -48,6 +48,15 @@ pub struct AppState {
     /// the matching vault unlock succeeds so the previously-active vault's
     /// binding is never overwritten while adding a second cloud vault.
     pending_sync: Option<PendingSync>,
+    /// Set while a user-driven *reconnect* is running its device-code
+    /// re-auth. Holds the existing on-disk `SyncConfig` of the vault being
+    /// reconnected — captured up front so the token poll loop can rebind it
+    /// (via `finish_reconnect`), reusing its drive/item ids, instead of
+    /// dropping into the file-picker connect flow. `None` for a normal
+    /// first-time Connect. Cleared on overlay teardown (`unwind_connect_flow`)
+    /// and on lock so a stale target can never mis-route a later plain
+    /// Connect into a rebind.
+    reconnect_target: Option<SyncConfig>,
     /// In-memory mirror of the on-disk recents list. Loaded once at
     /// construction (`with_resume`), prepended on every successful unlock,
     /// persisted async. Most-recent first.
@@ -167,6 +176,7 @@ impl Default for AppState {
             sync_history: Vec::new(),
             connect_flow: None,
             pending_sync: None,
+            reconnect_target: None,
             recents: Vec::new(),
             favicon_status: FaviconDownloadStatus::default(),
             update_status: UpdateStatus::default(),
@@ -321,6 +331,12 @@ pub struct ConflictState {
 pub enum ConnectFlow {
     /// Initial: three provider buttons (only SharePoint is wired in this MVP).
     PickProvider,
+    /// Requesting the device code (reconnect path): a brief spinner shown
+    /// between opening the overlay and the code arriving, so the user never
+    /// sees the provider picker during a reconnect (clicking it there could
+    /// spawn a second, non-reconnect connect flow). Replaced by `SigningIn`
+    /// once the challenge is in hand.
+    Authorizing,
     /// Device code shown; background task is polling for token. No file
     /// has been chosen yet — that comes after sign-in completes.
     SigningIn { challenge: DeviceCodeChallenge },
@@ -482,6 +498,24 @@ pub struct UnlockPrompt {
     pub error: Option<String>,
 }
 
+/// Health tone for the sidebar header's status dot. Derived from the live
+/// `SyncStatus` (not from `is_open`) so the header agrees with the bottom
+/// sync chip and the Settings → Sync card instead of always showing a
+/// green "Synced" the moment a vault is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SyncTone {
+    /// Synced / idle — everything's good (green).
+    Synced,
+    /// An operation is in flight (connecting / restoring / syncing) (blue).
+    Connecting,
+    /// Needs the user's attention: sign-in expired, last sync failed, or a
+    /// conflict is awaiting resolution (orange).
+    Attention,
+    /// No cloud sync for this vault, or no vault open — local-only (muted).
+    #[default]
+    Neutral,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultSummary {
     pub title: String,
@@ -491,6 +525,9 @@ pub struct VaultSummary {
     pub groups: usize,
     pub is_open: bool,
     pub is_busy: bool,
+    /// Health tone for the header status dot, derived from `SyncStatus`.
+    /// `Neutral` for non-open / local-only vaults.
+    pub sync_tone: SyncTone,
     /// Provider name from the active SyncBinding. `None` when the open vault
     /// is local-only.
     pub provider: Option<String>,
@@ -664,6 +701,10 @@ impl AppState {
     /// (e.g. a stale "Failed" message).
     fn unwind_connect_flow(&mut self) {
         self.connect_flow = None;
+        // A reconnect that's abandoned (Cancel / Esc / overlay switch) must
+        // not leave its target armed — otherwise the next plain Connect's
+        // token would rebind this vault instead of opening the picker.
+        self.reconnect_target = None;
         if matches!(
             self.sync_status,
             SyncStatus::Connecting | SyncStatus::Failed(_)
@@ -894,6 +935,27 @@ impl AppState {
             if let Some(b) = parked.sync.as_mut() {
                 f(b);
             }
+        }
+    }
+
+    /// Install a fresh `SyncBinding` for the vault at `target`, replacing
+    /// any existing one (or filling an empty slot left by a failed restore).
+    /// Routes to the active vault or the matching parked session. Returns
+    /// `true` when a slot was found — `false` means the vault was locked /
+    /// closed between dispatch and callback (the on-disk config + keychain
+    /// are already updated, so the next open restores cleanly). Used by the
+    /// reconnect rebind, which must *set* a binding rather than mutate one
+    /// in place (`with_sync_binding_mut_for` can't, since after an expired
+    /// restore `self.sync` is `None`).
+    fn rebind_sync(&mut self, target: &Path, binding: SyncBinding) -> bool {
+        if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
+            self.sync = Some(binding);
+            true
+        } else if let Some(parked) = self.parked.get_mut(target) {
+            parked.sync = Some(binding);
+            true
+        } else {
+            false
         }
     }
 
@@ -1395,6 +1457,7 @@ impl AppState {
         self.sync = None;
         self.sync_status = SyncStatus::Disconnected;
         self.pending_sync = None;
+        self.reconnect_target = None;
         // Clear with the rest of the session secrets — entry titles in
         // the history would otherwise outlive the unlocked DB they came
         // from, which contradicts the rest of the lock contract.
@@ -1452,6 +1515,10 @@ impl AppState {
     /// Reset the Connect overlay to its initial step. Called when the user
     /// opens Connect from Welcome.
     pub fn begin_connect_flow(&mut self, cx: &mut Context<Self>) {
+        // Normal (first-time) Connect: make sure no stale reconnect target
+        // survives from an abandoned reconnect, or the token poll would
+        // rebind instead of showing the file picker.
+        self.reconnect_target = None;
         self.connect_flow = Some(ConnectFlow::PickProvider);
         cx.notify();
     }
@@ -2548,6 +2615,10 @@ impl AppState {
             crate::sync::config::SyncProvider::SharePoint => "SharePoint".to_string(),
         });
         let synced_at = sync_status_label(&self.sync_status);
+        // Header dot tone tracks the live sync status — but only matters for
+        // an open vault (the sidebar header is the only consumer and only
+        // renders when a vault is open). Non-open / error arms stay Neutral.
+        let sync_tone = sync_status_tone(&self.sync_status);
         let auto_merged = match &self.sync_status {
             SyncStatus::Synced { auto_merged, .. } if *auto_merged > 0 => Some(*auto_merged),
             _ => None,
@@ -2562,6 +2633,7 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: false,
+                sync_tone: SyncTone::Neutral,
                 provider: None,
                 synced_at: None,
                 auto_merged: None,
@@ -2574,6 +2646,7 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: false,
+                sync_tone: SyncTone::Neutral,
                 provider: provider.clone(),
                 synced_at: synced_at.clone(),
                 auto_merged,
@@ -2586,6 +2659,7 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: true,
+                sync_tone: SyncTone::Neutral,
                 provider: provider.clone(),
                 synced_at: synced_at.clone(),
                 auto_merged,
@@ -2598,6 +2672,7 @@ impl AppState {
                 groups: document.snapshot().group_count.saturating_sub(1),
                 is_open: true,
                 is_busy: false,
+                sync_tone,
                 provider,
                 synced_at,
                 auto_merged,
@@ -2612,6 +2687,7 @@ impl AppState {
                 groups: 0,
                 is_open: false,
                 is_busy: false,
+                sync_tone: SyncTone::Neutral,
                 provider: None,
                 synced_at: None,
                 auto_merged: None,
@@ -2647,7 +2723,48 @@ impl AppState {
     /// button + the Escape key.
     pub fn cancel_connect(&mut self, cx: &mut Context<Self>) {
         self.connect_flow = None;
+        self.reconnect_target = None;
         cx.notify();
+    }
+
+    /// User-driven *reconnect* for the active vault whose refresh token
+    /// expired. Unlike `start_sharepoint_connect`, this does NOT run the
+    /// provider-pick / file-picker flow — it reuses the active vault's
+    /// existing on-disk `SyncConfig` and only swaps in a fresh token. We
+    /// arm `reconnect_target` with the vault's path, open the Connect
+    /// overlay straight onto the device-code step, and let the shared poll
+    /// loop route the resulting token into `finish_reconnect` (rebind)
+    /// instead of `Picking` (new download). No new local file is created.
+    pub fn start_sharepoint_reconnect(&mut self, cx: &mut Context<Self>) {
+        // Reconnect always targets the active vault — the Settings → Sync
+        // card (where the Reconnect button lives) reflects `self.sync` /
+        // `self.sync_status`, i.e. the active vault.
+        let path = match &self.vault {
+            VaultStatus::Open { path, .. } => path.clone(),
+            _ => return,
+        };
+        // Load the existing config up front: it carries the drive/item ids we
+        // rebind against, and reading it here lets us fail fast (before making
+        // the user sign in) when there's nothing to reconnect. A miss
+        // shouldn't happen — the Reconnect button only shows for a vault that
+        // had a binding.
+        let Ok(Some(config)) = crate::sync::config::load(&path) else {
+            self.sync_status =
+                SyncStatus::Failed("No cloud sync is configured for this vault.".into());
+            cx.notify();
+            return;
+        };
+
+        self.reconnect_target = Some(config);
+        self.open_overlay(Overlay::Connect, cx);
+        // Show a spinner (not the provider picker) while the device code is
+        // requested — `start_sharepoint_connect` flips this to `SigningIn`
+        // once the challenge arrives, then the poll loop's token branch sees
+        // `reconnect_target` and rebinds (no file picker, no new download).
+        self.connect_flow = Some(ConnectFlow::Authorizing);
+        self.sync_status = SyncStatus::Connecting;
+        cx.notify();
+        self.start_sharepoint_connect(cx);
     }
 
     /// Step 1 of Connect: request a device code and kick off the polling
@@ -2725,8 +2842,16 @@ impl AppState {
                     }
                     PollOutcome::Token(token) => {
                         let _ = this.update(cx, |s, cx| {
-                            // Transition to picker (loading state); spawn the
-                            // file-list fetch.
+                            // Reconnect path: rebind the existing vault's
+                            // config with this fresh token instead of opening
+                            // the file picker. `take()` disarms the target so
+                            // a later plain Connect can't accidentally rebind.
+                            if let Some(config) = s.reconnect_target.take() {
+                                s.finish_reconnect(config, token, cx);
+                                return;
+                            }
+                            // First-time connect: transition to picker
+                            // (loading state); spawn the file-list fetch.
                             s.connect_flow = Some(ConnectFlow::Picking {
                                 token: token.clone(),
                                 results: Vec::new(),
@@ -2867,6 +2992,68 @@ impl AppState {
                     let msg = e.to_string();
                     state.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
                     cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Finish a user-driven reconnect: rebind `config`'s vault with the
+    /// freshly-acquired `token` — no new local file, no duplicate binding.
+    /// `reconnect_rebind` (account match + keychain store + `authenticated_at`
+    /// re-stamp) runs on a background task; the result is installed against
+    /// whichever slot still holds the vault, followed by an immediate sync so
+    /// the user lands back in a known-good state. Account mismatch / failure
+    /// drops back to `Reconnect` so the card stays actionable.
+    fn finish_reconnect(&mut self, config: SyncConfig, token: AccessToken, cx: &mut Context<Self>) {
+        let path = config.local_path.clone();
+        // Close the device-code overlay right away — the rebind is quick and
+        // headless. The status pill carries the progress from here.
+        self.connect_flow = None;
+        self.overlay = Overlay::None;
+        self.apply_sync_status(&path, SyncStatus::Connecting, cx);
+
+        let task = cx.background_spawn(async move {
+            let config = crate::sync::service::reconnect_rebind(config, &token)?;
+            Ok::<_, crate::sync::service::ServiceError>((config, token))
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok((config, access_token)) => {
+                    let binding = SyncBinding {
+                        config,
+                        access_token,
+                    };
+                    if state.rebind_sync(&path, binding) {
+                        state.apply_sync_status(
+                            &path,
+                            SyncStatus::Synced {
+                                at: chrono::Local::now(),
+                                auto_merged: 0,
+                            },
+                            cx,
+                        );
+                        // Verify the new grant works and pull anything that
+                        // landed remotely while the sign-in was dead.
+                        state.sync_now_for_path(&path, cx);
+                    } else {
+                        // Vault locked/closed mid-reconnect — config + token
+                        // are persisted, so the next open restores cleanly.
+                        cx.notify();
+                    }
+                }
+                Err(e) => {
+                    // Stay on the Reconnect card (AccountMismatch or transient
+                    // failure) so the user can retry or read the reason.
+                    state.apply_sync_status(
+                        &path,
+                        SyncStatus::Reconnect {
+                            detail: Some(e.to_string()),
+                        },
+                        cx,
+                    );
                 }
             });
         })
@@ -3703,6 +3890,23 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
         SyncStatus::Conflict(_) => Some("Conflict".into()),
         SyncStatus::Failed(_) => Some("Sync failed".into()),
         SyncStatus::Reconnect { .. } => Some("Sign-in expired".into()),
+    }
+}
+
+/// Map a `SyncStatus` to the header dot's health tone. Keeps the sidebar
+/// header in lockstep with `sync_status_label` (which produces the text):
+/// green when healthy, blue while working, orange when the user needs to
+/// act, muted when there's no sync at all.
+fn sync_status_tone(status: &SyncStatus) -> SyncTone {
+    match status {
+        SyncStatus::Idle | SyncStatus::Synced { .. } => SyncTone::Synced,
+        SyncStatus::Connecting | SyncStatus::Restoring | SyncStatus::Syncing => {
+            SyncTone::Connecting
+        }
+        SyncStatus::Reconnect { .. } | SyncStatus::Failed(_) | SyncStatus::Conflict(_) => {
+            SyncTone::Attention
+        }
+        SyncStatus::Disconnected => SyncTone::Neutral,
     }
 }
 

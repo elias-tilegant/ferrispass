@@ -35,6 +35,16 @@ pub enum ServiceError {
         #[source]
         source: std::io::Error,
     },
+    /// Reconnect signed in as a different Microsoft account than the one
+    /// this vault is bound to. We refuse to rebind because the stored
+    /// drive/item ids belong to `expected`'s tenant — a `got` token can't
+    /// address them. Reversible: the user can sign in with the original
+    /// account, or Disconnect and Connect afresh.
+    #[error(
+        "signed in as {got}, but this vault is connected to {expected}. \
+         Sign in with the original account, or Disconnect and reconnect to pick a different file."
+    )]
+    AccountMismatch { expected: String, got: String },
 }
 
 /// Result of `complete_connect`: what the caller needs to (a) save the
@@ -123,6 +133,39 @@ pub fn complete_connect_picked(
         access_token: token,
         remote_bytes,
     })
+}
+
+/// Re-authenticate an existing vault whose refresh token expired. Takes
+/// the *existing* on-disk `SyncConfig` (loaded by the caller) and a fresh
+/// interactive `token`, and:
+///   1. verifies the re-authed account matches `config.account_email`
+///      (case-insensitive) — refuses with `AccountMismatch` otherwise, so
+///      we never store a token that can't reach the bound drive item;
+///   2. persists the (possibly rotated) refresh token to the keychain;
+///   3. re-stamps `authenticated_at` to now and saves the config back.
+///
+/// Everything else in the config — drive_id / item_id / site_id /
+/// last_etag / local_path / remote_url — is preserved verbatim, so no new
+/// local file or duplicate sync binding is created. Returns the updated
+/// config for the caller to wrap in a fresh `SyncBinding`.
+pub fn reconnect_rebind(
+    mut config: SyncConfig,
+    token: &AccessToken,
+) -> Result<SyncConfig, ServiceError> {
+    let user = graph::me(token)?;
+    if !user.email.eq_ignore_ascii_case(&config.account_email) {
+        return Err(ServiceError::AccountMismatch {
+            expected: config.account_email,
+            got: user.email,
+        });
+    }
+    // Keychain write before config save (mirrors `complete_connect_picked`):
+    // if the keychain write fails we never leave a config claiming a grant
+    // we can't reload.
+    tokens::store(&config.account_email, &token.refresh_token)?;
+    config.authenticated_at = now_unix();
+    config::save(&config)?;
+    Ok(config)
 }
 
 /// Push local bytes to SharePoint with optimistic-concurrency guard.

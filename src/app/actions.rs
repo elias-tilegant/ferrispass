@@ -30,6 +30,14 @@ actions!(
         CopyUrl,
         CopyPassword,
         OpenConnect,
+        /// Re-authenticate an *existing* synced vault whose refresh token
+        /// expired. Unlike `OpenConnect` (which runs the full provider →
+        /// device-code → file-picker flow and writes a brand-new local
+        /// copy), this reuses the active vault's on-disk `SyncConfig` and
+        /// only swaps in a fresh access/refresh token — no new file, no
+        /// duplicate binding. Dispatched by the "Reconnect" button on the
+        /// Sync settings card and the sidebar's expired-sign-in affordance.
+        OpenReconnect,
         OpenSettings,
         OpenSyncSettings,
         InstallUpdate,

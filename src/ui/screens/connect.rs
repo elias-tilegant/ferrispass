@@ -36,6 +36,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 
     let (step_index, body) = match &flow {
         ConnectFlow::PickProvider => (1usize, render_pick_provider(cx)),
+        ConnectFlow::Authorizing => (2, render_authorizing()),
         ConnectFlow::SigningIn { challenge } => (2, render_signing_in(challenge, cx)),
         ConnectFlow::Picking {
             results,
@@ -169,6 +170,36 @@ fn provider_row_button(
         }))
         .into_any_element()
     }
+}
+
+// ---------------- Step 2a: requesting device code (reconnect) ----------------
+
+/// Brief spinner shown during a reconnect while we request the device code,
+/// before the one-time code is ready to display. Keeps the provider picker
+/// off-screen so a reconnect can't be diverted into a fresh connect.
+fn render_authorizing() -> AnyElement {
+    v_flex()
+        .gap_4()
+        .child(heading(
+            "Reconnecting your vault…",
+            "Asking Microsoft for a fresh sign-in code. This keeps your \
+             existing vault and file — we're only renewing the connection.",
+        ))
+        .child(
+            div()
+                .h(px(4.))
+                .w_full()
+                .rounded(px(2.))
+                .bg(palette::sidebar())
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(0.4))
+                        .rounded(px(2.))
+                        .bg(palette::blue()),
+                ),
+        )
+        .into_any_element()
 }
 
 // ---------------- Step 2: device code ----------------

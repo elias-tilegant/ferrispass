@@ -13,7 +13,7 @@ pub use settings::AppSettings;
 pub use state::{
     AppState, BiometricAttempt, BiometricLaunch, ConflictState, ConnectFlow, CopyValueKind,
     FaviconDownloadStatus, LibrarySelection, Overlay, SaveStatus, SyncBinding, SyncStatus,
-    UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary,
+    SyncTone, UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary,
 };
 pub use sync_history::{SyncChangeKind, SyncHistoryEntry};
 
