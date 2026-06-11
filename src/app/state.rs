@@ -1275,8 +1275,7 @@ impl AppState {
             return;
         }
 
-        self.sync_status = SyncStatus::Restoring;
-        cx.notify();
+        self.apply_sync_status(&path, SyncStatus::Restoring, cx);
 
         let email = config.account_email.clone();
         let task = cx.background_spawn(async move {
@@ -1284,29 +1283,41 @@ impl AppState {
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
+            // Route everything by path: the keychain refresh can take
+            // seconds, and the user may have parked this vault and
+            // unlocked another one meanwhile. Writing into the *active*
+            // slot here would hand this vault's SharePoint binding to a
+            // different vault — whose next save would then upload its
+            // bytes over this vault's remote copy.
             let _ = this.update(cx, |state, cx| match result {
                 Ok((config, access_token)) => {
-                    state.sync = Some(SyncBinding {
+                    let binding = SyncBinding {
                         config,
                         access_token,
-                    });
-                    state.sync_status = SyncStatus::Synced {
-                        at: chrono::Local::now(),
-                        auto_merged: 0,
                     };
-                    cx.notify();
+                    if state.rebind_sync(&path, binding) {
+                        state.apply_sync_status(
+                            &path,
+                            SyncStatus::Synced {
+                                at: chrono::Local::now(),
+                                auto_merged: 0,
+                            },
+                            cx,
+                        );
+                    }
+                    // `false` = the vault was locked while the refresh
+                    // ran. Keychain + on-disk config are untouched, so
+                    // the next open restores cleanly; drop the result.
                 }
                 Err(crate::sync::service::ServiceError::Auth(
                     crate::sync::auth::AuthError::InvalidGrant(detail),
                 )) => {
-                    state.sync_status = SyncStatus::Reconnect { detail };
-                    cx.notify();
+                    state.apply_sync_status(&path, SyncStatus::Reconnect { detail }, cx);
                 }
                 Err(e) => {
                     // Transient (network, etc.) — leave the user in
                     // Failed; the next save's sync_now will retry.
-                    state.sync_status = SyncStatus::Failed(e.to_string());
-                    cx.notify();
+                    state.apply_sync_status(&path, SyncStatus::Failed(e.to_string()), cx);
                 }
             });
         })
