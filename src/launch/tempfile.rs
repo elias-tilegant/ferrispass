@@ -10,8 +10,11 @@
 //!    drops it after the cleanup TTL → file unlinked.
 //! 2. On lock or quit, the AppShell calls `sweeper::purge_all()` →
 //!    whole subdir removed.
-//! 3. On startup, `sweeper::sweep_stale()` removes anything older
-//!    than 60 s from a previous run that crashed.
+//! 3. `sweeper::sweep_stale()` removes anything older than 60 s from
+//!    a run that crashed. It runs at startup, again 120 s later (a
+//!    crash + quick relaunch leaves the orphan younger than 60 s, so
+//!    the startup pass alone would spare it for the whole session),
+//!    and on every vault unlock.
 //!
 //! We deliberately do NOT use the `tempfile` crate: its `NamedTempFile`
 //! is dev-only in our Cargo.toml, and its eager `Drop` semantics

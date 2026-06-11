@@ -373,6 +373,25 @@ impl AppShell {
         // payload) doesn't kill it, long enough that anything from a
         // previous session that didn't shut down cleanly is gone.
         crate::launch::sweeper::sweep_stale(std::time::Duration::from_secs(60));
+        // …and once more after the grace window has fully elapsed. A
+        // crash followed by an immediate relaunch (the typical user
+        // reaction) leaves the orphaned payload younger than 60 s, so
+        // the startup sweep above spares it — and without this second
+        // pass nothing would ever delete the cleartext file for the
+        // rest of the session. At +120 s (2× the maximum launch TTL)
+        // every survivor from a previous run is unambiguously stale,
+        // while this session's own pending launches are still protected
+        // by the 60 s age check. Unlocks re-sweep too (see
+        // `AppState::finish_open_attempt`); this timer covers sessions
+        // that resume without an unlock.
+        let resweep_delay = cx
+            .background_executor()
+            .timer(std::time::Duration::from_secs(120));
+        cx.background_spawn(async move {
+            resweep_delay.await;
+            crate::launch::sweeper::sweep_stale(std::time::Duration::from_secs(60));
+        })
+        .detach();
 
         let mut shell = Self {
             state,

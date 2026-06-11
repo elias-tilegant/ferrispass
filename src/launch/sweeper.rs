@@ -1,10 +1,12 @@
 //! Tempdir hygiene for the launch subsystem.
 //!
-//! Three entry points, all best-effort:
-//! - `sweep_stale(max_age)` — called from `AppShell::new`, deletes
-//!   any payload from a previous run that crashed before its TTL
-//!   timer fired. Anything younger than `max_age` is left alone in
-//!   case another instance is mid-launch.
+//! Two entry points, all best-effort:
+//! - `sweep_stale(max_age)` — deletes any payload from a previous run
+//!   that crashed before its TTL timer fired. Anything younger than
+//!   `max_age` is left alone in case another instance is mid-launch.
+//!   Called from `AppShell::new` (immediately and again after a 120 s
+//!   timer, for orphans the immediate pass was too early to age out)
+//!   and from `AppState::finish_open_attempt` on every unlock.
 //! - `purge_all()` — called from lock/quit hooks. Removes the whole
 //!   subdir; `launch_dir()` will recreate it lazily on next launch.
 

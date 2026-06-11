@@ -1243,6 +1243,14 @@ impl AppState {
 
         let did_open = opened_path.is_some();
         if let Some(opened) = opened_path {
+            // Opportunistic hygiene: clear launch payloads orphaned by a
+            // crash that the startup sweep spared (it only removes files
+            // older than 60 s, so a crash + quick relaunch slips through).
+            // `sweep_stale` — not `purge_all` — so this session's own
+            // pending launches survive; anything past 60 s is a guaranteed
+            // orphan because live payload TTLs cap at 60 s. Cheap: one
+            // read_dir over a near-empty private tempdir.
+            crate::launch::sweeper::sweep_stale(std::time::Duration::from_secs(60));
             // Remember the vault for next launch's auto-resume + the
             // Welcome screen's Recents list.
             self.push_recent(opened.clone(), cx);
