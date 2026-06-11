@@ -73,6 +73,12 @@ pub enum Outcome {
     BadSequence(ParseError),
     /// enigo or the OS rejected the keystroke dispatch.
     TypingFailed(String),
+    /// Focus moved to a different app between the hotkey press and the
+    /// keystroke dispatch (or during a `{DELAY}` pause), so the run was
+    /// aborted before the cleartext password reached whatever stole
+    /// focus. Carries the title of the window holding focus now (empty
+    /// when the foreground became unreadable mid-run).
+    FocusChanged { window_title: String },
 }
 
 /// All inputs the orchestrator needs to perform one auto-type. We
@@ -111,6 +117,12 @@ pub struct TypePlan {
     pub entry_title: String,
     pub entry_id: String,
     pub ops: Vec<sequence::TypeOp>,
+    /// The foreground window the plan was prepared against. `execute`
+    /// re-reads the foreground right before dispatch (and after every
+    /// `{DELAY}`) and aborts when focus has moved to a different app —
+    /// the checks `prepare` ran are stale by the time the background
+    /// task actually types.
+    pub expected_foreground: ForegroundInfo,
 }
 
 /// Run every check that doesn't require key dispatch: permission probe,
@@ -168,20 +180,43 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
         entry_title,
         entry_id,
         ops,
+        expected_foreground: input.foreground,
     })
 }
 
 /// Execute a previously-prepared plan. Translates the typer's result
-/// directly into the `Typed` / `TypingFailed` outcome so the caller
-/// can show a notification that reflects what *actually* happened.
+/// directly into the `Typed` / `TypingFailed` / `FocusChanged` outcome
+/// so the caller can show a notification that reflects what *actually*
+/// happened.
+///
+/// Before the first keystroke — and again after every `{DELAY}` pause,
+/// which can be seconds long — the foreground is re-read and compared
+/// against the app the plan was prepared for. A notification popup, an
+/// OS dialog, or the user alt-tabbing between hotkey and dispatch would
+/// otherwise receive the cleartext password. Only the *app* is compared
+/// (`ForegroundInfo::same_app`): window titles legitimately change
+/// mid-login. The re-read runs on the typing thread; that's fine —
+/// `active-win-pos-rs` is built on `CGWindowListCopyWindowInfo` and
+/// `NSRunningApplication`, both documented thread-safe.
 ///
 /// ⚠️ `plan.ops` holds the cleartext password inside a `TypeOp::Text`.
 /// Drop the `Plan` (or let it go out of scope) immediately after this
 /// returns.
 pub fn execute(plan: TypePlan) -> Outcome {
-    match typer::perform(&plan.ops, DEFAULT_INTER_OP) {
+    let expected = plan.expected_foreground.clone();
+    let guard = move || match window::foreground() {
+        Some(now) if now.same_app(&expected) => Ok(()),
+        Some(now) => Err(now.window_title),
+        // Foreground became unreadable mid-run — we can no longer prove
+        // the target is still focused, so abort rather than type blind.
+        None => Err(String::new()),
+    };
+    match typer::perform(&plan.ops, DEFAULT_INTER_OP, &guard) {
         Ok(()) => Outcome::Typed {
             entry_title: plan.entry_title,
+        },
+        Err(typer::TyperError::FocusChanged { current_title }) => Outcome::FocusChanged {
+            window_title: current_title,
         },
         Err(e) => Outcome::TypingFailed(e.to_string()),
     }

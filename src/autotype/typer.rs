@@ -33,6 +33,12 @@ pub enum TyperError {
     /// accepting events.
     #[error("failed to dispatch keystroke: {0}")]
     Dispatch(String),
+    /// The focus guard reported that the foreground app is no longer the
+    /// one the plan was prepared for — typing was aborted before the
+    /// cleartext reached the wrong window. Carries the title of whatever
+    /// holds focus now (may be empty when the foreground was unreadable).
+    #[error("focus moved to another window before keystrokes were dispatched")]
+    FocusChanged { current_title: String },
 }
 
 /// Default inter-op pause. Short enough to feel instant, long enough
@@ -44,13 +50,38 @@ pub const DEFAULT_INTER_OP_MS: u64 = 25;
 /// between every op (not just inside `TypeOp::Sleep`) so the receiving
 /// app has time to process — typing a 16-char password in 16 ms is
 /// faster than the keyboard buffer of most browsers.
-pub fn perform(ops: &[TypeOp], inter_op: Duration) -> Result<(), TyperError> {
+///
+/// `focus_guard` is probed before the first keystroke and again after
+/// every `TypeOp::Sleep` — the windows big enough for a notification,
+/// a dialog, or an alt-tab to steal focus (user `{DELAY}`s run up to
+/// 30 s). `Err(title)` aborts the run with `FocusChanged` before any
+/// further cleartext is dispatched. The 25 ms inter-op gaps are *not*
+/// re-checked: probing the window server per keystroke would slow
+/// typing without meaningfully shrinking the race. Kept as a closure
+/// so this module stays enigo-only (the foreground read lives in
+/// `window`).
+pub fn perform(
+    ops: &[TypeOp],
+    inter_op: Duration,
+    focus_guard: &dyn Fn() -> Result<(), String>,
+) -> Result<(), TyperError> {
     let mut enigo =
         Enigo::new(&Settings::default()).map_err(|e| TyperError::Init(e.to_string()))?;
 
+    let mut verify_next_dispatch = true;
     for (idx, op) in ops.iter().enumerate() {
         if idx > 0 {
             thread::sleep(inter_op);
+        }
+        if let TypeOp::Sleep(d) = op {
+            thread::sleep(*d);
+            verify_next_dispatch = true;
+            continue;
+        }
+        if std::mem::take(&mut verify_next_dispatch)
+            && let Err(current_title) = focus_guard()
+        {
+            return Err(TyperError::FocusChanged { current_title });
         }
         match op {
             TypeOp::Text(s) if s.is_empty() => {}
@@ -63,7 +94,8 @@ pub fn perform(ops: &[TypeOp], inter_op: Duration) -> Result<(), TyperError> {
             TypeOp::Return => enigo
                 .key(Key::Return, Direction::Click)
                 .map_err(|e| TyperError::Dispatch(e.to_string()))?,
-            TypeOp::Sleep(d) => thread::sleep(*d),
+            // Handled (and `continue`d) above; kept for exhaustiveness.
+            TypeOp::Sleep(_) => {}
         }
     }
     Ok(())

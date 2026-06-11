@@ -35,6 +35,22 @@ impl ForegroundInfo {
     pub fn is_self(&self) -> bool {
         self.app_name.eq_ignore_ascii_case("ferrispass")
     }
+
+    /// `true` when `other` plausibly refers to the same application as
+    /// `self`. The typer's focus guard uses this to confirm focus hasn't
+    /// moved to a *different app* between the hotkey press and keystroke
+    /// dispatch (or across a `{DELAY}` pause). Window titles legitimately
+    /// change mid-sequence — multi-step logins navigate from a username
+    /// page to a password page — so the title is deliberately excluded;
+    /// the process path is the strongest stable signal we have. Falls
+    /// back to the app name when either side lacks a path (some AX
+    /// queries yield an empty one).
+    pub fn same_app(&self, other: &ForegroundInfo) -> bool {
+        if !self.process_path.as_os_str().is_empty() && !other.process_path.as_os_str().is_empty() {
+            return self.process_path == other.process_path;
+        }
+        self.app_name.eq_ignore_ascii_case(&other.app_name)
+    }
 }
 
 /// Read the current foreground window, or `None` if the OS query
@@ -84,5 +100,50 @@ mod tests {
             process_path: PathBuf::new(),
         };
         assert!(!info.is_self());
+    }
+
+    fn fg(app: &str, title: &str, path: &str) -> ForegroundInfo {
+        ForegroundInfo {
+            app_name: app.into(),
+            window_title: title.into(),
+            process_path: PathBuf::from(path),
+        }
+    }
+
+    #[test]
+    fn same_app_compares_process_path_when_both_present() {
+        let a = fg(
+            "Safari",
+            "Sign in",
+            "/Applications/Safari.app/Contents/MacOS/Safari",
+        );
+        let b = fg(
+            "Safari",
+            "Password",
+            "/Applications/Safari.app/Contents/MacOS/Safari",
+        );
+        // Title changed (multi-step login) but same process → still same app.
+        assert!(a.same_app(&b));
+
+        let c = fg(
+            "Safari",
+            "Sign in",
+            "/Applications/Slack.app/Contents/MacOS/Slack",
+        );
+        // Spoofed/equal app name but different process → different app.
+        assert!(!a.same_app(&c));
+    }
+
+    #[test]
+    fn same_app_falls_back_to_app_name_when_path_missing() {
+        let a = fg("Safari", "Sign in", "");
+        let b = fg(
+            "safari",
+            "Password",
+            "/Applications/Safari.app/Contents/MacOS/Safari",
+        );
+        assert!(a.same_app(&b));
+        let c = fg("Slack", "general", "");
+        assert!(!a.same_app(&c));
     }
 }

@@ -1451,6 +1451,14 @@ impl AppShell {
             Outcome::TypingFailed(message) => {
                 window.push_notification(format!("Auto-Type failed: {message}"), cx);
             }
+            Outcome::FocusChanged { window_title } => {
+                let message = if window_title.is_empty() {
+                    "Auto-Type cancelled — the target window lost focus.".to_string()
+                } else {
+                    format!("Auto-Type cancelled — focus moved to \"{window_title}\".")
+                };
+                window.push_notification(message, cx);
+            }
         }
     }
 
