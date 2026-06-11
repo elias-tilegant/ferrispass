@@ -6,7 +6,9 @@ use crate::biometric::{
 };
 use crate::domain::{VaultEntry, VaultSnapshot};
 use crate::keepass::merge::{ConflictReport, Side};
-use crate::keepass::{EntryDraft, MutationError, OtpDisplay, StrengthReport, VaultDocument};
+use crate::keepass::{
+    EntryDraft, MutationError, OtpDisplay, SavePayload, StrengthReport, VaultDocument,
+};
 use crate::sync::auth::{AccessToken, DeviceCodeChallenge};
 use crate::sync::config::SyncConfig;
 use crate::sync::graph::DriveItemHit;
@@ -122,6 +124,25 @@ pub struct AppState {
     /// racy status writes. We insert before spawning and remove on
     /// completion; the auto-sync tick skips any path already present.
     auto_sync_in_flight: HashSet<PathBuf>,
+    /// Disk-save serialization per vault path. A key being present means a
+    /// background `save_to` is running for that path; the value records
+    /// whether another save was requested in the meantime. Only one writer
+    /// may run per path: concurrent saves would race on temp files and —
+    /// worse — an *older* payload could rename over a newer one, silently
+    /// reverting the freshest state on disk. The completion callback runs
+    /// one coalesced trailing save when the flag is set, so a burst of
+    /// edits collapses into "current save + one save of the latest state".
+    saves_in_flight: HashMap<PathBuf, QueuedSave>,
+}
+
+/// Bookkeeping value for `AppState::saves_in_flight` — see the field docs.
+#[derive(Clone, Copy, Debug, Default)]
+struct QueuedSave {
+    /// A new save was requested while one was already running for this path.
+    requested: bool,
+    /// At least one of the coalesced requests wanted the cloud-sync push
+    /// that normally chains off a successful save.
+    sync_after: bool,
 }
 
 /// Lifecycle of a single Touch ID unlock attempt. Drives the Unlock
@@ -189,6 +210,7 @@ impl Default for AppState {
             biometric_attempt: BiometricAttempt::default(),
             biometric_generation: 0,
             auto_sync_in_flight: HashSet::new(),
+            saves_in_flight: HashMap::new(),
         }
     }
 }
@@ -1679,9 +1701,11 @@ impl AppState {
     ///
     /// Concurrency model: snapshots the live `Database` once on the foreground
     /// (cheap memcpy) and ships the clone + key material to a worker. The UI
-    /// thread is free during the ~500 ms Argon2 KDF. If a save is already in
-    /// flight we deliberately let the new one queue behind it — the latest
-    /// state always wins, but we don't drop user changes.
+    /// thread is free during the ~500 ms Argon2 KDF. Saves are serialized per
+    /// path via `saves_in_flight`: while one runs, further requests only set
+    /// a flag, and the completion callback snapshots the then-latest document
+    /// state for one trailing save — the latest state always wins, but we
+    /// never have two writers racing on the same file.
     pub fn save_async(&mut self, cx: &mut Context<Self>) {
         self.save_async_internal(true, cx);
     }
@@ -1699,21 +1723,54 @@ impl AppState {
     }
 
     fn save_async_internal(&mut self, sync_after: bool, cx: &mut Context<Self>) {
-        let VaultStatus::Open { document, path, .. } = &self.vault else {
+        let VaultStatus::Open { path, .. } = &self.vault else {
             return;
         };
-        let payload = document.save_payload();
         let target = path.clone();
+        self.request_save(target, sync_after, cx);
+    }
 
-        self.save_status = SaveStatus::Saving;
-        cx.notify();
+    /// Snapshot a `SavePayload` for `target`, whether the vault is active or
+    /// parked. `None` when no open session owns the path (it was locked
+    /// while a previous save ran) — the caller drops the save in that case.
+    fn save_payload_for(&self, target: &Path) -> Option<SavePayload> {
+        if let VaultStatus::Open { document, path, .. } = &self.vault
+            && path == target
+        {
+            return Some(document.save_payload());
+        }
+        self.parked
+            .get(target)
+            .map(|session| session.document.save_payload())
+    }
 
-        let target_for_callback = target.clone();
-        let task = cx.background_spawn(async move { payload.save_to(&target) });
+    /// Run — or queue — a save for `target`. Only one background `save_to`
+    /// may run per path (see `saves_in_flight`); requests that arrive while
+    /// one is in flight are coalesced into a single trailing save that
+    /// snapshots the latest document state when the running one completes.
+    fn request_save(&mut self, target: PathBuf, sync_after: bool, cx: &mut Context<Self>) {
+        if let Some(queued) = self.saves_in_flight.get_mut(&target) {
+            queued.requested = true;
+            queued.sync_after |= sync_after;
+            return;
+        }
+        let Some(payload) = self.save_payload_for(&target) else {
+            return;
+        };
+        self.saves_in_flight
+            .insert(target.clone(), QueuedSave::default());
+
+        // Route the status by path so a trailing save kicked off after the
+        // user switched vaults marks the parked session, not the active one.
+        self.apply_save_status(&target, SaveStatus::Saving, cx);
+
+        let save_target = target.clone();
+        let task = cx.background_spawn(async move { payload.save_to(&save_target) });
 
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
+                let queued = state.saves_in_flight.remove(&target).unwrap_or_default();
                 let succeeded = result.is_ok();
                 let new_status = match result {
                     Ok(()) => SaveStatus::Saved,
@@ -1723,17 +1780,24 @@ impl AppState {
                 // from the saving vault while the disk write was in
                 // flight, mark the parked session, not whoever is now
                 // active.
-                state.apply_save_status(&target_for_callback, new_status, cx);
+                state.apply_save_status(&target, new_status, cx);
+                if queued.requested {
+                    // More mutations landed while this save ran. Run one
+                    // trailing save of the *latest* document state; any
+                    // cloud push (ours or the queued requests') rides on
+                    // that save instead, so the newest bytes are what
+                    // reach the server — pushing now would upload state
+                    // the trailing save is about to supersede.
+                    state.request_save(target, queued.sync_after || sync_after, cx);
+                    return;
+                }
                 // Chain into sync against the same vault that just saved
                 // — even if the user has switched away. `sync_now_for_path`
                 // routes its results back to whichever slot still owns
-                // `target_for_callback`, so a parked vault's edit still
-                // makes it to SharePoint.
-                if succeeded
-                    && sync_after
-                    && state.snapshot_sync_inputs(&target_for_callback).is_some()
-                {
-                    state.sync_now_for_path(&target_for_callback, cx);
+                // `target`, so a parked vault's edit still makes it to
+                // SharePoint.
+                if succeeded && sync_after && state.snapshot_sync_inputs(&target).is_some() {
+                    state.sync_now_for_path(&target, cx);
                 }
             });
         })

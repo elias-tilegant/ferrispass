@@ -8,6 +8,7 @@ use std::{
     io::{self, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 use thiserror::Error;
 
@@ -722,9 +723,10 @@ impl SavePayload {
         }
     }
 
-    /// Atomically write the database to `target_path`. Writes to `<target>.tmp`,
-    /// fsyncs, then renames over the target so a crash mid-write can never
-    /// leave a half-written `.kdbx`.
+    /// Atomically write the database to `target_path`. Writes to a uniquely
+    /// named `<target>.<pid>-<seq>.tmp` sibling, fsyncs, then renames over
+    /// the target so a crash mid-write can never leave a half-written
+    /// `.kdbx`.
     pub fn save_to(self, target_path: &Path) -> Result<(), SaveError> {
         let mut key = DatabaseKey::new();
         if !self.password.is_empty() {
@@ -739,26 +741,40 @@ impl SavePayload {
 
         let tmp_path = temp_path_for(target_path);
         // Scope the file handle so it's flushed + dropped before rename.
-        {
+        let write_result = (|| {
             let mut tmp = fs::File::create(&tmp_path).map_err(SaveError::CreateTemp)?;
-            self.database.save(&mut tmp, key).map_err(|e| {
-                // Best-effort cleanup: leave no orphaned .tmp behind on failure.
-                let _ = fs::remove_file(&tmp_path);
-                SaveError::Encode(e.to_string())
-            })?;
+            self.database
+                .save(&mut tmp, key)
+                .map_err(|e| SaveError::Encode(e.to_string()))?;
             tmp.flush().map_err(SaveError::WriteTemp)?;
             tmp.sync_all().map_err(SaveError::WriteTemp)?;
+            Ok(())
+        })();
+        // Best-effort cleanup on every failure arm: with per-save unique
+        // names, a stranded temp file would otherwise accumulate forever.
+        if let Err(e) = write_result {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
         }
-        fs::rename(&tmp_path, target_path).map_err(SaveError::Rename)?;
+        fs::rename(&tmp_path, target_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            SaveError::Rename(e)
+        })?;
         Ok(())
     }
 }
 
 fn temp_path_for(target: &Path) -> PathBuf {
-    // `target.kdbx.tmp` keeps the temp file next to the destination so the
-    // rename is on the same filesystem (atomic on POSIX/macOS).
+    // Keep the temp file next to the destination so the rename is on the
+    // same filesystem (atomic on POSIX/macOS). The name embeds the pid plus
+    // a process-wide counter so two concurrent saves — a second one of ours
+    // that slipped past serialization, or another app instance's — can never
+    // truncate each other's temp file and publish interleaved bytes via the
+    // final rename.
+    static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SAVE_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut buf = target.as_os_str().to_owned();
-    buf.push(".tmp");
+    buf.push(format!(".{}-{}.tmp", std::process::id(), seq));
     PathBuf::from(buf)
 }
 
@@ -829,9 +845,19 @@ mod tests {
             .save_to(&path)
             .expect("first save succeeds");
 
-        // No leftover .tmp from a successful save.
-        let tmp_path = path.with_extension("kdbx.tmp");
-        assert!(!tmp_path.exists(), "temp file must be cleaned up");
+        // No leftover temp file from a successful save — the target must be
+        // the only thing in the directory (temp names are per-save unique,
+        // so scan instead of probing one fixed name).
+        let leftovers: Vec<_> = fs::read_dir(tmp.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .filter(|n| n != "roundtrip.kdbx")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
 
         // Reopen and verify the entry survived.
         let reopened = crate::keepass::KeePassRepository::open(&path, "vault-pw", None)
