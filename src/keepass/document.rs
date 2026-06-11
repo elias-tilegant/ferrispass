@@ -28,6 +28,13 @@ pub struct VaultDocument {
     /// caching its contents) so that if the user rotates the key file outside
     /// the app, the next save uses the current bytes.
     keyfile_path: Option<PathBuf>,
+    /// Monotonic mutation counter. Every mutator funnels through
+    /// `refresh_snapshot`, which bumps it. The sync merge flow snapshots
+    /// this alongside the database clone it diffs against and compares it
+    /// again when the merged result is ready to install — a mismatch means
+    /// the user edited the document mid-merge, and installing the merged
+    /// copy would silently discard that edit.
+    generation: u64,
 }
 
 impl VaultDocument {
@@ -42,7 +49,14 @@ impl VaultDocument {
             snapshot: Arc::new(snapshot),
             password,
             keyfile_path,
+            generation: 0,
         }
+    }
+
+    /// Current mutation generation — see the field docs. Compare two reads
+    /// for equality only; the absolute value carries no meaning.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn snapshot(&self) -> &VaultSnapshot {
@@ -489,6 +503,7 @@ impl VaultDocument {
     }
 
     fn refresh_snapshot(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.snapshot = Arc::new(snapshot_from_database(&self.database));
     }
 }

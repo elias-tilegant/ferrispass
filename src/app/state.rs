@@ -345,6 +345,12 @@ pub struct ConflictState {
     pub remote_etag: String,
     pub report: ConflictReport,
     pub picks: HashMap<String, Side>,
+    /// `VaultDocument::generation` at the moment `local_db` was cloned.
+    /// `commit_merged_for` compares against the live document before
+    /// installing the merged result — if the user edited while this
+    /// conflict sat open, the merge is recomputed instead of silently
+    /// discarding those edits.
+    pub base_generation: u64,
 }
 
 /// Step machine for the Connect overlay. The Connect screen renders a
@@ -1097,6 +1103,19 @@ impl AppState {
         self.parked
             .get(target)
             .map(|p| p.document.database().clone())
+    }
+
+    /// Mutation generation of the document at `target` (active or parked).
+    /// `None` when the vault isn't unlocked in memory. Captured next to
+    /// `database_clone_for` by the merge flow and re-checked before the
+    /// merged result is installed — see `commit_merged_for`.
+    fn document_generation_for(&self, target: &Path) -> Option<u64> {
+        if let VaultStatus::Open { path, document, .. } = &self.vault
+            && path.as_path() == target
+        {
+            return Some(document.generation());
+        }
+        self.parked.get(target).map(|p| p.document.generation())
     }
 
     /// Replace the live `Database` for the vault at `target` with the
@@ -3446,6 +3465,13 @@ impl AppState {
             // response landing — nothing to merge against. Drop silently.
             return;
         };
+        // Stamp the mutation generation that `local_db` represents. The
+        // merge runs against this clone while the live document stays
+        // editable; `commit_merged_for` refuses to install a result whose
+        // base generation no longer matches the live document.
+        let Some(base_generation) = self.document_generation_for(target) else {
+            return;
+        };
 
         let target_is_active = matches!(
             &self.vault,
@@ -3497,6 +3523,7 @@ impl AppState {
                         auto_merged_count,
                         needs_upload,
                         history_entries,
+                        base_generation,
                         cx,
                     );
                     return;
@@ -3537,6 +3564,7 @@ impl AppState {
                     remote_etag,
                     report,
                     picks,
+                    base_generation,
                 }));
                 self.overlay = Overlay::Conflict;
                 cx.notify();
@@ -3587,6 +3615,7 @@ impl AppState {
             &state.report,
         );
         let remote_etag = state.remote_etag.clone();
+        let base_generation = state.base_generation;
         let master_password = document.password().to_string();
         let target = path.clone();
         // Translate report + picks into history entries up front so the
@@ -3610,6 +3639,7 @@ impl AppState {
             0,
             true,
             history_entries,
+            base_generation,
             cx,
         );
     }
@@ -3631,6 +3661,16 @@ impl AppState {
     /// the local save + reload succeeds (phase 1) — so a save failure
     /// can't leave phantom rows referencing changes that never
     /// actually committed.
+    ///
+    /// `base_generation` is the document's mutation generation at the time
+    /// `merged` was computed. The UI stays fully interactive while the
+    /// ~500 ms merge save runs, so the user can edit the live document in
+    /// that window; installing the merged copy would silently discard
+    /// those edits, and uploading it would publish a remote state that
+    /// lacks them. Whenever the live generation no longer matches, the
+    /// commit aborts and instead schedules a save + sync of the *latest*
+    /// state — the resulting 412 re-runs the whole download → diff →
+    /// merge cycle against that state, so neither side's changes are lost.
     #[allow(clippy::too_many_arguments)]
     fn commit_merged_for(
         &mut self,
@@ -3641,6 +3681,7 @@ impl AppState {
         auto_merged: usize,
         needs_upload: bool,
         history_entries: Vec<SyncHistoryEntry>,
+        base_generation: u64,
         cx: &mut Context<Self>,
     ) {
         // Pull config + token + keyfile path from whichever slot owns
@@ -3670,9 +3711,28 @@ impl AppState {
             }
         };
 
+        let local_path = target.to_path_buf();
+
+        // Abort before the expensive save when the merge base is already
+        // stale (the user edited while the Conflict overlay was open) or
+        // an ordinary save is mid-flight for this path (its bytes will
+        // land on disk at an arbitrary point relative to ours). Either
+        // way: write + push the latest state instead and let the 412
+        // cycle recompute the merge against it.
+        if self.document_generation_for(target) != Some(base_generation)
+            || self.saves_in_flight.contains_key(&local_path)
+        {
+            self.apply_sync_status(target, SyncStatus::Syncing, cx);
+            self.request_save(local_path, true, cx);
+            return;
+        }
+        // Hold the per-path save slot for the whole of phase 1 so ordinary
+        // saves queue behind the merge write instead of racing it on disk.
+        self.saves_in_flight
+            .insert(local_path.clone(), QueuedSave::default());
+
         let payload =
             crate::keepass::SavePayload::for_merged(merged, document_password, keyfile_path);
-        let local_path = target.to_path_buf();
         let if_match = remote_etag;
 
         self.apply_sync_status(target, SyncStatus::Syncing, cx);
@@ -3701,12 +3761,36 @@ impl AppState {
             let local_save_result = local_save_task.await;
             let proceed = this
                 .update(cx, |state, cx| {
+                    // Release the per-path save slot taken above; pick up
+                    // any ordinary-save request that queued behind the
+                    // merge write meanwhile.
+                    let queued = state
+                        .saves_in_flight
+                        .remove(&callback_path)
+                        .unwrap_or_default();
                     if let Err(error) = &local_save_result {
                         state.apply_sync_status(
                             &callback_path,
                             SyncStatus::Failed(error.to_string()),
                             cx,
                         );
+                        if queued.requested {
+                            state.request_save(callback_path.clone(), queued.sync_after, cx);
+                        }
+                        return false;
+                    }
+                    // The user edited this vault while the merged bytes
+                    // were being encrypted + written (the UI stays
+                    // interactive during the ~500 ms background save), or
+                    // locked it outright. Installing the merged document
+                    // would silently discard those edits — and phase 2
+                    // would publish a remote state that lacks them. Abort:
+                    // the save scheduled here writes the *latest* in-memory
+                    // state back over the merged file on disk, and its
+                    // chained sync re-runs the 412 → diff → merge cycle
+                    // against that state, so neither side loses changes.
+                    if state.document_generation_for(&callback_path) != Some(base_generation) {
+                        state.request_save(callback_path.clone(), true, cx);
                         return false;
                     }
                     // Reload the in-memory document from the freshly merged
