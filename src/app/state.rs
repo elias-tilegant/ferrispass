@@ -133,6 +133,15 @@ pub struct AppState {
     /// one coalesced trailing save when the flag is set, so a burst of
     /// edits collapses into "current save + one save of the latest state".
     saves_in_flight: HashMap<PathBuf, QueuedSave>,
+    /// Push serialization per vault path, mirroring `saves_in_flight`.
+    /// Every successful save chains a sync, so a burst of edits would
+    /// otherwise launch concurrent uploads all carrying the same
+    /// `last_etag` — the first rotates the server etag and the rest
+    /// collect spurious 412s, dragging the user through conflict cycles
+    /// against their own writes. While a push is in flight, further
+    /// requests only mark the queue flag; the completion callback runs
+    /// one follow-up push that reads the then-latest bytes.
+    syncs_in_flight: HashMap<PathBuf, QueuedSync>,
 }
 
 /// Bookkeeping value for `AppState::saves_in_flight` — see the field docs.
@@ -143,6 +152,17 @@ struct QueuedSave {
     /// At least one of the coalesced requests wanted the cloud-sync push
     /// that normally chains off a successful save.
     sync_after: bool,
+}
+
+/// Bookkeeping value for `AppState::syncs_in_flight` — see the field docs.
+#[derive(Clone, Copy, Debug, Default)]
+struct QueuedSync {
+    /// A new push was requested while one was already running for this path.
+    requested: bool,
+    /// At least one of the coalesced requests came through the interactive
+    /// entry point (manual "Sync now" / on-save push), so a conflict in the
+    /// follow-up is allowed to open the Conflict overlay.
+    interactive: bool,
 }
 
 /// Lifecycle of a single Touch ID unlock attempt. Drives the Unlock
@@ -211,6 +231,7 @@ impl Default for AppState {
             biometric_generation: 0,
             auto_sync_in_flight: HashSet::new(),
             saves_in_flight: HashMap::new(),
+            syncs_in_flight: HashMap::new(),
         }
     }
 }
@@ -3194,10 +3215,20 @@ impl AppState {
         interactive: bool,
         cx: &mut Context<Self>,
     ) {
+        // One push per vault at a time — see `syncs_in_flight`. Queue a
+        // follow-up instead of racing; it runs once the in-flight push
+        // completes and reads the then-latest bytes from disk.
+        if let Some(queued) = self.syncs_in_flight.get_mut(target) {
+            queued.requested = true;
+            queued.interactive |= interactive;
+            return;
+        }
         let Some((config, token, master_password)) = self.snapshot_sync_inputs(target) else {
             return;
         };
         let local_path = target.to_path_buf();
+        self.syncs_in_flight
+            .insert(local_path.clone(), QueuedSync::default());
 
         self.apply_sync_status(target, SyncStatus::Syncing, cx);
 
@@ -3213,53 +3244,82 @@ impl AppState {
         let callback_path = local_path;
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |state, cx| match result {
-                Ok((outcome, fresh_token)) => {
-                    state.with_sync_binding_mut_for(&callback_path, |b| {
-                        b.access_token = fresh_token;
-                    });
-                    use crate::sync::service::UploadAfterSave;
-                    match outcome {
-                        UploadAfterSave::Synced { new_etag, item: _ } => {
-                            state.with_sync_binding_mut_for(&callback_path, |b| {
-                                b.config.last_etag = new_etag;
-                                // Persist updated etag — best effort; if the
-                                // disk write fails we'll just re-detect a
-                                // conflict next push (and re-resolve).
-                                let _ = crate::sync::config::save(&b.config);
-                            });
-                            state.apply_sync_status(
-                                &callback_path,
-                                SyncStatus::Synced {
-                                    at: chrono::Local::now(),
-                                    auto_merged: 0,
-                                },
-                                cx,
-                            );
-                        }
-                        UploadAfterSave::Conflict {
-                            remote_bytes,
-                            remote_etag,
-                        } => {
-                            state.handle_remote_conflict_for(
-                                &callback_path,
+            let _ = this.update(cx, |state, cx| {
+                // Release the per-path push slot before anything else so
+                // a follow-up (or the conflict flow's own re-push) never
+                // finds a stale entry.
+                let queued = state
+                    .syncs_in_flight
+                    .remove(&callback_path)
+                    .unwrap_or_default();
+                match result {
+                    Ok((outcome, fresh_token)) => {
+                        state.with_sync_binding_mut_for(&callback_path, |b| {
+                            b.access_token = fresh_token;
+                        });
+                        use crate::sync::service::UploadAfterSave;
+                        match outcome {
+                            UploadAfterSave::Synced { new_etag, item: _ } => {
+                                state.with_sync_binding_mut_for(&callback_path, |b| {
+                                    b.config.last_etag = new_etag;
+                                    // Persist updated etag — best effort; if the
+                                    // disk write fails we'll just re-detect a
+                                    // conflict next push (and re-resolve).
+                                    let _ = crate::sync::config::save(&b.config);
+                                });
+                                state.apply_sync_status(
+                                    &callback_path,
+                                    SyncStatus::Synced {
+                                        at: chrono::Local::now(),
+                                        auto_merged: 0,
+                                    },
+                                    cx,
+                                );
+                                // Saves that completed while this push ran
+                                // queued behind it — run the one follow-up
+                                // push that carries their bytes.
+                                if queued.requested {
+                                    state.sync_now_for_path_inner(
+                                        &callback_path,
+                                        queued.interactive,
+                                        cx,
+                                    );
+                                }
+                            }
+                            UploadAfterSave::Conflict {
                                 remote_bytes,
                                 remote_etag,
-                                master_password,
-                                interactive,
-                                cx,
-                            );
+                            } => {
+                                // Any queued follow-up is deliberately
+                                // dropped here: the merge diff runs against
+                                // the *current* in-memory document, so edits
+                                // that queued behind this push are already
+                                // part of what gets merged and re-uploaded.
+                                state.handle_remote_conflict_for(
+                                    &callback_path,
+                                    remote_bytes,
+                                    remote_etag,
+                                    master_password,
+                                    interactive,
+                                    cx,
+                                );
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    let status = match e {
-                        crate::sync::service::ServiceError::Auth(
-                            crate::sync::auth::AuthError::InvalidGrant(detail),
-                        ) => SyncStatus::Reconnect { detail },
-                        other => SyncStatus::Failed(other.to_string()),
-                    };
-                    state.apply_sync_status(&callback_path, status, cx);
+                    Err(e) => {
+                        // Queued follow-up dropped on purpose: it would hit
+                        // the same broken network/grant immediately. The
+                        // auto-sync tick's Failed-recovery branch owns the
+                        // retry, and the queued edits are already on disk
+                        // for it to push.
+                        let status = match e {
+                            crate::sync::service::ServiceError::Auth(
+                                crate::sync::auth::AuthError::InvalidGrant(detail),
+                            ) => SyncStatus::Reconnect { detail },
+                            other => SyncStatus::Failed(other.to_string()),
+                        };
+                        state.apply_sync_status(&callback_path, status, cx);
+                    }
                 }
             });
         })
