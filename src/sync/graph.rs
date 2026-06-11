@@ -10,6 +10,7 @@ use thiserror::Error;
 use ureq::Error as UreqError;
 
 use crate::sync::auth::AccessToken;
+use crate::sync::http;
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
@@ -104,7 +105,8 @@ pub fn search_kdbx_files(token: &AccessToken) -> Result<Vec<DriveItemHit>, Graph
     });
 
     let body_str = body.to_string();
-    let resp = ureq::post(&url)
+    let resp = http::agent()
+        .post(&url)
         .set("Authorization", &format!("Bearer {}", token.access_token))
         .set("Content-Type", "application/json")
         .set("Accept", "application/json")
@@ -233,7 +235,8 @@ pub fn download_content(
     token: &AccessToken,
 ) -> Result<(Vec<u8>, String), GraphError> {
     let url = format!("{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content");
-    let resp = ureq::get(&url)
+    let resp = http::transfer_agent()
+        .get(&url)
         .set("Authorization", &format!("Bearer {}", token.access_token))
         .call()
         .map_err(map_ureq_error)?;
@@ -263,7 +266,8 @@ pub fn upload_content(
     token: &AccessToken,
 ) -> Result<UploadOutcome, GraphError> {
     let url = format!("{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content");
-    let mut req = ureq::put(&url)
+    let mut req = http::transfer_agent()
+        .put(&url)
         .set("Authorization", &format!("Bearer {}", token.access_token))
         .set("Content-Type", "application/octet-stream");
     if let Some(etag) = if_match {
@@ -289,7 +293,8 @@ pub fn upload_content(
 // ---------- internals ----------
 
 fn http_get(url: &str, token: &AccessToken) -> Result<String, GraphError> {
-    ureq::get(url)
+    http::agent()
+        .get(url)
         .set("Authorization", &format!("Bearer {}", token.access_token))
         .set("Accept", "application/json")
         .call()

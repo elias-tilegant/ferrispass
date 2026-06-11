@@ -202,7 +202,8 @@ pub fn refresh(refresh_token: &str) -> Result<AccessToken, AuthError> {
 // --------------- internals ---------------
 
 fn post_form(url: &str, params: &[(&str, &str)]) -> Result<String, AuthError> {
-    match ureq::post(url)
+    match crate::sync::http::agent()
+        .post(url)
         .set("Accept", "application/json")
         .send_form(params)
     {
