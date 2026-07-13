@@ -83,7 +83,7 @@ impl Drop for TempLaunchFile {
 /// thing on lock/quit. Idempotent — safe to call from `AppShell::new`
 /// before we know if we'll ever launch anything.
 pub fn launch_dir() -> io::Result<PathBuf> {
-    let mut path = std::env::temp_dir();
+    let mut path = launch_base_dir();
     path.push(format!("ferrispass-launch-{}", instance_tag()));
     if !path.exists() {
         std::fs::create_dir_all(&path)?;
@@ -99,6 +99,45 @@ pub fn launch_dir() -> io::Result<PathBuf> {
         }
     }
     Ok(path)
+}
+
+/// Base directory for cleartext launch payloads. `std::env::temp_dir()`
+/// is normally the right macOS per-user temp root (`/var/folders/.../T`),
+/// but it is environment-driven. If a user or launcher accidentally points
+/// `TMPDIR` at a synced folder, keep secrets out of cloud storage and fall
+/// back to the local system temp root.
+fn launch_base_dir() -> PathBuf {
+    let candidate = std::env::temp_dir();
+    if is_cloud_storage_path(&candidate) {
+        fallback_temp_dir()
+    } else {
+        candidate
+    }
+}
+
+#[cfg(unix)]
+fn fallback_temp_dir() -> PathBuf {
+    PathBuf::from("/tmp")
+}
+
+#[cfg(not(unix))]
+fn fallback_temp_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Temp"))
+}
+
+fn is_cloud_storage_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        name == "cloudstorage"
+            || name.starts_with("onedrive")
+            || name.contains("onedrive -")
+            || name == "icloud drive"
+            || name == "dropbox"
+            || name == "google drive"
+            || name == "box sync"
+    })
 }
 
 /// Stable per-user tag mixed into the tempdir name. Username + uid
@@ -200,5 +239,21 @@ mod tests {
         assert_eq!(sanitize("Alice/Bob"), "alicebob");
         assert_eq!(sanitize(""), "anon");
         assert_eq!(sanitize("---"), "anon");
+    }
+
+    #[test]
+    fn cloud_storage_paths_are_not_valid_launch_roots() {
+        assert!(is_cloud_storage_path(Path::new(
+            "/Users/alice/Library/CloudStorage/OneDrive-Contoso/T"
+        )));
+        assert!(is_cloud_storage_path(Path::new(
+            "/Users/alice/OneDrive - Contoso/Documents"
+        )));
+    }
+
+    #[test]
+    fn ordinary_temp_paths_are_valid_launch_roots() {
+        assert!(!is_cloud_storage_path(Path::new("/var/folders/ab/cdef/T")));
+        assert!(!is_cloud_storage_path(Path::new("/tmp")));
     }
 }
