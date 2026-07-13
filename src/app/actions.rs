@@ -1,4 +1,5 @@
 use gpui::{App, KeyBinding, Menu, MenuItem, actions};
+use gpui_component::WindowExt as _;
 
 pub const APP_CONTEXT: &str = "FerrisPass";
 
@@ -107,10 +108,29 @@ pub struct DeleteGroup {
     pub group_id: String,
 }
 
+fn block_lifecycle_action_while_saving(cx: &mut App) -> bool {
+    if !super::state::has_unpersisted_vault_saves() {
+        return false;
+    }
+
+    if let Some(window) = cx.active_window() {
+        let _ = window.update(cx, |_root, window, cx| {
+            window.push_notification(
+                "FerrisPass is still saving vault changes. Wait for the save to finish, or retry Save if it failed.",
+                cx,
+            );
+        });
+    }
+    true
+}
+
 pub fn init(cx: &mut App) {
     // App-global Quit handler. Wired here (not on AppShell) so the action fires
     // independently of whatever view currently holds focus.
     cx.on_action(|_: &Quit, cx: &mut App| {
+        if block_lifecycle_action_while_saving(cx) {
+            return;
+        }
         // Wipe the launch tempdir before we hand control back to the
         // OS — a Quit-mid-launch otherwise leaves cleartext payload
         // files lying around. The startup sweep would catch them on
@@ -122,6 +142,9 @@ pub fn init(cx: &mut App) {
     });
 
     cx.on_action(|_: &RestartToUpdate, cx: &mut App| {
+        if block_lifecycle_action_while_saving(cx) {
+            return;
+        }
         crate::launch::sweeper::purge_all();
         cx.restart();
     });

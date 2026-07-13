@@ -19,11 +19,42 @@ use keepass::db::Database;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+};
+
+/// Process-wide ids prevent an async callback from ever confusing a newly
+/// opened copy of the same path with the vault session that started the work.
+/// Zero is reserved so the first real session is easy to spot in diagnostics.
+static NEXT_VAULT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// App-global Quit/Restart actions cannot borrow the window-owned `AppState`.
+/// Keep only the minimum cross-cutting signal here: how many unlocked sessions
+/// still have local changes whose latest save has not succeeded.
+static UNPERSISTED_VAULT_SESSION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct VaultSessionId(u64);
+
+impl VaultSessionId {
+    fn next() -> Self {
+        Self(NEXT_VAULT_SESSION_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Used by app-global lifecycle actions, which deliberately refuse to
+/// terminate while doing so could discard a queued or failed vault save.
+pub(crate) fn has_unpersisted_vault_saves() -> bool {
+    UNPERSISTED_VAULT_SESSION_COUNT.load(Ordering::Acquire) != 0
+}
 
 #[derive(Debug)]
 pub struct AppState {
     vault: VaultStatus,
+    /// Identity of the currently-active `VaultStatus::Open`. Kept outside the
+    /// public enum so this internal race guard does not widen its public API.
+    active_vault_session_id: Option<VaultSessionId>,
     overlay: Overlay,
     /// Background-save lifecycle of the open vault. Drives the status indicator
     /// and gates retry / explicit-save UX.
@@ -87,6 +118,13 @@ pub struct AppState {
     /// right target for Esc-on-unlock and for picking a fallback when
     /// the active vault is closed.
     parked_order: Vec<PathBuf>,
+    /// Sessions whose newest in-memory state is not yet known to be on disk.
+    /// Membership survives a failed save and is cleared only by a successful
+    /// save for the exact same session id.
+    unpersisted_vault_sessions: HashSet<VaultSessionId>,
+    /// A lock requested while a save was unsafe to abandon. Completion of the
+    /// final successful local save consumes this flag and performs the lock.
+    lock_requested_after_save: bool,
     /// Per-platform biometric backend. Production uses
     /// `crate::biometric::default_store()` (Touch ID on macOS, noop
     /// elsewhere); tests inject `InMemoryBiometricStore`. Held as
@@ -145,13 +183,27 @@ pub struct AppState {
 }
 
 /// Bookkeeping value for `AppState::saves_in_flight` — see the field docs.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct QueuedSave {
-    /// A new save was requested while one was already running for this path.
-    requested: bool,
+    /// Session whose immutable payload is currently being written.
+    owner: VaultSessionId,
+    /// Latest session that requested another save for this path while the
+    /// owner was in flight. Usually equal to `owner`, but may differ when the
+    /// same file is closed/reopened before an old callback lands.
+    pending_session: Option<VaultSessionId>,
     /// At least one of the coalesced requests wanted the cloud-sync push
     /// that normally chains off a successful save.
     sync_after: bool,
+}
+
+impl QueuedSave {
+    fn new(owner: VaultSessionId) -> Self {
+        Self {
+            owner,
+            pending_session: None,
+            sync_after: false,
+        }
+    }
 }
 
 /// Bookkeeping value for `AppState::syncs_in_flight` — see the field docs.
@@ -210,6 +262,7 @@ impl Default for AppState {
         // this in `with_resume` via `default_store()`.
         Self {
             vault: VaultStatus::default(),
+            active_vault_session_id: None,
             overlay: Overlay::default(),
             save_status: SaveStatus::default(),
             sync: None,
@@ -224,6 +277,8 @@ impl Default for AppState {
             whats_new_info: None,
             parked: HashMap::new(),
             parked_order: Vec::new(),
+            unpersisted_vault_sessions: HashSet::new(),
+            lock_requested_after_save: false,
             biometric: Arc::new(NoopBiometricStore),
             biometric_registry: BiometricRegistry::new(),
             pending_biometric_enrollment: false,
@@ -236,6 +291,18 @@ impl Default for AppState {
     }
 }
 
+impl Drop for AppState {
+    fn drop(&mut self) {
+        // Unit tests and application teardown can drop an AppState without a
+        // final save callback. Remove only this instance's contribution to the
+        // process-wide lifecycle guard.
+        let remaining = self.unpersisted_vault_sessions.len();
+        if remaining != 0 {
+            UNPERSISTED_VAULT_SESSION_COUNT.fetch_sub(remaining, Ordering::AcqRel);
+        }
+    }
+}
+
 /// A vault that the user has unlocked at some point during this session
 /// but isn't currently looking at. Holds the full decrypted document plus
 /// every piece of per-vault UI state that would otherwise be lost on
@@ -243,6 +310,7 @@ impl Default for AppState {
 /// it's drained into `VaultStatus::Open` byte-for-byte — no second KDF.
 #[derive(Debug)]
 pub struct ParkedSession {
+    session_id: VaultSessionId,
     pub document: Box<VaultDocument>,
     pub selection: LibrarySelection,
     pub selected_entry_id: Option<String>,
@@ -646,15 +714,14 @@ impl AppState {
             .map(|pending| Overlay::WhatsNew { info: pending.info })
             .unwrap_or_default();
 
-        Self {
-            vault: initial_vault,
-            overlay,
-            recents: recents.entries,
-            whats_new_info,
-            biometric: crate::biometric::default_store(),
-            biometric_registry: crate::biometric::registry::load_or_default(),
-            ..Self::default()
-        }
+        let mut state = Self::default();
+        state.vault = initial_vault;
+        state.overlay = overlay;
+        state.recents = recents.entries;
+        state.whats_new_info = whats_new_info;
+        state.biometric = crate::biometric::default_store();
+        state.biometric_registry = crate::biometric::registry::load_or_default();
+        state
     }
 
     /// Test-friendly constructor: same field layout as `with_resume`
@@ -666,11 +733,10 @@ impl AppState {
         biometric: Arc<dyn BiometricStore>,
         biometric_registry: BiometricRegistry,
     ) -> Self {
-        Self {
-            biometric,
-            biometric_registry,
-            ..Self::default()
-        }
+        let mut state = Self::default();
+        state.biometric = biometric;
+        state.biometric_registry = biometric_registry;
+        state
     }
 
     /// Production wiring used by `app::run` after the AppState entity
@@ -863,6 +929,57 @@ impl AppState {
         matches!(self.vault, VaultStatus::Open { .. }) || !self.parked.is_empty()
     }
 
+    /// Resolve a path to the exact unlocked session that currently owns it.
+    /// The active slot wins if the same path also exists in `parked` during a
+    /// close/reopen transition.
+    fn vault_session_id_for(&self, target: &Path) -> Option<VaultSessionId> {
+        if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
+            return self.active_vault_session_id;
+        }
+        self.parked.get(target).map(|session| session.session_id)
+    }
+
+    fn vault_session_is_current(&self, target: &Path, session_id: VaultSessionId) -> bool {
+        self.vault_session_id_for(target) == Some(session_id)
+            || self
+                .parked
+                .get(target)
+                .is_some_and(|session| session.session_id == session_id)
+    }
+
+    fn path_for_vault_session(&self, session_id: VaultSessionId) -> Option<PathBuf> {
+        if self.active_vault_session_id == Some(session_id)
+            && let VaultStatus::Open { path, .. } = &self.vault
+        {
+            return Some(path.clone());
+        }
+        self.parked
+            .iter()
+            .find_map(|(path, session)| (session.session_id == session_id).then(|| path.clone()))
+    }
+
+    fn mark_vault_session_unpersisted(&mut self, session_id: VaultSessionId) {
+        if self.unpersisted_vault_sessions.insert(session_id) {
+            UNPERSISTED_VAULT_SESSION_COUNT.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    fn mark_vault_session_persisted(&mut self, session_id: VaultSessionId) {
+        if self.unpersisted_vault_sessions.remove(&session_id) {
+            UNPERSISTED_VAULT_SESSION_COUNT.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn has_unpersisted_save_work(&self) -> bool {
+        !self.unpersisted_vault_sessions.is_empty() || !self.saves_in_flight.is_empty()
+    }
+
+    fn save_queue_contains_session(&self, session_id: VaultSessionId) -> bool {
+        self.saves_in_flight
+            .values()
+            .any(|queued| queued.owner == session_id || queued.pending_session == Some(session_id))
+    }
+
     /// Move the currently-active `Open` vault into the parked map, taking
     /// its save lifecycle + sync binding with it. No-op on every other
     /// `VaultStatus` (Empty/AwaitingPassword/Opening/Error carry no
@@ -871,6 +988,10 @@ impl AppState {
         if !matches!(self.vault, VaultStatus::Open { .. }) {
             return;
         }
+        let session_id = self
+            .active_vault_session_id
+            .take()
+            .expect("open vault must have a session id");
         let prev = std::mem::take(&mut self.vault);
         let VaultStatus::Open {
             path,
@@ -888,6 +1009,7 @@ impl AppState {
             return;
         };
         let session = ParkedSession {
+            session_id,
             document,
             selection,
             selected_entry_id,
@@ -916,6 +1038,7 @@ impl AppState {
         };
         self.parked_order.retain(|p| p != path);
         let ParkedSession {
+            session_id,
             document,
             selection,
             selected_entry_id,
@@ -938,6 +1061,7 @@ impl AppState {
             selected_strength,
             last_used,
         };
+        self.active_vault_session_id = Some(session_id);
         self.save_status = save_status;
         self.sync = sync;
         self.sync_status = sync_status;
@@ -945,18 +1069,43 @@ impl AppState {
         true
     }
 
-    /// Apply a save result against the vault at `target`, regardless of
-    /// whether it's currently active or has been parked by the user
-    /// switching away mid-save. Notifies only when we touched the active
-    /// vault — parked-vault status changes don't have an on-screen view
-    /// to redraw. Drops the result silently if the vault was locked
-    /// outright while the save was in flight.
-    fn apply_save_status(&mut self, target: &Path, status: SaveStatus, cx: &mut Context<Self>) {
-        if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
+    /// Set save state only on the session that dispatched the async write.
+    /// Returns whether the active slot changed and therefore needs a redraw.
+    fn set_save_status_for_session(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        status: SaveStatus,
+    ) -> bool {
+        if self.active_vault_session_id == Some(session_id)
+            && matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target)
+        {
             self.save_status = status;
-            cx.notify();
-        } else if let Some(parked) = self.parked.get_mut(target) {
+            true
+        } else if let Some(parked) = self
+            .parked
+            .get_mut(target)
+            .filter(|parked| parked.session_id == session_id)
+        {
             parked.save_status = status;
+            false
+        } else {
+            false
+        }
+    }
+
+    /// Apply a save result against the exact vault session that started it.
+    /// Path equality alone is insufficient because a user can reopen the same
+    /// file before a background callback lands.
+    fn apply_save_status_for_session(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        status: SaveStatus,
+        cx: &mut Context<Self>,
+    ) {
+        if self.set_save_status_for_session(target, session_id, status) {
+            cx.notify();
         }
     }
 
@@ -1139,24 +1288,45 @@ impl AppState {
         self.parked.get(target).map(|p| p.document.generation())
     }
 
-    /// Replace the live `Database` for the vault at `target` with the
-    /// freshly merged one. Used by `commit_merged` after a 412 → merge →
-    /// re-save cycle so the in-memory and on-disk views agree, regardless
-    /// of which vault is currently active. Returns `true` when a vault was
-    /// actually updated.
-    fn replace_document_for(
+    fn document_generation_for_session(
+        &self,
+        target: &Path,
+        session_id: VaultSessionId,
+    ) -> Option<u64> {
+        if self.active_vault_session_id == Some(session_id)
+            && let VaultStatus::Open { path, document, .. } = &self.vault
+            && path.as_path() == target
+        {
+            return Some(document.generation());
+        }
+        self.parked
+            .get(target)
+            .filter(|session| session.session_id == session_id)
+            .map(|session| session.document.generation())
+    }
+
+    /// Replace a merged document only in the session that initiated the
+    /// merge-save callback.
+    fn replace_document_for_session(
         &mut self,
         target: &Path,
+        session_id: VaultSessionId,
         replacement: VaultDocument,
         cx: &mut Context<Self>,
     ) -> bool {
-        if matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target) {
+        if self.active_vault_session_id == Some(session_id)
+            && matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target)
+        {
             if let VaultStatus::Open { document, .. } = &mut self.vault {
                 **document = replacement;
                 cx.notify();
                 return true;
             }
-        } else if let Some(parked) = self.parked.get_mut(target) {
+        } else if let Some(parked) = self
+            .parked
+            .get_mut(target)
+            .filter(|parked| parked.session_id == session_id)
+        {
             *parked.document = replacement;
             return true;
         }
@@ -1222,6 +1392,7 @@ impl AppState {
         // side-effects (recents push, sync rebind) below — they need a
         // `&mut self` borrow that conflicts with the match arm.
         let mut opened_path: Option<PathBuf> = None;
+        let mut opened_session_id: Option<VaultSessionId> = None;
         self.vault = match result {
             Ok(document) => {
                 let snapshot = document.snapshot();
@@ -1238,6 +1409,7 @@ impl AppState {
                     .and_then(|id| document.strength_for_entry(id));
 
                 opened_path = Some(path.clone());
+                opened_session_id = Some(VaultSessionId::next());
                 VaultStatus::Open {
                     path,
                     document: Box::new(document),
@@ -1255,6 +1427,7 @@ impl AppState {
                 error: Some(message),
             },
         };
+        self.active_vault_session_id = opened_session_id;
         // Either branch ends the in-flight Touch ID attempt for this
         // path: on success the unlock screen is gone anyway, on
         // failure we replace any stale BiometricAttempt::Error with
@@ -1531,8 +1704,12 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn lock_vault(&mut self, cx: &mut Context<Self>) {
+    /// Remove all decrypted vault state. Callers must first establish that no
+    /// local save work can still be lost.
+    fn lock_vault_now(&mut self) {
+        debug_assert!(!self.has_unpersisted_save_work());
         self.vault = VaultStatus::Empty;
+        self.active_vault_session_id = None;
         self.overlay = Overlay::None;
         self.save_status = SaveStatus::Idle;
         self.sync = None;
@@ -1547,12 +1724,59 @@ impl AppState {
         // a single idle timeout sweeps every decrypted session at once.
         self.parked.clear();
         self.parked_order.clear();
+        self.lock_requested_after_save = false;
         // Touch ID UI bits are session-scoped; drop them so the next
         // unlock screen starts clean rather than re-showing a stale
         // "Touch ID cancelled" toast from minutes ago.
         self.clear_biometric_attempt();
         self.pending_biometric_enrollment = false;
+    }
+
+    fn finish_deferred_lock_if_ready(&mut self) -> bool {
+        if !self.lock_requested_after_save || self.has_unpersisted_save_work() {
+            return false;
+        }
+        self.lock_vault_now();
+        true
+    }
+
+    /// Retry sessions left dirty by a previous failed write. In-flight and
+    /// already-queued sessions need no extra request: their normal completion
+    /// path will finish the deferred lock.
+    fn retry_unpersisted_vault_saves(&mut self, cx: &mut Context<Self>) {
+        let retries: Vec<(PathBuf, VaultSessionId)> = self
+            .unpersisted_vault_sessions
+            .iter()
+            .copied()
+            .filter(|session_id| !self.save_queue_contains_session(*session_id))
+            .filter_map(|session_id| {
+                self.path_for_vault_session(session_id)
+                    .map(|path| (path, session_id))
+            })
+            .collect();
+
+        for (path, session_id) in retries {
+            // Lock only promises durable local bytes. A cloud push can resume
+            // after the next unlock and must not delay clearing secrets.
+            self.request_save_for_session(path, session_id, false, cx);
+        }
+    }
+
+    /// Lock immediately when disk is current, otherwise retry failures and
+    /// defer wiping the decrypted sessions until the final save succeeds.
+    /// Returns `true` only when the lock completed synchronously.
+    #[must_use]
+    pub fn lock_vault(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.has_unpersisted_save_work() {
+            self.lock_requested_after_save = true;
+            self.retry_unpersisted_vault_saves(cx);
+            cx.notify();
+            return false;
+        }
+
+        self.lock_vault_now();
         cx.notify();
+        true
     }
 
     pub fn sync_history(&self) -> &[SyncHistoryEntry] {
@@ -1786,42 +2010,58 @@ impl AppState {
             return;
         };
         let target = path.clone();
-        self.request_save(target, sync_after, cx);
+        let Some(session_id) = self.active_vault_session_id else {
+            return;
+        };
+        self.request_save_for_session(target, session_id, sync_after, cx);
     }
 
-    /// Snapshot a `SavePayload` for `target`, whether the vault is active or
-    /// parked. `None` when no open session owns the path (it was locked
-    /// while a previous save ran) — the caller drops the save in that case.
-    fn save_payload_for(&self, target: &Path) -> Option<SavePayload> {
+    /// Snapshot a `SavePayload` only from the session that issued the request.
+    /// Matching only by path would let a reopened copy of the same file donate
+    /// its payload to an old session's trailing save.
+    fn save_payload_for_session(
+        &self,
+        target: &Path,
+        session_id: VaultSessionId,
+    ) -> Option<SavePayload> {
         if let VaultStatus::Open { document, path, .. } = &self.vault
             && path == target
+            && self.active_vault_session_id == Some(session_id)
         {
             return Some(document.save_payload());
         }
         self.parked
             .get(target)
+            .filter(|session| session.session_id == session_id)
             .map(|session| session.document.save_payload())
     }
 
-    /// Run — or queue — a save for `target`. Only one background `save_to`
-    /// may run per path (see `saves_in_flight`); requests that arrive while
-    /// one is in flight are coalesced into a single trailing save that
-    /// snapshots the latest document state when the running one completes.
-    fn request_save(&mut self, target: PathBuf, sync_after: bool, cx: &mut Context<Self>) {
+    /// Run or queue a save for an exact vault session. The per-path slot still
+    /// serializes writers, while `session_id` prevents cross-session results.
+    fn request_save_for_session(
+        &mut self,
+        target: PathBuf,
+        session_id: VaultSessionId,
+        sync_after: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.vault_session_is_current(&target, session_id) {
+            return;
+        }
+
+        self.mark_vault_session_unpersisted(session_id);
+        self.apply_save_status_for_session(&target, session_id, SaveStatus::Saving, cx);
+
         if let Some(queued) = self.saves_in_flight.get_mut(&target) {
-            queued.requested = true;
+            queued.pending_session = Some(session_id);
             queued.sync_after |= sync_after;
             return;
         }
-        let Some(payload) = self.save_payload_for(&target) else {
+        let Some(payload) = self.save_payload_for_session(&target, session_id) else {
             return;
         };
         self.saves_in_flight
-            .insert(target.clone(), QueuedSave::default());
-
-        // Route the status by path so a trailing save kicked off after the
-        // user switched vaults marks the parked session, not the active one.
-        self.apply_save_status(&target, SaveStatus::Saving, cx);
+            .insert(target.clone(), QueuedSave::new(session_id));
 
         let save_target = target.clone();
         let task = cx.background_spawn(async move { payload.save_to(&save_target) });
@@ -1829,25 +2069,49 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
-                let queued = state.saves_in_flight.remove(&target).unwrap_or_default();
+                let Some(queued) = state.saves_in_flight.remove(&target) else {
+                    return;
+                };
+                if queued.owner != session_id {
+                    // A different writer owns the slot. This should be
+                    // unreachable, but never let an unexpected callback
+                    // consume or update another session's bookkeeping.
+                    state.saves_in_flight.insert(target, queued);
+                    return;
+                }
                 let succeeded = result.is_ok();
                 let new_status = match result {
                     Ok(()) => SaveStatus::Saved,
                     Err(error) => SaveStatus::Failed(error.to_string()),
                 };
-                // Route the result by path: if the user switched away
-                // from the saving vault while the disk write was in
-                // flight, mark the parked session, not whoever is now
-                // active.
-                state.apply_save_status(&target, new_status, cx);
-                if queued.requested {
+                state.apply_save_status_for_session(&target, session_id, new_status, cx);
+
+                // A successful payload makes its owner durable unless that
+                // same session requested a newer trailing snapshot.
+                if succeeded && queued.pending_session != Some(session_id) {
+                    state.mark_vault_session_persisted(session_id);
+                }
+
+                if let Some(pending_session) = queued.pending_session {
                     // More mutations landed while this save ran. Run one
                     // trailing save of the *latest* document state; any
                     // cloud push (ours or the queued requests') rides on
                     // that save instead, so the newest bytes are what
                     // reach the server — pushing now would upload state
                     // the trailing save is about to supersede.
-                    state.request_save(target, queued.sync_after || sync_after, cx);
+                    state.request_save_for_session(
+                        target,
+                        pending_session,
+                        queued.sync_after || sync_after,
+                        cx,
+                    );
+                    return;
+                }
+
+                // Lock requests wait for local durability, not cloud sync.
+                // Once the final writer succeeds, clear secrets immediately.
+                if succeeded && state.finish_deferred_lock_if_ready() {
+                    cx.notify();
                     return;
                 }
                 // Chain into sync against the same vault that just saved
@@ -1855,7 +2119,11 @@ impl AppState {
                 // routes its results back to whichever slot still owns
                 // `target`, so a parked vault's edit still makes it to
                 // SharePoint.
-                if succeeded && sync_after && state.snapshot_sync_inputs(&target).is_some() {
+                if succeeded
+                    && sync_after
+                    && state.vault_session_is_current(&target, session_id)
+                    && state.snapshot_sync_inputs(&target).is_some()
+                {
                     state.sync_now_for_path(&target, cx);
                 }
             });
@@ -3752,16 +4020,20 @@ impl AppState {
         base_generation: u64,
         cx: &mut Context<Self>,
     ) {
+        let Some(session_id) = self.vault_session_id_for(target) else {
+            return;
+        };
         // Pull config + token + keyfile path from whichever slot owns
         // `target` right now. Works for both active and parked vaults
         // — silent auto-merge from a parked sync still writes through
         // to disk + uploads cleanly.
         let (document_password, keyfile_path, config, token) = {
             let inputs = self.snapshot_sync_inputs(target);
-            let keyfile_path = if matches!(
-                &self.vault,
-                VaultStatus::Open { path, .. } if path.as_path() == target
-            ) {
+            let keyfile_path = if self.active_vault_session_id == Some(session_id)
+                && matches!(
+                    &self.vault,
+                    VaultStatus::Open { path, .. } if path.as_path() == target
+                ) {
                 match &self.vault {
                     VaultStatus::Open { document, .. } => {
                         document.keyfile_path().map(std::path::Path::to_path_buf)
@@ -3771,6 +4043,7 @@ impl AppState {
             } else {
                 self.parked
                     .get(target)
+                    .filter(|session| session.session_id == session_id)
                     .and_then(|p| p.document.keyfile_path().map(std::path::Path::to_path_buf))
             };
             match inputs {
@@ -3787,17 +4060,19 @@ impl AppState {
         // land on disk at an arbitrary point relative to ours). Either
         // way: write + push the latest state instead and let the 412
         // cycle recompute the merge against it.
-        if self.document_generation_for(target) != Some(base_generation)
+        if self.document_generation_for_session(target, session_id) != Some(base_generation)
             || self.saves_in_flight.contains_key(&local_path)
         {
             self.apply_sync_status(target, SyncStatus::Syncing, cx);
-            self.request_save(local_path, true, cx);
+            self.request_save_for_session(local_path, session_id, true, cx);
             return;
         }
         // Hold the per-path save slot for the whole of phase 1 so ordinary
         // saves queue behind the merge write instead of racing it on disk.
+        self.mark_vault_session_unpersisted(session_id);
+        self.apply_save_status_for_session(target, session_id, SaveStatus::Saving, cx);
         self.saves_in_flight
-            .insert(local_path.clone(), QueuedSave::default());
+            .insert(local_path.clone(), QueuedSave::new(session_id));
 
         let payload =
             crate::keepass::SavePayload::for_merged(merged, document_password, keyfile_path);
@@ -3832,21 +4107,41 @@ impl AppState {
                     // Release the per-path save slot taken above; pick up
                     // any ordinary-save request that queued behind the
                     // merge write meanwhile.
-                    let queued = state
-                        .saves_in_flight
-                        .remove(&callback_path)
-                        .unwrap_or_default();
+                    let Some(queued) = state.saves_in_flight.remove(&callback_path) else {
+                        return false;
+                    };
+                    if queued.owner != session_id {
+                        state.saves_in_flight.insert(callback_path.clone(), queued);
+                        return false;
+                    }
                     if let Err(error) = &local_save_result {
+                        state.apply_save_status_for_session(
+                            &callback_path,
+                            session_id,
+                            SaveStatus::Failed(error.to_string()),
+                            cx,
+                        );
                         state.apply_sync_status(
                             &callback_path,
                             SyncStatus::Failed(error.to_string()),
                             cx,
                         );
-                        if queued.requested {
-                            state.request_save(callback_path.clone(), queued.sync_after, cx);
+                        if let Some(pending_session) = queued.pending_session {
+                            state.request_save_for_session(
+                                callback_path.clone(),
+                                pending_session,
+                                true,
+                                cx,
+                            );
                         }
                         return false;
                     }
+                    state.apply_save_status_for_session(
+                        &callback_path,
+                        session_id,
+                        SaveStatus::Saved,
+                        cx,
+                    );
                     // The user edited this vault while the merged bytes
                     // were being encrypted + written (the UI stays
                     // interactive during the ~500 ms background save), or
@@ -3857,8 +4152,20 @@ impl AppState {
                     // state back over the merged file on disk, and its
                     // chained sync re-runs the 412 → diff → merge cycle
                     // against that state, so neither side loses changes.
-                    if state.document_generation_for(&callback_path) != Some(base_generation) {
-                        state.request_save(callback_path.clone(), true, cx);
+                    if state.document_generation_for_session(&callback_path, session_id)
+                        != Some(base_generation)
+                    {
+                        state.request_save_for_session(callback_path.clone(), session_id, true, cx);
+                        if let Some(pending_session) = queued.pending_session
+                            && pending_session != session_id
+                        {
+                            state.request_save_for_session(
+                                callback_path.clone(),
+                                pending_session,
+                                true,
+                                cx,
+                            );
+                        }
                         return false;
                     }
                     // Reload the in-memory document from the freshly merged
@@ -3866,7 +4173,7 @@ impl AppState {
                     // on-disk file agree, so a subsequent network failure
                     // can't strand the merge on disk.
                     let bytes = std::fs::read(&reload_path).unwrap_or_default();
-                    match crate::keepass::KeePassRepository::open_bytes(
+                    let reloaded = match crate::keepass::KeePassRepository::open_bytes(
                         &bytes,
                         &reload_password,
                         None,
@@ -3876,16 +4183,21 @@ impl AppState {
                             // — active or parked. If the user locked the
                             // vault between the merge and the reload, we
                             // simply drop and let the next open re-read.
-                            state.replace_document_for(&callback_path, reloaded, cx);
+                            let replaced = state.replace_document_for_session(
+                                &callback_path,
+                                session_id,
+                                reloaded,
+                                cx,
+                            );
                             // History is appended *here*, after the local
                             // DB genuinely reflects the merge. Earlier
                             // (pre-save) would risk phantom rows; later
                             // (post-upload) would lose them on network
                             // failure even though the local change stuck.
-                            if let Some(entries) = history_slot.take() {
+                            if replaced && let Some(entries) = history_slot.take() {
                                 state.append_sync_history_for(&callback_path, entries);
                             }
-                            true
+                            replaced
                         }
                         Err(_) => {
                             state.apply_sync_status(
@@ -3899,7 +4211,27 @@ impl AppState {
                             );
                             false
                         }
+                    };
+
+                    if queued.pending_session != Some(session_id) {
+                        state.mark_vault_session_persisted(session_id);
                     }
+                    if let Some(pending_session) = queued.pending_session {
+                        state.request_save_for_session(
+                            callback_path.clone(),
+                            pending_session,
+                            true,
+                            cx,
+                        );
+                        return false;
+                    }
+
+                    if state.finish_deferred_lock_if_ready() {
+                        cx.notify();
+                        return false;
+                    }
+
+                    reloaded
                 })
                 .unwrap_or(false);
 
@@ -4143,9 +4475,8 @@ mod park_tests {
     //! and the lock-clears-all-parked semantics. The cx-bearing public
     //! methods (`switch_to_unlocked`, `lock_vault`, …) can't be hit
     //! without a gpui test harness, so we drill straight into the
-    //! private park/unpark helpers and the `parked` map. Routing of
-    //! save-status by path is exercised via `apply_save_status` which
-    //! also avoids `cx.notify` for the parked branch.
+    //! private park/unpark helpers and the `parked` map. Save completion
+    //! routing is exercised through the pure session-aware status helper.
     use super::*;
     use crate::domain::VaultGroup;
     use keepass::Database;
@@ -4169,6 +4500,7 @@ mod park_tests {
             selected_strength: None,
             last_used: HashMap::new(),
         };
+        state.active_vault_session_id = Some(VaultSessionId::next());
     }
 
     #[test]
@@ -4396,22 +4728,19 @@ mod park_tests {
         let active_path = PathBuf::from("/tmp/active.kdbx");
 
         fresh_open(&mut state, saved_path.clone(), "pw");
+        let saved_session_id = state.active_vault_session_id.expect("session id");
         state.park_active();
         fresh_open(&mut state, active_path.clone(), "pw");
         // Active vault starts Idle; parked vault starts Idle too.
         assert_eq!(state.save_status, SaveStatus::Idle);
 
-        // Background save for the parked path finished after the switch.
-        // Without cx-routing this would have stomped on the active
-        // vault's save indicator.
-        let cx = &mut DummyCx;
-        // Direct call avoids the cx.notify wiring (we don't have a
-        // gpui Context in this test harness). The parked branch never
-        // calls notify, so this exercises the production code path.
-        let _ = cx;
-        if let Some(parked) = state.parked.get_mut(&saved_path) {
-            parked.save_status = SaveStatus::Saved;
-        }
+        // Background save for the parked session finished after the switch.
+        // The pure setter returns false because no active redraw is needed.
+        assert!(!state.set_save_status_for_session(
+            &saved_path,
+            saved_session_id,
+            SaveStatus::Saved,
+        ));
         // Active stays Idle:
         assert_eq!(state.save_status, SaveStatus::Idle);
         // Parked vault recorded Saved:
@@ -4419,6 +4748,88 @@ mod park_tests {
             state.parked.get(&saved_path).unwrap().save_status,
             SaveStatus::Saved,
         );
+    }
+
+    #[test]
+    fn vault_session_ids_are_monotonic_across_reopens() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/reopen.kdbx");
+
+        fresh_open(&mut state, path.clone(), "pw-old");
+        let old = state.active_vault_session_id.expect("old session");
+        fresh_open(&mut state, path, "pw-new");
+        let new = state.active_vault_session_id.expect("new session");
+
+        assert!(new.0 > old.0);
+    }
+
+    #[test]
+    fn stale_save_result_cannot_mark_reopened_same_path_as_saved() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/same-path.kdbx");
+
+        fresh_open(&mut state, path.clone(), "pw-old");
+        let stale_session = state.active_vault_session_id.expect("old session");
+
+        // Simulate closing and reopening the same file before the old
+        // background callback resolves.
+        fresh_open(&mut state, path.clone(), "pw-new");
+        let current_session = state.active_vault_session_id.expect("new session");
+        state.save_status = SaveStatus::Idle;
+
+        assert!(!state.set_save_status_for_session(&path, stale_session, SaveStatus::Saved,));
+        assert_eq!(state.save_status, SaveStatus::Idle);
+
+        assert!(state.set_save_status_for_session(&path, current_session, SaveStatus::Saved,));
+        assert_eq!(state.save_status, SaveStatus::Saved);
+    }
+
+    #[test]
+    fn deferred_lock_waits_for_dirty_session_and_writer_slot() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/queued-save.kdbx");
+        fresh_open(&mut state, path.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session id");
+
+        state.mark_vault_session_unpersisted(session_id);
+        state
+            .saves_in_flight
+            .insert(path.clone(), QueuedSave::new(session_id));
+        state.lock_requested_after_save = true;
+
+        assert!(!state.finish_deferred_lock_if_ready());
+        assert!(state.has_any_unlocked());
+
+        // Even after the payload is known durable, the writer slot itself
+        // must be released before decrypted state can be discarded.
+        state.mark_vault_session_persisted(session_id);
+        assert!(!state.finish_deferred_lock_if_ready());
+        state.saves_in_flight.remove(&path);
+
+        assert!(state.finish_deferred_lock_if_ready());
+        assert!(!state.has_any_unlocked());
+        assert!(state.active_vault_session_id.is_none());
+    }
+
+    #[test]
+    fn failed_save_keeps_deferred_lock_armed_and_vault_open() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/failed-save.kdbx");
+        fresh_open(&mut state, path.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session id");
+
+        state.mark_vault_session_unpersisted(session_id);
+        state.set_save_status_for_session(
+            &path,
+            session_id,
+            SaveStatus::Failed("disk full".into()),
+        );
+        state.lock_requested_after_save = true;
+
+        assert!(!state.finish_deferred_lock_if_ready());
+        assert!(state.has_any_unlocked());
+        assert!(state.lock_requested_after_save);
+        assert!(state.unpersisted_vault_sessions.contains(&session_id));
     }
 
     #[test]
@@ -4496,9 +4907,6 @@ mod park_tests {
 
     #[test]
     fn lock_vault_clears_parked_and_resets_sync_fields() {
-        // Direct construction so we don't need a gpui Context. lock_vault
-        // does call cx.notify under the hood, but the field mutations
-        // we care about (parked map, sync fields) happen unconditionally.
         let mut state = AppState::default();
         let parked_path = PathBuf::from("/tmp/parked.kdbx");
 
@@ -4512,28 +4920,14 @@ mod park_tests {
         state.sync = Some(fake_binding("user2@example.invalid"));
         state.sync_status = SyncStatus::Idle;
 
-        // Mirror the body of `lock_vault` minus `cx.notify`. (The full
-        // method needs a gpui Context which we can't construct here.)
-        state.vault = VaultStatus::Empty;
-        state.overlay = Overlay::None;
-        state.save_status = SaveStatus::Idle;
-        state.sync = None;
-        state.sync_status = SyncStatus::Disconnected;
-        state.parked.clear();
-        state.parked_order.clear();
+        state.lock_vault_now();
 
         assert!(state.parked.is_empty());
         assert!(state.parked_order.is_empty());
         assert!(state.sync.is_none());
         assert!(!state.has_any_unlocked());
+        assert!(state.active_vault_session_id.is_none());
     }
-
-    // Stand-in for `&mut Context<AppState>` so tests can call helpers
-    // that don't actually touch the context. The few helpers we exercise
-    // (apply_save_status's parked branch, snapshot_sync_inputs,
-    // with_sync_binding_mut_for) never reach `cx.notify` when the target
-    // is parked, so this never has a method called on it.
-    struct DummyCx;
 }
 
 #[cfg(test)]
