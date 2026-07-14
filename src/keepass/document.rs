@@ -774,9 +774,52 @@ impl VaultDocument {
     }
 
     fn refresh_snapshot(&mut self) {
+        enforce_history_limits(&mut self.database);
         self.generation = self.generation.wrapping_add(1);
         self.snapshot = Arc::new(snapshot_from_database(&self.database));
     }
+}
+
+/// KeePass's `Meta/HistoryMaxItems` default (KeePass 2.x and KeePassXC).
+const HISTORY_MAX_ITEMS_DEFAULT: usize = 10;
+
+/// The per-entry history cap the vault asks for: absent → KeePass default,
+/// negative → unlimited (KeePass's -1 convention).
+fn history_cap(db: &Database) -> Option<usize> {
+    match db.meta.history_max_items {
+        None => Some(HISTORY_MAX_ITEMS_DEFAULT),
+        Some(n) if n < 0 => None,
+        Some(n) => Some(n as usize),
+    }
+}
+
+/// Trim every entry's history to the vault's `HistoryMaxItems`. The pinned
+/// fork appends a full pre-mutation snapshot per tracked change (even a
+/// favorite-star toggle) but never trims, so a frequently-edited entry would
+/// grow the vault without bound — until the 250 MB save limit refuses to
+/// write it at all. Runs after every mutation (cheap length check per entry)
+/// and after merges.
+// ponytail: HistoryMaxSize (byte cap) is not enforced, only the item count;
+// add it if vaults with huge notes/attachment history show up in practice.
+pub(crate) fn enforce_history_limits(db: &mut Database) {
+    let Some(cap) = history_cap(db) else {
+        return;
+    };
+    db.foreach_entry_mut(|mut entry| {
+        let Some(history) = entry.history.as_ref() else {
+            return;
+        };
+        if history.get_entries().len() <= cap {
+            return;
+        }
+        // Rebuild through the public API: `add_entry` prepends, so feeding
+        // the surviving newest `cap` snapshots oldest-first preserves order.
+        let mut trimmed = keepass::db::History::default();
+        for version in history.get_entries()[..cap].iter().rev() {
+            trimmed.add_entry(version.clone());
+        }
+        entry.history = Some(trimmed);
+    });
 }
 
 /// Field bundle for `create_entry` / `update_entry`. Empty fields are skipped
@@ -1556,6 +1599,60 @@ mod tests {
     use crate::domain::VaultGroup;
     use keepass::{Database, db::fields};
     use tempfile::TempDir;
+
+    #[test]
+    fn history_is_trimmed_to_keepass_default_on_repeated_edits() {
+        let mut db = Database::new();
+        let mut root = db.root_mut();
+        let mut entry = root.add_entry();
+        entry.set_unprotected(fields::TITLE, "Hot entry");
+        entry.set_protected(fields::PASSWORD, "pw-0");
+        let entry_id = entry.id().to_string();
+        drop(entry);
+        drop(root);
+
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "vault-pw".to_string(), None);
+
+        // Every toggle appends one full pre-mutation snapshot via EntryTrack.
+        for _ in 0..30 {
+            doc.toggle_starred(&entry_id).expect("toggle");
+        }
+
+        let id = find_entry_id(&doc.database, &entry_id).expect("entry id");
+        let history_len = doc
+            .database
+            .entry(id)
+            .unwrap()
+            .history
+            .as_ref()
+            .map_or(0, |history| history.get_entries().len());
+        assert_eq!(history_len, HISTORY_MAX_ITEMS_DEFAULT);
+
+        // A vault-configured cap wins over the default…
+        doc.database.meta.history_max_items = Some(3);
+        doc.toggle_starred(&entry_id).expect("toggle");
+        let history_len = doc
+            .database
+            .entry(id)
+            .unwrap()
+            .history
+            .as_ref()
+            .map_or(0, |history| history.get_entries().len());
+        assert_eq!(history_len, 3);
+
+        // …and KeePass's -1 convention disables trimming.
+        doc.database.meta.history_max_items = Some(-1);
+        doc.toggle_starred(&entry_id).expect("toggle");
+        let history_len = doc
+            .database
+            .entry(id)
+            .unwrap()
+            .history
+            .as_ref()
+            .map_or(0, |history| history.get_entries().len());
+        assert_eq!(history_len, 4);
+    }
 
     #[test]
     fn lock_bounded_times_out_instead_of_blocking() {

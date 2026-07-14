@@ -407,6 +407,11 @@ pub fn apply_picks(
         return Err(ApplyError::DatabaseMergeWarnings(lossy.join("; ")));
     }
 
+    // The merged database is saved directly (no document mutation runs in
+    // between), and `merge_history` unions both sides' histories — trim here
+    // or repeated conflicts grow entries past the vault's HistoryMaxItems.
+    crate::keepass::document::enforce_history_limits(&mut merged);
+
     Ok(merged)
 }
 
