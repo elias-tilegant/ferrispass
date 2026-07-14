@@ -1,5 +1,6 @@
 use crate::app::recents::{self, RecentEntry};
 use crate::app::sync_history::{self, SyncHistoryEntry};
+use crate::autotype::CancellationToken;
 use crate::biometric::{
     BiometricEnrollment, BiometricError, BiometricRegistry, BiometricStore, EnrollmentId,
     NoopBiometricStore,
@@ -122,6 +123,11 @@ pub struct AppState {
     /// Identity of the currently-active `VaultStatus::Open`. Kept outside the
     /// public enum so this internal race guard does not widen its public API.
     active_vault_session_id: Option<VaultSessionId>,
+    /// Authorization shared by Auto-Type plans for the current active vault
+    /// context. State transitions rotate it synchronously, before decrypted
+    /// ownership changes, so GPUI's deferred observers are not a security
+    /// boundary.
+    auto_type_cancellation: CancellationToken,
     overlay: Overlay,
     /// Last file-picker validation error. Kept separate from `VaultStatus` so
     /// a bad selection can never replace an unlocked document and discard its
@@ -370,6 +376,7 @@ impl Default for AppState {
         Self {
             vault: VaultStatus::default(),
             active_vault_session_id: None,
+            auto_type_cancellation: CancellationToken::new(),
             overlay: Overlay::default(),
             vault_selection_error: None,
             save_status: SaveStatus::default(),
@@ -811,6 +818,15 @@ pub enum CopyValueKind {
 }
 
 impl AppState {
+    pub(crate) fn auto_type_cancellation(&self) -> CancellationToken {
+        self.auto_type_cancellation.clone()
+    }
+
+    fn rotate_auto_type_context(&mut self) {
+        self.auto_type_cancellation.cancel();
+        self.auto_type_cancellation = CancellationToken::new();
+    }
+
     /// Construct an AppState that auto-resumes the most recently opened
     /// vault. Reads the recents file synchronously (a few hundred bytes
     /// of JSON — cheap), prunes entries whose file no longer exists, and
@@ -979,6 +995,7 @@ impl AppState {
         if self.switch_to_unlocked(&path, cx) {
             return;
         }
+        self.rotate_auto_type_context();
         self.vault_selection_error = None;
         self.clear_pending_sync_unless(&path);
         // Already looking at an unlocked vault? Park it so the user can
@@ -1021,6 +1038,7 @@ impl AppState {
         if !self.parked.contains_key(path) {
             return false;
         }
+        self.rotate_auto_type_context();
         // Park whatever's currently active (Open or AwaitingPassword) so
         // it survives the switch.
         self.park_active();
@@ -1043,6 +1061,7 @@ impl AppState {
         let Some(path) = self.parked_order.last().cloned() else {
             return false;
         };
+        self.rotate_auto_type_context();
         // We're abandoning the AwaitingPassword screen — drop it without
         // parking (no decrypted state to preserve).
         self.vault = VaultStatus::Empty;
@@ -1699,6 +1718,7 @@ impl AppState {
         if self.switch_to_unlocked(&path, cx) {
             return;
         }
+        self.rotate_auto_type_context();
         // If we're transitioning from a currently-open vault directly into
         // unlocking another one (Welcome-recent → submit_password while a
         // different vault is already Open), park the active one first so it
@@ -1725,6 +1745,7 @@ impl AppState {
         if !matches!(&self.vault, VaultStatus::Opening { path: active } if active == &path) {
             return false;
         }
+        self.rotate_auto_type_context();
 
         // Track whether the unlock succeeded so we can fire post-open
         // side-effects (recents push, sync rebind) below — they need a
@@ -2065,6 +2086,7 @@ impl AppState {
 
         self.active_vault_session_id = None;
         self.vault_selection_error = None;
+        self.rotate_auto_type_context();
         self.vault = VaultStatus::Error { message, path };
     }
 
@@ -2090,6 +2112,7 @@ impl AppState {
             return;
         }
 
+        self.rotate_auto_type_context();
         let previous_vault = std::mem::replace(&mut self.vault, VaultStatus::LockedPendingSave);
         let mut candidates = Vec::with_capacity(self.parked.len() + 1);
         if let VaultStatus::Open { path, document, .. } = previous_vault {
@@ -2156,6 +2179,7 @@ impl AppState {
     /// local save work can still be lost.
     fn lock_vault_now(&mut self) {
         debug_assert!(!self.has_unpersisted_save_work());
+        self.rotate_auto_type_context();
         self.vault = VaultStatus::Empty;
         self.active_vault_session_id = None;
         self.overlay = Overlay::None;
@@ -5326,6 +5350,32 @@ mod park_tests {
         assert!(state.parked.is_empty());
         assert!(state.parked_order.is_empty());
         assert_eq!(state.save_status, SaveStatus::Saved);
+    }
+
+    #[test]
+    fn rotating_auto_type_context_revokes_only_the_previous_generation() {
+        let mut state = AppState::default();
+        let previous = state.auto_type_cancellation();
+
+        state.rotate_auto_type_context();
+
+        assert!(previous.is_cancelled());
+        assert!(!state.auto_type_cancellation().is_cancelled());
+    }
+
+    #[test]
+    fn deferred_lock_revokes_the_open_auto_type_context() {
+        let mut state = AppState::default();
+        fresh_open(&mut state, PathBuf::from("/tmp/auto-type-dirty.kdbx"), "pw");
+        let session_id = state.active_vault_session_id.expect("session id");
+        state.mark_vault_session_unpersisted(session_id);
+        let previous = state.auto_type_cancellation();
+
+        state.quarantine_sessions_for_deferred_lock();
+
+        assert!(previous.is_cancelled());
+        assert!(matches!(state.vault, VaultStatus::LockedPendingSave));
+        assert!(!state.auto_type_cancellation().is_cancelled());
     }
 
     #[test]

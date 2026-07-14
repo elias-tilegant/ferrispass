@@ -28,7 +28,14 @@ pub mod sequence;
 pub mod typer;
 pub mod window;
 
-use std::time::Duration;
+use std::{
+    fmt,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use crate::domain::VaultSnapshot;
 
@@ -37,12 +44,71 @@ pub use matcher::MatchedEntry;
 pub use sequence::{DEFAULT_SEQUENCE, ParseError, RenderContext, TypeOp};
 pub use window::ForegroundInfo;
 
+/// Shared cancellation state for every auto-type attempt started from one
+/// unlocked vault context. Locking the vault cancels all clones immediately;
+/// reopening creates a new token, so stale countdowns and typing tasks cannot
+/// resume against the new session.
+#[derive(Default)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    dispatch_gate: Mutex<()>,
+}
+
+#[derive(Clone, Default)]
+pub struct CancellationToken {
+    state: Arc<CancellationState>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        // Publish cancellation first so delays and in-flight text dispatches
+        // stop cooperatively. Taking the gate afterwards makes `cancel()` a
+        // barrier: when it returns, no OS input call authorized by this token
+        // can still be running or start later.
+        self.state.cancelled.store(true, Ordering::Release);
+        drop(
+            self.state
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn dispatch_if_active<T>(&self, dispatch: impl FnOnce() -> T) -> Option<T> {
+        let _gate = self
+            .state
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (!self.is_cancelled()).then(dispatch)
+    }
+}
+
+impl fmt::Debug for CancellationToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
 /// What happened on an auto-type attempt. Each variant maps to one
 /// user-visible outcome (toast, notification, or silent action). The
 /// caller (AppShell) picks the wording — we keep this enum free of
 /// UI strings so it's easy to translate or restyle later.
 #[derive(Debug)]
 pub enum Outcome {
+    /// The vault context that authorized this attempt was locked or replaced.
+    /// This is intentionally silent in the UI.
+    Cancelled,
     /// Successfully typed credentials for `entry_title`. The caller
     /// may want to surface a toast confirming the action so the user
     /// has feedback even when the typing happened into a backgrounded
@@ -87,6 +153,7 @@ pub enum Outcome {
 /// GPUI entity locks that we can't hold across the (potentially
 /// blocking) typer call.
 pub struct PerformInput<'a> {
+    pub cancellation: CancellationToken,
     pub foreground: ForegroundInfo,
     pub snapshot: &'a VaultSnapshot,
     /// Closure rather than a direct ref so the caller can resolve
@@ -114,6 +181,7 @@ pub const DEFAULT_INTER_OP: Duration = Duration::from_millis(typer::DEFAULT_INTE
 /// `Plan` as soon as `execute` returns.
 #[derive(Debug)]
 pub struct TypePlan {
+    pub cancellation: CancellationToken,
     pub entry_title: String,
     pub entry_id: String,
     pub ops: Vec<sequence::TypeOp>,
@@ -132,6 +200,9 @@ pub struct TypePlan {
 /// — including `TypingFailed` — instead of fire-and-forget the typer
 /// and unconditionally claim success.
 pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
+    if input.cancellation.is_cancelled() {
+        return Err(Outcome::Cancelled);
+    }
     if !permissions::is_trusted() {
         return Err(Outcome::NotTrusted);
     }
@@ -176,7 +247,12 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
     let tokens = sequence::parse(input.sequence_template).map_err(Outcome::BadSequence)?;
     let ops = sequence::render(&tokens, &RenderContext { username, password });
 
+    if input.cancellation.is_cancelled() {
+        return Err(Outcome::Cancelled);
+    }
+
     Ok(TypePlan {
+        cancellation: input.cancellation,
         entry_title,
         entry_id,
         ops,
@@ -201,6 +277,13 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
 /// Drop the `Plan` (or let it go out of scope) immediately after this
 /// returns.
 pub fn execute(plan: TypePlan) -> Outcome {
+    // Check before querying the foreground or initializing the input backend.
+    // A plan cancelled while queued on the background executor must make no OS
+    // calls and must never dispatch its retained cleartext operations.
+    if plan.cancellation.is_cancelled() {
+        return Outcome::Cancelled;
+    }
+
     let expected = plan.expected_foreground.clone();
     let guard = move || match window::foreground() {
         Some(now) if now.same_app(&expected) => Ok(()),
@@ -209,10 +292,15 @@ pub fn execute(plan: TypePlan) -> Outcome {
         // the target is still focused, so abort rather than type blind.
         None => Err(String::new()),
     };
-    match typer::perform(&plan.ops, DEFAULT_INTER_OP, &guard) {
+    let result = typer::perform(&plan.ops, DEFAULT_INTER_OP, &guard, &plan.cancellation);
+    if plan.cancellation.is_cancelled() {
+        return Outcome::Cancelled;
+    }
+    match result {
         Ok(()) => Outcome::Typed {
             entry_title: plan.entry_title,
         },
+        Err(typer::TyperError::Cancelled) => Outcome::Cancelled,
         Err(typer::TyperError::FocusChanged { current_title }) => Outcome::FocusChanged {
             window_title: current_title,
         },
@@ -234,5 +322,41 @@ pub fn perform(input: PerformInput<'_>) -> Outcome {
     match prepare(input) {
         Ok(plan) => execute(plan),
         Err(outcome) => outcome,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn cancellation_is_shared_across_clones() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+
+        assert!(!clone.is_cancelled());
+        token.cancel();
+        assert!(clone.is_cancelled());
+    }
+
+    #[test]
+    fn cancelled_plan_stops_before_foreground_or_input_backend_access() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let plan = TypePlan {
+            cancellation,
+            entry_title: "Account".into(),
+            entry_id: "entry-id".into(),
+            ops: vec![TypeOp::SecretText("must-not-be-typed".into())],
+            expected_foreground: ForegroundInfo {
+                app_name: "Target".into(),
+                window_title: "Login".into(),
+                process_path: PathBuf::from("/Applications/Target.app"),
+            },
+        };
+
+        assert!(matches!(execute(plan), Outcome::Cancelled));
     }
 }

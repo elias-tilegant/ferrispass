@@ -768,7 +768,8 @@ impl AppShell {
                         // real `&mut Window` regardless of focus.
                         let entered = window_handle.update(cx, |_root, window, app| {
                             this.update(app, |shell, cx| {
-                                shell.perform_auto_type(None, window, cx);
+                                let cancellation = shell.state.read(cx).auto_type_cancellation();
+                                shell.perform_auto_type(None, cancellation, window, cx);
                             })
                             .ok();
                         });
@@ -1383,7 +1384,8 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.perform_auto_type(None, window, cx);
+        let cancellation = self.state.read(cx).auto_type_cancellation();
+        self.perform_auto_type(None, cancellation, window, cx);
     }
 
     /// In-app ⌘⇧T route: types the *currently-selected* entry after a
@@ -1425,12 +1427,16 @@ impl AppShell {
             ),
             cx,
         );
+        let cancellation = self.state.read(cx).auto_type_cancellation();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_secs(AUTO_TYPE_COUNTDOWN_SECS))
                 .await;
+            if cancellation.is_cancelled() {
+                return;
+            }
             let _ = this.update_in(cx, |shell, window, cx| {
-                shell.perform_auto_type(Some(entry_id.clone()), window, cx);
+                shell.perform_auto_type(Some(entry_id.clone()), cancellation.clone(), window, cx);
             });
         })
         .detach();
@@ -1452,9 +1458,14 @@ impl AppShell {
     fn perform_auto_type(
         &mut self,
         force_entry_id: Option<String>,
+        cancellation: autotype::CancellationToken,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Stale countdowns and queued hotkey work are deliberately silent.
+        if cancellation.is_cancelled() {
+            return;
+        }
         let Some(foreground) = autotype::window::foreground() else {
             window.push_notification(
                 "Could not read the foreground window. Check Accessibility permission.",
@@ -1474,6 +1485,7 @@ impl AppShell {
                 crate::app::VaultStatus::Open { document, .. } => {
                     let snapshot = document.snapshot_rc();
                     autotype::prepare(autotype::PerformInput {
+                        cancellation,
                         foreground: foreground.clone(),
                         snapshot: &snapshot,
                         resolve_password: &|id: &str| document.password_for_entry(id),
@@ -1503,11 +1515,15 @@ impl AppShell {
         // Spawn the (blocking) typer on a background task. The plan
         // — and the cleartext password it carries inside its TypeOps
         // — is moved into the task and dropped when the task ends.
+        let completion_cancellation = plan.cancellation.clone();
         let task = cx.background_spawn(async move { autotype::execute(plan) });
         let foreground_for_callback = foreground;
         cx.spawn_in(window, async move |this, cx| {
             let outcome = task.await;
             let _ = this.update_in(cx, |shell, window, cx| {
+                if completion_cancellation.is_cancelled() {
+                    return;
+                }
                 shell.notify_auto_type_outcome(outcome, &foreground_for_callback, window, cx);
             });
         })
@@ -1528,6 +1544,7 @@ impl AppShell {
     ) {
         use autotype::Outcome;
         match outcome {
+            Outcome::Cancelled => {}
             Outcome::Typed { entry_title } => {
                 window.push_notification(format!("Auto-typed {entry_title}."), cx);
             }
@@ -2546,6 +2563,12 @@ impl AppShell {
     }
 
     pub fn lock_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // AppState rotates the Auto-Type context before it revokes decrypted
+        // ownership. Do this first so form and clipboard cleanup cannot leave
+        // an old background typer authorized in parallel.
+        self.state.update(cx, |state, cx| {
+            let _ = state.lock_vault(cx);
+        });
         self.clear_unlock_form(window, cx);
         self.clear_entry_form(window, cx);
         self.search_input
@@ -2560,7 +2583,6 @@ impl AppShell {
         // Same secret-wipe as auto-lock: drop reveal, cancel pending
         // clipboard timer, flush clipboard if it still holds our copy.
         self.wipe_session_secrets(cx);
-        self.state.update(cx, |state, cx| state.lock_vault(cx));
     }
 
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
