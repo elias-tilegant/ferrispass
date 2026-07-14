@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use crate::clipboard::{ClipboardChangeCount, clear_if_unchanged, write_secret_text};
 use crate::{
     app::{
         AppSettings, AppState, CopyValueKind, Overlay,
@@ -25,10 +27,12 @@ pub enum SettingsTab {
     Sync,
     AutoType,
 }
+#[cfg(not(target_os = "macos"))]
+use gpui::ClipboardItem;
 use gpui::{
-    AnyWindowHandle, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement as _, ParentElement as _, PathPromptOptions,
-    Render, ScrollStrategy, SharedString, Styled as _, Subscription, Task, Window, div, px,
+    AnyWindowHandle, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement as _, ParentElement as _, PathPromptOptions, Render,
+    ScrollStrategy, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
@@ -64,6 +68,16 @@ pub struct CustomFieldDraftInputs {
     pub key_input: Entity<InputState>,
     pub value_input: Entity<InputState>,
     pub protected: bool,
+}
+
+/// Opaque identity of the clipboard write owned by the current clear timer.
+/// It deliberately contains neither the copied value nor a digest of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingClipboardWrite {
+    #[cfg(target_os = "macos")]
+    Native(ClipboardChangeCount),
+    #[cfg(not(target_os = "macos"))]
+    Portable(u64),
 }
 
 pub struct AppShell {
@@ -137,11 +151,14 @@ pub struct AppShell {
     /// a copy. Holding the `Task` here means a new copy replaces (= cancels)
     /// the previous timer — only the latest copy's clear fires.
     clipboard_clear_task: Option<Task<()>>,
-    /// Last value we wrote to the clipboard. Compared against the live
-    /// clipboard contents before clearing — protects user-pasted content
-    /// (e.g. an unrelated string they copied from another app in the
-    /// meantime) from being clobbered by our timer.
-    last_clipboard_value: Option<String>,
+    /// Opaque identity of our latest clipboard write. On macOS this is the
+    /// NSPasteboard change count, which lets the timer compare-and-clear
+    /// without retaining the copied secret in application state.
+    pending_clipboard_write: Option<PendingClipboardWrite>,
+    /// Monotonic identity for portable clipboard writes. Only compiled on
+    /// platforms where GPUI cannot expose an OS clipboard generation.
+    #[cfg(not(target_os = "macos"))]
+    next_portable_clipboard_write: u64,
     /// Wall-clock deadline at which the pending clipboard-clear fires.
     /// Drives the countdown pill in the bottom-right corner. `None`
     /// when no clear is scheduled (no active copy, or settings have
@@ -417,7 +434,9 @@ impl AppShell {
             pending_perma_delete: None,
             totp_tick: None,
             clipboard_clear_task: None,
-            last_clipboard_value: None,
+            pending_clipboard_write: None,
+            #[cfg(not(target_os = "macos"))]
+            next_portable_clipboard_write: 0,
             clipboard_clear_deadline: None,
             clipboard_pill_tick: None,
             revealed_entry_id: None,
@@ -742,24 +761,11 @@ impl AppShell {
         let _ = autotype::permissions::request_trust();
     }
 
-    /// Drop reveal flag, cancel any pending clipboard-clear timer, and
-    /// flush the OS clipboard *now* if it still holds the value we
-    /// last wrote. Shared between auto-lock and manual lock so
-    /// dropping the timer doesn't leave a copied password sitting on
-    /// the clipboard until the next copy.
+    /// Drop reveal state, cancel timers, and clear the clipboard write owned
+    /// by this shell without retaining or comparing the copied secret.
     fn wipe_session_secrets(&mut self, cx: &mut Context<Self>) {
         self.revealed_entry_id = None;
-        if self.last_clipboard_value.is_some() {
-            let still_ours = cx
-                .read_from_clipboard()
-                .and_then(|item| item.text())
-                .as_deref()
-                == self.last_clipboard_value.as_deref();
-            if still_ours {
-                cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-            }
-        }
-        self.last_clipboard_value = None;
+        self.clear_owned_clipboard(cx);
         self.clipboard_clear_task = None;
         self.clipboard_clear_deadline = None;
         self.clipboard_pill_tick = None;
@@ -771,6 +777,25 @@ impl AppShell {
         self.pending_launches.clear();
         self.launch_cleanup_tasks.clear();
         crate::launch::sweeper::purge_all();
+    }
+
+    fn clear_owned_clipboard(&mut self, _cx: &mut Context<Self>) {
+        let Some(write) = self.pending_clipboard_write.take() else {
+            return;
+        };
+        match write {
+            #[cfg(target_os = "macos")]
+            PendingClipboardWrite::Native(change_count) => {
+                let _ = clear_if_unchanged(change_count);
+            }
+            #[cfg(not(target_os = "macos"))]
+            PendingClipboardWrite::Portable(_) => {
+                // GPUI has no portable clipboard generation. Clearing is
+                // unconditional here, but only while our opaque write token
+                // is still current; no secret is retained for comparison.
+                _cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+            }
+        }
     }
 
     pub fn arm_perma_delete(&mut self, entry_id: String, cx: &mut Context<Self>) {
@@ -2600,22 +2625,43 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+        #[cfg(target_os = "macos")]
+        let write = match write_secret_text(&value) {
+            Ok(change_count) => PendingClipboardWrite::Native(change_count),
+            Err(_) => {
+                // Fail closed: a native write error must never downgrade to a
+                // normal pasteboard item that clipboard history or Universal
+                // Clipboard can retain. Clear any previous write we owned.
+                self.clear_owned_clipboard(cx);
+                self.clipboard_clear_task = None;
+                self.clipboard_clear_deadline = None;
+                self.clipboard_pill_tick = None;
+                window.push_notification(format!("Could not copy {label}."), cx);
+                return;
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let write = {
+            cx.write_to_clipboard(ClipboardItem::new_string(value));
+            self.next_portable_clipboard_write = self.next_portable_clipboard_write.wrapping_add(1);
+            PendingClipboardWrite::Portable(self.next_portable_clipboard_write)
+        };
+
         let toast = match self.settings.clipboard_clear_secs {
             Some(secs) => format!("{label} copied. Clipboard clears in {secs} s."),
             None => format!("{label} copied."),
         };
         window.push_notification(toast, cx);
-        self.schedule_clipboard_clear(value, cx);
+        self.schedule_clipboard_clear(write, cx);
     }
 
-    fn schedule_clipboard_clear(&mut self, value: String, cx: &mut Context<Self>) {
-        self.last_clipboard_value = Some(value);
+    fn schedule_clipboard_clear(&mut self, write: PendingClipboardWrite, cx: &mut Context<Self>) {
+        self.pending_clipboard_write = Some(write);
         // Drop any prior timer by replacing the slot. GPUI tasks cancel
         // on drop (same pattern as `totp_tick`).
         let Some(secs) = self.settings.clipboard_clear_secs else {
-            // "Never": don't spawn a timer or pill. We still record
-            // the value so the lock-time wipe can compare-then-clear.
+            // "Never": don't spawn a timer or pill. The opaque write token
+            // remains so lock-time cleanup can still clear our clipboard.
             self.clipboard_clear_task = None;
             self.clipboard_clear_deadline = None;
             self.clipboard_pill_tick = None;
@@ -2648,18 +2694,12 @@ impl AppShell {
                 .timer(Duration::from_secs(secs))
                 .await;
             let _ = this.update(cx, |shell, cx| {
-                // Only clear when the clipboard still holds *our* value.
-                // If the user copied something else in between, leave
-                // their content alone.
-                let still_ours = cx
-                    .read_from_clipboard()
-                    .and_then(|item| item.text())
-                    .as_deref()
-                    == shell.last_clipboard_value.as_deref();
-                if still_ours {
-                    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                // A cancelled timer can race a replacement copy. Its token
+                // must match before it may touch either clipboard or state.
+                if shell.pending_clipboard_write != Some(write) {
+                    return;
                 }
-                shell.last_clipboard_value = None;
+                shell.clear_owned_clipboard(cx);
                 shell.clipboard_clear_task = None;
                 shell.clipboard_clear_deadline = None;
                 shell.clipboard_pill_tick = None;

@@ -1,6 +1,7 @@
 pub mod app;
 pub mod autotype;
 pub mod biometric;
+pub mod clipboard;
 pub mod domain;
 pub mod favicon;
 pub mod keepass;
