@@ -11,10 +11,10 @@
 //! - Manual picks only force which current entry version wins. The losing
 //!   current version is retained in the winner's history before the database
 //!   merge runs.
-//! - The pinned keepass fork does not merge attachment stores or divergent
-//!   custom-icon stores. `apply_picks` rejects those cases explicitly instead
-//!   of returning a database with dangling references or lost bytes. Identical
-//!   custom-icon stores are retained safely.
+//! - The pinned keepass fork does not merge attachment or custom-icon
+//!   stores. `apply_picks` rejects *divergent* stores explicitly instead of
+//!   returning a database with dangling references or lost bytes; identical
+//!   stores on both sides are retained safely.
 //! - Passwords are compared in cleartext (necessarily — both sides are
 //!   already decrypted) but the displayed `FieldDiff.local`/`.remote` for
 //!   the Password row is redacted to `"••• (N chars)"` so the conflict
@@ -391,11 +391,38 @@ pub fn apply_picks(
     let log = merged
         .merge(&source)
         .map_err(|error| ApplyError::DatabaseMerge(error.to_string()))?;
-    if !log.warnings.is_empty() {
-        return Err(ApplyError::DatabaseMergeWarnings(log.warnings.join("; ")));
+    // The fork warns both for outcomes it already resolved by documented
+    // policy and for genuinely lossy ones. Only the lossy ones may abort:
+    // a policy-resolved warning's trigger lives in the remote file (e.g.
+    // another client wrote entries without LocationChanged timestamps), so
+    // treating it as fatal re-fails every retry identically and wedges sync
+    // permanently with no user remedy.
+    let lossy: Vec<&str> = log
+        .warnings
+        .iter()
+        .map(String::as_str)
+        .filter(|warning| !warning_is_policy_resolved(warning))
+        .collect();
+    if !lossy.is_empty() {
+        return Err(ApplyError::DatabaseMergeWarnings(lossy.join("; ")));
     }
 
     Ok(merged)
+}
+
+/// Warnings the pinned fork emits for situations it has already resolved
+/// without dropping data: same-second diverged history versions (both are
+/// kept), moves it cannot order (the destination location is kept), and
+/// missing timestamps/history (deterministic epoch/now substitutes). The
+/// warning set is closed because the fork is pinned by revision; anything
+/// unrecognized — notably "Cannot add entry … parent group does not exist",
+/// which silently drops an entry — stays fatal.
+fn warning_is_policy_resolved(warning: &str) -> bool {
+    warning.starts_with("History entries for ")
+        || warning.starts_with("Cannot determine which ")
+        || warning.starts_with("Cannot move ")
+        || warning.contains("did not have a last modification timestamp")
+        || warning.ends_with("had no history.")
 }
 
 fn preserve_auto_resolved_history(
@@ -426,12 +453,16 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
         return Err(ApplyError::DifferentRoots);
     }
 
-    let local_attachments = local.num_attachments();
-    let remote_attachments = remote.num_attachments();
-    if local_attachments != 0 || remote_attachments != 0 {
+    // The pinned fork's merge does not carry attachments across databases
+    // (its own `// TODO: attachments`), so divergent stores would produce
+    // dangling references or lost bytes. Identical stores are safe: every
+    // attachment id a winning entry references resolves to the same bytes
+    // on either side. Rejecting mere *presence* would make a vault with one
+    // attachment permanently unable to resolve any conflict.
+    if attachment_stores_diverge(local, remote) {
         return Err(ApplyError::AttachmentsUnsupported {
-            local: local_attachments,
-            remote: remote_attachments,
+            local: local.num_attachments(),
+            remote: remote.num_attachments(),
         });
     }
 
@@ -445,6 +476,21 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
     }
 
     Ok(())
+}
+
+fn attachment_stores_diverge(local: &Database, remote: &Database) -> bool {
+    if local.num_attachments() != remote.num_attachments() {
+        return true;
+    }
+    let remote_by_id: HashMap<usize, _> = remote
+        .iter_all_attachments()
+        .map(|attachment| (attachment.id().id(), attachment))
+        .collect();
+    !local.iter_all_attachments().all(|attachment| {
+        remote_by_id
+            .get(&attachment.id().id())
+            .is_some_and(|remote| remote.data == attachment.data)
+    })
 }
 
 fn custom_icon_store(
@@ -1446,6 +1492,50 @@ mod tests {
                 local: 1,
                 remote: 0
             }
+        ));
+    }
+
+    #[test]
+    fn identical_attachment_stores_merge_instead_of_wedging() {
+        let mut local = Database::new();
+        let id = add(&mut local, "With attachment", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .add_attachment("secret.bin", Value::protected(vec![1, 2, 3]));
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "remote-newer");
+
+        let report = diff(&local, &remote);
+        let picks = HashMap::from([(id.to_string(), Side::Remote)]);
+        let merged = apply_picks(&local, &remote, &picks, &report)
+            .expect("identical attachment stores must not block conflict resolution");
+
+        assert_eq!(merged.num_attachments(), 1);
+        assert_eq!(merged.entry(id).unwrap().get_password(), Some("remote-newer"));
+    }
+
+    #[test]
+    fn policy_resolved_merge_warnings_are_not_fatal() {
+        // Exact strings the pinned fork emits for outcomes it already
+        // resolved without loss — and the one that genuinely drops data.
+        for benign in [
+            "History entries for 1234 have the same modification timestamp 2026-01-01 but have diverged.",
+            "Cannot determine which entry 1234 move is more recent because one of the entries does not have a location changed timestamp.",
+            "Cannot determine which group 1234 move is more recent because one of the groups does not have a location changed timestamp.",
+            "Cannot move root group 1234",
+            "Cannot move entry 1234 to group 5678 because the group does not exist in the destination database.",
+            "Source entry 1234 did not have a last modification timestamp",
+            "Destination history entry 1234 did not have a last modification timestamp",
+            "Source entry 1234 had no history.",
+        ] {
+            assert!(warning_is_policy_resolved(benign), "misclassified: {benign}");
+        }
+        assert!(!warning_is_policy_resolved(
+            "Cannot add entry 1234 because its parent group 5678 does not exist in the destination database."
         ));
     }
 
