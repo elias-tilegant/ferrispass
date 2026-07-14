@@ -307,15 +307,28 @@ impl VaultDocument {
     /// held, so a retargeted symlink or externally replaced KDBX can never be
     /// uploaded under this document's cloud binding.
     pub fn read_current_bytes(&self) -> Result<Arc<Vec<u8>>, SaveError> {
-        let storage = self.storage.lock().map_err(|_| SaveError::StorageState)?;
-        let state = storage.as_ref().ok_or(SaveError::StorageUnbound)?;
-        let _sidecar_lock = acquire_save_lock(&state.path)?;
-        let _target_lock = acquire_target_lock(&state.path)?;
-        let bytes = read_bounded_file(&state.path)?;
-        if DiskRevision::from_bytes(&bytes) != state.revision {
-            return Err(SaveError::ExternalModification(state.path.clone()));
+        self.current_bytes_reader()()
+    }
+
+    /// [`Self::read_current_bytes`] as a `Send` closure. An in-flight save
+    /// holds the storage mutex across the whole KDF + fsync, so the read
+    /// must happen on a background thread — calling the closure on the UI
+    /// thread can freeze the app for the full save duration.
+    pub fn current_bytes_reader(
+        &self,
+    ) -> impl FnOnce() -> Result<Arc<Vec<u8>>, SaveError> + Send + 'static {
+        let storage = Arc::clone(&self.storage);
+        move || {
+            let storage = storage.lock().map_err(|_| SaveError::StorageState)?;
+            let state = storage.as_ref().ok_or(SaveError::StorageUnbound)?;
+            let _sidecar_lock = acquire_save_lock(&state.path)?;
+            let _target_lock = acquire_target_lock(&state.path)?;
+            let bytes = read_bounded_file(&state.path)?;
+            if DiskRevision::from_bytes(&bytes) != state.revision {
+                return Err(SaveError::ExternalModification(state.path.clone()));
+            }
+            Ok(Arc::new(bytes))
         }
-        Ok(Arc::new(bytes))
     }
 
     /// Create a new entry under `group_id` (the stringified `GroupId`), apply

@@ -52,6 +52,10 @@ pub enum ServiceError {
     AccountMismatch { expected: String, got: String },
     #[error("remote vault response did not identify the downloaded revision")]
     MissingRemoteEtag,
+    /// Reading the local vault bytes failed or the file changed under us
+    /// before the push could start. Produced on the background sync task.
+    #[error("Local vault changed before sync: {0}")]
+    LocalVault(String),
     #[error("remote vault changed repeatedly while it was being downloaded")]
     UnstableRemoteDownload,
 }

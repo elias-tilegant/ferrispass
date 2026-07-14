@@ -306,6 +306,15 @@ struct QueuedSyncRequest {
     bytes: Option<Arc<Vec<u8>>>,
 }
 
+/// Vault bytes for a push: either already published by the save that
+/// triggered it, or read from disk inside the background task — the read
+/// takes the same locks a save holds across KDF + fsync and must never
+/// run on the UI thread.
+enum BytesSource {
+    Published(Arc<Vec<u8>>),
+    Read(Box<dyn FnOnce() -> Result<Arc<Vec<u8>>, crate::keepass::SaveError> + Send>),
+}
+
 impl QueuedSync {
     fn new(owner: VaultSessionId) -> Self {
         Self {
@@ -1557,21 +1566,26 @@ impl AppState {
             .map(|session| session.document.database_key())
     }
 
-    fn read_current_bytes_for_session(
+    /// Resolve the session's document to a deferred bytes-reader. The lookup
+    /// runs here on the UI thread; the returned closure takes the storage
+    /// mutex + file locks and must only be invoked on a background thread —
+    /// an in-flight save holds those guards across the whole KDF + fsync.
+    fn current_bytes_reader_for_session(
         &self,
         target: &Path,
         session_id: VaultSessionId,
-    ) -> Option<Result<Arc<Vec<u8>>, crate::keepass::SaveError>> {
+    ) -> Option<impl FnOnce() -> Result<Arc<Vec<u8>>, crate::keepass::SaveError> + Send + 'static>
+    {
         if self.active_vault_session_id == Some(session_id)
             && let VaultStatus::Open { path, document, .. } = &self.vault
             && path.as_path() == target
         {
-            return Some(document.read_current_bytes());
+            return Some(document.current_bytes_reader());
         }
         self.parked
             .get(target)
             .filter(|session| session.session_id == session_id)
-            .map(|session| session.document.read_current_bytes())
+            .map(|session| session.document.current_bytes_reader())
     }
 
     fn document_generation_for_session(
@@ -4178,19 +4192,10 @@ impl AppState {
         else {
             return;
         };
-        let bytes = match published_bytes {
-            Some(bytes) => bytes,
-            None => match self.read_current_bytes_for_session(target, session_id) {
-                Some(Ok(bytes)) => bytes,
-                Some(Err(error)) => {
-                    self.apply_sync_status_for_session(
-                        target,
-                        session_id,
-                        SyncStatus::Failed(format!("Local vault changed before sync: {error}")),
-                        cx,
-                    );
-                    return;
-                }
+        let bytes_source = match published_bytes {
+            Some(bytes) => BytesSource::Published(bytes),
+            None => match self.current_bytes_reader_for_session(target, session_id) {
+                Some(reader) => BytesSource::Read(Box::new(reader)),
                 None => return,
             },
         };
@@ -4202,6 +4207,12 @@ impl AppState {
 
         let task_config = config.clone();
         let task = cx.background_spawn(async move {
+            let bytes = match bytes_source {
+                BytesSource::Published(bytes) => bytes,
+                BytesSource::Read(reader) => reader().map_err(|error| {
+                    crate::sync::service::ServiceError::LocalVault(error.to_string())
+                })?,
+            };
             let token = crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
             let outcome = crate::sync::service::upload_after_save(&task_config, &token, &bytes)?;
             Ok::<_, crate::sync::service::ServiceError>((outcome, token))
