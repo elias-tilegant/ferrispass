@@ -7,7 +7,10 @@
 //! cost: user copies a code into a browser. Acceptable for a desktop
 //! password manager that signs in once per device.
 
-use std::time::{Duration, SystemTime};
+use std::{
+    fmt,
+    time::{Duration, SystemTime},
+};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -80,7 +83,7 @@ pub enum AuthError {
 
 /// Result of a `request_device_code` call. Carries everything the user-facing
 /// code needs to display + everything the polling loop needs to keep going.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeviceCodeChallenge {
     /// Short alphanumeric code the user types into the verification URL.
     pub user_code: String,
@@ -97,14 +100,36 @@ pub struct DeviceCodeChallenge {
     pub interval: Duration,
 }
 
+impl fmt::Debug for DeviceCodeChallenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCodeChallenge")
+            .field("user_code", &"<redacted>")
+            .field("verification_uri", &self.verification_uri)
+            .field("device_code", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field("interval", &self.interval)
+            .finish()
+    }
+}
+
 /// Successful token bundle. `expires_at` is computed locally as
 /// `now + expires_in` so callers can compare without knowing when the
 /// token was issued.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AccessToken {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: SystemTime,
+}
+
+impl fmt::Debug for AccessToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AccessToken")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl AccessToken {
@@ -183,16 +208,22 @@ pub fn refresh(refresh_token: &str) -> Result<AccessToken, AuthError> {
         ],
     )?;
 
-    match parse_token_response(&body) {
+    parse_refresh_response(&body)
+}
+
+fn parse_refresh_response(body: &str) -> Result<AccessToken, AuthError> {
+    match parse_token_response(body) {
         Ok(token) => Ok(token),
-        Err(AuthError::Server(_msg)) => {
+        Err(AuthError::Server(message)) => {
             // Distinguish `invalid_grant` (terminal — user must reconnect)
             // from generic server errors so the caller can render a clear
             // "sign-in expired" message.
-            if body.contains("\"invalid_grant\"") {
-                Err(AuthError::InvalidGrant(extract_error_detail(&body)))
+            if serde_json::from_str::<ErrorResponse>(body)
+                .is_ok_and(|response| response.error == "invalid_grant")
+            {
+                Err(AuthError::InvalidGrant(extract_error_detail(body)))
             } else {
-                Err(AuthError::Server(body))
+                Err(AuthError::Server(message))
             }
         }
         Err(other) => Err(other),
@@ -240,10 +271,7 @@ fn classify_token_response(body: &str) -> PollOutcome {
         "slow_down" => PollOutcome::SlowDown,
         "expired_token" => PollOutcome::Failed(AuthError::Expired),
         "authorization_declined" | "access_denied" => PollOutcome::Failed(AuthError::Declined),
-        other => PollOutcome::Failed(AuthError::Server(format!(
-            "{other}: {}",
-            err.error_description.unwrap_or_default()
-        ))),
+        _ => PollOutcome::Failed(server_error(&err)),
     }
 }
 
@@ -253,11 +281,9 @@ fn parse_token_response(body: &str) -> Result<AccessToken, AuthError> {
         // truly malformed JSON. The token endpoint returns 4xx with a JSON
         // body containing `{"error": "..."}` when something's wrong; in that
         // case we want callers to fall through to error classification.
-        if body.contains("\"error\"") {
-            AuthError::Server(body.to_string())
-        } else {
-            AuthError::Parse(e.to_string())
-        }
+        serde_json::from_str::<ErrorResponse>(body)
+            .map(|response| server_error(&response))
+            .unwrap_or_else(|_| AuthError::Parse(e.to_string()))
     })?;
     Ok(AccessToken {
         access_token: resp.access_token,
@@ -272,10 +298,14 @@ fn parse_token_response(body: &str) -> Result<AccessToken, AuthError> {
 /// line and cap the length so it fits a status pill / log line without
 /// leaking the full trace id into the UI.
 fn extract_error_detail(body: &str) -> Option<String> {
-    let desc = serde_json::from_str::<ErrorResponse>(body)
+    let description = serde_json::from_str::<ErrorResponse>(body)
         .ok()
         .and_then(|e| e.error_description)?;
-    let first_line = desc.lines().next().unwrap_or(&desc).trim();
+    sanitize_error_detail(&description)
+}
+
+fn sanitize_error_detail(description: &str) -> Option<String> {
+    let first_line = description.lines().next().unwrap_or(description).trim();
     if first_line.is_empty() {
         return None;
     }
@@ -287,6 +317,30 @@ fn extract_error_detail(body: &str) -> Option<String> {
         first_line.to_string()
     };
     Some(trimmed)
+}
+
+fn server_error(response: &ErrorResponse) -> AuthError {
+    const MAX_ERROR_CODE_CHARS: usize = 64;
+    let raw_code = response.error.trim();
+    let code_is_safe = !raw_code.is_empty()
+        && raw_code.chars().count() <= MAX_ERROR_CODE_CHARS
+        && raw_code
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'));
+    let code = if code_is_safe {
+        raw_code
+    } else {
+        "unknown_oauth_error"
+    };
+    let detail = response
+        .error_description
+        .as_deref()
+        .and_then(sanitize_error_detail);
+
+    AuthError::Server(match detail {
+        Some(detail) => format!("{code}: {detail}"),
+        None => code.to_string(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -415,6 +469,39 @@ mod tests {
     }
 
     #[test]
+    fn refresh_error_drops_token_fields_and_trace_data() {
+        let access_token = "ACCESS-TOKEN-SENTINEL-cd83";
+        let refresh_token = "REFRESH-TOKEN-SENTINEL-57a1";
+        let body = format!(
+            r#"{{"error":"temporarily_unavailable","error_description":"Try again later.\r\nTrace ID: trace-secret","access_token":"{access_token}","refresh_token":"{refresh_token}"}}"#
+        );
+
+        let error = parse_refresh_response(&body).expect_err("error envelope must fail");
+        let rendered = format!("{error:?} {error}");
+
+        assert!(rendered.contains("temporarily_unavailable: Try again later."));
+        assert!(!rendered.contains(access_token));
+        assert!(!rendered.contains(refresh_token));
+        assert!(!rendered.contains("trace-secret"));
+    }
+
+    #[test]
+    fn refresh_invalid_grant_keeps_only_the_bounded_reason() {
+        let token = "REFRESH-TOKEN-SENTINEL-5b11";
+        let body = format!(
+            r#"{{"error":"invalid_grant","error_description":"AADSTS700082: Grant expired.\r\nCorrelation ID: private-id","refresh_token":"{token}"}}"#
+        );
+
+        let error = parse_refresh_response(&body).expect_err("invalid grant must fail");
+        let rendered = format!("{error:?} {error}");
+
+        assert!(matches!(error, AuthError::InvalidGrant(_)));
+        assert!(rendered.contains("AADSTS700082: Grant expired."));
+        assert!(!rendered.contains(token));
+        assert!(!rendered.contains("private-id"));
+    }
+
+    #[test]
     fn token_is_near_expiry_when_clock_passed() {
         let token = AccessToken {
             access_token: "x".into(),
@@ -432,5 +519,39 @@ mod tests {
             expires_at: SystemTime::now() + Duration::from_secs(3600),
         };
         assert!(!token.is_near_expiry(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn device_code_debug_redacts_credentials() {
+        let challenge = DeviceCodeChallenge {
+            user_code: "USER-CODE-SENTINEL-8f1b".into(),
+            verification_uri: "https://microsoft.com/devicelogin".into(),
+            device_code: "DEVICE-CODE-SENTINEL-2ca7".into(),
+            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(900),
+            interval: Duration::from_secs(5),
+        };
+
+        let debug = format!("{challenge:?}");
+        assert!(!debug.contains("USER-CODE-SENTINEL-8f1b"));
+        assert!(!debug.contains("DEVICE-CODE-SENTINEL-2ca7"));
+        assert!(debug.contains("https://microsoft.com/devicelogin"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn access_token_debug_redacts_credentials_directly_and_in_poll_outcome() {
+        let token = AccessToken {
+            access_token: "ACCESS-TOKEN-SENTINEL-a104".into(),
+            refresh_token: "REFRESH-TOKEN-SENTINEL-e392".into(),
+            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
+        };
+
+        let direct_debug = format!("{token:?}");
+        let outcome_debug = format!("{:?}", PollOutcome::Token(token));
+        for debug in [&direct_debug, &outcome_debug] {
+            assert!(!debug.contains("ACCESS-TOKEN-SENTINEL-a104"));
+            assert!(!debug.contains("REFRESH-TOKEN-SENTINEL-e392"));
+            assert!(debug.contains("<redacted>"));
+        }
     }
 }

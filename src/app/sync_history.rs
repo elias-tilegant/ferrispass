@@ -41,7 +41,7 @@ pub enum SyncChangeKind {
     ResolvedKeptLocal,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SyncHistoryEntry {
     pub at: DateTime<Local>,
     pub kind: SyncChangeKind,
@@ -49,6 +49,17 @@ pub struct SyncHistoryEntry {
     /// entry won't rewrite the log line — that's intentional, the log
     /// records what happened, not what the entry looks like now.
     pub entry_title: String,
+}
+
+impl std::fmt::Debug for SyncHistoryEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SyncHistoryEntry")
+            .field("at", &self.at)
+            .field("kind", &self.kind)
+            .field("title_chars", &self.entry_title.chars().count())
+            .finish()
+    }
 }
 
 /// Turn a merge report (plus the resolution picks, empty for the silent
@@ -150,6 +161,21 @@ mod tests {
 
     fn fixed_now() -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 5, 12, 9, 30, 0).unwrap()
+    }
+
+    #[test]
+    fn history_debug_omits_entry_title() {
+        let title = "sensitive-entry-title";
+        let entry = SyncHistoryEntry {
+            at: fixed_now(),
+            kind: SyncChangeKind::AddedFromRemote,
+            entry_title: title.into(),
+        };
+
+        let rendered = format!("{entry:?}");
+
+        assert!(!rendered.contains(title));
+        assert!(rendered.contains("AddedFromRemote"));
     }
 
     #[test]

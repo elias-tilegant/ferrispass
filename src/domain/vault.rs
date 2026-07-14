@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct VaultSnapshot {
     pub root: VaultGroup,
     pub entry_count: usize,
@@ -9,7 +9,18 @@ pub struct VaultSnapshot {
     pub recycle_bin_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl std::fmt::Debug for VaultSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultSnapshot")
+            .field("entry_count", &self.entry_count)
+            .field("group_count", &self.group_count)
+            .field("has_recycle_bin", &self.recycle_bin_id.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct VaultGroup {
     pub id: String,
     pub name: String,
@@ -30,6 +41,20 @@ pub struct VaultGroup {
     pub icon: Option<FaviconImage>,
 }
 
+impl std::fmt::Debug for VaultGroup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultGroup")
+            .field("id", &self.id)
+            .field("name_chars", &self.name.chars().count())
+            .field("group_count", &self.groups.len())
+            .field("entry_count", &self.entries.len())
+            .field("is_expanded", &self.is_expanded)
+            .field("has_icon", &self.icon.is_some())
+            .finish()
+    }
+}
+
 impl Default for VaultGroup {
     fn default() -> Self {
         Self {
@@ -43,7 +68,7 @@ impl Default for VaultGroup {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct VaultEntry {
     pub id: String,
     pub title: String,
@@ -73,15 +98,48 @@ pub struct VaultEntry {
     pub custom_fields: Vec<CustomField>,
 }
 
+impl std::fmt::Debug for VaultEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultEntry")
+            .field("id", &self.id)
+            .field("title_chars", &self.title.chars().count())
+            .field("has_username", &!self.username.is_empty())
+            .field("has_url", &!self.url.is_empty())
+            .field("has_notes", &!self.notes.is_empty())
+            .field("has_password", &self.has_password)
+            .field("password_length", &self.password_length)
+            .field("has_otp", &self.has_otp)
+            .field("tag_count", &self.tags.len())
+            .field("starred", &self.starred)
+            .field("strength", &self.strength)
+            .field("group_depth", &self.group_path.len())
+            .field("in_recycle_bin", &self.in_recycle_bin)
+            .field("custom_field_count", &self.custom_fields.len())
+            .finish()
+    }
+}
+
 /// One non-standard attribute on a KeePass entry. `protected` mirrors the
 /// `Protected="True"` XML attribute — KeePassXC writes secrets (e.g.
 /// alternate passwords) with this flag and we must round-trip it so
 /// nothing silently downgrades from secret to plain on save.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct CustomField {
     pub key: String,
     pub value: String,
     pub protected: bool,
+}
+
+impl std::fmt::Debug for CustomField {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CustomField")
+            .field("key_chars", &self.key.chars().count())
+            .field("has_value", &!self.value.is_empty())
+            .field("protected", &self.protected)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -326,7 +384,7 @@ impl VaultEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{Favicon, Strength, VaultEntry, VaultGroup, VaultSnapshot};
+    use super::{CustomField, Favicon, Strength, VaultEntry, VaultGroup, VaultSnapshot};
 
     fn entry(id: &str, title: &str) -> VaultEntry {
         VaultEntry::new(id, title, "alice", "", true)
@@ -409,5 +467,45 @@ mod tests {
     fn favicon_default_letter_is_dot() {
         let e = entry("e", "Mail");
         assert_eq!(e.favicon, Favicon::default());
+    }
+
+    #[test]
+    fn debug_output_omits_decrypted_vault_content() {
+        let sentinels = [
+            "group-secret",
+            "title-secret",
+            "username-secret",
+            "url-secret",
+            "notes-secret",
+            "tag-secret",
+            "custom-key-secret",
+            "custom-value-secret",
+        ];
+        let custom = CustomField {
+            key: sentinels[6].into(),
+            value: sentinels[7].into(),
+            protected: true,
+        };
+        let mut vault_entry = entry("entry-id", sentinels[1]);
+        vault_entry.username = sentinels[2].into();
+        vault_entry.url = sentinels[3].into();
+        vault_entry.notes = sentinels[4].into();
+        vault_entry.tags = vec![sentinels[5].into()];
+        vault_entry.custom_fields = vec![custom.clone()];
+        let snapshot = VaultSnapshot::new(VaultGroup::new(
+            "root-id",
+            sentinels[0],
+            Vec::new(),
+            vec![vault_entry.clone()],
+        ));
+
+        let rendered = format!(
+            "{snapshot:?} {:?} {vault_entry:?} {custom:?}",
+            snapshot.root
+        );
+
+        for sentinel in sentinels {
+            assert!(!rendered.contains(sentinel), "debug leaked {sentinel}");
+        }
     }
 }

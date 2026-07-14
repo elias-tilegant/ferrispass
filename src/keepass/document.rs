@@ -768,7 +768,7 @@ impl VaultDocument {
 
 /// Field bundle for `create_entry` / `update_entry`. Empty fields are skipped
 /// so the entry doesn't accumulate empty-string values for never-touched keys.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct EntryDraft {
     pub title: String,
     pub username: String,
@@ -787,6 +787,30 @@ pub struct EntryDraft {
     /// write, so the editor can keep blank rows around without polluting
     /// the saved database.
     pub custom_fields: Vec<CustomField>,
+}
+
+impl fmt::Debug for EntryDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EntryDraft")
+            .field("title_chars", &self.title.chars().count())
+            .field("username_chars", &self.username.chars().count())
+            .field("has_password", &!self.password.is_empty())
+            .field("url_chars", &self.url.chars().count())
+            .field("notes_chars", &self.notes.chars().count())
+            .field("tag_count", &self.tags.len())
+            .field("has_otp", &!self.otp.is_empty())
+            .field("custom_field_count", &self.custom_fields.len())
+            .field(
+                "protected_custom_field_count",
+                &self
+                    .custom_fields
+                    .iter()
+                    .filter(|field| field.protected)
+                    .count(),
+            )
+            .finish()
+    }
 }
 
 fn apply_draft_to_entry<E>(entry: &mut E, draft: &EntryDraft)
@@ -931,11 +955,22 @@ pub struct StrengthReport {
 }
 
 /// A formatted, ready-to-display TOTP code with its remaining validity window.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OtpDisplay {
     pub code: String,
     pub remaining_secs: u32,
     pub period_secs: u32,
+}
+
+impl fmt::Debug for OtpDisplay {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OtpDisplay")
+            .field("code_chars", &self.code.chars().count())
+            .field("remaining_secs", &self.remaining_secs)
+            .field("period_secs", &self.period_secs)
+            .finish()
+    }
 }
 
 /// Parse the raw OTP field of a KeePass entry into a `TOTP`.
@@ -1459,7 +1494,10 @@ impl fmt::Debug for VaultDocument {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VaultDocument")
-            .field("snapshot", &self.snapshot)
+            .field("entry_count", &self.snapshot.entry_count)
+            .field("group_count", &self.snapshot.group_count)
+            .field("generation", &self.generation)
+            .field("has_keyfile", &self.keyfile_path.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -1479,6 +1517,60 @@ mod tests {
             log.warnings,
         );
         destination
+    }
+
+    #[test]
+    fn debug_output_omits_draft_otp_and_document_secrets() {
+        let sentinels = [
+            "draft-title-secret",
+            "draft-username-secret",
+            "draft-password-secret",
+            "draft-url-secret",
+            "draft-notes-secret",
+            "draft-tag-secret",
+            "draft-otp-secret",
+            "custom-key-secret",
+            "custom-value-secret",
+            "otp-code-secret",
+            "snapshot-group-secret",
+            "master-password-secret",
+        ];
+        let draft = EntryDraft {
+            title: sentinels[0].into(),
+            username: sentinels[1].into(),
+            password: sentinels[2].into(),
+            url: sentinels[3].into(),
+            notes: sentinels[4].into(),
+            tags: vec![sentinels[5].into()],
+            otp: sentinels[6].into(),
+            custom_fields: vec![CustomField {
+                key: sentinels[7].into(),
+                value: sentinels[8].into(),
+                protected: true,
+            }],
+        };
+        let otp = OtpDisplay {
+            code: sentinels[9].into(),
+            remaining_secs: 17,
+            period_secs: 30,
+        };
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::new(
+                "root-id",
+                sentinels[10],
+                Vec::new(),
+                Vec::new(),
+            )),
+            sentinels[11].into(),
+            None,
+        );
+
+        let rendered = format!("{draft:?} {otp:?} {document:?}");
+
+        for sentinel in sentinels {
+            assert!(!rendered.contains(sentinel), "debug leaked {sentinel}");
+        }
     }
 
     /// Open → save → re-open round-trip on a freshly-built in-memory database.

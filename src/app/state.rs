@@ -553,7 +553,7 @@ impl FaviconDownloadStatus {
 /// Clone-ability is required because `SyncStatus` is `Clone` (the renderer
 /// snapshots it). The two `Database` clones inside aren't free but they're
 /// the same memcpy `save_payload` already does on every save — acceptable.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConflictState {
     pub local_db: Database,
     pub remote_db: Database,
@@ -569,6 +569,22 @@ pub struct ConflictState {
     /// Exact unlocked session that produced this report. A path can be
     /// reopened while async conflict work is in flight.
     session_id: VaultSessionId,
+}
+
+impl std::fmt::Debug for ConflictState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConflictState")
+            .field("has_remote_etag", &!self.remote_etag.is_empty())
+            .field("conflict_count", &self.report.conflicts.len())
+            .field("local_only_count", &self.report.local_only.len())
+            .field("remote_only_count", &self.report.remote_only.len())
+            .field("auto_resolved_count", &self.report.auto_resolved.len())
+            .field("pick_count", &self.picks.len())
+            .field("base_generation", &self.base_generation)
+            .field("session_id", &self.session_id)
+            .finish()
+    }
 }
 
 /// Step machine for the Connect overlay. The Connect screen renders a
@@ -5248,7 +5264,7 @@ mod park_tests {
     //! routing is exercised through the pure session-aware status helper.
     use super::*;
     use crate::domain::VaultGroup;
-    use keepass::Database;
+    use keepass::{Database, db::fields};
     use std::path::PathBuf;
     use std::rc::Rc;
 
@@ -5270,6 +5286,32 @@ mod park_tests {
             last_used: HashMap::new(),
         };
         state.active_vault_session_id = Some(VaultSessionId::next());
+    }
+
+    #[test]
+    fn conflict_state_debug_omits_databases_and_remote_revision() {
+        let database_secret = "conflict-database-secret";
+        let etag_secret = "conflict-etag-secret";
+        let mut local_db = Database::new();
+        local_db
+            .root_mut()
+            .add_entry()
+            .set_unprotected(fields::NOTES, database_secret);
+        let state = ConflictState {
+            remote_db: local_db.clone(),
+            local_db,
+            remote_etag: etag_secret.into(),
+            report: ConflictReport::default(),
+            picks: HashMap::new(),
+            base_generation: 7,
+            session_id: VaultSessionId::next(),
+        };
+
+        let rendered = format!("{state:?}");
+
+        assert!(!rendered.contains(database_secret));
+        assert!(!rendered.contains(etag_secret));
+        assert!(rendered.contains("base_generation: 7"));
     }
 
     #[test]

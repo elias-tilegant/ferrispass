@@ -26,7 +26,7 @@ use std::time::Duration;
 
 /// One unit of the parsed template. Cheap to clone; tokens are scanned
 /// once at parse time and reused for every keystroke run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Token {
     /// Type this string verbatim.
     Literal(String),
@@ -44,6 +44,19 @@ pub enum Token {
     Delay(u64),
 }
 
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Literal(_) => f.write_str("Literal(<redacted>)"),
+            Self::Username => f.write_str("Username"),
+            Self::Password => f.write_str("Password"),
+            Self::Tab => f.write_str("Tab"),
+            Self::Return => f.write_str("Return"),
+            Self::Delay(ms) => f.debug_tuple("Delay").field(ms).finish(),
+        }
+    }
+}
+
 /// One step the typer should execute. Password text stays distinct from
 /// ordinary text so the execution layer can apply a last-moment focus guard
 /// and avoid exposing it through `Debug` output.
@@ -59,7 +72,7 @@ pub enum TypeOp {
 impl fmt::Debug for TypeOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Text(text) => f.debug_tuple("Text").field(text).finish(),
+            Self::Text(_) => f.write_str("Text(<redacted>)"),
             Self::SecretText(_) => f.write_str("SecretText(<redacted>)"),
             Self::Tab => f.write_str("Tab"),
             Self::Return => f.write_str("Return"),
@@ -419,5 +432,31 @@ mod tests {
         let rendered = format!("{:?}", TypeOp::SecretText("p4ssw0rd".into()));
         assert_eq!(rendered, "SecretText(<redacted>)");
         assert!(!rendered.contains("p4ssw0rd"));
+    }
+
+    #[test]
+    fn literal_token_debug_output_is_redacted() {
+        let sentinel = "literal-debug-sentinel-96f7f6d5";
+        let rendered = format!("{:?}", Token::Literal(sentinel.into()));
+
+        assert_eq!(rendered, "Literal(<redacted>)");
+        assert!(!rendered.contains(sentinel));
+        assert_eq!(format!("{:?}", Token::Delay(750)), "Delay(750)");
+    }
+
+    #[test]
+    fn rendered_text_debug_output_is_redacted() {
+        let username = "username-debug-sentinel-4b293bec";
+        let ops = render(
+            &[Token::Username, Token::Tab],
+            &RenderContext {
+                username: username.into(),
+                password: String::new(),
+            },
+        );
+        let rendered = format!("{ops:?}");
+
+        assert_eq!(rendered, "[Text(<redacted>), Tab]");
+        assert!(!rendered.contains(username));
     }
 }

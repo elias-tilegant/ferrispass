@@ -22,6 +22,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     ops::Deref,
 };
 
@@ -42,7 +43,7 @@ use crate::keepass::repository::{STANDARD_FIELDS, collect_custom_fields};
 /// five visible-in-UI ones. When the user picks "Remote" for a conflict, all
 /// these fields get transplanted onto the local entry — partial transplants
 /// were the source of a silent-data-loss bug pre-v0.2.1.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EntryView {
     /// EntryId stringified to its UUID. Stable across diff/apply, and
     /// re-hydrated via `EntryId::from_uuid` when adding remote-only entries
@@ -74,6 +75,25 @@ pub struct EntryView {
     pub override_url: Option<String>,
 }
 
+impl fmt::Debug for EntryView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EntryView")
+            .field("id", &self.id)
+            .field("modified", &self.modified)
+            .field("has_username", &!self.username.is_empty())
+            .field("has_password", &!self.password.is_empty())
+            .field("has_url", &!self.url.is_empty())
+            .field("has_notes", &!self.notes.is_empty())
+            .field("tag_count", &self.tags.len())
+            .field("custom_data_count", &self.custom_data.len())
+            .field("custom_field_count", &self.custom_fields.len())
+            .field("has_autotype", &self.autotype.is_some())
+            .field("has_override_url", &self.override_url.is_some())
+            .finish()
+    }
+}
+
 /// Internal fidelity snapshot. `EntryView` stays a UI-oriented, stable public
 /// shape; the raw map is retained privately so diffing does not collapse a
 /// missing field into an empty value or discard its protection bit.
@@ -88,12 +108,24 @@ struct EntrySnapshot {
 /// One field's local-vs-remote comparison. `local` and `remote` are the
 /// strings the UI should render directly — for the Password row those are
 /// pre-redacted; for the rest they're the cleartext field values.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FieldDiff {
     pub label: &'static str,
     pub local: String,
     pub remote: String,
     pub differs: bool,
+}
+
+impl fmt::Debug for FieldDiff {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FieldDiff")
+            .field("label", &self.label)
+            .field("local_present", &!self.local.is_empty())
+            .field("remote_present", &!self.remote.is_empty())
+            .field("differs", &self.differs)
+            .finish()
+    }
 }
 
 /// One entry's worth of conflict. Carries enough to render the side-by-side
@@ -769,6 +801,42 @@ mod tests {
         assert!(report.local_only.is_empty());
         assert!(report.remote_only.is_empty());
         assert!(report.is_clean());
+    }
+
+    #[test]
+    fn conflict_report_debug_omits_decrypted_entry_content() {
+        let sentinels = [
+            "local-title-secret",
+            "remote-title-secret",
+            "local-username-secret",
+            "remote-username-secret",
+            "local-password-secret",
+            "remote-password-secret",
+            "custom-key-secret",
+            "custom-value-secret",
+        ];
+        let mut local = Database::new();
+        let id = add(&mut local, sentinels[0], sentinels[4]);
+        local
+            .entry_mut(id)
+            .expect("local entry")
+            .set_unprotected(fields::USERNAME, sentinels[2]);
+        local
+            .entry_mut(id)
+            .expect("local entry")
+            .set_protected(sentinels[6], sentinels[7]);
+        let mut remote = local.clone();
+        let mut remote_entry = remote.entry_mut(id).expect("remote entry");
+        remote_entry.set_unprotected(fields::TITLE, sentinels[1]);
+        remote_entry.set_unprotected(fields::USERNAME, sentinels[3]);
+        remote_entry.set_protected(fields::PASSWORD, sentinels[5]);
+
+        let rendered = format!("{:?}", diff(&local, &remote));
+
+        for sentinel in sentinels {
+            assert!(!rendered.contains(sentinel), "debug leaked {sentinel}");
+        }
+        assert!(rendered.contains("conflicts"));
     }
 
     #[test]
