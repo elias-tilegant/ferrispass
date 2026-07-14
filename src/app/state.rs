@@ -15,7 +15,7 @@ use crate::sync::graph::DriveItemHit;
 use crate::update::{UpdateInfo, UpdateStatus};
 use chrono::{DateTime, Local};
 use gpui::{AppContext as _, Context};
-use keepass::db::Database;
+use keepass::{DatabaseKey, db::Database};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -56,6 +56,10 @@ pub struct AppState {
     /// public enum so this internal race guard does not widen its public API.
     active_vault_session_id: Option<VaultSessionId>,
     overlay: Overlay,
+    /// Last file-picker validation error. Kept separate from `VaultStatus` so
+    /// a bad selection can never replace an unlocked document and discard its
+    /// in-memory state.
+    vault_selection_error: Option<String>,
     /// Background-save lifecycle of the open vault. Drives the status indicator
     /// and gates retry / explicit-save UX.
     save_status: SaveStatus,
@@ -207,14 +211,43 @@ impl QueuedSave {
 }
 
 /// Bookkeeping value for `AppState::syncs_in_flight` — see the field docs.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug)]
 struct QueuedSync {
-    /// A new push was requested while one was already running for this path.
-    requested: bool,
-    /// At least one of the coalesced requests came through the interactive
-    /// entry point (manual "Sync now" / on-save push), so a conflict in the
-    /// follow-up is allowed to open the Conflict overlay.
+    /// Exact unlocked session whose request currently owns the network task.
+    owner: VaultSessionId,
+    /// Latest request that arrived while `owner` was in flight.
+    pending: Option<QueuedSyncRequest>,
+}
+
+#[derive(Clone, Debug)]
+struct QueuedSyncRequest {
+    session_id: VaultSessionId,
     interactive: bool,
+    bytes: Option<Arc<Vec<u8>>>,
+}
+
+impl QueuedSync {
+    fn new(owner: VaultSessionId) -> Self {
+        Self {
+            owner,
+            pending: None,
+        }
+    }
+
+    fn queue(&mut self, request: QueuedSyncRequest) {
+        if let Some(pending) = &mut self.pending
+            && pending.session_id == request.session_id
+        {
+            pending.interactive |= request.interactive;
+            pending.bytes = request.bytes;
+            return;
+        }
+
+        // A reopened vault at the same display path is a different owner.
+        // Replace every bit of queued state so old bytes/interactivity cannot
+        // bleed into the new session's follow-up.
+        self.pending = Some(request);
+    }
 }
 
 /// Lifecycle of a single Touch ID unlock attempt. Drives the Unlock
@@ -264,6 +297,7 @@ impl Default for AppState {
             vault: VaultStatus::default(),
             active_vault_session_id: None,
             overlay: Overlay::default(),
+            vault_selection_error: None,
             save_status: SaveStatus::default(),
             sync: None,
             sync_status: SyncStatus::default(),
@@ -440,6 +474,9 @@ pub struct ConflictState {
     /// conflict sat open, the merge is recomputed instead of silently
     /// discarding those edits.
     pub base_generation: u64,
+    /// Exact unlocked session that produced this report. A path can be
+    /// reopened while async conflict work is in flight.
+    session_id: VaultSessionId,
 }
 
 /// Step machine for the Connect overlay. The Connect screen renders a
@@ -771,6 +808,10 @@ impl AppState {
         &self.overlay
     }
 
+    pub fn vault_selection_error(&self) -> Option<&str> {
+        self.vault_selection_error.as_deref()
+    }
+
     pub fn open_overlay(&mut self, overlay: Overlay, cx: &mut Context<Self>) {
         if self.overlay == overlay {
             return;
@@ -832,6 +873,7 @@ impl AppState {
     }
 
     pub fn request_password(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.vault_selection_error = None;
         self.clear_pending_sync_unless(&path);
         // Already looking at an unlocked vault? Park it so the user can
         // come back without re-typing their master password. The
@@ -862,6 +904,7 @@ impl AppState {
     /// the caller hasn't told us they wanted to do anything, so we don't
     /// disturb selection / search state.
     pub fn switch_to_unlocked(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        self.vault_selection_error = None;
         if let VaultStatus::Open { path: active, .. } = &self.vault
             && active.as_path() == path
         {
@@ -1120,6 +1163,21 @@ impl AppState {
         }
     }
 
+    /// Session-aware counterpart used by async callbacks. A path can be
+    /// locked and reopened while a request is in flight; only the exact
+    /// session that dispatched it may consume the result.
+    fn apply_sync_status_for_session(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        status: SyncStatus,
+        cx: &mut Context<Self>,
+    ) {
+        if self.vault_session_is_current(target, session_id) {
+            self.apply_sync_status(target, status, cx);
+        }
+    }
+
     /// Mutate the `SyncBinding` for the vault at `target` if one exists.
     /// Used by sync callbacks to write back a refreshed access token /
     /// updated ETag against the vault that actually issued the upload,
@@ -1133,6 +1191,17 @@ impl AppState {
             if let Some(b) = parked.sync.as_mut() {
                 f(b);
             }
+        }
+    }
+
+    fn with_sync_binding_mut_for_session(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        f: impl FnOnce(&mut SyncBinding),
+    ) {
+        if self.vault_session_is_current(target, session_id) {
+            self.with_sync_binding_mut_for(target, f);
         }
     }
 
@@ -1261,6 +1330,16 @@ impl AppState {
         ))
     }
 
+    fn snapshot_sync_inputs_for_session(
+        &self,
+        target: &Path,
+        session_id: VaultSessionId,
+    ) -> Option<(crate::sync::config::SyncConfig, AccessToken, String)> {
+        self.vault_session_is_current(target, session_id)
+            .then(|| self.snapshot_sync_inputs(target))
+            .flatten()
+    }
+
     /// Borrow the live `Database` for the vault at `target` if it's
     /// still unlocked. Used by the conflict-diff path so it works for
     /// vaults parked while a sync was in flight.
@@ -1275,17 +1354,49 @@ impl AppState {
             .map(|p| p.document.database().clone())
     }
 
-    /// Mutation generation of the document at `target` (active or parked).
-    /// `None` when the vault isn't unlocked in memory. Captured next to
-    /// `database_clone_for` by the merge flow and re-checked before the
-    /// merged result is installed — see `commit_merged_for`.
-    fn document_generation_for(&self, target: &Path) -> Option<u64> {
+    fn database_clone_for_session(
+        &self,
+        target: &Path,
+        session_id: VaultSessionId,
+    ) -> Option<keepass::Database> {
+        self.vault_session_is_current(target, session_id)
+            .then(|| self.database_clone_for(target))
+            .flatten()
+    }
+
+    fn database_key_for_session(
+        &self,
+        target: &Path,
+        session_id: VaultSessionId,
+    ) -> Option<DatabaseKey> {
+        if !self.vault_session_is_current(target, session_id) {
+            return None;
+        }
         if let VaultStatus::Open { path, document, .. } = &self.vault
             && path.as_path() == target
         {
-            return Some(document.generation());
+            return Some(document.database_key());
         }
-        self.parked.get(target).map(|p| p.document.generation())
+        self.parked
+            .get(target)
+            .map(|session| session.document.database_key())
+    }
+
+    fn read_current_bytes_for_session(
+        &self,
+        target: &Path,
+        session_id: VaultSessionId,
+    ) -> Option<Result<Arc<Vec<u8>>, crate::keepass::SaveError>> {
+        if self.active_vault_session_id == Some(session_id)
+            && let VaultStatus::Open { path, document, .. } = &self.vault
+            && path.as_path() == target
+        {
+            return Some(document.read_current_bytes());
+        }
+        self.parked
+            .get(target)
+            .filter(|session| session.session_id == session_id)
+            .map(|session| session.document.read_current_bytes())
     }
 
     fn document_generation_for_session(
@@ -1305,20 +1416,44 @@ impl AppState {
             .map(|session| session.document.generation())
     }
 
-    /// Replace a merged document only in the session that initiated the
-    /// merge-save callback.
-    fn replace_document_for_session(
+    /// Install a merged database only in the session that initiated the save.
+    /// The existing document retains its cached key and shared storage state;
+    /// derived UI caches are rebuilt from the merged snapshot in the same
+    /// foreground update.
+    fn replace_database_for_session(
         &mut self,
         target: &Path,
         session_id: VaultSessionId,
-        replacement: VaultDocument,
+        database: Database,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.active_vault_session_id == Some(session_id)
             && matches!(&self.vault, VaultStatus::Open { path, .. } if path.as_path() == target)
         {
-            if let VaultStatus::Open { document, .. } = &mut self.vault {
-                **document = replacement;
+            if let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                last_used,
+                ..
+            } = &mut self.vault
+            {
+                document.replace_database(database);
+                let entries =
+                    entries_for_selection(document.snapshot(), selection, search_query, last_used);
+                if !entries
+                    .iter()
+                    .any(|entry| Some(entry.id.as_str()) == selected_entry_id.as_deref())
+                {
+                    *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+                }
+                *selected_strength = selected_entry_id
+                    .as_deref()
+                    .and_then(|id| document.strength_for_entry(id));
+                *visible_entries = Rc::new(entries);
                 cx.notify();
                 return true;
             }
@@ -1327,7 +1462,24 @@ impl AppState {
             .get_mut(target)
             .filter(|parked| parked.session_id == session_id)
         {
-            *parked.document = replacement;
+            parked.document.replace_database(database);
+            let entries = entries_for_selection(
+                parked.document.snapshot(),
+                &parked.selection,
+                &parked.search_query,
+                &parked.last_used,
+            );
+            if !entries
+                .iter()
+                .any(|entry| Some(entry.id.as_str()) == parked.selected_entry_id.as_deref())
+            {
+                parked.selected_entry_id = entries.first().map(|entry| entry.id.clone());
+            }
+            parked.selected_strength = parked
+                .selected_entry_id
+                .as_deref()
+                .and_then(|id| parked.document.strength_for_entry(id));
+            parked.visible_entries = Rc::new(entries);
             return true;
         }
         false
@@ -1697,11 +1849,19 @@ impl AppState {
         message: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        self.vault = VaultStatus::Error {
-            message: message.into(),
-            path,
-        };
+        self.record_vault_selection_failure(path, message.into());
         cx.notify();
+    }
+
+    fn record_vault_selection_failure(&mut self, path: Option<PathBuf>, message: String) {
+        if matches!(self.vault, VaultStatus::Open { .. }) {
+            self.vault_selection_error = Some(message);
+            return;
+        }
+
+        self.active_vault_session_id = None;
+        self.vault_selection_error = None;
+        self.vault = VaultStatus::Error { message, path };
     }
 
     /// Remove all decrypted vault state. Callers must first establish that no
@@ -2036,6 +2196,28 @@ impl AppState {
             .map(|session| session.document.save_payload())
     }
 
+    /// Build a merged save from the exact session that owns the file. This
+    /// retains the document's shared disk revision guard; constructing a free
+    /// payload here would let conflict resolution bypass external-change
+    /// detection and overwrite a newer file from another KeePass client.
+    fn save_payload_for_database_for_session(
+        &self,
+        target: &Path,
+        session_id: VaultSessionId,
+        database: Database,
+    ) -> Option<SavePayload> {
+        if let VaultStatus::Open { document, path, .. } = &self.vault
+            && path == target
+            && self.active_vault_session_id == Some(session_id)
+        {
+            return Some(document.save_payload_for_database(database));
+        }
+        self.parked
+            .get(target)
+            .filter(|session| session.session_id == session_id)
+            .map(|session| session.document.save_payload_for_database(database))
+    }
+
     /// Run or queue a save for an exact vault session. The per-path slot still
     /// serializes writers, while `session_id` prevents cross-session results.
     fn request_save_for_session(
@@ -2079,16 +2261,38 @@ impl AppState {
                     state.saves_in_flight.insert(target, queued);
                     return;
                 }
-                let succeeded = result.is_ok();
-                let new_status = match result {
-                    Ok(()) => SaveStatus::Saved,
-                    Err(error) => SaveStatus::Failed(error.to_string()),
+                let receipt = match result {
+                    Ok(receipt) => Some(receipt),
+                    Err(error) => {
+                        state.apply_save_status_for_session(
+                            &target,
+                            session_id,
+                            SaveStatus::Failed(error.to_string()),
+                            cx,
+                        );
+                        None
+                    }
                 };
-                state.apply_save_status_for_session(&target, session_id, new_status, cx);
+                let durable = receipt.as_ref().is_some_and(|receipt| receipt.is_durable());
+                if let Some(error) = receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.durability_error())
+                {
+                    state.apply_save_status_for_session(
+                        &target,
+                        session_id,
+                        SaveStatus::Failed(format!(
+                            "Vault was written, but directory sync failed: {error}"
+                        )),
+                        cx,
+                    );
+                } else if durable {
+                    state.apply_save_status_for_session(&target, session_id, SaveStatus::Saved, cx);
+                }
 
                 // A successful payload makes its owner durable unless that
                 // same session requested a newer trailing snapshot.
-                if succeeded && queued.pending_session != Some(session_id) {
+                if durable && queued.pending_session != Some(session_id) {
                     state.mark_vault_session_persisted(session_id);
                 }
 
@@ -2110,7 +2314,7 @@ impl AppState {
 
                 // Lock requests wait for local durability, not cloud sync.
                 // Once the final writer succeeds, clear secrets immediately.
-                if succeeded && state.finish_deferred_lock_if_ready() {
+                if durable && state.finish_deferred_lock_if_ready() {
                     cx.notify();
                     return;
                 }
@@ -2119,12 +2323,13 @@ impl AppState {
                 // routes its results back to whichever slot still owns
                 // `target`, so a parked vault's edit still makes it to
                 // SharePoint.
-                if succeeded
+                if durable
                     && sync_after
                     && state.vault_session_is_current(&target, session_id)
                     && state.snapshot_sync_inputs(&target).is_some()
                 {
-                    state.sync_now_for_path(&target, cx);
+                    let bytes = receipt.expect("durable save has a receipt").bytes();
+                    state.sync_now_for_path_inner(&target, session_id, true, Some(bytes), cx);
                 }
             });
         })
@@ -3474,37 +3679,65 @@ impl AppState {
     /// allowed to open the Conflict overlay. Background auto-sync uses
     /// `sync_now_for_path_inner(.., false, ..)` so it can never do that.
     pub fn sync_now_for_path(&mut self, target: &Path, cx: &mut Context<Self>) {
-        self.sync_now_for_path_inner(target, true, cx);
+        let Some(session_id) = self.vault_session_id_for(target) else {
+            return;
+        };
+        self.sync_now_for_path_inner(target, session_id, true, None, cx);
     }
 
     fn sync_now_for_path_inner(
         &mut self,
         target: &Path,
+        session_id: VaultSessionId,
         interactive: bool,
+        published_bytes: Option<Arc<Vec<u8>>>,
         cx: &mut Context<Self>,
     ) {
-        // One push per vault at a time — see `syncs_in_flight`. Queue a
-        // follow-up instead of racing; it runs once the in-flight push
-        // completes and reads the then-latest bytes from disk.
-        if let Some(queued) = self.syncs_in_flight.get_mut(target) {
-            queued.requested = true;
-            queued.interactive |= interactive;
+        if !self.vault_session_is_current(target, session_id) {
             return;
         }
-        let Some((config, token, master_password)) = self.snapshot_sync_inputs(target) else {
+
+        // One push per vault at a time — see `syncs_in_flight`. Queue a
+        // follow-up instead of racing; it runs once the in-flight push
+        // completes and uses the newest request's exact session + bytes.
+        if let Some(queued) = self.syncs_in_flight.get_mut(target) {
+            queued.queue(QueuedSyncRequest {
+                session_id,
+                interactive,
+                bytes: published_bytes,
+            });
             return;
+        }
+        let Some((config, token, _master_password)) =
+            self.snapshot_sync_inputs_for_session(target, session_id)
+        else {
+            return;
+        };
+        let bytes = match published_bytes {
+            Some(bytes) => bytes,
+            None => match self.read_current_bytes_for_session(target, session_id) {
+                Some(Ok(bytes)) => bytes,
+                Some(Err(error)) => {
+                    self.apply_sync_status_for_session(
+                        target,
+                        session_id,
+                        SyncStatus::Failed(format!("Local vault changed before sync: {error}")),
+                        cx,
+                    );
+                    return;
+                }
+                None => return,
+            },
         };
         let local_path = target.to_path_buf();
         self.syncs_in_flight
-            .insert(local_path.clone(), QueuedSync::default());
+            .insert(local_path.clone(), QueuedSync::new(session_id));
 
-        self.apply_sync_status(target, SyncStatus::Syncing, cx);
+        self.apply_sync_status_for_session(target, session_id, SyncStatus::Syncing, cx);
 
-        let task_path = local_path.clone();
         let task_config = config.clone();
         let task = cx.background_spawn(async move {
             let token = crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
-            let bytes = crate::sync::service::read_local(&task_path)?;
             let outcome = crate::sync::service::upload_after_save(&task_config, &token, &bytes)?;
             Ok::<_, crate::sync::service::ServiceError>((outcome, token))
         });
@@ -3513,30 +3746,52 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
-                // Release the per-path push slot before anything else so
-                // a follow-up (or the conflict flow's own re-push) never
-                // finds a stale entry.
-                let queued = state
-                    .syncs_in_flight
-                    .remove(&callback_path)
-                    .unwrap_or_default();
+                let Some(queued) = state.syncs_in_flight.remove(&callback_path) else {
+                    return;
+                };
+                if queued.owner != session_id {
+                    state.syncs_in_flight.insert(callback_path, queued);
+                    return;
+                }
+
+                // Lock + reopen creates a new owner even for the same path.
+                // Never apply the old token/etag/conflict to that session;
+                // only hand off an explicitly queued request owned by it.
+                if !state.vault_session_is_current(&callback_path, session_id) {
+                    if let Some(pending) = queued.pending {
+                        state.start_queued_sync(&callback_path, pending, cx);
+                    }
+                    return;
+                }
+
+                let conflict_interactive = interactive
+                    || queued.pending.as_ref().is_some_and(|pending| {
+                        pending.session_id == session_id && pending.interactive
+                    });
                 match result {
                     Ok((outcome, fresh_token)) => {
-                        state.with_sync_binding_mut_for(&callback_path, |b| {
-                            b.access_token = fresh_token;
-                        });
+                        state.with_sync_binding_mut_for_session(
+                            &callback_path,
+                            session_id,
+                            |binding| binding.access_token = fresh_token,
+                        );
                         use crate::sync::service::UploadAfterSave;
                         match outcome {
                             UploadAfterSave::Synced { new_etag, item: _ } => {
-                                state.with_sync_binding_mut_for(&callback_path, |b| {
-                                    b.config.last_etag = new_etag;
-                                    // Persist updated etag — best effort; if the
-                                    // disk write fails we'll just re-detect a
-                                    // conflict next push (and re-resolve).
-                                    let _ = crate::sync::config::save(&b.config);
-                                });
-                                state.apply_sync_status(
+                                state.with_sync_binding_mut_for_session(
                                     &callback_path,
+                                    session_id,
+                                    |binding| {
+                                        binding.config.last_etag = new_etag;
+                                        // Persist updated etag — best effort; if the
+                                        // disk write fails we'll just re-detect a
+                                        // conflict next push (and re-resolve).
+                                        let _ = crate::sync::config::save(&binding.config);
+                                    },
+                                );
+                                state.apply_sync_status_for_session(
+                                    &callback_path,
+                                    session_id,
                                     SyncStatus::Synced {
                                         at: chrono::Local::now(),
                                         auto_merged: 0,
@@ -3546,12 +3801,8 @@ impl AppState {
                                 // Saves that completed while this push ran
                                 // queued behind it — run the one follow-up
                                 // push that carries their bytes.
-                                if queued.requested {
-                                    state.sync_now_for_path_inner(
-                                        &callback_path,
-                                        queued.interactive,
-                                        cx,
-                                    );
+                                if let Some(pending) = queued.pending {
+                                    state.start_queued_sync(&callback_path, pending, cx);
                                 }
                             }
                             UploadAfterSave::Conflict {
@@ -3565,10 +3816,10 @@ impl AppState {
                                 // part of what gets merged and re-uploaded.
                                 state.handle_remote_conflict_for(
                                     &callback_path,
+                                    session_id,
                                     remote_bytes,
                                     remote_etag,
-                                    master_password,
-                                    interactive,
+                                    conflict_interactive,
                                     cx,
                                 );
                             }
@@ -3586,12 +3837,29 @@ impl AppState {
                             ) => SyncStatus::Reconnect { detail },
                             other => SyncStatus::Failed(other.to_string()),
                         };
-                        state.apply_sync_status(&callback_path, status, cx);
+                        state.apply_sync_status_for_session(&callback_path, session_id, status, cx);
                     }
                 }
             });
         })
         .detach();
+    }
+
+    fn start_queued_sync(
+        &mut self,
+        target: &Path,
+        request: QueuedSyncRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if self.vault_session_is_current(target, request.session_id) {
+            self.sync_now_for_path_inner(
+                target,
+                request.session_id,
+                request.interactive,
+                request.bytes,
+                cx,
+            );
+        }
     }
 
     /// Run a background auto-sync pull for every synced vault in memory —
@@ -3637,6 +3905,9 @@ impl AppState {
     /// sign-in while the app is open — early enough to fix it before it
     /// blocks a real save.
     fn auto_sync_for_path(&mut self, target: &Path, cx: &mut Context<Self>) {
+        let Some(session_id) = self.vault_session_id_for(target) else {
+            return;
+        };
         // Skip vaults mid-operation, and don't fire while the user is in a
         // Connect / Conflict overlay — auto-merging underneath them would
         // be jarring.
@@ -3666,10 +3937,12 @@ impl AppState {
         // moved. `interactive: false` so a background retry of a *conflict*
         // never pops the overlay unattended.
         if matches!(&status, Some(SyncStatus::Failed(_))) {
-            self.sync_now_for_path_inner(target, false, cx);
+            self.sync_now_for_path_inner(target, session_id, false, None, cx);
             return;
         }
-        let Some((config, token, master_password)) = self.snapshot_sync_inputs(target) else {
+        let Some((config, token, _master_password)) =
+            self.snapshot_sync_inputs_for_session(target, session_id)
+        else {
             return;
         };
 
@@ -3694,9 +3967,11 @@ impl AppState {
 
                 // Revalidate: while this pull was in flight the user may have
                 // started a manual sync, hit a conflict, disconnected, or
-                // locked the vault. If the binding is gone, drop everything
-                // (incl. the refreshed token — there's nowhere to put it).
-                if !state.has_sync_binding_for(&callback_path) {
+                // locked and reopened the same path. Results belong only to
+                // the exact session that dispatched the request.
+                if !state.vault_session_is_current(&callback_path, session_id)
+                    || !state.has_sync_binding_for(&callback_path)
+                {
                     return;
                 }
 
@@ -3705,8 +3980,8 @@ impl AppState {
                         // Keep-alive: persist the (possibly refreshed) token
                         // so the next tick rides on it and the inactivity
                         // window stays reset.
-                        state.with_sync_binding_mut_for(&callback_path, |b| {
-                            b.access_token = fresh_token;
+                        state.with_sync_binding_mut_for_session(&callback_path, session_id, |b| {
+                            b.access_token = fresh_token
                         });
                         // Only act on the pull result from a healthy resting
                         // state. If a manual sync moved us to Syncing, or a
@@ -3724,8 +3999,9 @@ impl AppState {
                             None => {
                                 // Up to date — stamp "synced just now" so the
                                 // UI shows the keep-alive ran.
-                                state.apply_sync_status(
+                                state.apply_sync_status_for_session(
                                     &callback_path,
+                                    session_id,
                                     SyncStatus::Synced {
                                         at: chrono::Local::now(),
                                         auto_merged: 0,
@@ -3742,9 +4018,9 @@ impl AppState {
                                 // instead.
                                 state.handle_remote_conflict_for(
                                     &callback_path,
+                                    session_id,
                                     remote_bytes,
                                     remote_etag,
-                                    master_password,
                                     false,
                                     cx,
                                 );
@@ -3754,8 +4030,9 @@ impl AppState {
                     Err(crate::sync::service::ServiceError::Auth(
                         crate::sync::auth::AuthError::InvalidGrant(detail),
                     )) => {
-                        state.apply_sync_status(
+                        state.apply_sync_status_for_session(
                             &callback_path,
+                            session_id,
                             SyncStatus::Reconnect { detail },
                             cx,
                         );
@@ -3784,19 +4061,20 @@ impl AppState {
     fn handle_remote_conflict_for(
         &mut self,
         target: &Path,
+        session_id: VaultSessionId,
         remote_bytes: Vec<u8>,
         remote_etag: String,
-        master_password: String,
         interactive: bool,
         cx: &mut Context<Self>,
     ) {
         // The binding can vanish between issuing the request and this
         // callback (disconnect mid-flight). With no binding there's nothing
         // to sync against, so don't decrypt/diff or surface a conflict.
-        if !self.has_sync_binding_for(target) {
+        if !self.vault_session_is_current(target, session_id) || !self.has_sync_binding_for(target)
+        {
             return;
         }
-        let Some(local_db) = self.database_clone_for(target) else {
+        let Some(local_db) = self.database_clone_for_session(target, session_id) else {
             // Vault was locked between issuing the upload and the 412
             // response landing — nothing to merge against. Drop silently.
             return;
@@ -3805,7 +4083,7 @@ impl AppState {
         // merge runs against this clone while the live document stays
         // editable; `commit_merged_for` refuses to install a result whose
         // base generation no longer matches the live document.
-        let Some(base_generation) = self.document_generation_for(target) else {
+        let Some(base_generation) = self.document_generation_for_session(target, session_id) else {
             return;
         };
 
@@ -3814,9 +4092,11 @@ impl AppState {
             VaultStatus::Open { path, .. } if path.as_path() == target
         );
 
-        match crate::keepass::KeePassRepository::open_bytes(&remote_bytes, &master_password, None) {
-            Ok(remote_doc) => {
-                let remote_db = remote_doc.database().clone();
+        let Some(remote_key) = self.database_key_for_session(target, session_id) else {
+            return;
+        };
+        match crate::keepass::repository::parse_database_bytes(&remote_bytes, remote_key) {
+            Ok(remote_db) => {
                 let report = crate::keepass::merge::diff(&local_db, &remote_db);
 
                 // Git-style: if no per-entry conflicts to decide, auto-merge
@@ -3853,8 +4133,9 @@ impl AppState {
                     ) {
                         Ok(merged) => merged,
                         Err(error) => {
-                            self.apply_sync_status(
+                            self.apply_sync_status_for_session(
                                 target,
+                                session_id,
                                 SyncStatus::Failed(format!("Merge blocked: {error}")),
                                 cx,
                             );
@@ -3863,9 +4144,9 @@ impl AppState {
                     };
                     self.commit_merged_for(
                         target,
+                        session_id,
                         merged,
                         remote_etag,
-                        master_password,
                         auto_merged_count,
                         needs_upload,
                         history_entries,
@@ -3880,8 +4161,9 @@ impl AppState {
                 // vault, mark Failed with a hint so the user knows to
                 // switch back before resolving.
                 if !target_is_active {
-                    self.apply_sync_status(
+                    self.apply_sync_status_for_session(
                         target,
+                        session_id,
                         SyncStatus::Failed(
                             "Remote conflict — switch back to this vault to resolve.".into(),
                         ),
@@ -3893,8 +4175,9 @@ impl AppState {
                 // hint; the user resolves on their next explicit "Sync now",
                 // which runs interactively and opens the overlay.
                 if !interactive {
-                    self.apply_sync_status(
+                    self.apply_sync_status_for_session(
                         target,
+                        session_id,
                         SyncStatus::Failed("Remote conflict — choose Sync now to resolve.".into()),
                         cx,
                     );
@@ -3911,13 +4194,15 @@ impl AppState {
                     report,
                     picks,
                     base_generation,
+                    session_id,
                 }));
                 self.overlay = Overlay::Conflict;
                 cx.notify();
             }
             Err(_) => {
-                self.apply_sync_status(
+                self.apply_sync_status_for_session(
                     target,
+                    session_id,
                     SyncStatus::Failed(
                         "Remote file uses a different master password — \
                          cannot merge automatically."
@@ -3948,25 +4233,33 @@ impl AppState {
     /// blind force-overwrite, at the cost of one extra round trip in the
     /// rare race case.
     pub fn apply_conflict_resolution(&mut self, cx: &mut Context<Self>) {
-        let (merge_result, remote_etag, base_generation, history_entries) = match &self.sync_status
-        {
-            SyncStatus::Conflict(state) => (
-                crate::keepass::merge::apply_picks(
-                    &state.local_db,
-                    &state.remote_db,
-                    &state.picks,
-                    &state.report,
-                ),
-                state.remote_etag.clone(),
-                state.base_generation,
-                sync_history::entries_from_report(
-                    &state.report,
-                    &state.picks,
-                    chrono::Local::now(),
-                ),
-            ),
+        let target = match &self.vault {
+            VaultStatus::Open { path, .. } => path.clone(),
             _ => return,
         };
+        let (merge_result, remote_etag, base_generation, history_entries, session_id) =
+            match &self.sync_status {
+                SyncStatus::Conflict(state) => (
+                    crate::keepass::merge::apply_picks(
+                        &state.local_db,
+                        &state.remote_db,
+                        &state.picks,
+                        &state.report,
+                    ),
+                    state.remote_etag.clone(),
+                    state.base_generation,
+                    sync_history::entries_from_report(
+                        &state.report,
+                        &state.picks,
+                        chrono::Local::now(),
+                    ),
+                    state.session_id,
+                ),
+                _ => return,
+            };
+        if !self.vault_session_is_current(&target, session_id) {
+            return;
+        }
         let merged = match merge_result {
             Ok(merged) => merged,
             Err(error) => {
@@ -3976,11 +4269,6 @@ impl AppState {
                 return;
             }
         };
-        let VaultStatus::Open { document, path, .. } = &self.vault else {
-            return;
-        };
-        let master_password = document.password().to_string();
-        let target = path.clone();
 
         // User-driven resolution — the "Synced · N merged" badge is reserved
         // for git-style silent merges where the user got no overlay at all.
@@ -3989,9 +4277,9 @@ impl AppState {
         // deliberate new state that must reach the server.
         self.commit_merged_for(
             &target,
+            session_id,
             merged,
             remote_etag,
-            master_password,
             0,
             true,
             history_entries,
@@ -4031,45 +4319,22 @@ impl AppState {
     fn commit_merged_for(
         &mut self,
         target: &Path,
+        session_id: VaultSessionId,
         merged: keepass::Database,
         remote_etag: String,
-        master_password: String,
         auto_merged: usize,
         needs_upload: bool,
         history_entries: Vec<SyncHistoryEntry>,
         base_generation: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_id) = self.vault_session_id_for(target) else {
+        if !self.vault_session_is_current(target, session_id) {
             return;
-        };
-        // Pull config + token + keyfile path from whichever slot owns
-        // `target` right now. Works for both active and parked vaults
-        // — silent auto-merge from a parked sync still writes through
-        // to disk + uploads cleanly.
-        let (document_password, keyfile_path, config, token) = {
-            let inputs = self.snapshot_sync_inputs(target);
-            let keyfile_path = if self.active_vault_session_id == Some(session_id)
-                && matches!(
-                    &self.vault,
-                    VaultStatus::Open { path, .. } if path.as_path() == target
-                ) {
-                match &self.vault {
-                    VaultStatus::Open { document, .. } => {
-                        document.keyfile_path().map(std::path::Path::to_path_buf)
-                    }
-                    _ => None,
-                }
-            } else {
-                self.parked
-                    .get(target)
-                    .filter(|session| session.session_id == session_id)
-                    .and_then(|p| p.document.keyfile_path().map(std::path::Path::to_path_buf))
-            };
-            match inputs {
-                Some((config, token, pw)) => (pw, keyfile_path, config, token),
-                None => return,
-            }
+        }
+        // Pull config + token from whichever slot owns `target` right now.
+        let (config, token) = match self.snapshot_sync_inputs_for_session(target, session_id) {
+            Some((config, token, _password)) => (config, token),
+            None => return,
         };
 
         let local_path = target.to_path_buf();
@@ -4083,10 +4348,16 @@ impl AppState {
         if self.document_generation_for_session(target, session_id) != Some(base_generation)
             || self.saves_in_flight.contains_key(&local_path)
         {
-            self.apply_sync_status(target, SyncStatus::Syncing, cx);
+            self.apply_sync_status_for_session(target, session_id, SyncStatus::Syncing, cx);
             self.request_save_for_session(local_path, session_id, true, cx);
             return;
         }
+        let merged_for_document = merged.clone();
+        let Some(payload) = self.save_payload_for_database_for_session(target, session_id, merged)
+        else {
+            return;
+        };
+
         // Hold the per-path save slot for the whole of phase 1 so ordinary
         // saves queue behind the merge write instead of racing it on disk.
         self.mark_vault_session_unpersisted(session_id);
@@ -4094,11 +4365,9 @@ impl AppState {
         self.saves_in_flight
             .insert(local_path.clone(), QueuedSave::new(session_id));
 
-        let payload =
-            crate::keepass::SavePayload::for_merged(merged, document_password, keyfile_path);
         let if_match = remote_etag;
 
-        self.apply_sync_status(target, SyncStatus::Syncing, cx);
+        self.apply_sync_status_for_session(target, session_id, SyncStatus::Syncing, cx);
 
         // Phase 1: local merge save. Splitting this off from the network
         // step lets us commit the merge into the in-memory document
@@ -4110,9 +4379,6 @@ impl AppState {
         let save_path = local_path.clone();
         let local_save_task = cx.background_spawn(async move { payload.save_to(&save_path) });
 
-        let reload_path = local_path.clone();
-        let reload_password = master_password;
-        let network_path = local_path.clone();
         let callback_path = local_path;
 
         cx.spawn(async move |this, cx| {
@@ -4121,29 +4387,36 @@ impl AppState {
             // `move` (which would also consume `callback_path`, still
             // needed by phase 2 below).
             let mut history_slot = Some(history_entries);
-            let local_save_result = local_save_task.await;
-            let proceed = this
+            let (save_receipt, save_error) = match local_save_task.await {
+                Ok(receipt) => (Some(receipt), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let published_bytes = this
                 .update(cx, |state, cx| {
                     // Release the per-path save slot taken above; pick up
                     // any ordinary-save request that queued behind the
                     // merge write meanwhile.
                     let Some(queued) = state.saves_in_flight.remove(&callback_path) else {
-                        return false;
+                        return None;
                     };
                     if queued.owner != session_id {
                         state.saves_in_flight.insert(callback_path.clone(), queued);
-                        return false;
+                        return None;
                     }
-                    if let Err(error) = &local_save_result {
+                    let Some(receipt) = save_receipt.as_ref() else {
+                        let error = save_error
+                            .as_deref()
+                            .unwrap_or("merge save failed before publication");
                         state.apply_save_status_for_session(
                             &callback_path,
                             session_id,
-                            SaveStatus::Failed(error.to_string()),
+                            SaveStatus::Failed(error.into()),
                             cx,
                         );
-                        state.apply_sync_status(
+                        state.apply_sync_status_for_session(
                             &callback_path,
-                            SyncStatus::Failed(error.to_string()),
+                            session_id,
+                            SyncStatus::Failed(error.into()),
                             cx,
                         );
                         if let Some(pending_session) = queued.pending_session {
@@ -4154,14 +4427,8 @@ impl AppState {
                                 cx,
                             );
                         }
-                        return false;
-                    }
-                    state.apply_save_status_for_session(
-                        &callback_path,
-                        session_id,
-                        SaveStatus::Saved,
-                        cx,
-                    );
+                        return None;
+                    };
                     // The user edited this vault while the merged bytes
                     // were being encrypted + written (the UI stays
                     // interactive during the ~500 ms background save), or
@@ -4186,54 +4453,44 @@ impl AppState {
                                 cx,
                             );
                         }
-                        return false;
+                        return None;
                     }
-                    // Reload the in-memory document from the freshly merged
-                    // file. After this point the in-memory state and the
-                    // on-disk file agree, so a subsequent network failure
-                    // can't strand the merge on disk.
-                    let bytes = std::fs::read(&reload_path).unwrap_or_default();
-                    let reloaded = match crate::keepass::KeePassRepository::open_bytes(
-                        &bytes,
-                        &reload_password,
-                        None,
-                    ) {
-                        Ok(reloaded) => {
-                            // Replace whichever slot still owns this path
-                            // — active or parked. If the user locked the
-                            // vault between the merge and the reload, we
-                            // simply drop and let the next open re-read.
-                            let replaced = state.replace_document_for_session(
-                                &callback_path,
-                                session_id,
-                                reloaded,
-                                cx,
-                            );
-                            // History is appended *here*, after the local
-                            // DB genuinely reflects the merge. Earlier
-                            // (pre-save) would risk phantom rows; later
-                            // (post-upload) would lose them on network
-                            // failure even though the local change stuck.
-                            if replaced && let Some(entries) = history_slot.take() {
-                                state.append_sync_history_for(&callback_path, entries);
-                            }
-                            replaced
-                        }
-                        Err(_) => {
-                            state.apply_sync_status(
-                                &callback_path,
-                                SyncStatus::Failed(
-                                    "Merge saved locally but could not be re-read; \
-                                     reopen the vault to continue."
-                                        .into(),
-                                ),
-                                cx,
-                            );
-                            false
-                        }
-                    };
+                    let installed = state.replace_database_for_session(
+                        &callback_path,
+                        session_id,
+                        merged_for_document,
+                        cx,
+                    );
+                    if installed && let Some(entries) = history_slot.take() {
+                        state.append_sync_history_for(&callback_path, entries);
+                    }
 
-                    if queued.pending_session != Some(session_id) {
+                    let durable = receipt.is_durable();
+                    if let Some(error) = receipt.durability_error() {
+                        let message =
+                            format!("Merge was written, but directory sync failed: {error}");
+                        state.apply_save_status_for_session(
+                            &callback_path,
+                            session_id,
+                            SaveStatus::Failed(message.clone()),
+                            cx,
+                        );
+                        state.apply_sync_status_for_session(
+                            &callback_path,
+                            session_id,
+                            SyncStatus::Failed(message),
+                            cx,
+                        );
+                    } else if installed {
+                        state.apply_save_status_for_session(
+                            &callback_path,
+                            session_id,
+                            SaveStatus::Saved,
+                            cx,
+                        );
+                    }
+
+                    if installed && durable && queued.pending_session != Some(session_id) {
                         state.mark_vault_session_persisted(session_id);
                     }
                     if let Some(pending_session) = queued.pending_session {
@@ -4243,21 +4500,22 @@ impl AppState {
                             true,
                             cx,
                         );
-                        return false;
+                        return None;
                     }
 
-                    if state.finish_deferred_lock_if_ready() {
+                    if durable && state.finish_deferred_lock_if_ready() {
                         cx.notify();
-                        return false;
+                        return None;
                     }
 
-                    reloaded
+                    (installed && durable).then(|| receipt.bytes())
                 })
-                .unwrap_or(false);
+                .ok()
+                .flatten();
 
-            if !proceed {
+            let Some(published_bytes) = published_bytes else {
                 return;
-            }
+            };
 
             // Pure fast-forward: the merge only pulled remote-side changes,
             // so the merged DB already matches the server. Skip the upload
@@ -4267,12 +4525,16 @@ impl AppState {
             // refreshed the token.
             if !needs_upload {
                 let _ = this.update(cx, |state, cx| {
-                    state.with_sync_binding_mut_for(&callback_path, |b| {
+                    if !state.vault_session_is_current(&callback_path, session_id) {
+                        return;
+                    }
+                    state.with_sync_binding_mut_for_session(&callback_path, session_id, |b| {
                         b.config.last_etag = if_match.clone();
                         let _ = crate::sync::config::save(&b.config);
                     });
-                    state.apply_sync_status(
+                    state.apply_sync_status_for_session(
                         &callback_path,
+                        session_id,
                         SyncStatus::Synced {
                             at: chrono::Local::now(),
                             auto_merged,
@@ -4290,11 +4552,10 @@ impl AppState {
             let task_config = config.clone();
             let network_task = cx.background_spawn(async move {
                 let token = crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
-                let bytes = crate::sync::service::read_local(&network_path)?;
                 let outcome = crate::sync::graph::upload_content(
                     &task_config.drive_id,
                     &task_config.item_id,
-                    &bytes,
+                    &published_bytes,
                     Some(&if_match),
                     &token,
                 )?;
@@ -4302,20 +4563,31 @@ impl AppState {
             });
 
             let result = network_task.await;
-            let _ = this.update(cx, |state, cx| match result {
+            let _ = this.update(cx, |state, cx| {
+                if !state.vault_session_is_current(&callback_path, session_id) {
+                    return;
+                }
+                match result {
                 Ok((outcome, fresh_token)) => {
-                    state.with_sync_binding_mut_for(&callback_path, |b| {
-                        b.access_token = fresh_token;
-                    });
+                    state.with_sync_binding_mut_for_session(
+                        &callback_path,
+                        session_id,
+                        |b| b.access_token = fresh_token,
+                    );
                     use crate::sync::graph::UploadOutcome;
                     match outcome {
                         UploadOutcome::Ok { new_etag, .. } => {
-                            state.with_sync_binding_mut_for(&callback_path, |b| {
-                                b.config.last_etag = new_etag;
-                                let _ = crate::sync::config::save(&b.config);
-                            });
-                            state.apply_sync_status(
+                            state.with_sync_binding_mut_for_session(
                                 &callback_path,
+                                session_id,
+                                |b| {
+                                    b.config.last_etag = new_etag;
+                                    let _ = crate::sync::config::save(&b.config);
+                                },
+                            );
+                            state.apply_sync_status_for_session(
+                                &callback_path,
+                                session_id,
                                 SyncStatus::Synced {
                                     at: chrono::Local::now(),
                                     auto_merged,
@@ -4339,8 +4611,19 @@ impl AppState {
                             // Third device wrote during resolution. Re-trigger
                             // the conflict flow against the freshly merged
                             // local + the new remote — for the same vault.
-                            state.apply_sync_status(&callback_path, SyncStatus::Syncing, cx);
-                            state.sync_now_for_path(&callback_path, cx);
+                            state.apply_sync_status_for_session(
+                                &callback_path,
+                                session_id,
+                                SyncStatus::Syncing,
+                                cx,
+                            );
+                            state.sync_now_for_path_inner(
+                                &callback_path,
+                                session_id,
+                                true,
+                                None,
+                                cx,
+                            );
                         }
                     }
                 }
@@ -4355,8 +4638,14 @@ impl AppState {
                         ) => SyncStatus::Reconnect { detail },
                         other => SyncStatus::Failed(other.to_string()),
                     };
-                    state.apply_sync_status(&callback_path, status, cx);
+                    state.apply_sync_status_for_session(
+                        &callback_path,
+                        session_id,
+                        status,
+                        cx,
+                    );
                 }
+            }
             });
         })
         .detach();
@@ -4802,6 +5091,98 @@ mod park_tests {
 
         assert!(state.set_save_status_for_session(&path, current_session, SaveStatus::Saved,));
         assert_eq!(state.save_status, SaveStatus::Saved);
+    }
+
+    #[test]
+    fn invalid_vault_selection_does_not_replace_an_open_document() {
+        let mut state = AppState::default();
+        let open_path = PathBuf::from("/tmp/open.kdbx");
+        fresh_open(&mut state, open_path.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session id");
+
+        state.record_vault_selection_failure(
+            Some(PathBuf::from("/tmp/not-a-vault.txt")),
+            "Selected file is not a .kdbx database.".into(),
+        );
+
+        assert!(matches!(
+            &state.vault,
+            VaultStatus::Open { path, .. } if path == &open_path
+        ));
+        assert_eq!(state.active_vault_session_id, Some(session_id));
+        assert_eq!(
+            state.vault_selection_error(),
+            Some("Selected file is not a .kdbx database.")
+        );
+    }
+
+    #[test]
+    fn queued_sync_replaces_all_old_state_for_a_reopened_session() {
+        let old_session = VaultSessionId::next();
+        let new_session = VaultSessionId::next();
+        let old_bytes = Arc::new(vec![1]);
+        let new_bytes = Arc::new(vec![2]);
+        let mut queued = QueuedSync::new(old_session);
+
+        queued.queue(QueuedSyncRequest {
+            session_id: old_session,
+            interactive: false,
+            bytes: Some(old_bytes.clone()),
+        });
+        queued.queue(QueuedSyncRequest {
+            session_id: old_session,
+            interactive: true,
+            bytes: None,
+        });
+        let same_session = queued.pending.as_ref().expect("queued request");
+        assert!(same_session.interactive);
+        assert!(same_session.bytes.is_none());
+
+        queued.queue(QueuedSyncRequest {
+            session_id: new_session,
+            interactive: false,
+            bytes: Some(new_bytes.clone()),
+        });
+        let reopened = queued.pending.as_ref().expect("replacement request");
+        assert_eq!(queued.owner, old_session);
+        assert_eq!(reopened.session_id, new_session);
+        assert!(!reopened.interactive);
+        assert!(
+            reopened
+                .bytes
+                .as_ref()
+                .is_some_and(|b| Arc::ptr_eq(b, &new_bytes))
+        );
+    }
+
+    #[test]
+    fn stale_sync_callback_cannot_mutate_reopened_same_path_binding() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/same-sync-path.kdbx");
+
+        fresh_open(&mut state, path.clone(), "pw-old");
+        state.sync = Some(fake_binding("old@example.invalid"));
+        let stale_session = state.active_vault_session_id.expect("old session");
+
+        fresh_open(&mut state, path.clone(), "pw-new");
+        state.sync = Some(fake_binding("new@example.invalid"));
+        let current_session = state.active_vault_session_id.expect("new session");
+
+        state.with_sync_binding_mut_for_session(&path, stale_session, |binding| {
+            binding.config.last_etag = "stale-etag".into();
+        });
+        assert_eq!(
+            state.sync.as_ref().expect("binding").config.last_etag,
+            "etag-0"
+        );
+
+        state.with_sync_binding_mut_for_session(&path, current_session, |binding| {
+            binding.config.last_etag = "current-etag".into();
+        });
+        assert_eq!(
+            state.sync.as_ref().expect("binding").config.last_etag,
+            "current-etag"
+        );
     }
 
     #[test]

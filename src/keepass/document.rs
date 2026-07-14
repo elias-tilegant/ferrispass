@@ -3,12 +3,13 @@ use crate::keepass::repository::{
     STANDARD_FIELDS, find_entry_id, find_group_id, snapshot_from_database,
 };
 use keepass::{Database, DatabaseKey, db::fields};
+use sha2::{Digest as _, Sha256};
 use std::{
     fmt, fs,
-    io::{self, Write as _},
+    io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
+    sync::{Arc, Mutex},
 };
 use thiserror::Error;
 
@@ -20,14 +21,14 @@ pub(crate) const FAVORITE_TAG: &str = "Favorite";
 pub struct VaultDocument {
     database: Database,
     snapshot: Arc<VaultSnapshot>,
-    /// Master password kept in memory so we can rebuild the `DatabaseKey` for
-    /// every save. The decrypted entries are already in memory anyway, so
-    /// holding the password here is no worse than the existing exposure.
+    /// Master password retained for decrypting remote conflict payloads.
     password: String,
-    /// Optional key-file path. We re-read the file on each save (rather than
-    /// caching its contents) so that if the user rotates the key file outside
-    /// the app, the next save uses the current bytes.
+    /// Display/source path of the key file selected at unlock time.
     keyfile_path: Option<PathBuf>,
+    /// Exact key material that successfully opened the database. The type
+    /// zeroizes itself on drop. Reusing it prevents an external keyfile
+    /// replacement from silently changing the key used by the next save.
+    database_key: DatabaseKey,
     /// Monotonic mutation counter. Every mutator funnels through
     /// `refresh_snapshot`, which bumps it. The sync merge flow snapshots
     /// this alongside the database clone it diffs against and compares it
@@ -35,6 +36,54 @@ pub struct VaultDocument {
     /// the user edited the document mid-merge, and installing the merged
     /// copy would silently discard that edit.
     generation: u64,
+    /// Canonical write target plus the exact bytes revision that was opened or
+    /// last saved. Shared with background save payloads so a completed save
+    /// advances the baseline before a queued save snapshots again.
+    storage: Arc<Mutex<Option<StorageState>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiskRevision([u8; 32]);
+
+impl DiskRevision {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+
+    fn from_path(path: &Path) -> Result<Self, io::Error> {
+        let mut file = fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(Self(hasher.finalize().into()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StorageState {
+    path: PathBuf,
+    revision: DiskRevision,
+}
+
+fn database_key_from_sources(
+    password: &str,
+    keyfile_path: Option<&Path>,
+) -> Result<DatabaseKey, io::Error> {
+    let mut key = DatabaseKey::new();
+    if !password.is_empty() {
+        key = key.with_password(password);
+    }
+    if let Some(path) = keyfile_path {
+        let mut file = fs::File::open(path)?;
+        key = key.with_keyfile(&mut file)?;
+    }
+    Ok(key)
 }
 
 impl VaultDocument {
@@ -44,12 +93,49 @@ impl VaultDocument {
         password: String,
         keyfile_path: Option<PathBuf>,
     ) -> Self {
+        let database_key = database_key_from_sources(&password, keyfile_path.as_deref())
+            .expect("VaultDocument::new keyfile must be readable");
+        Self::new_with_key(database, snapshot, password, keyfile_path, database_key)
+    }
+
+    pub(crate) fn new_with_key(
+        database: Database,
+        snapshot: VaultSnapshot,
+        password: String,
+        keyfile_path: Option<PathBuf>,
+        database_key: DatabaseKey,
+    ) -> Self {
         Self {
             database,
             snapshot: Arc::new(snapshot),
             password,
             keyfile_path,
+            database_key,
             generation: 0,
+            storage: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub(crate) fn new_with_storage(
+        database: Database,
+        snapshot: VaultSnapshot,
+        password: String,
+        keyfile_path: Option<PathBuf>,
+        database_key: DatabaseKey,
+        storage_path: PathBuf,
+        revision: DiskRevision,
+    ) -> Self {
+        Self {
+            database,
+            snapshot: Arc::new(snapshot),
+            password,
+            keyfile_path,
+            database_key,
+            generation: 0,
+            storage: Arc::new(Mutex::new(Some(StorageState {
+                path: storage_path,
+                revision,
+            }))),
         }
     }
 
@@ -76,6 +162,10 @@ impl VaultDocument {
     /// password-only vaults.
     pub fn keyfile_path(&self) -> Option<&Path> {
         self.keyfile_path.as_deref()
+    }
+
+    pub(crate) fn database_key(&self) -> DatabaseKey {
+        self.database_key.clone()
     }
 
     /// Borrow the live `Database` for diff / read-only operations (e.g. by
@@ -176,11 +266,56 @@ impl VaultDocument {
     /// Argon2 KDF that runs inside `Database::save`) so the foreground keeps
     /// full ownership of the live document and stays responsive while save runs.
     pub fn save_payload(&self) -> SavePayload {
+        let expected_storage = self
+            .storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         SavePayload {
             database: self.database.clone(),
-            password: self.password.clone(),
-            keyfile_path: self.keyfile_path.clone(),
+            database_key: self.database_key.clone(),
+            storage: Arc::clone(&self.storage),
+            expected_storage,
         }
+    }
+
+    /// Build a save payload for a merged database while retaining the local
+    /// file revision guard and canonical storage target.
+    pub fn save_payload_for_database(&self, database: Database) -> SavePayload {
+        let expected_storage = self
+            .storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        SavePayload {
+            database,
+            database_key: self.database_key.clone(),
+            storage: Arc::clone(&self.storage),
+            expected_storage,
+        }
+    }
+
+    /// Install an already-published merge result without replacing the
+    /// document's credentials or shared storage revision.
+    pub fn replace_database(&mut self, database: Database) {
+        self.database = database;
+        self.refresh_snapshot();
+    }
+
+    /// Read the exact currently-bound vault bytes for a manual or retry sync.
+    /// The storage revision is verified while the same guards used by saves are
+    /// held, so a retargeted symlink or externally replaced KDBX can never be
+    /// uploaded under this document's cloud binding.
+    pub fn read_current_bytes(&self) -> Result<Arc<Vec<u8>>, SaveError> {
+        let storage = self.storage.lock().map_err(|_| SaveError::StorageState)?;
+        let state = storage.as_ref().ok_or(SaveError::StorageUnbound)?;
+        let _sidecar_lock = acquire_save_lock(&state.path)?;
+        let _target_lock = acquire_target_lock(&state.path)?;
+        let bytes = read_bounded_file(&state.path)?;
+        if DiskRevision::from_bytes(&bytes) != state.revision {
+            return Err(SaveError::ExternalModification(state.path.clone()));
+        }
+        Ok(Arc::new(bytes))
     }
 
     /// Create a new entry under `group_id` (the stringified `GroupId`), apply
@@ -875,61 +1010,364 @@ fn format_code(raw: &str) -> String {
 /// `DatabaseKey` and serialize without touching the live document.
 pub struct SavePayload {
     database: Database,
-    password: String,
-    keyfile_path: Option<PathBuf>,
+    database_key: DatabaseKey,
+    storage: Arc<Mutex<Option<StorageState>>>,
+    expected_storage: Option<StorageState>,
 }
 
-impl SavePayload {
-    /// Build a payload from arbitrary inputs — used by the sync conflict
-    /// flow to encrypt a freshly-merged Database without going through the
-    /// live VaultDocument (which already holds the *un*-merged state).
-    pub fn for_merged(database: Database, password: String, keyfile_path: Option<PathBuf>) -> Self {
-        SavePayload {
-            database,
-            password,
-            keyfile_path,
+/// Exact encrypted bytes published by a save. Sync chains upload this receipt
+/// instead of re-reading a path that another process may have replaced after
+/// the revision check.
+pub struct SaveReceipt {
+    bytes: Arc<Vec<u8>>,
+    durability: SaveDurability,
+}
+
+enum SaveDurability {
+    Durable,
+    DirectorySyncFailed(String),
+}
+
+impl SaveReceipt {
+    pub fn bytes(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.bytes)
+    }
+
+    pub fn durability_error(&self) -> Option<&str> {
+        match &self.durability {
+            SaveDurability::Durable => None,
+            SaveDurability::DirectorySyncFailed(error) => Some(error),
         }
     }
 
+    pub fn is_durable(&self) -> bool {
+        self.durability_error().is_none()
+    }
+}
+
+impl fmt::Debug for SaveReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SaveReceipt")
+            .field("encrypted_bytes", &self.bytes.len())
+            .field("durable", &self.is_durable())
+            .finish()
+    }
+}
+
+impl SavePayload {
     /// Atomically write the database to `target_path`. Writes to a uniquely
     /// named `<target>.<pid>-<seq>.tmp` sibling, fsyncs, then renames over
     /// the target so a crash mid-write can never leave a half-written
     /// `.kdbx`.
-    pub fn save_to(self, target_path: &Path) -> Result<(), SaveError> {
-        let mut key = DatabaseKey::new();
-        if !self.password.is_empty() {
-            key = key.with_password(&self.password);
+    pub fn save_to(self, target_path: &Path) -> Result<SaveReceipt, SaveError> {
+        // This guard serializes every payload cloned from one unlocked
+        // document and remains held until the published revision is recorded.
+        let mut storage = self.storage.lock().map_err(|_| SaveError::StorageState)?;
+        if *storage != self.expected_storage {
+            return Err(SaveError::StalePayload);
         }
-        if let Some(kf) = &self.keyfile_path {
-            let mut kf_handle = fs::File::open(kf).map_err(SaveError::ReadKeyfile)?;
-            key = key
-                .with_keyfile(&mut kf_handle)
-                .map_err(SaveError::Keyfile)?;
-        }
+        let (write_path, expected_revision) = match self.expected_storage.as_ref() {
+            Some(state) => {
+                let current_target =
+                    fs::canonicalize(target_path).map_err(SaveError::ResolveTarget)?;
+                if current_target != state.path {
+                    return Err(SaveError::TargetChanged {
+                        expected: state.path.clone(),
+                        actual: current_target,
+                    });
+                }
+                (state.path.clone(), Some(state.revision.clone()))
+            }
+            None => (canonical_target_path(target_path)?, None),
+        };
 
-        let tmp_path = temp_path_for(target_path);
-        // Scope the file handle so it's flushed + dropped before rename.
+        // A stable sidecar lock coordinates aliases and separate FerrisPass
+        // processes. Locking the vault inode itself would stop coordinating as
+        // soon as atomic rename replaces that inode.
+        let _file_lock = acquire_save_lock(&write_path)?;
+        let _target_lock = acquire_target_lock(&write_path)?;
+        match &expected_revision {
+            Some(revision) => verify_disk_revision(&write_path, revision)?,
+            None if write_path.exists() => {
+                return Err(SaveError::UnboundTargetExists(write_path));
+            }
+            None => {}
+        }
+        reject_hardlinked_target(&write_path)?;
+
+        let tmp_path = temp_path_for(&write_path);
+        let mut tmp = create_temp_file(&write_path, &tmp_path)?;
         let write_result = (|| {
-            let mut tmp = fs::File::create(&tmp_path).map_err(SaveError::CreateTemp)?;
             self.database
-                .save(&mut tmp, key)
-                .map_err(|e| SaveError::Encode(e.to_string()))?;
+                .save(&mut tmp, self.database_key)
+                .map_err(|error| SaveError::Encode(error.to_string()))?;
             tmp.flush().map_err(SaveError::WriteTemp)?;
-            tmp.sync_all().map_err(SaveError::WriteTemp)?;
+            sync_file(&tmp).map_err(SaveError::WriteTemp)?;
+
+            // Preserve the target's latest mode even when chmod raced the
+            // expensive KDF. macOS metadata/ACL/xattrs were copied when the
+            // temp inode was created.
+            if let Ok(metadata) = fs::metadata(&write_path) {
+                tmp.set_permissions(metadata.permissions())
+                    .map_err(SaveError::WriteTemp)?;
+                sync_file(&tmp).map_err(SaveError::WriteTemp)?;
+            }
             Ok(())
         })();
-        // Best-effort cleanup on every failure arm: with per-save unique
-        // names, a stranded temp file would otherwise accumulate forever.
-        if let Err(e) = write_result {
+        if let Err(error) = write_result {
+            drop(tmp);
             let _ = fs::remove_file(&tmp_path);
-            return Err(e);
+            return Err(error);
         }
-        fs::rename(&tmp_path, target_path).map_err(|e| {
+        drop(tmp);
+
+        // Buffer and hash the finished encrypted bytes before the final target
+        // check. This keeps the verify-to-publish interval independent of vault
+        // size and avoids a second allocation when handing bytes to sync.
+        let published_bytes = match read_bounded_file(&tmp_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(error);
+            }
+        };
+        let new_revision = DiskRevision::from_bytes(&published_bytes);
+
+        // Recheck after encoding, while the process-wide storage guard,
+        // sidecar lock and (where supported by the other client) target inode
+        // lock are still held. Nothing expensive may run between this check
+        // and publication.
+        match &expected_revision {
+            Some(revision) => {
+                if let Err(error) = verify_disk_revision(&write_path, revision) {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(error);
+                }
+            }
+            None if write_path.exists() => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(SaveError::UnboundTargetExists(write_path));
+            }
+            None => {}
+        }
+        if let Err(error) = reject_hardlinked_target(&write_path) {
             let _ = fs::remove_file(&tmp_path);
-            SaveError::Rename(e)
-        })?;
-        Ok(())
+            return Err(error);
+        }
+
+        let cleanup_error = if expected_revision.is_some() {
+            fs::rename(&tmp_path, &write_path).map_err(|error| {
+                let _ = fs::remove_file(&tmp_path);
+                SaveError::Rename(error)
+            })?;
+            None
+        } else {
+            // `hard_link` is an atomic no-clobber publication because the temp
+            // inode lives in the destination directory. Unlike rename, it can
+            // never replace a file that appeared after the final exists check.
+            match fs::hard_link(&tmp_path, &write_path) {
+                Ok(()) => fs::remove_file(&tmp_path).err(),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(SaveError::UnboundTargetExists(write_path));
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(SaveError::PublishNew(error));
+                }
+            }
+        };
+
+        // Everything below happens after publication and therefore cannot be
+        // represented as a pre-commit error. Record the revision first, then
+        // return a receipt that distinguishes full durability from a failed
+        // directory fsync.
+        *storage = Some(StorageState {
+            path: write_path.clone(),
+            revision: new_revision,
+        });
+        let durability = match (cleanup_error, sync_parent_directory(&write_path)) {
+            (None, Ok(())) => SaveDurability::Durable,
+            (Some(error), _) => SaveDurability::DirectorySyncFailed(format!(
+                "vault was published but its temporary hard link could not be removed: {error}"
+            )),
+            (None, Err(error)) => SaveDurability::DirectorySyncFailed(error.to_string()),
+        };
+        Ok(SaveReceipt {
+            bytes: Arc::new(published_bytes),
+            durability,
+        })
     }
+}
+
+fn acquire_save_lock(target: &Path) -> Result<fs::File, SaveError> {
+    let mut lock_name = target.as_os_str().to_owned();
+    lock_name.push(".ferrispass.lock");
+    let lock_path = PathBuf::from(lock_name);
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&lock_path)
+        .map_err(|source| SaveError::OpenLock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    file.lock().map_err(|source| SaveError::Lock {
+        path: lock_path,
+        source,
+    })?;
+    Ok(file)
+}
+
+fn acquire_target_lock(target: &Path) -> Result<Option<fs::File>, SaveError> {
+    if !target.exists() {
+        return Ok(None);
+    }
+    let file = fs::File::open(target).map_err(SaveError::OpenTargetLock)?;
+    file.lock().map_err(SaveError::TargetLock)?;
+    Ok(Some(file))
+}
+
+fn read_bounded_file(path: &Path) -> Result<Vec<u8>, SaveError> {
+    let file = fs::File::open(path).map_err(SaveError::ReadRevision)?;
+    let size = file.metadata().map_err(SaveError::ReadRevision)?.len();
+    crate::keepass::limits::validate_kdbx_size(size).map_err(SaveError::ReadRevision)?;
+    let capacity = usize::try_from(size).map_err(|_| {
+        SaveError::ReadRevision(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "vault size does not fit this platform",
+        ))
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(crate::keepass::limits::MAX_KDBX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(SaveError::ReadRevision)?;
+    crate::keepass::limits::validate_kdbx_size(bytes.len() as u64)
+        .map_err(SaveError::ReadRevision)?;
+    Ok(bytes)
+}
+
+fn sync_file(file: &fs::File) -> Result<(), io::Error> {
+    file.sync_all()?;
+    #[cfg(target_os = "macos")]
+    macos_full_sync::full_sync(file)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod macos_full_sync {
+    use std::{fs::File, io, os::fd::AsRawFd as _};
+
+    const F_FULLFSYNC: i32 = 51;
+
+    unsafe extern "C" {
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+    }
+
+    pub(super) fn full_sync(file: &File) -> io::Result<()> {
+        // SAFETY: F_FULLFSYNC takes no variadic argument; the descriptor stays
+        // valid for the duration of this call and belongs to `file`.
+        let result = unsafe { fcntl(file.as_raw_fd(), F_FULLFSYNC) };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+            ) {
+                // `sync_all` already completed above. Some non-APFS volumes do
+                // not implement F_FULLFSYNC, so retain normal fsync durability
+                // instead of making those vaults impossible to save.
+                Ok(())
+            } else {
+                Err(error)
+            }
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn create_temp_file(target: &Path, temp: &Path) -> Result<fs::File, SaveError> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(temp).map_err(SaveError::CreateTemp)?;
+
+    // `std::fs::copy` uses COPYFILE_ALL on macOS, retaining ACLs, xattrs,
+    // flags, ownership metadata and mode. Keep our already-open descriptor so
+    // a read-only source mode cannot stop the app from truncating the temp.
+    #[cfg(target_os = "macos")]
+    if target.exists() {
+        if let Err(error) = fs::copy(target, temp) {
+            drop(file);
+            let _ = fs::remove_file(temp);
+            return Err(SaveError::CopyMetadata(error));
+        }
+        if let Err(error) = file.set_len(0) {
+            drop(file);
+            let _ = fs::remove_file(temp);
+            return Err(SaveError::WriteTemp(error));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = target;
+
+    Ok(file)
+}
+
+fn reject_hardlinked_target(path: &Path) -> Result<(), SaveError> {
+    #[cfg(unix)]
+    if path.exists() {
+        use std::os::unix::fs::MetadataExt as _;
+        if fs::metadata(path).map_err(SaveError::ReadRevision)?.nlink() > 1 {
+            return Err(SaveError::HardlinkedTarget(path.to_path_buf()));
+        }
+    }
+    Ok(())
+}
+
+fn verify_disk_revision(path: &Path, expected: &DiskRevision) -> Result<(), SaveError> {
+    let actual = DiskRevision::from_path(path).map_err(SaveError::ReadRevision)?;
+    if &actual == expected {
+        Ok(())
+    } else {
+        Err(SaveError::ExternalModification(path.to_path_buf()))
+    }
+}
+
+fn canonical_target_path(target: &Path) -> Result<PathBuf, SaveError> {
+    match fs::symlink_metadata(target) {
+        Ok(_) => return fs::canonicalize(target).map_err(SaveError::ResolveTarget),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(SaveError::ResolveTarget(error)),
+    }
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let canonical_parent = fs::canonicalize(parent).map_err(SaveError::ResolveTarget)?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| SaveError::InvalidTarget(target.to_path_buf()))?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn sync_parent_directory(target: &Path) -> Result<(), io::Error> {
+    #[cfg(unix)]
+    {
+        let parent = target.parent().unwrap_or_else(|| Path::new("."));
+        fs::File::open(parent).and_then(|dir| dir.sync_all())?;
+    }
+    Ok(())
 }
 
 fn temp_path_for(target: &Path) -> PathBuf {
@@ -948,20 +1386,70 @@ fn temp_path_for(target: &Path) -> PathBuf {
 
 #[derive(Debug, Error)]
 pub enum SaveError {
-    #[error("could not open key file: {0}")]
-    ReadKeyfile(#[source] io::Error),
-
-    #[error("could not read key file: {0}")]
-    Keyfile(#[source] io::Error),
-
     #[error("could not create temp file for save: {0}")]
     CreateTemp(#[source] io::Error),
 
     #[error("could not write temp file: {0}")]
     WriteTemp(#[source] io::Error),
 
+    #[error("could not copy vault metadata to temp file: {0}")]
+    CopyMetadata(#[source] io::Error),
+
     #[error("could not rename temp file over target: {0}")]
     Rename(#[source] io::Error),
+
+    #[error("could not publish new vault without replacing an existing file: {0}")]
+    PublishNew(#[source] io::Error),
+
+    #[error("could not resolve vault save target: {0}")]
+    ResolveTarget(#[source] io::Error),
+
+    #[error("vault save target is invalid: {0}")]
+    InvalidTarget(PathBuf),
+
+    #[error("vault save target changed from {expected} to {actual}")]
+    TargetChanged { expected: PathBuf, actual: PathBuf },
+
+    #[error("vault file changed outside FerrisPass: {0}")]
+    ExternalModification(PathBuf),
+
+    #[error("refusing to overwrite an existing file from an unbound document: {0}")]
+    UnboundTargetExists(PathBuf),
+
+    #[error("refusing atomic save because the vault has multiple hard links: {0}")]
+    HardlinkedTarget(PathBuf),
+
+    #[error("could not open save lock {path}: {source}")]
+    OpenLock {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("could not lock save target via {path}: {source}")]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("could not open vault for cooperative locking: {0}")]
+    OpenTargetLock(#[source] io::Error),
+
+    #[error("could not acquire cooperative vault lock: {0}")]
+    TargetLock(#[source] io::Error),
+
+    #[error("could not read vault revision: {0}")]
+    ReadRevision(#[source] io::Error),
+
+    #[error("vault storage state is unavailable")]
+    StorageState,
+
+    #[error("vault document is not bound to a local file")]
+    StorageUnbound,
+
+    #[error("save payload is stale because a newer payload already committed")]
+    StalePayload,
 
     #[error("could not encode database: {0}")]
     Encode(String),
@@ -1019,18 +1507,20 @@ mod tests {
 
         // Use the public payload API exactly the way `save_async` does on the
         // real path — so this test catches regressions in the same code path.
-        doc.save_payload()
+        let receipt = doc
+            .save_payload()
             .save_to(&path)
             .expect("first save succeeds");
+        assert!(receipt.is_durable());
+        assert_eq!(receipt.bytes().as_slice(), fs::read(&path).unwrap());
 
-        // No leftover temp file from a successful save — the target must be
-        // the only thing in the directory (temp names are per-save unique,
-        // so scan instead of probing one fixed name).
+        // No leftover temp file from a successful save. The stable sidecar
+        // lock is intentionally retained for cross-process coordination.
         let leftovers: Vec<_> = fs::read_dir(tmp.path())
             .expect("read tempdir")
             .filter_map(|e| e.ok())
             .map(|e| e.file_name())
-            .filter(|n| n != "roundtrip.kdbx")
+            .filter(|n| n != "roundtrip.kdbx" && n != "roundtrip.kdbx.ferrispass.lock")
             .collect();
         assert!(
             leftovers.is_empty(),
@@ -1053,6 +1543,334 @@ mod tests {
             .expect("second save succeeds");
         let _ = crate::keepass::KeePassRepository::open(&path, "vault-pw", None)
             .expect("reopen after second save");
+    }
+
+    #[test]
+    fn save_rejects_external_file_changes() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("external-change.kdbx");
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::default()),
+            "vault-pw".into(),
+            None,
+        );
+        document
+            .save_payload()
+            .save_to(&path)
+            .expect("initial save");
+
+        let reopened =
+            crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("reopen");
+        let pending_save = reopened.save_payload();
+        fs::write(&path, b"changed by another process").expect("external write");
+
+        let error = pending_save
+            .save_to(&path)
+            .expect_err("must reject stale save");
+        assert!(matches!(error, SaveError::ExternalModification(_)));
+        assert_eq!(
+            fs::read(&path).expect("read external bytes"),
+            b"changed by another process"
+        );
+    }
+
+    #[test]
+    fn sync_read_rejects_external_file_changes() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("external-sync-change.kdbx");
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::default()),
+            "vault-pw".into(),
+            None,
+        );
+        document
+            .save_payload()
+            .save_to(&path)
+            .expect("initial save");
+
+        let reopened =
+            crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("reopen");
+        let expected = reopened.read_current_bytes().expect("bound bytes");
+        assert_eq!(expected.as_slice(), fs::read(&path).unwrap());
+
+        fs::write(&path, b"different vault bytes").expect("external replace");
+        let error = reopened
+            .read_current_bytes()
+            .expect_err("stale local bytes must not be returned for sync");
+        assert!(matches!(error, SaveError::ExternalModification(_)));
+    }
+
+    #[test]
+    fn unbound_save_refuses_an_existing_target() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("already-there.kdbx");
+        fs::write(&path, b"existing bytes").expect("seed target");
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::default()),
+            "vault-pw".into(),
+            None,
+        );
+
+        let error = document
+            .save_payload()
+            .save_to(&path)
+            .expect_err("unbound save must not replace an existing file");
+        assert!(matches!(error, SaveError::UnboundTargetExists(_)));
+        assert_eq!(fs::read(path).expect("read target"), b"existing bytes");
+    }
+
+    #[test]
+    fn stale_payload_cannot_overwrite_a_newer_payload() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("stale-payload.kdbx");
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::default()),
+            "vault-pw".into(),
+            None,
+        );
+        let stale = document.save_payload();
+        let newest = document.save_payload();
+
+        newest.save_to(&path).expect("newest save");
+        let expected = fs::read(&path).expect("newest bytes");
+        let error = stale
+            .save_to(&path)
+            .expect_err("stale payload must be rejected");
+
+        assert!(matches!(error, SaveError::StalePayload));
+        assert_eq!(fs::read(path).expect("bytes after rejection"), expected);
+    }
+
+    #[test]
+    fn save_keeps_the_keyfile_material_used_at_unlock() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("keyfile-vault.kdbx");
+        let selected_keyfile = tmp.path().join("selected.key");
+        let original_keyfile = tmp.path().join("original.key");
+        let original = b"original key file material";
+        let replacement = b"replacement key file material";
+        fs::write(&selected_keyfile, original).expect("write selected keyfile");
+
+        let mut key = DatabaseKey::new().with_password("vault-pw");
+        let mut key_bytes = original.as_slice();
+        key = key.with_keyfile(&mut key_bytes).expect("build key");
+        let mut file = fs::File::create(&path).expect("create database");
+        Database::new().save(&mut file, key).expect("seed database");
+        file.sync_all().expect("sync seed");
+
+        let opened =
+            crate::keepass::KeePassRepository::open(&path, "vault-pw", Some(&selected_keyfile))
+                .expect("open with original keyfile");
+        fs::write(&selected_keyfile, replacement).expect("replace selected keyfile");
+        opened
+            .save_payload()
+            .save_to(&path)
+            .expect("save with cached unlock key");
+
+        fs::write(&original_keyfile, original).expect("restore original keyfile copy");
+        crate::keepass::KeePassRepository::open(&path, "vault-pw", Some(&original_keyfile))
+            .expect("saved database still opens with original keyfile");
+        assert!(
+            crate::keepass::KeePassRepository::open(&path, "vault-pw", Some(&selected_keyfile),)
+                .is_err(),
+            "replacement keyfile must not become the save key"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_refuses_hardlinked_vaults() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("hardlinked.kdbx");
+        let alias = tmp.path().join("hardlinked-alias.kdbx");
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::default()),
+            "vault-pw".into(),
+            None,
+        );
+        document
+            .save_payload()
+            .save_to(&path)
+            .expect("initial save");
+        fs::hard_link(&path, &alias).expect("hard link");
+        let opened =
+            crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("open");
+
+        let error = opened
+            .save_payload()
+            .save_to(&path)
+            .expect_err("hardlinked target must be rejected");
+        assert!(matches!(error, SaveError::HardlinkedTarget(_)));
+        assert_eq!(
+            fs::read(&path).expect("target bytes"),
+            fs::read(&alias).expect("alias bytes")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliases_share_the_cross_process_save_lock() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let target = tmp.path().join("alias-target.kdbx");
+        let link = tmp.path().join("alias-link.kdbx");
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::default()),
+            "vault-pw".into(),
+            None,
+        );
+        document
+            .save_payload()
+            .save_to(&target)
+            .expect("initial save");
+        symlink(&target, &link).expect("symlink");
+
+        let via_target = crate::keepass::KeePassRepository::open(&target, "vault-pw", None)
+            .expect("open target")
+            .save_payload();
+        let via_link = crate::keepass::KeePassRepository::open(&link, "vault-pw", None)
+            .expect("open link")
+            .save_payload();
+        let target_for_thread = target.clone();
+        let link_for_thread = link.clone();
+        let first = std::thread::spawn(move || via_target.save_to(&target_for_thread));
+        let second = std::thread::spawn(move || via_link.save_to(&link_for_thread));
+        let results = [
+            first.join().expect("first thread"),
+            second.join().expect("second thread"),
+        ];
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(SaveError::ExternalModification(_))))
+                .count(),
+            1
+        );
+        crate::keepass::KeePassRepository::open(&target, "vault-pw", None)
+            .expect("winner remains readable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_follows_original_symlink_target_and_preserves_mode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+
+        let tmp = TempDir::new().expect("tempdir");
+        let target = tmp.path().join("vault.kdbx");
+        let link = tmp.path().join("linked-vault.kdbx");
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::default()),
+            "vault-pw".into(),
+            None,
+        );
+        document
+            .save_payload()
+            .save_to(&target)
+            .expect("initial save");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("chmod");
+        symlink(&target, &link).expect("symlink");
+
+        let reopened = crate::keepass::KeePassRepository::open(&link, "vault-pw", None)
+            .expect("open through symlink");
+        reopened
+            .save_payload()
+            .save_to(&link)
+            .expect("save through symlink");
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::metadata(&target).expect("target metadata").mode() & 0o777,
+            0o600
+        );
+        crate::keepass::KeePassRepository::open(&target, "vault-pw", None)
+            .expect("target remains readable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_rejects_a_symlink_retargeted_after_open() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let first = tmp.path().join("first.kdbx");
+        let second = tmp.path().join("second.kdbx");
+        let link = tmp.path().join("current.kdbx");
+        for path in [&first, &second] {
+            let document = VaultDocument::new(
+                Database::new(),
+                VaultSnapshot::new(VaultGroup::default()),
+                "vault-pw".into(),
+                None,
+            );
+            document.save_payload().save_to(path).expect("seed vault");
+        }
+        symlink(&first, &link).expect("initial symlink");
+        let opened = crate::keepass::KeePassRepository::open(&link, "vault-pw", None)
+            .expect("open through symlink");
+        fs::remove_file(&link).expect("remove symlink");
+        symlink(&second, &link).expect("retarget symlink");
+
+        let error = opened
+            .save_payload()
+            .save_to(&link)
+            .expect_err("retargeted symlink must be rejected");
+        assert!(matches!(error, SaveError::TargetChanged { .. }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn save_preserves_macos_extended_attributes() {
+        use std::process::Command;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("xattr.kdbx");
+        let document = VaultDocument::new(
+            Database::new(),
+            VaultSnapshot::new(VaultGroup::default()),
+            "vault-pw".into(),
+            None,
+        );
+        document
+            .save_payload()
+            .save_to(&path)
+            .expect("initial save");
+        assert!(
+            Command::new("xattr")
+                .args(["-w", "com.ferrispass.test", "preserve"])
+                .arg(&path)
+                .status()
+                .expect("run xattr")
+                .success()
+        );
+
+        let opened =
+            crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("open");
+        opened
+            .save_payload()
+            .save_to(&path)
+            .expect("save with xattr");
+        let output = Command::new("xattr")
+            .args(["-p", "com.ferrispass.test"])
+            .arg(&path)
+            .output()
+            .expect("read xattr");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "preserve");
     }
 
     #[test]

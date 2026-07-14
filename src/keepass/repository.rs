@@ -22,7 +22,7 @@ pub(crate) const STANDARD_FIELDS: &[&str] = &[
 ];
 use std::{
     collections::hash_map::DefaultHasher,
-    fs::File,
+    fs::{self, File},
     hash::{Hash, Hasher},
     io::Read,
     path::{Path, PathBuf},
@@ -44,7 +44,9 @@ impl KeePassRepository {
         password: &str,
         keyfile: Option<&Path>,
     ) -> Result<VaultDocument, DatabaseOpenError> {
-        let bytes = read_database_bytes(path.as_ref())?;
+        let storage_path = fs::canonicalize(path.as_ref())?;
+        let bytes = read_database_bytes(&storage_path)?;
+        let revision = crate::keepass::document::DiskRevision::from_bytes(&bytes);
         let mut key = DatabaseKey::new();
         if !password.is_empty() {
             key = key.with_password(password);
@@ -54,14 +56,18 @@ impl KeePassRepository {
             key = key.with_keyfile(&mut keyfile)?;
         }
 
+        let database_key = key.clone();
         let database = parse_database_bytes(&bytes, key)?;
         let snapshot = snapshot_from_database(&database);
 
-        Ok(VaultDocument::new(
+        Ok(VaultDocument::new_with_storage(
             database,
             snapshot,
             password.to_string(),
             keyfile.map(PathBuf::from),
+            database_key,
+            storage_path,
+            revision,
         ))
     }
 
@@ -81,13 +87,15 @@ impl KeePassRepository {
             let mut keyfile = File::open(keyfile_path)?;
             key = key.with_keyfile(&mut keyfile)?;
         }
+        let database_key = key.clone();
         let database = parse_database_bytes(bytes, key)?;
         let snapshot = snapshot_from_database(&database);
-        Ok(VaultDocument::new(
+        Ok(VaultDocument::new_with_key(
             database,
             snapshot,
             password.to_string(),
             keyfile.map(PathBuf::from),
+            database_key,
         ))
     }
 
