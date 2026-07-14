@@ -26,8 +26,10 @@ incremental = false
 keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "db05af8", features = ["save_kdbx4", "totp", "_merge"] }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+# Keep both Longbridge crates on the same tested source revision. Their manifest
+# references Zed without a rev, so Cargo.lock owns that one shared GPUI SourceId.
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "b004e595cf5de98a73b6b561394a559a94ae1e2a" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "b004e595cf5de98a73b6b561394a559a94ae1e2a" }
 rust-embed = "8"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
