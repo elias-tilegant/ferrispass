@@ -300,7 +300,18 @@ pub fn upload_content(
                 .into_string()
                 .map_err(|e| GraphError::Network(e.to_string()))?;
             let item_resp: ItemResponse = parse_json(&body)?;
-            let item = item_from_response(item_resp);
+            let mut item = item_from_response(item_resp);
+            // Callers persist `new_etag` as the optimistic-concurrency
+            // revision for every future push. An upload response without an
+            // eTag would store "" and permanently fail the empty-revision
+            // guard in `upload_after_save`, so fall back to a metadata fetch
+            // rather than ever handing out an empty revision.
+            if item.etag.trim().is_empty() {
+                item.etag = get_item_metadata(drive_id, item_id, token)?.etag;
+                if item.etag.trim().is_empty() {
+                    return Err(GraphError::MissingField("eTag"));
+                }
+            }
             Ok(UploadOutcome::Ok {
                 new_etag: item.etag.clone(),
                 item,

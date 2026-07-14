@@ -382,7 +382,17 @@ pub fn upload_after_save(
     local_bytes: &[u8],
 ) -> Result<UploadAfterSave, ServiceError> {
     if config.last_etag.trim().is_empty() {
-        return Err(ServiceError::MissingRemoteEtag);
+        // Legacy configs (pre-etag-hardening) can carry an empty revision.
+        // Failing hard here would wedge every future push with no self-heal —
+        // the Failed-recovery tick only retries the push, never pulls. Route
+        // through the conflict path instead: the caller's merge machinery
+        // re-downloads the remote and persists a fresh, non-empty etag.
+        let (remote_bytes, remote_etag) =
+            download_versioned(&config.drive_id, &config.item_id, token)?;
+        return Ok(UploadAfterSave::Conflict {
+            remote_bytes,
+            remote_etag,
+        });
     }
     let outcome = graph::upload_content(
         &config.drive_id,
