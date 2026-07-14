@@ -7,6 +7,8 @@
 //! AddEntry) so even with many conflicts the Apply button is always
 //! reachable.
 
+use std::borrow::Cow;
+
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, hsla, prelude::FluentBuilder as _, px,
@@ -394,17 +396,7 @@ fn column(
 
     for (i, f) in fields.iter().enumerate() {
         let last = i == fields.len() - 1;
-        let value = match f.label {
-            "Title" => &view.title,
-            "Username" => &view.username,
-            "Password" => match side {
-                Side::Local => &f.local,
-                Side::Remote => &f.remote,
-            },
-            "URL" => &view.url,
-            "Notes" => &view.notes,
-            _ => "",
-        };
+        let value = conflict_field_value(view, f, side);
         let chip_el = if f.differs {
             Some(chip("Differs", ChipTone::Orange))
         } else if !value.is_empty() {
@@ -442,12 +434,33 @@ fn column(
                         } else {
                             "JetBrains Mono"
                         })
-                        .child(value.to_string()),
+                        .child(value.into_owned()),
                 ),
         );
     }
 
     col.into_any_element()
+}
+
+/// `FieldDiff` is the protection-aware display source for every ordinary
+/// field. Passwords keep an additional boundary check here so a future merge
+/// refactor cannot pass their cleartext through to the GPUI element tree.
+fn conflict_field_value<'a>(view: &'a EntryView, field: &'a FieldDiff, side: Side) -> Cow<'a, str> {
+    match field.label {
+        "Password" => Cow::Owned(redact_password(&view.password)),
+        _ => match side {
+            Side::Local => Cow::Borrowed(&field.local),
+            Side::Remote => Cow::Borrowed(&field.remote),
+        },
+    }
+}
+
+fn redact_password(password: &str) -> String {
+    if password.is_empty() {
+        String::new()
+    } else {
+        format!("••• ({} chars)", password.chars().count())
+    }
 }
 
 fn apply_button(cx: &mut Context<AppShell>) -> AnyElement {
@@ -522,4 +535,102 @@ struct ConflictSnapshot {
     local_only_count: usize,
     remote_only_count: usize,
     picks: std::collections::HashMap<String, Side>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EntryView, FieldDiff, Side, conflict_field_value, redact_password};
+
+    fn entry_view(password: &str) -> EntryView {
+        EntryView {
+            id: "entry-id".into(),
+            title: "Example".into(),
+            username: "alice".into(),
+            password: password.into(),
+            url: String::new(),
+            notes: String::new(),
+            modified: None,
+            tags: Vec::new(),
+            custom_data: Default::default(),
+            custom_fields: Vec::new(),
+            autotype: None,
+            foreground_color: None,
+            background_color: None,
+            override_url: None,
+        }
+    }
+
+    #[test]
+    fn password_redaction_never_contains_cleartext() {
+        let password = "correct horse battery staple";
+        let rendered = redact_password(password);
+
+        assert_eq!(rendered, "••• (28 chars)");
+        assert!(!rendered.contains(password));
+    }
+
+    #[test]
+    fn password_redaction_counts_characters_and_preserves_empty_state() {
+        assert_eq!(redact_password("pässwörd"), "••• (8 chars)");
+        assert_eq!(redact_password(""), "");
+    }
+
+    #[test]
+    fn conflict_screen_ignores_cleartext_password_from_field_diff() {
+        let view = entry_view("screen-secret");
+        let unsafe_diff = FieldDiff {
+            label: "Password",
+            local: "must-not-render".into(),
+            remote: "must-not-render".into(),
+            differs: true,
+        };
+
+        let rendered = conflict_field_value(&view, &unsafe_diff, Side::Local);
+        assert_eq!(rendered, "••• (13 chars)");
+        assert!(!rendered.contains("screen-secret"));
+        assert!(!rendered.contains("must-not-render"));
+    }
+
+    #[test]
+    fn protected_standard_fields_use_the_redacted_diff_value() {
+        let mut view = entry_view("");
+        view.title = "protected-title".into();
+        let field = FieldDiff {
+            label: "Title",
+            local: "••• (15 chars)".into(),
+            remote: "••• (12 chars)".into(),
+            differs: true,
+        };
+
+        let local = conflict_field_value(&view, &field, Side::Local);
+        let remote = conflict_field_value(&view, &field, Side::Remote);
+
+        assert_eq!(local, "••• (15 chars)");
+        assert_eq!(remote, "••• (12 chars)");
+        assert!(!local.contains("protected-title"));
+    }
+
+    #[test]
+    fn non_password_rows_preserve_each_side_and_empty_values() {
+        let view = entry_view("");
+        for (label, local, remote) in [
+            ("OTP", "••• (32 chars)", ""),
+            ("Tags", "work, admin", "work"),
+            (
+                "Additional fields",
+                "API_KEY = ••• (12 chars)",
+                "SAP_HOST = example.invalid",
+            ),
+        ] {
+            let field = FieldDiff {
+                label,
+                local: local.into(),
+                remote: remote.into(),
+                differs: true,
+            };
+
+            assert_eq!(conflict_field_value(&view, &field, Side::Local), local);
+            assert_eq!(conflict_field_value(&view, &field, Side::Remote), remote);
+        }
+    }
 }
