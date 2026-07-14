@@ -1,16 +1,21 @@
 //! Score vault entries against a foreground window.
 //!
-//! Browser window titles are controlled by the page and therefore cannot
-//! authenticate the site receiving a password. Until FerrisPass can read a
-//! browser's active-tab URL through a trusted integration, automatic matching
-//! in browsers fails closed. The explicit in-app "type selected entry" route
-//! does not use this matcher.
+//! Two signals qualify an entry for unattended typing:
 //!
-//! For non-browser applications the only current automatic signal is an exact
-//! equality between the app name and the entry URL's full hostname. We do not
-//! shorten hosts to an assumed registrable domain and do not use substring
-//! matches: `notgithub.com`, `github.com.evil`, and unrelated `*.co.uk` hosts
-//! must never qualify for `github.com` or `amazon.co.uk` credentials.
+//! 1. An explicit KeePass `AutoType/Association/Window` pattern matching the
+//!    foreground window title. The user wrote the pattern themselves (in any
+//!    KeePass client), which makes it a deliberate trust decision — it
+//!    therefore also applies in browsers, exactly like KeePass 2.x/XC.
+//! 2. Exact equality between the app name and the entry URL's full hostname.
+//!    We do not shorten hosts to an assumed registrable domain and do not use
+//!    substring matches: `notgithub.com`, `github.com.evil`, and unrelated
+//!    `*.co.uk` hosts must never qualify for `github.com` or `amazon.co.uk`
+//!    credentials. Browser window titles are page-controlled and cannot
+//!    authenticate the receiving site, so this *derived* signal fails closed
+//!    in browsers.
+//!
+//! Entries whose KeePass Auto-Type is disabled never match. The explicit
+//! in-app "type selected entry" route does not use this matcher.
 
 use crate::autotype::window::ForegroundInfo;
 use crate::domain::{VaultEntry, VaultSnapshot};
@@ -26,6 +31,7 @@ pub struct MatchedEntry {
 }
 
 const SCORE_EXACT_APP_HOST: u32 = 200;
+const SCORE_EXPLICIT_ASSOCIATION: u32 = 300;
 
 /// Hard floor for unattended entry selection. Keeping this separate from the
 /// current signal score makes future, weaker match signals fail closed unless
@@ -36,12 +42,6 @@ pub const MIN_AUTOMATIC_SCORE: u32 = SCORE_EXACT_APP_HOST;
 /// Entries in the Recycle Bin are skipped — surfacing a trashed
 /// credential as a credible match would be confusing.
 pub fn rank(snapshot: &VaultSnapshot, foreground: &ForegroundInfo) -> Vec<MatchedEntry> {
-    // A page can choose any title it wants. Without an extension/native-
-    // messaging bridge we have no trustworthy site identity in a browser.
-    if foreground.is_browser() {
-        return Vec::new();
-    }
-
     let mut matches: Vec<MatchedEntry> = snapshot
         .entries_recursive()
         .into_iter()
@@ -78,6 +78,27 @@ pub fn select_automatic(matches: &[MatchedEntry]) -> Option<&MatchedEntry> {
 }
 
 fn score_entry(entry: &VaultEntry, foreground: &ForegroundInfo) -> u32 {
+    if !entry.auto_type_enabled {
+        return 0;
+    }
+
+    // User-authored association patterns are a deliberate trust decision
+    // and apply everywhere, including browsers (KeePass 2.x/XC semantics).
+    if entry
+        .auto_type_windows
+        .iter()
+        .any(|pattern| window_pattern_matches(pattern, &foreground.window_title))
+    {
+        return SCORE_EXPLICIT_ASSOCIATION;
+    }
+
+    // A page can choose any title it wants. Without an extension/native-
+    // messaging bridge we have no trustworthy site identity in a browser,
+    // so the derived app-name signal fails closed there.
+    if foreground.is_browser() {
+        return 0;
+    }
+
     let Some(host) = host_of(&entry.url) else {
         return 0;
     };
@@ -87,6 +108,46 @@ fn score_entry(entry: &VaultEntry, foreground: &ForegroundInfo) -> u32 {
     } else {
         0
     }
+}
+
+/// KeePass window-association matching: case-insensitive, `*` matches any
+/// run of characters, `?` matches exactly one. The whole title must match
+/// (KeePass anchors patterns; users write `*Sign in*` when they want
+/// substring behavior). A blank pattern never matches.
+// ponytail: KeePass's `//regex//` association syntax is not supported —
+// add it if a vault with regex associations ever shows up.
+fn window_pattern_matches(pattern: &str, title: &str) -> bool {
+    let pattern: Vec<char> = pattern.trim().to_lowercase().chars().collect();
+    if pattern.is_empty() {
+        return false;
+    }
+    let title: Vec<char> = title.to_lowercase().chars().collect();
+    glob_match(&pattern, &title)
+}
+
+/// Classic two-pointer wildcard match with `*` backtracking.
+fn glob_match(pattern: &[char], text: &[char]) -> bool {
+    let (mut p, mut t) = (0usize, 0usize);
+    let mut backtrack: Option<(usize, usize)> = None;
+    while t < text.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            backtrack = Some((p, t));
+            p += 1;
+        } else if let Some((star_p, star_t)) = backtrack {
+            p = star_p + 1;
+            t = star_t + 1;
+            backtrack = Some((star_p, star_t + 1));
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 /// Extract a host string from an entry URL. Handles three input shapes:
@@ -187,6 +248,80 @@ mod tests {
         assert_eq!(host_of("localhost"), None);
         assert_eq!(host_of("mailto:user@example.com"), None);
         assert_eq!(host_of("javascript:alert@github.com"), None);
+    }
+
+    fn entry_with_association(id: &str, url: &str, windows: &[&str]) -> VaultEntry {
+        let mut e = entry(id, id, "u", url);
+        e.auto_type_windows = windows.iter().map(|w| (*w).to_string()).collect();
+        e
+    }
+
+    #[test]
+    fn explicit_association_matches_by_window_title() {
+        let snap = snapshot_with(vec![entry_with_association(
+            "sap",
+            "",
+            &["SAP Logon ?60*"],
+        )]);
+        let ranked = rank(&snap, &fg("SAP Logon", "SAP Logon 760 — PRD"));
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(
+            select_automatic(&ranked).map(|m| m.id.as_str()),
+            Some("sap")
+        );
+        assert!(rank(&snap, &fg("SAP Logon", "SAP Logon — PRD")).is_empty());
+    }
+
+    #[test]
+    fn explicit_association_applies_in_browsers() {
+        // The pattern is user-authored — a deliberate KeePass-standard trust
+        // decision — so the browser gate does not apply to it.
+        let snap = snapshot_with(vec![entry_with_association(
+            "g",
+            "https://github.com",
+            &["*· github.com*"],
+        )]);
+        let ranked = rank(&snap, &fg("Safari", "Sign in · github.com — Safari"));
+        assert_eq!(select_automatic(&ranked).map(|m| m.id.as_str()), Some("g"));
+    }
+
+    #[test]
+    fn association_pattern_is_anchored() {
+        let snap = snapshot_with(vec![entry_with_association("a", "", &["Sign in"])]);
+        assert!(rank(&snap, &fg("App", "Sign in to Evil")).is_empty());
+        assert_eq!(rank(&snap, &fg("App", "sign IN")).len(), 1);
+    }
+
+    #[test]
+    fn blank_association_never_matches() {
+        let snap = snapshot_with(vec![entry_with_association("a", "", &["", "   "])]);
+        assert!(rank(&snap, &fg("App", "Anything")).is_empty());
+    }
+
+    #[test]
+    fn disabled_auto_type_excludes_entry_from_all_signals() {
+        let mut e = entry_with_association("s", "https://slack.com", &["*Slack*"]);
+        e.auto_type_enabled = false;
+        let snap = snapshot_with(vec![e]);
+        assert!(rank(&snap, &fg("slack.com", "Slack — #general")).is_empty());
+    }
+
+    #[test]
+    fn glob_edge_cases() {
+        let cases = [
+            ("*", "anything", true),
+            ("a*b*c", "aXXbYYc", true),
+            ("a*b*c", "aXXbYY", false),
+            ("?", "x", true),
+            ("?", "", false),
+            ("*end", "the end", true),
+            ("*end", "the ending", false),
+        ];
+        for (pattern, text, expected) in cases {
+            let p: Vec<char> = pattern.chars().collect();
+            let t: Vec<char> = text.chars().collect();
+            assert_eq!(glob_match(&p, &t), expected, "{pattern} vs {text}");
+        }
     }
 
     #[test]

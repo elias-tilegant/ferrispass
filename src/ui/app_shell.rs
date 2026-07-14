@@ -1613,12 +1613,17 @@ impl AppShell {
                 } else {
                     window_title
                 };
+                // Name the remedy, not just the failure: matching is
+                // deliberately strict (exact app/hostname identity), and
+                // the KeePass-standard way to widen it is a per-entry
+                // Auto-Type window association.
+                let hint = "Add an Auto-Type window association to the entry to match this window.";
                 let message = if !title.is_empty() {
-                    format!("No matching entry for \"{title}\".")
+                    format!("No matching entry for \"{title}\". {hint}")
                 } else if !foreground.app_name.is_empty() {
-                    format!("No matching entry for {}.", foreground.app_name)
+                    format!("No matching entry for {}. {hint}", foreground.app_name)
                 } else {
-                    "No matching entry for the foreground window.".to_string()
+                    format!("No matching entry for the foreground window. {hint}")
                 };
                 window.push_notification(message, cx);
             }

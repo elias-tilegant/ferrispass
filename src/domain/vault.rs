@@ -88,6 +88,14 @@ pub struct VaultEntry {
     /// swap the action footer (Restore + Delete forever) without having to
     /// re-walk the group tree per render.
     pub in_recycle_bin: bool,
+    /// KeePass `AutoType/Enabled` — `false` excludes the entry from hotkey
+    /// matching entirely (KeePass semantics; explicit in-app typing of a
+    /// selected entry is unaffected).
+    pub auto_type_enabled: bool,
+    /// User-authored KeePass `AutoType/Association/Window` patterns
+    /// (`*`/`?` wildcards). An explicit association is a trustworthy hotkey
+    /// match signal precisely because the user wrote the pattern themselves.
+    pub auto_type_windows: Vec<String>,
     /// Arbitrary key-value pairs stored on the KeePass entry beyond the
     /// six standard fields (Title/UserName/Password/URL/Notes/otp). Used
     /// by KeePassXC's "Additional attributes" UI and by our launcher
@@ -377,6 +385,8 @@ impl VaultEntry {
             strength: Strength::default(),
             group_path: Vec::new(),
             in_recycle_bin: false,
+            auto_type_enabled: true,
+            auto_type_windows: Vec::new(),
             custom_fields: Vec::new(),
         }
     }

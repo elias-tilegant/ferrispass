@@ -260,6 +260,21 @@ fn entry_from_ref(
 
     let custom_fields = collect_custom_fields(entry);
 
+    // KeePass semantics: absent AutoType settings mean "enabled, no
+    // associations". The association window patterns are user-authored and
+    // feed the trustworthy hotkey match signal in `autotype::matcher`.
+    let (auto_type_enabled, auto_type_windows) = match &entry.autotype {
+        Some(autotype) => (
+            autotype.enabled,
+            autotype
+                .associations
+                .iter()
+                .map(|association| association.window.clone())
+                .collect(),
+        ),
+        None => (true, Vec::new()),
+    };
+
     VaultEntry {
         id: entry.id().to_string(),
         title,
@@ -280,6 +295,8 @@ fn entry_from_ref(
             .cloned()
             .collect(),
         in_recycle_bin,
+        auto_type_enabled,
+        auto_type_windows,
         custom_fields,
     }
 }
