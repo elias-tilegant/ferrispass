@@ -1,40 +1,34 @@
 //! Pure-data diff and three-way merge over keepass `Database`s, used by the
 //! sync conflict resolution flow. No GPUI dependencies — fully unit-testable.
 //!
-//! Scope:
-//! - Entry-grain diff over UUID-identified entries. Title / Username /
-//!   Password / URL / Notes / Tags are surfaced in the conflict UI as
-//!   side-by-side rows. Custom-data, AutoType, and colors are preserved
-//!   silently (replaced when user picks Remote, kept when user picks Local)
-//!   without rendering as diff rows — they're rarely user-visible in
-//!   normal vault use, so surfacing each one would be UI noise.
-//! - Remote-only entries are imported with their **original UUID** preserved
-//!   via `Group::add_entry_with_id`. This is essential for cross-client sync:
-//!   without it, every merge cycle re-randomises UUIDs, and other clients
-//!   (KeePass2, KeePassXC) treat the entry as new on their side — leading
-//!   to exponential entry duplication on each round trip.
-//! - Recycle-bin entries are filtered out — they're effectively deleted from
-//!   the user's perspective. Edge case "X live on one side, X recycled on
-//!   the other" therefore presents as a one-sided add (the live side wins
-//!   silently). Acceptable; refining requires surfacing delete-vs-edit
-//!   conflicts, which is its own project.
-//! - Group additions are not detected. A remote-only entry lands in the
-//!   merged vault under the local root group, regardless of where it sat in
-//!   the remote tree. Documented limitation.
-//! - **Not preserved** across a merge: icon bytes, attachments, history.
-//!   Both icon and attachments are accessed through private fields in
-//!   keepass-rs; exposing them is a separate fork-patch chunk. History
-//!   is intentionally reset because the merge itself is a fresh write.
+//! Fidelity policy:
+//! - Diffing compares every entry field as a `Value<String>`, so field
+//!   presence, OTP values, arbitrary custom fields, and protected/unprotected
+//!   bits all participate in conflict detection.
+//! - Applying choices delegates the structural merge to `Database::merge`.
+//!   That preserves UUIDs, group placement and additions, tombstone-driven
+//!   deletions, entry history, and the complete field map.
+//! - Manual picks only force which current entry version wins. The losing
+//!   current version is retained in the winner's history before the database
+//!   merge runs.
+//! - The pinned keepass fork does not merge attachment stores or divergent
+//!   custom-icon stores. `apply_picks` rejects those cases explicitly instead
+//!   of returning a database with dangling references or lost bytes. Identical
+//!   custom-icon stores are retained safely.
 //! - Passwords are compared in cleartext (necessarily — both sides are
 //!   already decrypted) but the displayed `FieldDiff.local`/`.remote` for
 //!   the Password row is redacted to `"••• (N chars)"` so the conflict
 //!   screen is screen-sharing-safe.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+};
 
 use chrono::NaiveDateTime;
 use keepass::db::{
-    AutoType, Color, CustomDataItem, Database, EntryId, EntryMut, EntryRef, GroupId, Times, fields,
+    AutoType, Color, CustomDataItem, Database, Entry, EntryId, EntryRef, GroupId, Icon, Times,
+    Value, fields,
 };
 
 use crate::domain::CustomField;
@@ -78,6 +72,17 @@ pub struct EntryView {
     pub foreground_color: Option<Color>,
     pub background_color: Option<Color>,
     pub override_url: Option<String>,
+}
+
+/// Internal fidelity snapshot. `EntryView` stays a UI-oriented, stable public
+/// shape; the raw map is retained privately so diffing does not collapse a
+/// missing field into an empty value or discard its protection bit.
+struct EntrySnapshot {
+    view: EntryView,
+    fields: HashMap<String, Value<String>>,
+    icon: Option<Icon>,
+    quality_check: Option<bool>,
+    previous_parent_group: Option<GroupId>,
 }
 
 /// One field's local-vs-remote comparison. `local` and `remote` are the
@@ -127,6 +132,11 @@ pub struct ConflictReport {
     /// side's `last_modification` is strictly newer — last-write-wins,
     /// applied silently.
     pub auto_resolved: Vec<AutoResolved>,
+    /// Group topology/metadata, tombstones, recycle-bin metadata, or entry
+    /// histories differ. Direction attribution is deliberately conservative:
+    /// writing the merged result back may create a redundant remote version,
+    /// but skipping it could strand a local deletion or empty-group change.
+    pub structural_writeback_required: bool,
 }
 
 impl ConflictReport {
@@ -134,7 +144,10 @@ impl ConflictReport {
     /// can skip the Conflict overlay entirely and just upload `apply_picks`
     /// with an empty pick map.
     pub fn is_clean(&self) -> bool {
-        self.conflicts.is_empty() && self.remote_only.is_empty() && self.auto_resolved.is_empty()
+        self.conflicts.is_empty()
+            && self.remote_only.is_empty()
+            && self.auto_resolved.is_empty()
+            && !self.structural_writeback_required
         // `local_only` doesn't dirty the merge: those entries are already in
         // the local DB we'll start the merge from.
     }
@@ -149,7 +162,8 @@ impl ConflictReport {
     /// and the caller can skip the upload — avoiding a redundant remote
     /// version for what is really just someone else's change landing here.
     pub fn has_local_contribution(&self) -> bool {
-        !self.local_only.is_empty()
+        self.structural_writeback_required
+            || !self.local_only.is_empty()
             || self
                 .auto_resolved
                 .iter()
@@ -162,6 +176,27 @@ impl ConflictReport {
 pub enum Side {
     Local,
     Remote,
+}
+
+/// A merge was refused because it could not be completed without either data
+/// loss or guessing. Callers should keep both original databases untouched and
+/// surface the error as a sync conflict/failure.
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyError {
+    #[error("attachment-aware merge is not supported yet (local: {local}, remote: {remote})")]
+    AttachmentsUnsupported { local: usize, remote: usize },
+    #[error(
+        "custom-icon stores differ and cannot be merged safely (local: {local}, remote: {remote})"
+    )]
+    CustomIconsDiffer { local: usize, remote: usize },
+    #[error("cannot merge databases with different root group UUIDs")]
+    DifferentRoots,
+    #[error("{side:?} entry {id} referenced by the conflict report no longer exists")]
+    EntryMissing { id: String, side: Side },
+    #[error("keepass database merge failed: {0}")]
+    DatabaseMerge(String),
+    #[error("keepass database merge completed with unresolved warnings: {0}")]
+    DatabaseMergeWarnings(String),
 }
 
 /// Build a `ConflictReport` between two unlocked databases.
@@ -187,16 +222,16 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         // missing) — pre-v0.4 every field-level divergence forced a prompt
         // even when the user had clearly saved one side later than the
         // other, which made benign sync round-trips noisy.
-        match timestamp_winner(l.modified, r.modified) {
+        match timestamp_winner(l.view.modified, r.view.modified) {
             Some(winner) => auto_resolved.push(AutoResolved {
                 id: (*id).clone(),
                 winner,
-                remote: r.clone(),
+                remote: r.view.clone(),
             }),
             None => conflicts.push(EntryConflict {
                 id: (*id).clone(),
-                local: l.clone(),
-                remote: r.clone(),
+                local: l.view.clone(),
+                remote: r.view.clone(),
                 fields,
             }),
         }
@@ -204,11 +239,11 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
 
     let mut local_only: Vec<EntryView> = local_ids
         .difference(&remote_ids)
-        .map(|id| local_map[*id].clone())
+        .map(|id| local_map[*id].view.clone())
         .collect();
     let mut remote_only: Vec<EntryView> = remote_ids
         .difference(&local_ids)
-        .map(|id| remote_map[*id].clone())
+        .map(|id| remote_map[*id].view.clone())
         .collect();
 
     // Stable ordering for deterministic rendering + tests. Title is the
@@ -225,7 +260,58 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         local_only,
         remote_only,
         auto_resolved,
+        structural_writeback_required: structural_state_differs(local, remote),
     }
+}
+
+fn structural_state_differs(local: &Database, remote: &Database) -> bool {
+    if local.deleted_objects != remote.deleted_objects
+        || local.meta.recyclebin_uuid != remote.meta.recyclebin_uuid
+    {
+        return true;
+    }
+
+    let local_groups: HashSet<_> = local.iter_all_groups().map(|group| group.id()).collect();
+    let remote_groups: HashSet<_> = remote.iter_all_groups().map(|group| group.id()).collect();
+    if local_groups != remote_groups {
+        return true;
+    }
+    for id in local_groups.intersection(&remote_groups) {
+        let Some(local_group) = local.group(*id) else {
+            return true;
+        };
+        let Some(remote_group) = remote.group(*id) else {
+            return true;
+        };
+        if local_group.parent().map(|parent| parent.id())
+            != remote_group.parent().map(|parent| parent.id())
+            || local_group.name != remote_group.name
+            || local_group.notes != remote_group.notes
+            || local_group.icon() != remote_group.icon()
+            || local_group.custom_data != remote_group.custom_data
+            || local_group.is_expanded != remote_group.is_expanded
+            || local_group.default_autotype_sequence != remote_group.default_autotype_sequence
+            || local_group.enable_autotype != remote_group.enable_autotype
+            || local_group.enable_searching != remote_group.enable_searching
+            || local_group.previous_parent_group != remote_group.previous_parent_group
+            || local_group.tags != remote_group.tags
+        {
+            return true;
+        }
+    }
+
+    for local_entry in local.iter_all_entries() {
+        let Some(remote_entry) = remote.entry(local_entry.id()) else {
+            continue;
+        };
+        if local_entry.parent().id() != remote_entry.parent().id()
+            || local_entry.history.as_ref() != remote_entry.history.as_ref()
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Returns the strictly-newer side, or `None` when timestamps are tied
@@ -241,70 +327,215 @@ fn timestamp_winner(local: Option<NaiveDateTime>, remote: Option<NaiveDateTime>)
     }
 }
 
-/// Build a merged `Database` from `local` + the user's resolution choices.
+/// Build a merged `Database` from both complete inputs and the user's entry
+/// choices. Structural changes and non-conflicting entry updates are delegated
+/// to keepass-rs's timestamp/tombstone-aware merge implementation.
 ///
-/// - For each conflict in `report`: if the pick is `Remote`, replace the
-///   entry's standard fields in the merged copy with the remote view.
-///   `Local` (or unmapped) → keep as-is.
-/// - For each `remote_only` entry: add a fresh entry to the merged root
-///   with those fields. The original remote `EntryId` is *not* preserved
-///   (no public API to insert with a specific id) — documented MVP loss.
-/// - `local_only` entries are inherited from the cloned base; nothing to do.
-///
-/// Modification times are stamped to "now" on any entry we touch so other
-/// clients see the merge as a fresh write.
+/// A missing manual pick defaults to Local, matching the conflict UI. The
+/// chosen current version receives a deterministic newer timestamp and the
+/// losing current version is inserted into its history before the structural
+/// merge. The originals are never mutated.
 pub fn apply_picks(
     local: &Database,
-    _remote: &Database,
+    remote: &Database,
     picks: &HashMap<String, Side>,
     report: &ConflictReport,
-) -> Database {
+) -> Result<Database, ApplyError> {
+    preflight_fidelity(local, remote)?;
+
     let mut merged = local.clone();
+    let mut source = remote.clone();
 
-    // We can't reconstruct EntryId from the string in `report.conflicts[].id`
-    // because `EntryId::from_uuid` is `pub(crate)` in keepass-rs. Instead we
-    // walk the cloned database once and build a string→EntryId lookup, then
-    // use it to drive the per-conflict replacements.
-    let id_lookup: HashMap<String, EntryId> = merged
-        .iter_all_entries()
-        .map(|e| (e.id().to_string(), e.id()))
-        .collect();
-
+    // Only genuinely ambiguous entries appear here. Timestamp-resolved rows
+    // and one-sided additions are handled natively by Database::merge.
     for conflict in &report.conflicts {
-        let Some(&entry_id) = id_lookup.get(&conflict.id) else {
-            continue;
-        };
         let side = picks.get(&conflict.id).copied().unwrap_or(Side::Local);
-        if side == Side::Remote {
-            replace_entry_fields(&mut merged, entry_id, &conflict.remote);
-        }
+        force_manual_winner(&mut merged, &mut source, &conflict.id, side)?;
     }
-
-    // Auto-resolved entries (timestamp-based last-write-wins) get applied
-    // unconditionally — they never appear in `picks` because the user was
-    // never asked. Local-winners are no-ops since `merged` started as a
-    // clone of local; only Remote-winners need their fields transplanted.
     for resolved in &report.auto_resolved {
-        if resolved.winner != Side::Remote {
-            continue;
+        preserve_auto_resolved_history(&mut merged, &mut source, resolved)?;
+    }
+
+    let log = merged
+        .merge(&source)
+        .map_err(|error| ApplyError::DatabaseMerge(error.to_string()))?;
+    if !log.warnings.is_empty() {
+        return Err(ApplyError::DatabaseMergeWarnings(log.warnings.join("; ")));
+    }
+
+    Ok(merged)
+}
+
+fn preserve_auto_resolved_history(
+    local: &mut Database,
+    remote: &mut Database,
+    resolved: &AutoResolved,
+) -> Result<(), ApplyError> {
+    let entry_id = uuid::Uuid::parse_str(&resolved.id)
+        .map(EntryId::from_uuid)
+        .map_err(|_| ApplyError::EntryMissing {
+            id: resolved.id.clone(),
+            side: resolved.winner,
+        })?;
+    match resolved.winner {
+        Side::Local => {
+            let losing = clone_entry(remote, entry_id, Side::Remote)?;
+            add_history_version(local, entry_id, losing, Side::Local)
         }
-        let Some(&entry_id) = id_lookup.get(&resolved.id) else {
-            continue;
-        };
-        replace_entry_fields(&mut merged, entry_id, &resolved.remote);
+        Side::Remote => {
+            let losing = clone_entry(local, entry_id, Side::Local)?;
+            add_history_version(remote, entry_id, losing, Side::Remote)
+        }
+    }
+}
+
+fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyError> {
+    if local.root().id() != remote.root().id() {
+        return Err(ApplyError::DifferentRoots);
     }
 
-    let root_id = merged.root().id();
-    for view in &report.remote_only {
-        add_entry_under(&mut merged, root_id, view);
+    let local_attachments = local.num_attachments();
+    let remote_attachments = remote.num_attachments();
+    if local_attachments != 0 || remote_attachments != 0 {
+        return Err(ApplyError::AttachmentsUnsupported {
+            local: local_attachments,
+            remote: remote_attachments,
+        });
     }
 
-    merged
+    let local_icons = custom_icon_store(local);
+    let remote_icons = custom_icon_store(remote);
+    if local_icons != remote_icons {
+        return Err(ApplyError::CustomIconsDiffer {
+            local: local_icons.len(),
+            remote: remote_icons.len(),
+        });
+    }
+
+    Ok(())
+}
+
+fn custom_icon_store(
+    db: &Database,
+) -> HashMap<uuid::Uuid, (Vec<u8>, Option<String>, Option<NaiveDateTime>)> {
+    db.iter_all_custom_icons()
+        .map(|icon| {
+            (
+                icon.id().uuid(),
+                (
+                    icon.data.clone(),
+                    icon.name.clone(),
+                    icon.last_modification_time,
+                ),
+            )
+        })
+        .collect()
+}
+
+fn force_manual_winner(
+    local: &mut Database,
+    remote: &mut Database,
+    raw_id: &str,
+    winner: Side,
+) -> Result<(), ApplyError> {
+    let entry_id = uuid::Uuid::parse_str(raw_id)
+        .map(EntryId::from_uuid)
+        .map_err(|_| ApplyError::EntryMissing {
+            id: raw_id.to_string(),
+            side: winner,
+        })?;
+
+    let local_entry = clone_entry(local, entry_id, Side::Local)?;
+    let remote_entry = clone_entry(remote, entry_id, Side::Remote)?;
+    let winner_time = [
+        Times::now(),
+        local_entry
+            .times
+            .last_modification
+            .unwrap_or_else(Times::epoch),
+        remote_entry
+            .times
+            .last_modification
+            .unwrap_or_else(Times::epoch),
+    ]
+    .into_iter()
+    .max()
+    .expect("forced winner timestamp candidates are non-empty");
+
+    match winner {
+        Side::Local => {
+            add_history_version(local, entry_id, remote_entry, Side::Local)?;
+            local
+                .entry_mut(entry_id)
+                .ok_or_else(|| ApplyError::EntryMissing {
+                    id: raw_id.to_string(),
+                    side: Side::Local,
+                })?
+                .times
+                .last_modification = Some(winner_time);
+            remote
+                .entry_mut(entry_id)
+                .ok_or_else(|| ApplyError::EntryMissing {
+                    id: raw_id.to_string(),
+                    side: Side::Remote,
+                })?
+                .times
+                .last_modification = Some(Times::epoch());
+        }
+        Side::Remote => {
+            add_history_version(remote, entry_id, local_entry, Side::Remote)?;
+            remote
+                .entry_mut(entry_id)
+                .ok_or_else(|| ApplyError::EntryMissing {
+                    id: raw_id.to_string(),
+                    side: Side::Remote,
+                })?
+                .times
+                .last_modification = Some(winner_time);
+            local
+                .entry_mut(entry_id)
+                .ok_or_else(|| ApplyError::EntryMissing {
+                    id: raw_id.to_string(),
+                    side: Side::Local,
+                })?
+                .times
+                .last_modification = Some(Times::epoch());
+        }
+    }
+
+    Ok(())
+}
+
+fn clone_entry(db: &Database, id: EntryId, side: Side) -> Result<Entry, ApplyError> {
+    db.entry(id)
+        .map(|entry| entry.deref().clone())
+        .ok_or_else(|| ApplyError::EntryMissing {
+            id: id.to_string(),
+            side,
+        })
+}
+
+fn add_history_version(
+    db: &mut Database,
+    id: EntryId,
+    mut losing: Entry,
+    winner_side: Side,
+) -> Result<(), ApplyError> {
+    losing.history = None;
+    let mut winner = db.entry_mut(id).ok_or_else(|| ApplyError::EntryMissing {
+        id: id.to_string(),
+        side: winner_side,
+    })?;
+    let history = winner.history.get_or_insert_default();
+    if !history.get_entries().contains(&losing) {
+        history.add_entry(losing);
+    }
+    Ok(())
 }
 
 // ---------- internals ----------
 
-fn live_entries(db: &Database) -> HashMap<String, EntryView> {
+fn live_entries(db: &Database) -> HashMap<String, EntrySnapshot> {
     let recycle_bin_id: Option<GroupId> = db.recycle_bin().map(|g| g.id());
     db.iter_all_entries()
         .filter(|e| {
@@ -314,43 +545,174 @@ fn live_entries(db: &Database) -> HashMap<String, EntryView> {
             recycle_bin_id.map_or(true, |bin| e.parent().id() != bin)
         })
         .map(|e| {
-            let view = entry_to_view(&e);
-            (view.id.clone(), view)
+            let snapshot = entry_to_snapshot(&e);
+            (snapshot.view.id.clone(), snapshot)
         })
         .collect()
 }
 
-fn entry_to_view(e: &EntryRef<'_>) -> EntryView {
-    EntryView {
-        id: e.id().to_string(),
-        title: e.get(fields::TITLE).unwrap_or("").to_string(),
-        username: e.get(fields::USERNAME).unwrap_or("").to_string(),
-        password: e.get(fields::PASSWORD).unwrap_or("").to_string(),
-        url: e.get(fields::URL).unwrap_or("").to_string(),
-        notes: e.get(fields::NOTES).unwrap_or("").to_string(),
-        modified: e.times.last_modification,
-        // EntryRef Derefs to Entry, so the public fields below are reached
-        // straight through. Cloning here is cheap relative to KDF cost on
-        // any subsequent save.
-        tags: e.tags.clone(),
-        custom_data: e.custom_data.clone(),
-        custom_fields: collect_custom_fields(e),
-        autotype: e.autotype.clone(),
-        foreground_color: e.foreground_color.clone(),
-        background_color: e.background_color.clone(),
-        override_url: e.override_url.clone(),
+fn entry_to_snapshot(e: &EntryRef<'_>) -> EntrySnapshot {
+    EntrySnapshot {
+        view: EntryView {
+            id: e.id().to_string(),
+            title: e.get(fields::TITLE).unwrap_or("").to_string(),
+            username: e.get(fields::USERNAME).unwrap_or("").to_string(),
+            password: e.get(fields::PASSWORD).unwrap_or("").to_string(),
+            url: e.get(fields::URL).unwrap_or("").to_string(),
+            notes: e.get(fields::NOTES).unwrap_or("").to_string(),
+            modified: e.times.last_modification,
+            tags: e.tags.clone(),
+            custom_data: e.custom_data.clone(),
+            custom_fields: collect_custom_fields(e),
+            autotype: e.autotype.clone(),
+            foreground_color: e.foreground_color.clone(),
+            background_color: e.background_color.clone(),
+            override_url: e.override_url.clone(),
+        },
+        fields: e.fields.clone(),
+        icon: e.icon().cloned(),
+        quality_check: e.quality_check,
+        previous_parent_group: e.previous_parent_group,
     }
 }
 
-fn field_diffs(local: &EntryView, remote: &EntryView) -> Vec<FieldDiff> {
-    vec![
-        plain_diff("Title", &local.title, &remote.title),
-        plain_diff("Username", &local.username, &remote.username),
-        password_diff(&local.password, &remote.password),
-        plain_diff("URL", &local.url, &remote.url),
-        plain_diff("Notes", &local.notes, &remote.notes),
-        tags_diff(&local.tags, &remote.tags),
-    ]
+fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> {
+    let mut diffs = vec![
+        entry_field_diff("Title", fields::TITLE, local, remote, false),
+        entry_field_diff("Username", fields::USERNAME, local, remote, false),
+        entry_field_diff("Password", fields::PASSWORD, local, remote, true),
+        entry_field_diff("URL", fields::URL, local, remote, false),
+        entry_field_diff("Notes", fields::NOTES, local, remote, false),
+        tags_diff(&local.view.tags, &remote.view.tags),
+    ];
+
+    if local.fields.contains_key(fields::OTP) || remote.fields.contains_key(fields::OTP) {
+        diffs.push(entry_field_diff("OTP", fields::OTP, local, remote, true));
+    }
+
+    let local_additional = additional_fields(&local.fields);
+    let remote_additional = additional_fields(&remote.fields);
+    if !local_additional.is_empty() || !remote_additional.is_empty() {
+        diffs.push(FieldDiff {
+            label: "Additional fields",
+            local: render_additional_fields(&local_additional),
+            remote: render_additional_fields(&remote_additional),
+            differs: local_additional != remote_additional,
+        });
+    }
+
+    let local_protected = protected_field_names(&local.fields);
+    let remote_protected = protected_field_names(&remote.fields);
+    if !local_protected.is_empty() || !remote_protected.is_empty() {
+        diffs.push(FieldDiff {
+            label: "Protected fields",
+            local: local_protected.join(", "),
+            remote: remote_protected.join(", "),
+            differs: local_protected != remote_protected,
+        });
+    }
+
+    let metadata = metadata_differences(local, remote);
+    if !metadata.is_empty() {
+        let summary = metadata.join(", ");
+        diffs.push(FieldDiff {
+            label: "Entry settings",
+            local: summary.clone(),
+            remote: summary,
+            differs: true,
+        });
+    }
+
+    diffs
+}
+
+fn entry_field_diff(
+    label: &'static str,
+    key: &str,
+    local: &EntrySnapshot,
+    remote: &EntrySnapshot,
+    always_redact: bool,
+) -> FieldDiff {
+    let local_value = local.fields.get(key);
+    let remote_value = remote.fields.get(key);
+    FieldDiff {
+        label,
+        local: render_field(local_value, always_redact),
+        remote: render_field(remote_value, always_redact),
+        // `Value` equality includes both the cleartext and its protected bit.
+        differs: local_value != remote_value,
+    }
+}
+
+fn render_field(value: Option<&Value<String>>, always_redact: bool) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if always_redact || value.is_protected() {
+        redact(value.get())
+    } else {
+        value.get().clone()
+    }
+}
+
+fn additional_fields(fields_map: &HashMap<String, Value<String>>) -> Vec<(&str, &Value<String>)> {
+    let mut fields: Vec<_> = fields_map
+        .iter()
+        .filter(|(key, _)| !STANDARD_FIELDS.contains(&key.as_str()))
+        .map(|(key, value)| (key.as_str(), value))
+        .collect();
+    fields.sort_by_key(|(key, _)| *key);
+    fields
+}
+
+fn render_additional_fields(fields: &[(&str, &Value<String>)]) -> String {
+    fields
+        .iter()
+        .map(|(key, value)| {
+            let rendered = render_field(Some(value), false);
+            format!("{key} = {rendered}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn protected_field_names(fields_map: &HashMap<String, Value<String>>) -> Vec<&str> {
+    let mut names: Vec<_> = fields_map
+        .iter()
+        .filter(|(_, value)| value.is_protected())
+        .map(|(key, _)| key.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if local.view.autotype != remote.view.autotype {
+        changed.push("Auto-Type");
+    }
+    if local.view.custom_data != remote.view.custom_data {
+        changed.push("custom data");
+    }
+    if local.icon != remote.icon {
+        changed.push("icon");
+    }
+    if local.view.foreground_color != remote.view.foreground_color {
+        changed.push("foreground color");
+    }
+    if local.view.background_color != remote.view.background_color {
+        changed.push("background color");
+    }
+    if local.view.override_url != remote.view.override_url {
+        changed.push("URL override");
+    }
+    if local.quality_check != remote.quality_check {
+        changed.push("quality check");
+    }
+    if local.previous_parent_group != remote.previous_parent_group {
+        changed.push("previous group");
+    }
+    changed
 }
 
 fn tags_diff(local: &[String], remote: &[String]) -> FieldDiff {
@@ -366,127 +728,12 @@ fn tags_diff(local: &[String], remote: &[String]) -> FieldDiff {
     }
 }
 
-fn plain_diff(label: &'static str, local: &str, remote: &str) -> FieldDiff {
-    FieldDiff {
-        label,
-        local: local.to_string(),
-        remote: remote.to_string(),
-        differs: local != remote,
-    }
-}
-
-fn password_diff(local: &str, remote: &str) -> FieldDiff {
-    FieldDiff {
-        label: "Password",
-        local: redact(local),
-        remote: redact(remote),
-        // Compare cleartext for the differs flag; only the displayed strings
-        // get redacted so the screen is safe to share.
-        differs: local != remote,
-    }
-}
-
 fn redact(pw: &str) -> String {
     if pw.is_empty() {
         String::new()
     } else {
         format!("••• ({} chars)", pw.chars().count())
     }
-}
-
-/// Copy every field from `view` onto `entry`. Shared by the conflict-pick
-/// path (`replace_entry_fields`) and the remote-only-import path
-/// (`add_entry_under`) so they stay in lockstep — pre-v0.2.1 they each had
-/// their own field list and drifted, causing tags/custom-data to silently
-/// not be transplanted when the user picked Remote.
-fn populate_from_view(entry: &mut EntryMut<'_>, view: &EntryView) {
-    entry.set_unprotected(fields::TITLE, &view.title);
-    entry.set_unprotected(fields::USERNAME, &view.username);
-    entry.set_protected(fields::PASSWORD, &view.password);
-    entry.set_unprotected(fields::URL, &view.url);
-    entry.set_unprotected(fields::NOTES, &view.notes);
-    entry.tags = view.tags.clone();
-    entry.custom_data = view.custom_data.clone();
-    // Replace non-standard fields wholesale: drop everything outside the
-    // standard set, then re-write from the view. Pre-fix this step was
-    // missing entirely and "pick remote" silently dropped any custom
-    // fields off the local entry — the SAP launcher's whole config
-    // would have evaporated on the next conflict resolution.
-    let drop: Vec<String> = entry
-        .fields
-        .keys()
-        .filter(|k| !STANDARD_FIELDS.contains(&k.as_str()))
-        .cloned()
-        .collect();
-    for key in drop {
-        entry.fields.remove(&key);
-    }
-    for cf in &view.custom_fields {
-        let key = cf.key.trim();
-        if key.is_empty() {
-            continue;
-        }
-        if cf.protected {
-            entry.set_protected(key, cf.value.clone());
-        } else {
-            entry.set_unprotected(key, cf.value.clone());
-        }
-    }
-    entry.autotype = view.autotype.clone();
-    entry.foreground_color = view.foreground_color.clone();
-    entry.background_color = view.background_color.clone();
-    entry.override_url = view.override_url.clone();
-}
-
-fn replace_entry_fields(db: &mut Database, id: EntryId, view: &EntryView) {
-    let Some(mut entry) = db.entry_mut(id) else {
-        return;
-    };
-    populate_from_view(&mut entry, view);
-    entry.times.last_modification = Some(Times::now());
-}
-
-fn add_entry_under(db: &mut Database, group_id: GroupId, view: &EntryView) {
-    // Re-hydrate the original remote-side EntryId from its UUID string so
-    // the imported entry keeps the identity other KeePass clients know it
-    // by. Falls back to a fresh-UUID add if the string isn't a valid UUID
-    // (shouldn't happen — `entry_to_view` produces these via
-    // `EntryId::to_string` — but stay defensive rather than panic).
-    let entry_id = match uuid::Uuid::parse_str(&view.id) {
-        Ok(uuid) => Some(EntryId::from_uuid(uuid)),
-        Err(_) => {
-            eprintln!(
-                "merge: remote entry UUID unparseable, importing with fresh UUID: {}",
-                view.id
-            );
-            None
-        }
-    };
-
-    // `remote_only` is computed from the *live* view of both sides — entries
-    // inside the recycle bin are filtered out of `live_entries`. An entry the
-    // local user trashed (still in their bin) AND that the remote has live
-    // would otherwise land here with an id that *does* collide with a row
-    // already in the cloned `merged` database. `add_entry_with_id` panics on
-    // that, so guard explicitly: if we already know this id, the local user
-    // has expressed an intent for it (trash). Skip the re-import rather than
-    // resurrect, matching the "last writer in *this* client wins" stance.
-    if let Some(id) = entry_id
-        && db.iter_all_entries().any(|e| e.id() == id)
-    {
-        return;
-    }
-
-    let Some(mut group) = db.group_mut(group_id) else {
-        return;
-    };
-    let mut entry = match entry_id {
-        Some(id) => group.add_entry_with_id(id),
-        None => group.add_entry(),
-    };
-    populate_from_view(&mut entry, view);
-    entry.times.last_modification = Some(Times::now());
-    entry.times.creation = Some(Times::now());
 }
 
 #[cfg(test)]
@@ -656,7 +903,8 @@ mod tests {
         assert_eq!(report.auto_resolved[0].winner, Side::Remote);
         assert!(!report.is_clean(), "auto-resolved still requires writeback");
 
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("newer remote should merge");
         let merged_notes = merged
             .iter_all_entries()
             .find(|e| e.id() == id)
@@ -694,7 +942,8 @@ mod tests {
         assert_eq!(report.auto_resolved.len(), 1);
         assert_eq!(report.auto_resolved[0].winner, Side::Local);
 
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("newer local should merge");
         let merged_url = merged
             .iter_all_entries()
             .find(|e| e.id() == id)
@@ -775,7 +1024,8 @@ mod tests {
 
         let report = diff(&local, &remote);
         // No picks supplied → defaults to Local → password unchanged.
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("default local pick should merge");
         let entry = merged.entry(id).unwrap();
         assert_eq!(entry.get_password(), Some("local-pw"));
     }
@@ -794,7 +1044,8 @@ mod tests {
         let mut picks = HashMap::new();
         picks.insert(id.to_string(), Side::Remote);
 
-        let merged = apply_picks(&local, &remote, &picks, &report);
+        let merged =
+            apply_picks(&local, &remote, &picks, &report).expect("remote pick should merge");
         let entry = merged.entry(id).unwrap();
         assert_eq!(entry.get_password(), Some("remote-pw"));
     }
@@ -806,7 +1057,8 @@ mod tests {
         let remote_id = add(&mut remote, "NewRemote", "remote-secret");
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("remote-only entry should merge");
 
         // UUID preservation regression test (bug fixed in v0.2.1): the
         // entry must be findable by the *original* remote EntryId in the
@@ -860,7 +1112,8 @@ mod tests {
         // including the tags.
         let mut picks = HashMap::new();
         picks.insert(id.to_string(), Side::Remote);
-        let merged = apply_picks(&local, &remote, &picks, &report);
+        let merged =
+            apply_picks(&local, &remote, &picks, &report).expect("remote tags should merge");
 
         let entry = merged.entry(id).unwrap();
         assert_eq!(entry.get_password(), Some("remote-pw"));
@@ -916,7 +1169,8 @@ mod tests {
         let report = diff(&local, &remote);
         let mut picks = HashMap::new();
         picks.insert(id.to_string(), Side::Remote);
-        let merged = apply_picks(&local, &remote, &picks, &report);
+        let merged = apply_picks(&local, &remote, &picks, &report)
+            .expect("remote custom fields should merge");
         let entry = merged.entry(id).unwrap();
 
         // Remote's value wins.
@@ -933,6 +1187,237 @@ mod tests {
         assert!(
             api_field.is_protected(),
             "Protected bit must round-trip through the conflict-pick path"
+        );
+    }
+
+    #[test]
+    fn otp_participates_in_diff_and_remote_pick_preserves_protection() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::OTP, "otpauth://totp/GitHub:alice?secret=LOCAL");
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::OTP, "otpauth://totp/GitHub:alice?secret=REMOTE");
+
+        let report = diff(&local, &remote);
+        let conflict = report.conflicts.first().expect("OTP change must conflict");
+        let otp = conflict
+            .fields
+            .iter()
+            .find(|field| field.label == "OTP")
+            .expect("OTP needs its own redacted diff row");
+        assert!(otp.differs);
+        assert!(!otp.local.contains("LOCAL"));
+        assert!(!otp.remote.contains("REMOTE"));
+
+        let picks = HashMap::from([(id.to_string(), Side::Remote)]);
+        let merged =
+            apply_picks(&local, &remote, &picks, &report).expect("OTP-aware merge should succeed");
+        let entry = merged.entry(id).unwrap();
+        let field = entry.fields.get(fields::OTP).unwrap();
+        assert_eq!(field.get(), "otpauth://totp/GitHub:alice?secret=REMOTE");
+        assert!(field.is_protected());
+    }
+
+    #[test]
+    fn protection_only_change_is_detected_and_applied() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Service", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_unprotected("API_TOKEN", "same-value");
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected("API_TOKEN", "same-value");
+
+        let report = diff(&local, &remote);
+        let conflict = report
+            .conflicts
+            .first()
+            .expect("changing only the protection bit must conflict");
+        assert!(
+            conflict
+                .fields
+                .iter()
+                .any(|field| field.label == "Protected fields" && field.differs)
+        );
+
+        let picks = HashMap::from([(id.to_string(), Side::Remote)]);
+        let merged = apply_picks(&local, &remote, &picks, &report)
+            .expect("protection-aware merge should succeed");
+        let entry = merged.entry(id).unwrap();
+        let field = entry.fields.get("API_TOKEN").unwrap();
+        assert_eq!(field.get(), "same-value");
+        assert!(field.is_protected());
+    }
+
+    #[test]
+    fn remote_group_and_entry_location_are_preserved() {
+        let local = Database::new();
+        let mut remote = fork(&local);
+        let (group_id, entry_id) = {
+            let mut root = remote.root_mut();
+            let mut group = root.add_group();
+            group.name = "Infrastructure".into();
+            let group_id = group.id();
+            let mut entry = group.add_entry();
+            entry.set_unprotected(fields::TITLE, "Router");
+            entry.set_protected(fields::PASSWORD, "secret");
+            (group_id, entry.id())
+        };
+
+        let report = diff(&local, &remote);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("remote group tree should merge");
+
+        assert_eq!(merged.group(group_id).unwrap().name, "Infrastructure");
+        assert_eq!(merged.entry(entry_id).unwrap().parent().id(), group_id);
+    }
+
+    #[test]
+    fn remote_tombstone_deletes_local_entry() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Deleted elsewhere", "pw");
+        let mut remote = fork(&local);
+        remote.entry_mut(id).unwrap().track_changes().remove();
+
+        let report = diff(&local, &remote);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("tombstone-aware merge should succeed");
+        assert!(merged.entry(id).is_none());
+        assert!(merged.deleted_objects.contains_key(&id.uuid()));
+    }
+
+    #[test]
+    fn local_tombstone_forces_writeback_and_is_not_resurrected() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Deleted locally", "pw");
+        let remote = fork(&local);
+        local.entry_mut(id).unwrap().track_changes().remove();
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.has_local_contribution(),
+            "a local tombstone must force upload of the merged result"
+        );
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("newer local tombstone should merge");
+        assert!(merged.entry(id).is_none());
+        assert!(merged.deleted_objects.contains_key(&id.uuid()));
+    }
+
+    #[test]
+    fn manual_remote_pick_keeps_both_losing_and_existing_history() {
+        use chrono::NaiveDate;
+
+        let older = NaiveDate::from_ymd_opt(2025, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "local-current");
+        let mut remote = fork(&local);
+
+        let mut old_remote = clone_entry(&remote, id, Side::Remote).unwrap();
+        old_remote.history = None;
+        old_remote.set_protected(fields::PASSWORD, "remote-history");
+        old_remote.times.last_modification = Some(older);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .history
+            .get_or_insert_default()
+            .add_entry(old_remote);
+
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "remote-current");
+        let report = diff(&local, &remote);
+        let picks = HashMap::from([(id.to_string(), Side::Remote)]);
+        let merged = apply_picks(&local, &remote, &picks, &report)
+            .expect("history-aware merge should succeed");
+
+        let entry = merged.entry(id).unwrap();
+        assert_eq!(entry.get_password(), Some("remote-current"));
+        let history_passwords: Vec<_> = entry
+            .history
+            .as_ref()
+            .unwrap()
+            .get_entries()
+            .iter()
+            .filter_map(|historical| historical.get_password())
+            .collect();
+        assert!(history_passwords.contains(&"local-current"));
+        assert!(history_passwords.contains(&"remote-history"));
+    }
+
+    #[test]
+    fn attachments_fail_closed_instead_of_being_dropped() {
+        let mut local = Database::new();
+        let id = add(&mut local, "With attachment", "pw");
+        let remote = fork(&local);
+        local
+            .entry_mut(id)
+            .unwrap()
+            .add_attachment("secret.bin", Value::protected(vec![1, 2, 3]));
+
+        let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
+            .expect_err("attachment merge must be refused");
+        assert!(matches!(
+            error,
+            ApplyError::AttachmentsUnsupported {
+                local: 1,
+                remote: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn remote_added_custom_icon_fails_closed_instead_of_being_dropped() {
+        let mut local = Database::new();
+        let id = add(&mut local, "With custom icon", "pw");
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(vec![1, 2, 3]);
+
+        let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
+            .expect_err("custom-icon merge must be refused");
+        assert!(matches!(
+            error,
+            ApplyError::CustomIconsDiffer {
+                local: 0,
+                remote: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn identical_custom_icon_stores_are_allowed() {
+        let mut local = Database::new();
+        let id = add(&mut local, "With shared icon", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(vec![1, 2, 3]);
+        let remote = fork(&local);
+
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
+            .expect("identical custom-icon stores are safe to retain");
+        assert_eq!(merged.num_custom_icons(), 1);
+        assert_eq!(
+            merged.entry(id).unwrap().custom_icon().unwrap().data,
+            vec![1, 2, 3]
         );
     }
 
@@ -957,7 +1442,8 @@ mod tests {
             1,
             "expected exactly one remote-only entry"
         );
-        let merged_fp = apply_picks(&local_fp, &cloud, &HashMap::new(), &report);
+        let merged_fp = apply_picks(&local_fp, &cloud, &HashMap::new(), &report)
+            .expect("round-trip merge should succeed");
         assert_eq!(
             merged_fp.iter_all_entries().count(),
             1,
@@ -990,18 +1476,28 @@ mod tests {
         );
     }
 
-    /// Regression: local has an entry in its recycle bin while remote still
-    /// has the same id live. `live_entries` filters bin rows on both sides,
-    /// so the id appears in `remote_only` — but `merged = local.clone()`
-    /// preserves the bin row, and an unchecked `add_entry_with_id` would
-    /// panic with "Entry with ID ... already exists". The guard in
-    /// `add_entry_under` must catch this and skip the import.
+    /// Regression: local has moved an entry to its recycle bin more recently
+    /// than the remote copy was updated. The structural merge must retain the
+    /// newer local location instead of resurrecting a second live copy.
     #[test]
     fn apply_picks_does_not_panic_when_remote_only_collides_with_local_bin() {
-        // Build local with one entry, then trash it (recycle bin) so it
-        // disappears from the live view but stays in `db.entries`.
+        use chrono::NaiveDate;
+
+        let older = NaiveDate::from_ymd_opt(2025, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let newer = NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
         let mut local = Database::new();
         let id = add(&mut local, "WasTrashed", "x");
+        let mut remote = fork(&local);
+        remote.entry_mut(id).unwrap().times.last_modification = Some(older);
+        remote.entry_mut(id).unwrap().times.location_changed = Some(older);
+
         let bin_id = {
             let mut root = local.root_mut();
             let mut bin = root.add_group();
@@ -1013,17 +1509,8 @@ mod tests {
             id
         };
         local.entry_mut(id).unwrap().move_to(bin_id).unwrap();
-
-        // Remote still has the same entry live — fork before the local
-        // trash, give it some content so the diff has something to do.
-        let mut remote = Database::new();
-        {
-            let mut root = remote.root_mut();
-            let mut e = root.add_entry_with_id(id);
-            e.set_unprotected(fields::TITLE, "WasTrashed");
-            e.set_unprotected(fields::USERNAME, "user");
-            e.set_protected(fields::PASSWORD, "x");
-        }
+        local.entry_mut(id).unwrap().times.last_modification = Some(newer);
+        local.entry_mut(id).unwrap().times.location_changed = Some(newer);
 
         let report = diff(&local, &remote);
         // Bug precondition: local has it in the bin (filtered), remote has
@@ -1031,9 +1518,10 @@ mod tests {
         assert_eq!(report.remote_only.len(), 1);
         assert_eq!(report.remote_only[0].id, id.to_string());
 
-        // Must not panic. The collision check skips the import, preserving
-        // the local user's "I trashed this" intent.
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report);
+        // Database::merge sees the same UUID on both sides and retains the
+        // newer local location without adding another entry.
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("recycle-bin collision should merge without resurrection");
         // Entry still exists exactly once — in the recycle bin.
         let live_count = merged
             .iter_all_entries()

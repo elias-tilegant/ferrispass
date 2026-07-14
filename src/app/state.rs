@@ -3845,12 +3845,22 @@ impl AppState {
                         &HashMap::new(),
                         chrono::Local::now(),
                     );
-                    let merged = crate::keepass::merge::apply_picks(
+                    let merged = match crate::keepass::merge::apply_picks(
                         &local_db,
                         &remote_db,
                         &HashMap::new(),
                         &report,
-                    );
+                    ) {
+                        Ok(merged) => merged,
+                        Err(error) => {
+                            self.apply_sync_status(
+                                target,
+                                SyncStatus::Failed(format!("Merge blocked: {error}")),
+                                cx,
+                            );
+                            return;
+                        }
+                    };
                     self.commit_merged_for(
                         target,
                         merged,
@@ -3938,29 +3948,39 @@ impl AppState {
     /// blind force-overwrite, at the cost of one extra round trip in the
     /// rare race case.
     pub fn apply_conflict_resolution(&mut self, cx: &mut Context<Self>) {
-        let SyncStatus::Conflict(state) = &self.sync_status else {
-            return;
+        let (merge_result, remote_etag, base_generation, history_entries) = match &self.sync_status
+        {
+            SyncStatus::Conflict(state) => (
+                crate::keepass::merge::apply_picks(
+                    &state.local_db,
+                    &state.remote_db,
+                    &state.picks,
+                    &state.report,
+                ),
+                state.remote_etag.clone(),
+                state.base_generation,
+                sync_history::entries_from_report(
+                    &state.report,
+                    &state.picks,
+                    chrono::Local::now(),
+                ),
+            ),
+            _ => return,
+        };
+        let merged = match merge_result {
+            Ok(merged) => merged,
+            Err(error) => {
+                self.sync_status = SyncStatus::Failed(format!("Merge blocked: {error}"));
+                self.overlay = Overlay::None;
+                cx.notify();
+                return;
+            }
         };
         let VaultStatus::Open { document, path, .. } = &self.vault else {
             return;
         };
-        let merged = crate::keepass::merge::apply_picks(
-            &state.local_db,
-            &state.remote_db,
-            &state.picks,
-            &state.report,
-        );
-        let remote_etag = state.remote_etag.clone();
-        let base_generation = state.base_generation;
         let master_password = document.password().to_string();
         let target = path.clone();
-        // Translate report + picks into history entries up front so the
-        // borrow on `state.sync_status` drops cleanly. Append happens
-        // inside commit_merged_for once the merged DB is actually on
-        // disk and re-read into memory — see the "defer until success"
-        // note on the silent-merge call site.
-        let history_entries =
-            sync_history::entries_from_report(&state.report, &state.picks, chrono::Local::now());
 
         // User-driven resolution — the "Synced · N merged" badge is reserved
         // for git-style silent merges where the user got no overlay at all.
