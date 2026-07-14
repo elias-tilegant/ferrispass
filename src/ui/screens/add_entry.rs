@@ -4,7 +4,12 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Sizable as _, WindowExt as _, checkbox::Checkbox, h_flex, input::Input, slider::Slider, v_flex,
+    Sizable as _, WindowExt as _,
+    checkbox::Checkbox,
+    h_flex,
+    input::{Input, InputContentType},
+    slider::Slider,
+    v_flex,
 };
 
 use crate::domain::VaultGroup;
@@ -13,6 +18,7 @@ use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::label;
 use crate::ui::widgets::interaction::Interaction as _;
+use crate::ui::widgets::secret_input::SecretInput;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let underlay = crate::ui::screens::vault::render(shell, cx);
@@ -323,7 +329,15 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .child(
                             h_flex()
                                 .gap_1p5()
-                                .child(div().flex_1().child(Input::new(&password_input)))
+                                .child(div().flex_1().child(SecretInput::new(
+                                    &password_input,
+                                    true,
+                                    Some(if is_edit {
+                                        InputContentType::Password
+                                    } else {
+                                        InputContentType::NewPassword
+                                    }),
+                                )))
                                 .child(generate_button_el),
                         )
                         .child(generator_card(shell, cx)),
@@ -355,7 +369,11 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                         .child("(otpauth URL or secret)"),
                                 ),
                         )
-                        .child(Input::new(&otp_input)),
+                        .child(SecretInput::new(
+                            &otp_input,
+                            true,
+                            Some(InputContentType::Password),
+                        )),
                 )
                 .child(custom_fields_editor(shell, cx)),
         )
@@ -425,7 +443,11 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                 .gap_2()
                 .items_center()
                 .child(div().flex_1().min_w(px(0.)).child(Input::new(&key_input)))
-                .child(div().flex_1().min_w(px(0.)).child(Input::new(&value_input)))
+                .child(div().flex_1().min_w(px(0.)).child(SecretInput::new(
+                    &value_input,
+                    protected,
+                    protected.then_some(InputContentType::Password),
+                )))
                 .child(
                     // Lock toggle: clicking flips the `protected` flag.
                     // When set, the value is stored via `set_protected`
@@ -493,8 +515,8 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                         .hover(|s| s.text_color(palette::red()))
                         .pressable()
                         .on_click(cx.listener(
-                            move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                                shell.remove_custom_field_row(id_for_remove, cx);
+                            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                                shell.remove_custom_field_row(id_for_remove, window, cx);
                             },
                         )),
                 ),

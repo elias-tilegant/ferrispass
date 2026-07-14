@@ -172,6 +172,14 @@ pub struct AppShell {
     /// detail panel. `None` = masked. Compared against the live selection
     /// in the state observer so switching entries (or locking) auto-masks.
     revealed_entry_id: Option<String>,
+    /// Last vault context observed by the window-bound state observer. A
+    /// path/status transition wipes editor and clipboard secrets before the
+    /// newly-selected vault is rendered.
+    secret_context_path: Option<PathBuf>,
+    secret_context_was_open: bool,
+    /// Tracks leaving Add/Edit through any route, including global Escape or
+    /// another overlay replacing the editor without calling its Cancel button.
+    entry_editor_was_open: bool,
     /// Wall-clock timestamp of the last user input event (mouse-move,
     /// click, key-down). Updated cheaply on every event without
     /// triggering a re-render — only the auto-lock checker reads it.
@@ -292,13 +300,19 @@ impl AppShell {
         let new_entry_title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
         let new_entry_username_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
-        let new_entry_password_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
+        let new_entry_password_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("Password")
+        });
         let new_entry_url_input = cx.new(|cx| InputState::new(window, cx).placeholder("URL"));
         let new_entry_notes_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Notes (optional)"));
-        let new_entry_otp_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("otpauth://… or base32 secret"));
+        let new_entry_otp_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("otpauth://… or base32 secret")
+        });
         let new_group_name_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let picker_query_input =
@@ -344,8 +358,20 @@ impl AppShell {
             },
         );
 
+        let (secret_context_path, secret_context_was_open, entry_editor_was_open) = {
+            let state = state.read(cx);
+            (
+                state.current_vault_path(),
+                matches!(state.vault_status(), crate::app::VaultStatus::Open { .. }),
+                matches!(
+                    state.overlay(),
+                    Overlay::AddEntry | Overlay::EditEntry { .. }
+                ),
+            )
+        };
+
         let _subscriptions = vec![
-            cx.observe(&state, |shell: &mut AppShell, state, cx| {
+            cx.observe_in(&state, window, |shell: &mut AppShell, state, window, cx| {
                 // Re-render whenever AppState notifies AND keep the
                 // background tasks (TOTP tick + auto-lock checker) in
                 // sync with whether a vault is currently open.
@@ -357,11 +383,35 @@ impl AppShell {
                 // Auto-mask: if the user moves to a different entry (or
                 // locks the vault), drop any reveal we held. Compared by
                 // id so re-renders against the same entry don't trigger.
-                let current_id = state
-                    .read(cx)
-                    .vault_browser()
-                    .and_then(|b| b.selected_entry)
-                    .map(|e| e.id);
+                let (current_id, current_path, current_is_open, editor_is_open) = {
+                    let state = state.read(cx);
+                    (
+                        state
+                            .vault_browser()
+                            .and_then(|b| b.selected_entry)
+                            .map(|e| e.id),
+                        state.current_vault_path(),
+                        matches!(state.vault_status(), crate::app::VaultStatus::Open { .. }),
+                        matches!(
+                            state.overlay(),
+                            Overlay::AddEntry | Overlay::EditEntry { .. }
+                        ),
+                    )
+                };
+                let secret_context_changed = shell.secret_context_path != current_path
+                    || shell.secret_context_was_open != current_is_open;
+                let editor_closed = shell.entry_editor_was_open && !editor_is_open;
+                shell.secret_context_path = current_path;
+                shell.secret_context_was_open = current_is_open;
+                shell.entry_editor_was_open = editor_is_open;
+
+                if secret_context_changed {
+                    shell.wipe_session_secrets(cx);
+                    shell.clear_unlock_form(window, cx);
+                    shell.clear_entry_form(window, cx);
+                } else if editor_closed {
+                    shell.clear_entry_form(window, cx);
+                }
                 if shell.revealed_entry_id.is_some() && shell.revealed_entry_id != current_id {
                     shell.revealed_entry_id = None;
                 }
@@ -440,6 +490,9 @@ impl AppShell {
             clipboard_clear_deadline: None,
             clipboard_pill_tick: None,
             revealed_entry_id: None,
+            secret_context_path,
+            secret_context_was_open,
+            entry_editor_was_open,
             last_activity: Instant::now(),
             auto_lock_task: None,
             auto_sync_task: None,
@@ -548,27 +601,34 @@ impl AppShell {
                 // timestamp from earlier in the session doesn't trip an
                 // immediate lock.
                 self.last_activity = Instant::now();
+                let window_handle = self.window_handle;
                 self.auto_lock_task = Some(cx.spawn(async move |this, cx| {
                     loop {
                         cx.background_executor()
                             .timer(Duration::from_secs(AUTO_LOCK_TICK_SECS))
                             .await;
-                        let triggered = this.update(cx, |shell, cx| {
+                        let decision = this.update(cx, |shell, _| {
                             // Re-read on each tick so toggling the
                             // setting takes effect within ~5 s.
                             let Some(threshold) = shell.settings.auto_lock_secs else {
-                                return true; // settings disabled — exit.
+                                return None; // settings disabled — exit.
                             };
                             if shell.last_activity.elapsed() >= Duration::from_secs(threshold) {
-                                shell.auto_lock_now(cx);
-                                true
+                                Some(true)
                             } else {
-                                false
+                                Some(false)
                             }
                         });
-                        match triggered {
-                            Ok(true) | Err(_) => break,
-                            Ok(false) => continue,
+                        match decision {
+                            Ok(Some(false)) => continue,
+                            Ok(Some(true)) => {
+                                let _ = window_handle.update(cx, |_root, window, app| {
+                                    this.update(app, |shell, cx| shell.lock_vault(window, cx))
+                                        .ok();
+                                });
+                                break;
+                            }
+                            Ok(None) | Err(_) => break,
                         }
                     }
                 }));
@@ -630,16 +690,6 @@ impl AppShell {
             }
             _ => {}
         }
-    }
-
-    /// Lock the vault from a non-foreground context (idle timeout).
-    /// Wipes shell-side secrets and delegates to AppState. Skips
-    /// clearing the password / search input fields because we don't
-    /// have a `Window` here — they get reset by `select_vault_path`
-    /// whenever the user picks a vault to re-open.
-    fn auto_lock_now(&mut self, cx: &mut Context<Self>) {
-        self.wipe_session_secrets(cx);
-        self.state.update(cx, |state, cx| state.lock_vault(cx));
     }
 
     /// Reconcile the global-hotkey listener with the current settings.
@@ -796,6 +846,15 @@ impl AppShell {
                 _cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
             }
         }
+    }
+
+    fn clear_unlock_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.password_input.update(cx, |input, cx| {
+            input.set_masked(true, window, cx);
+            input.set_value("", window, cx);
+        });
+        self.keyfile_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
     }
 
     pub fn arm_perma_delete(&mut self, entry_id: String, cx: &mut Context<Self>) {
@@ -999,7 +1058,18 @@ impl AppShell {
     }
 
     /// Remove a row by its stable id (the trash button on each row).
-    pub fn remove_custom_field_row(&mut self, id: usize, cx: &mut Context<Self>) {
+    pub fn remove_custom_field_row(
+        &mut self,
+        id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(row) = self.new_entry_custom_fields.iter().find(|row| row.id == id) {
+            row.key_input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+            row.value_input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+        }
         self.new_entry_custom_fields.retain(|row| row.id != id);
         cx.notify();
     }
@@ -1022,12 +1092,29 @@ impl AppShell {
         for input in [
             &self.new_entry_title_input,
             &self.new_entry_username_input,
-            &self.new_entry_password_input,
             &self.new_entry_url_input,
             &self.new_entry_notes_input,
-            &self.new_entry_otp_input,
         ] {
             input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+        for input in [&self.new_entry_password_input, &self.new_entry_otp_input] {
+            input.update(cx, |state, cx| {
+                state.set_masked(true, window, cx);
+                state.set_value("", window, cx);
+            });
+        }
+        // Clear row entities before dropping our handles. GPUI may retain an
+        // entity until the end of the frame, so dropping the Vec alone is not
+        // an immediate in-memory wipe of protected custom values.
+        for row in &self.new_entry_custom_fields {
+            row.key_input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+            row.value_input.update(cx, |state, cx| {
+                if row.protected {
+                    state.set_masked(true, window, cx);
+                }
+                state.set_value("", window, cx);
+            });
         }
         // Drop any explicit target-group pick so the next open re-derives
         // from the current sidebar selection, and snap the picker shut.
@@ -1110,8 +1197,10 @@ impl AppShell {
     pub fn generate_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let length = self.gen_length(cx);
         let pw = crate::keepass::password_gen::generate(length, self.gen_classes);
-        self.new_entry_password_input
-            .update(cx, |state, cx| state.set_value(pw, window, cx));
+        self.new_entry_password_input.update(cx, |state, cx| {
+            state.set_masked(true, window, cx);
+            state.set_value(pw, window, cx);
+        });
     }
 
     fn on_action_open_vault(&mut self, _: &OpenVault, window: &mut Window, cx: &mut Context<Self>) {
@@ -1950,18 +2039,25 @@ impl AppShell {
             return;
         };
 
+        // Wipe any Add/Edit state from the previous overlay before installing
+        // this entry's values. This also restores the secret inputs to masked.
+        self.clear_entry_form(window, cx);
         self.new_entry_title_input
             .update(cx, |s, cx| s.set_value(&p.title, window, cx));
         self.new_entry_username_input
             .update(cx, |s, cx| s.set_value(&p.username, window, cx));
-        self.new_entry_password_input
-            .update(cx, |s, cx| s.set_value(&p.password, window, cx));
+        self.new_entry_password_input.update(cx, |s, cx| {
+            s.set_masked(true, window, cx);
+            s.set_value(&p.password, window, cx);
+        });
         self.new_entry_url_input
             .update(cx, |s, cx| s.set_value(&p.url, window, cx));
         self.new_entry_notes_input
             .update(cx, |s, cx| s.set_value(&p.notes, window, cx));
-        self.new_entry_otp_input
-            .update(cx, |s, cx| s.set_value(&p.otp, window, cx));
+        self.new_entry_otp_input.update(cx, |s, cx| {
+            s.set_masked(true, window, cx);
+            s.set_value(&p.otp, window, cx);
+        });
 
         // Rebuild the custom-fields editor rows from the entry. Each
         // row gets a fresh Entity<InputState> with the current value
@@ -1972,7 +2068,11 @@ impl AppShell {
             let id = self.next_custom_field_id;
             self.next_custom_field_id = self.next_custom_field_id.wrapping_add(1);
             let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Key"));
-            let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
+            let value_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(cf.protected)
+                    .placeholder("Value")
+            });
             key_input.update(cx, |s, cx| s.set_value(&cf.key, window, cx));
             value_input.update(cx, |s, cx| s.set_value(&cf.value, window, cx));
             self.new_entry_custom_fields.push(CustomFieldDraftInputs {
@@ -2212,8 +2312,7 @@ impl AppShell {
         if switched {
             // Same-vault no-op or successful instant switch: clear any
             // residual unlock inputs so a later cold-open starts clean.
-            self.password_input
-                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.clear_unlock_form(window, cx);
             return;
         }
         self.select_vault_path(path, window, cx);
@@ -2232,6 +2331,7 @@ impl AppShell {
         }
 
         self.password_input.update(cx, |input, cx| {
+            input.set_masked(true, window, cx);
             input.set_value("", window, cx);
             input.focus(window, cx);
         });
@@ -2276,8 +2376,7 @@ impl AppShell {
         // alongside the path.
         let enroll_after_unlock = self.state.read(cx).pending_biometric_enrollment();
 
-        self.password_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.clear_unlock_form(window, cx);
         self.state
             .update(cx, |state, cx| state.begin_open(path.clone(), cx));
 
@@ -2434,8 +2533,7 @@ impl AppShell {
             return;
         }
 
-        self.password_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.clear_unlock_form(window, cx);
         // Esc on the unlock screen: if the user had a vault open before
         // and was just about to unlock another, snap back to the original
         // instead of hard-locking everything.
@@ -2448,8 +2546,8 @@ impl AppShell {
     }
 
     pub fn lock_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.password_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.clear_unlock_form(window, cx);
+        self.clear_entry_form(window, cx);
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         // If Settings was sitting on the Sync tab when the user locked,

@@ -4,7 +4,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, h_flex,
-    input::{Input, InputState},
+    input::{Input, InputContentType, InputState},
     v_flex,
 };
 
@@ -17,6 +17,7 @@ use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::atoms::label;
 use crate::ui::widgets::interaction::Interaction as _;
+use crate::ui::widgets::secret_input::SecretInput;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let state = shell.state().read(cx);
@@ -114,7 +115,11 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     v_flex()
                         .gap_2()
                         .child(label("Master password"))
-                        .child(input_box(shell.password_input())),
+                        .child(SecretInput::new(
+                            shell.password_input(),
+                            true,
+                            Some(InputContentType::Password),
+                        )),
                 )
                 .child(
                     v_flex()
