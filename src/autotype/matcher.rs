@@ -1,31 +1,23 @@
 //! Score vault entries against a foreground window.
 //!
-//! KeePassXC's auto-type matches an entry to a window by checking the
-//! foreground window's title against the entry's URL hostname and title.
-//! We mirror that, lightly:
+//! Browser window titles are controlled by the page and therefore cannot
+//! authenticate the site receiving a password. Until FerrisPass can read a
+//! browser's active-tab URL through a trusted integration, automatic matching
+//! in browsers fails closed. The explicit in-app "type selected entry" route
+//! does not use this matcher.
 //!
-//! - `https://login.example.com/path` → hostname `example.com` (the
-//!   eTLD+1 isn't worth importing PSL data for; full host is fine and
-//!   string-contains matching against the title generally absorbs the
-//!   subdomain noise).
-//! - Each entry is scored. The top score wins. Ties resolve in entry-
-//!   id order to keep the result deterministic (so the toast naming
-//!   the chosen entry is stable across runs).
-//!
-//! Why string-contains rather than regex / exact match: browsers
-//! decorate window titles inconsistently (`example.com — Google Chrome`
-//! vs `example.com - Mozilla Firefox` vs `Sign in to Example`), and
-//! sites occasionally embed the host inside a tab title. A substring
-//! check absorbs the noise without needing per-site rules.
+//! For non-browser applications the only current automatic signal is an exact
+//! equality between the app name and the entry URL's full hostname. We do not
+//! shorten hosts to an assumed registrable domain and do not use substring
+//! matches: `notgithub.com`, `github.com.evil`, and unrelated `*.co.uk` hosts
+//! must never qualify for `github.com` or `amazon.co.uk` credentials.
 
 use crate::autotype::window::ForegroundInfo;
 use crate::domain::{VaultEntry, VaultSnapshot};
 
-/// One ranked match. `score` is a relative number; only ordering
-/// matters (no calibration against an absolute "good vs. bad"
-/// threshold). A score of `0` means no signal — the matcher drops
-/// those before returning, so an empty result means "nothing
-/// matched".
+/// One ranked match. Scores are calibrated against
+/// [`MIN_AUTOMATIC_SCORE`]; callers must use [`select_automatic`] rather than
+/// blindly taking the first row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchedEntry {
     pub id: String,
@@ -33,32 +25,29 @@ pub struct MatchedEntry {
     pub score: u32,
 }
 
-// URL-derived signals — the *only* class of signal that can carry an
-// entry onto the match list. Without one of these we refuse to surface
-// the entry, even if its title happens to be inside the foreground
-// window's text. See `score_entry` for the rationale.
-const SCORE_HOSTNAME_IN_TITLE: u32 = 100;
-const SCORE_HOSTNAME_IN_APP_NAME: u32 = 90;
-const SCORE_REGISTRABLE_IN_TITLE: u32 = 80;
+const SCORE_EXACT_APP_HOST: u32 = 200;
 
-// Tie-breaker only — applied *on top* of a URL signal to disambiguate
-// when several entries share the same host (e.g. multiple GitHub
-// accounts named `personal` / `work`). Never qualifies on its own.
-const SCORE_TITLE_TIEBREAKER: u32 = 10;
+/// Hard floor for unattended entry selection. Keeping this separate from the
+/// current signal score makes future, weaker match signals fail closed unless
+/// their author deliberately decides they are safe for automatic typing.
+pub const MIN_AUTOMATIC_SCORE: u32 = SCORE_EXACT_APP_HOST;
 
 /// Rank every entry in the snapshot against the foreground window.
 /// Entries in the Recycle Bin are skipped — surfacing a trashed
 /// credential as a credible match would be confusing.
 pub fn rank(snapshot: &VaultSnapshot, foreground: &ForegroundInfo) -> Vec<MatchedEntry> {
-    let title_haystack = foreground.window_title.to_lowercase();
-    let app_haystack = foreground.app_name.to_lowercase();
+    // A page can choose any title it wants. Without an extension/native-
+    // messaging bridge we have no trustworthy site identity in a browser.
+    if foreground.is_browser() {
+        return Vec::new();
+    }
 
     let mut matches: Vec<MatchedEntry> = snapshot
         .entries_recursive()
         .into_iter()
         .filter(|e| !e.in_recycle_bin)
         .filter_map(|entry| {
-            let score = score_entry(entry, &title_haystack, &app_haystack);
+            let score = score_entry(entry, foreground);
             if score == 0 {
                 None
             } else {
@@ -71,69 +60,33 @@ pub fn rank(snapshot: &VaultSnapshot, foreground: &ForegroundInfo) -> Vec<Matche
         })
         .collect();
 
-    // Stable secondary sort by id so a tie always resolves the same
-    // way across runs — important so the "Auto-typed Foo" toast names
-    // the same entry every time the user repeats the action on the
-    // same login page.
+    // The stable secondary ordering is useful for diagnostics and a future
+    // chooser. It is deliberately not an ambiguity tie-breaker:
+    // `select_automatic` rejects more than one credible candidate.
     matches.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     matches
 }
 
-/// Score an entry against the foreground window. A URL-derived signal
-/// (hostname, registrable form, or hostname-in-app-name) is **required**
-/// for any non-zero score — title-only or app-name-only matches are
-/// deliberately suppressed because they're the dominant source of
-/// "credentials typed into the wrong site" bugs: a generic entry
-/// titled `Login`, `Mail`, `Admin`, or `Google` would otherwise score
-/// against any window containing that word.
-///
-/// The title-substring signal is preserved purely as a *tie-breaker*
-/// (`SCORE_TITLE_TIEBREAKER`) so that when two entries share a host
-/// (e.g. `github.com` personal + work) the one whose title matches
-/// the page title floats up — but a title alone can never get an entry
-/// onto the match list.
-///
-/// In-app auto-type (⌘⇧T, `force_entry_id` path) bypasses this entirely
-/// — the user is explicitly naming the entry, so URL relevance doesn't
-/// apply.
-fn score_entry(entry: &VaultEntry, title_haystack: &str, app_haystack: &str) -> u32 {
-    let mut url_score = 0u32;
+/// Return the sole candidate that is strong enough for unattended typing.
+/// Multiple candidates are ambiguous even when sorting made one deterministic;
+/// account choice must be explicit in that case.
+pub fn select_automatic(matches: &[MatchedEntry]) -> Option<&MatchedEntry> {
+    let [only] = matches else {
+        return None;
+    };
+    (only.score >= MIN_AUTOMATIC_SCORE).then_some(only)
+}
 
-    if let Some(host) = host_of(&entry.url) {
-        let host_lower = host.to_lowercase();
-        if !host_lower.is_empty() && title_haystack.contains(&host_lower) {
-            url_score += SCORE_HOSTNAME_IN_TITLE;
-        }
-        if !host_lower.is_empty() && app_haystack.contains(&host_lower) {
-            url_score += SCORE_HOSTNAME_IN_APP_NAME;
-        }
-        // Also try the "registrable" form (everything from the last
-        // two dot-separated labels). Helps when the URL is
-        // `accounts.google.com` but the title shows `google.com`.
-        // Crude — we don't want a PSL crate dep for this — but the
-        // false-positive cost is bounded because we still require a
-        // dot-bearing match (`google.com`, not just `google`).
-        if let Some(short) = trim_to_registrable(&host_lower)
-            && short != host_lower
-            && title_haystack.contains(&short)
-        {
-            url_score += SCORE_REGISTRABLE_IN_TITLE;
-        }
-    }
-
-    if url_score == 0 {
+fn score_entry(entry: &VaultEntry, foreground: &ForegroundInfo) -> u32 {
+    let Some(host) = host_of(&entry.url) else {
         return 0;
-    }
+    };
 
-    // Title tie-breaker — only ever adds to an entry that already
-    // qualified via URL. A long entry title (≥4 chars) avoids hits
-    // on generic words like `App` / `Web` in browser-decorated titles.
-    let title_lower = entry.title.to_lowercase();
-    if title_lower.chars().count() >= 4 && title_haystack.contains(&title_lower) {
-        return url_score + SCORE_TITLE_TIEBREAKER;
+    if foreground.app_name.trim().eq_ignore_ascii_case(&host) {
+        SCORE_EXACT_APP_HOST
+    } else {
+        0
     }
-
-    url_score
 }
 
 /// Extract a host string from an entry URL. Handles three input shapes:
@@ -143,51 +96,36 @@ fn score_entry(entry: &VaultEntry, title_haystack: &str, app_haystack: &str) -> 
 ///    `www.example.com/foo`
 /// 3. Garbage / non-URL text: returns `None`.
 ///
-/// We use `url::Url` for case 1 and a manual best-effort split for
-/// case 2 to avoid the silent failure where `Url::parse("example.com")`
-/// returns `Err(RelativeUrlWithoutBase)` and KeePassXC users would
-/// suddenly have no matches.
+/// Scheme-less values are parsed by adding an `https://` base. Using `Url` for
+/// both shapes rejects spaces, malformed ports and user-info edge cases that a
+/// manual splitter can accidentally reinterpret as a host.
 pub fn host_of(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if let Ok(url) = url::Url::parse(trimmed)
-        && let Some(h) = url.host_str()
-    {
-        return Some(strip_www(h).to_string());
-    }
-    // No scheme — split off path/query manually, then strip leading
-    // user@ so URLs like `user@host.com` still resolve to the host.
-    let after_at = trimmed.rsplit('@').next().unwrap_or(trimmed);
-    let host_only = after_at
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_at)
-        .trim();
-    if host_only.is_empty() || !host_only.contains('.') {
-        return None;
-    }
-    Some(strip_www(host_only).to_string())
-}
 
-fn strip_www(host: &str) -> &str {
-    host.strip_prefix("www.").unwrap_or(host)
-}
+    let parsed = match url::Url::parse(trimmed) {
+        Ok(url) if url.host_str().is_some() => url,
+        // Do not reinterpret hostless explicit schemes such as `mailto:` or
+        // `javascript:` as scheme-less web addresses.
+        Ok(_) => return None,
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            url::Url::parse(&format!("https://{trimmed}")).ok()?
+        }
+        Err(_) => return None,
+    };
+    let host = parsed
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+    let is_ip_address = unbracketed.parse::<std::net::IpAddr>().is_ok();
 
-/// Crude best-effort "registrable host" (last two dot-separated labels).
-/// Returns `None` for hosts with fewer than three labels (i.e. no
-/// subdomain to trim away). We deliberately avoid a PSL dep — a
-/// `co.uk`-style two-part TLD will produce `co.uk` from this function,
-/// but downstream we treat the result as one possible match signal,
-/// not authority. The hostname-in-title check already covers the
-/// authoritative path.
-fn trim_to_registrable(host: &str) -> Option<String> {
-    let labels: Vec<&str> = host.split('.').collect();
-    if labels.len() < 3 {
-        return None;
-    }
-    Some(labels[labels.len() - 2..].join("."))
+    // Single-label names (for example `localhost`) do not provide enough
+    // identity for unattended matching. Explicit in-app auto-type remains
+    // available for local and intranet services.
+    (host.contains('.') || is_ip_address).then_some(host)
 }
 
 #[cfg(test)]
@@ -232,12 +170,12 @@ mod tests {
     }
 
     #[test]
-    fn strips_leading_www() {
-        // `www.example.com` typically matches a title that just says
-        // `example.com`; the `www.` is rarely in the page title.
+    fn preserves_full_www_host() {
+        // `www.example.com` and `example.com` can be different security
+        // principals. Do not silently collapse them for credential matching.
         assert_eq!(
             host_of("https://www.example.com/").as_deref(),
-            Some("example.com"),
+            Some("www.example.com"),
         );
     }
 
@@ -247,21 +185,21 @@ mod tests {
         assert_eq!(host_of("not a url"), None);
         // No dot → not a host. Avoids matching every single-word title.
         assert_eq!(host_of("localhost"), None);
+        assert_eq!(host_of("mailto:user@example.com"), None);
+        assert_eq!(host_of("javascript:alert@github.com"), None);
     }
 
     #[test]
-    fn url_bearing_entry_wins_and_titleless_entry_is_dropped() {
-        // Conservative match policy: title-only entries never qualify
-        // — they're the dominant source of false-positive credential
-        // injection (a "Login" entry typing into any sign-in page).
+    fn spoofed_browser_title_never_qualifies() {
         let snap = snapshot_with(vec![
             entry("a", "GitHub", "alice", "https://github.com/login"),
             entry("b", "Login", "bob", ""),
         ]);
         let ranked = rank(&snap, &fg("Safari", "Sign in to GitHub · github.com"));
-        assert_eq!(ranked.len(), 1, "title-only entry must not surface");
-        assert_eq!(ranked[0].id, "a");
-        assert_eq!(ranked[0].title, "GitHub");
+        assert!(
+            ranked.is_empty(),
+            "page-controlled browser titles must not authorize auto-type"
+        );
     }
 
     #[test]
@@ -290,34 +228,53 @@ mod tests {
     }
 
     #[test]
-    fn title_tiebreaker_disambiguates_within_url_matches() {
-        // Two GitHub entries (personal + work). With identical URLs
-        // they get the same URL score; the one whose title appears in
-        // the foreground window wins the tie-breaker.
+    fn multiple_exact_candidates_are_ambiguous() {
         let snap = snapshot_with(vec![
             entry("z", "Personal", "alice", "https://github.com/login"),
             entry("y", "Work", "alice@corp", "https://github.com/login"),
         ]);
-        let ranked = rank(
-            &snap,
-            &fg("Safari", "Sign in to GitHub — Work account · github.com"),
-        );
-        assert_eq!(ranked.first().map(|m| m.id.as_str()), Some("y"));
-        // Both still surface; the "Personal" row is a legitimate
-        // alternate target, just not the top suggestion here.
+        let ranked = rank(&snap, &fg("github.com", "Work account"));
         assert_eq!(ranked.len(), 2);
+        assert!(
+            select_automatic(&ranked).is_none(),
+            "sorting must never silently resolve an account ambiguity"
+        );
     }
 
     #[test]
-    fn hostname_in_app_name_qualifies() {
-        // Native apps often expose the service host as the app name
-        // (e.g. Slack desktop wrapper has the workspace host in the
-        // process name). Treat that as a URL signal so a `slack.com`
-        // entry matches against Slack itself.
+    fn exact_hostname_app_identity_qualifies() {
         let snap = snapshot_with(vec![entry("s", "Slack", "u", "https://slack.com")]);
         let ranked = rank(&snap, &fg("slack.com", "Untitled window"));
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].id, "s");
+        assert_eq!(select_automatic(&ranked).map(|m| m.id.as_str()), Some("s"));
+    }
+
+    #[test]
+    fn hostname_substrings_do_not_qualify() {
+        let snap = snapshot_with(vec![entry("g", "GitHub", "u", "https://github.com")]);
+        for app_name in ["notgithub.com", "github.com.evil", "foo-github.com"] {
+            let ranked = rank(&snap, &fg(app_name, "github.com — Sign in"));
+            assert!(ranked.is_empty(), "'{app_name}' must not match github.com");
+        }
+    }
+
+    #[test]
+    fn multipart_public_suffixes_are_not_collapsed() {
+        let snap = snapshot_with(vec![entry(
+            "a",
+            "Amazon UK",
+            "u",
+            "https://www.amazon.co.uk/sign-in",
+        )]);
+        let ranked = rank(
+            &snap,
+            &fg("tesco.co.uk", "Amazon UK — www.amazon.co.uk — Sign in"),
+        );
+        assert!(
+            ranked.is_empty(),
+            "amazon.co.uk credentials must not qualify for another co.uk app"
+        );
     }
 
     #[test]
@@ -340,49 +297,26 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_url_matches_when_registrable_in_title() {
-        // KeePass entry `accounts.google.com` vs a title that contains
-        // `google.com`. The registrable-form match catches it without
-        // needing the (false-positive prone) title-substring fallback.
+    fn full_subdomain_must_match_exactly() {
         let snap = snapshot_with(vec![entry(
             "g",
             "Google",
             "u",
             "https://accounts.google.com/signin",
         )]);
-        let ranked = rank(&snap, &fg("Chrome", "Sign in · accounts.google.com"));
+        let ranked = rank(&snap, &fg("accounts.google.com", "Sign in"));
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].id, "g");
+        assert!(rank(&snap, &fg("google.com", "accounts.google.com")).is_empty());
     }
 
     #[test]
-    fn subdomain_url_with_brand_only_title_does_not_match() {
-        // Conservative trade-off: if the browser title only shows
-        // `Google Account · Sign in` (no `.com`) then we'd rather miss
-        // and let the user invoke ⌘⇧T on the selected entry than guess
-        // and risk typing into a Google-impersonating page. KeePassXC
-        // ships the same conservative default.
-        let snap = snapshot_with(vec![entry(
-            "g",
-            "Google",
-            "u",
-            "https://accounts.google.com/signin",
-        )]);
-        let ranked = rank(&snap, &fg("Chrome", "Google Account · Sign in"));
-        assert!(ranked.is_empty());
-    }
-
-    #[test]
-    fn ties_resolve_by_id_deterministically() {
-        // Two entries with the same URL and same title produce the same
-        // score. The toast that names the typed entry must always
-        // surface the same one, so users don't see different choices
-        // on identical input.
-        let snap = snapshot_with(vec![
-            entry("zz", "Mail", "u1", "https://mail.example.com"),
-            entry("aa", "Mail", "u2", "https://mail.example.com"),
-        ]);
-        let ranked = rank(&snap, &fg("Safari", "Inbox · mail.example.com"));
-        assert_eq!(ranked[0].id, "aa", "lowest id wins on score tie");
+    fn below_minimum_score_is_rejected() {
+        let weak = [MatchedEntry {
+            id: "a".into(),
+            title: "Weak future signal".into(),
+            score: MIN_AUTOMATIC_SCORE - 1,
+        }];
+        assert!(select_automatic(&weak).is_none());
     }
 }

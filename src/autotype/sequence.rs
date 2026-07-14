@@ -17,9 +17,11 @@
 //!    `Vec<TypeOp>` rather than executing, so the typer (the only code
 //!    that depends on enigo) is fully unit-testable in isolation.
 //!
-//! ⚠️ A rendered `Vec<TypeOp>` contains the cleartext password inside
-//! `TypeOp::Text`. Callers must drop it as soon as the typing finishes.
+//! A rendered `Vec<TypeOp>` contains the cleartext password inside
+//! `TypeOp::SecretText`. Its `Debug` implementation always redacts the value;
+//! callers must still drop the operation stream as soon as typing finishes.
 
+use std::fmt;
 use std::time::Duration;
 
 /// One unit of the parsed template. Cheap to clone; tokens are scanned
@@ -42,16 +44,28 @@ pub enum Token {
     Delay(u64),
 }
 
-/// One step the typer should execute. `Text` is faster than per-char
-/// `Key::Unicode` events on macOS (enigo's `fast_text` path uses
-/// `CGEventKeyboardSetUnicodeString`), so we batch contiguous literal
-/// runs through it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One step the typer should execute. Password text stays distinct from
+/// ordinary text so the execution layer can apply a last-moment focus guard
+/// and avoid exposing it through `Debug` output.
+#[derive(Clone, PartialEq, Eq)]
 pub enum TypeOp {
     Text(String),
+    SecretText(String),
     Tab,
     Return,
     Sleep(Duration),
+}
+
+impl fmt::Debug for TypeOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => f.debug_tuple("Text").field(text).finish(),
+            Self::SecretText(_) => f.write_str("SecretText(<redacted>)"),
+            Self::Tab => f.write_str("Tab"),
+            Self::Return => f.write_str("Return"),
+            Self::Sleep(duration) => f.debug_tuple("Sleep").field(duration).finish(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -91,7 +105,7 @@ pub const MAX_DELAY_MS: u64 = 30_000;
 pub const DEFAULT_SEQUENCE: &str = "{USERNAME}{TAB}{PASSWORD}{ENTER}";
 
 /// Inputs available to placeholder substitution.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RenderContext {
     pub username: String,
     pub password: String,
@@ -187,11 +201,10 @@ fn parse_token(body: &str) -> Result<Token, ParseError> {
     }
 }
 
-/// Materialise a parsed template into the op stream the typer will
-/// execute. Adjacent `Literal`/`Username`/`Password` tokens are merged
-/// into a single `TypeOp::Text` so enigo's fast-text path runs once per
-/// run instead of once per token — important for the password which
-/// can be 30+ characters.
+/// Materialise a parsed template into the op stream the typer will execute.
+/// Adjacent literal and username tokens are batched into `TypeOp::Text`.
+/// Password placeholders remain separate `SecretText` operations so each one
+/// gets its own last-moment focus check and redacted debug representation.
 pub fn render(tokens: &[Token], ctx: &RenderContext) -> Vec<TypeOp> {
     let mut ops = Vec::new();
     let mut pending_text = String::new();
@@ -206,7 +219,12 @@ pub fn render(tokens: &[Token], ctx: &RenderContext) -> Vec<TypeOp> {
         match tok {
             Token::Literal(s) => pending_text.push_str(s),
             Token::Username => pending_text.push_str(&ctx.username),
-            Token::Password => pending_text.push_str(&ctx.password),
+            Token::Password => {
+                flush(&mut pending_text, &mut ops);
+                if !ctx.password.is_empty() {
+                    ops.push(TypeOp::SecretText(ctx.password.clone()));
+                }
+            }
             Token::Tab => {
                 flush(&mut pending_text, &mut ops);
                 ops.push(TypeOp::Tab);
@@ -353,7 +371,7 @@ mod tests {
             vec![
                 TypeOp::Text("alice".into()),
                 TypeOp::Tab,
-                TypeOp::Text("p4ssw0rd".into()),
+                TypeOp::SecretText("p4ssw0rd".into()),
                 TypeOp::Return,
             ],
         );
@@ -378,8 +396,28 @@ mod tests {
             vec![
                 TypeOp::Text("alice".into()),
                 TypeOp::Sleep(Duration::from_millis(250)),
-                TypeOp::Text("p4ssw0rd".into()),
+                TypeOp::SecretText("p4ssw0rd".into()),
             ],
         );
+    }
+
+    #[test]
+    fn every_password_placeholder_is_a_separate_secret_operation() {
+        let tokens = parse("{PASSWORD}{TAB}{PASSWORD}").unwrap();
+        assert_eq!(
+            render(&tokens, &ctx()),
+            vec![
+                TypeOp::SecretText("p4ssw0rd".into()),
+                TypeOp::Tab,
+                TypeOp::SecretText("p4ssw0rd".into()),
+            ],
+        );
+    }
+
+    #[test]
+    fn secret_operation_debug_output_is_redacted() {
+        let rendered = format!("{:?}", TypeOp::SecretText("p4ssw0rd".into()));
+        assert_eq!(rendered, "SecretText(<redacted>)");
+        assert!(!rendered.contains("p4ssw0rd"));
     }
 }

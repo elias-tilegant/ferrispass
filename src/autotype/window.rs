@@ -36,6 +36,22 @@ impl ForegroundInfo {
         self.app_name.eq_ignore_ascii_case("ferrispass")
     }
 
+    /// Whether the foreground process is a known web browser. A page title is
+    /// attacker-controlled, so the automatic matcher must not use it as a
+    /// credential-selection signal. This list is intentionally conservative:
+    /// a false positive only disables automatic selection, while a false
+    /// negative still cannot match by title or hostname substring.
+    pub fn is_browser(&self) -> bool {
+        if is_known_browser_name(&self.app_name) {
+            return true;
+        }
+
+        self.process_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_known_browser_name)
+    }
+
     /// `true` when `other` plausibly refers to the same application as
     /// `self`. The typer's focus guard uses this to confirm focus hasn't
     /// moved to a *different app* between the hotkey press and keystroke
@@ -51,6 +67,39 @@ impl ForegroundInfo {
         }
         self.app_name.eq_ignore_ascii_case(&other.app_name)
     }
+}
+
+fn is_known_browser_name(raw: &str) -> bool {
+    let name = raw.trim().to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "safari"
+            | "safari technology preview"
+            | "google chrome"
+            | "google chrome canary"
+            | "google chrome beta"
+            | "google chrome dev"
+            | "chromium"
+            | "firefox"
+            | "firefox developer edition"
+            | "firefox nightly"
+            | "arc"
+            | "arc browser"
+            | "brave browser"
+            | "microsoft edge"
+            | "microsoft edge beta"
+            | "microsoft edge dev"
+            | "microsoft edge canary"
+            | "opera"
+            | "opera gx"
+            | "vivaldi"
+            | "orion"
+            | "duckduckgo"
+            | "duckduckgo browser"
+            | "zen"
+            | "zen browser"
+            | "dia"
+    )
 }
 
 /// Read the current foreground window, or `None` if the OS query
@@ -108,6 +157,29 @@ mod tests {
             window_title: title.into(),
             process_path: PathBuf::from(path),
         }
+    }
+
+    #[test]
+    fn identifies_common_browsers_by_app_or_executable_name() {
+        for info in [
+            fg("Safari", "", ""),
+            fg("Google Chrome", "", ""),
+            fg("Firefox Developer Edition", "", ""),
+            fg("Arc", "", ""),
+            fg(
+                "Unknown localized name",
+                "",
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            ),
+        ] {
+            assert!(info.is_browser(), "expected browser: {info:?}");
+        }
+    }
+
+    #[test]
+    fn domain_named_native_app_is_not_assumed_to_be_a_browser() {
+        let info = fg("github.com", "Sign in to GitHub", "/Applications/GitHub");
+        assert!(!info.is_browser());
     }
 
     #[test]

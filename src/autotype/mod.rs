@@ -7,8 +7,8 @@
 //! - `sequence` — parse and render the user's template
 //!   (`{USERNAME}{TAB}{PASSWORD}{ENTER}`) into a `Vec<TypeOp>`.
 //!   Pure, no IO, fully unit-tested.
-//! - `matcher` — score vault entries against the foreground window's
-//!   title and app name. Pure, no IO, fully unit-tested.
+//! - `matcher` — select entries from trustworthy foreground identity
+//!   signals. Pure, no IO, fully unit-tested.
 //! - `window` — read the foreground app/window via active-win-pos-rs.
 //! - `permissions` — probe / request the macOS Accessibility TCC bit.
 //! - `hotkey` — register the global hotkey and poll the event channel.
@@ -62,8 +62,8 @@ pub enum Outcome {
     NotTrusted,
     /// No vault is open right now — there's no credential to type.
     VaultLocked,
-    /// We read the foreground but no entry's URL hostname or title
-    /// matched. Names the foreground title so the user knows what
+    /// We read the foreground but could not identify exactly one safe
+    /// automatic match. Names the foreground title so the user knows what
     /// FerrisPass saw.
     NoMatch { window_title: String },
     /// The matched entry doesn't have a password set.
@@ -110,7 +110,7 @@ pub const DEFAULT_INTER_OP: Duration = Duration::from_millis(typer::DEFAULT_INTE
 /// `String`) so it can cross a thread boundary — important because the
 /// UI runs the actual keystroke dispatch on a background task while
 /// keeping the foreground responsive. Carries the cleartext password
-/// inside one of the `TypeOp::Text` ops; callers should drop the
+/// inside one of the `TypeOp::SecretText` ops; callers should drop the
 /// `Plan` as soon as `execute` returns.
 #[derive(Debug)]
 pub struct TypePlan {
@@ -154,12 +154,12 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
         }
     } else {
         let ranked = matcher::rank(input.snapshot, &input.foreground);
-        let Some(top) = ranked.into_iter().next() else {
+        let Some(top) = matcher::select_automatic(&ranked) else {
             return Err(Outcome::NoMatch {
                 window_title: input.foreground.window_title.clone(),
             });
         };
-        (top.id, top.title)
+        (top.id.clone(), top.title.clone())
     };
 
     // Resolve username from the snapshot, password through the
@@ -189,17 +189,15 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
 /// so the caller can show a notification that reflects what *actually*
 /// happened.
 ///
-/// Before the first keystroke — and again after every `{DELAY}` pause,
-/// which can be seconds long — the foreground is re-read and compared
-/// against the app the plan was prepared for. A notification popup, an
-/// OS dialog, or the user alt-tabbing between hotkey and dispatch would
-/// otherwise receive the cleartext password. Only the *app* is compared
-/// (`ForegroundInfo::same_app`): window titles legitimately change
-/// mid-login. The re-read runs on the typing thread; that's fine —
-/// `active-win-pos-rs` is built on `CGWindowListCopyWindowInfo` and
-/// `NSRunningApplication`, both documented thread-safe.
+/// Immediately before every dispatch, the foreground is re-read and compared
+/// against the app the plan was prepared for. This includes a last-moment
+/// check before each `SecretText` operation. Only the *app* is compared
+/// (`ForegroundInfo::same_app`): window titles legitimately change during
+/// multi-step login flows. Automatic matching in known browsers is disabled
+/// because same-process browser tabs cannot be distinguished without a trusted
+/// active-tab URL integration.
 ///
-/// ⚠️ `plan.ops` holds the cleartext password inside a `TypeOp::Text`.
+/// `plan.ops` holds the cleartext password inside a `TypeOp::SecretText`.
 /// Drop the `Plan` (or let it go out of scope) immediately after this
 /// returns.
 pub fn execute(plan: TypePlan) -> Outcome {

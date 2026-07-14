@@ -51,15 +51,12 @@ pub const DEFAULT_INTER_OP_MS: u64 = 25;
 /// app has time to process — typing a 16-char password in 16 ms is
 /// faster than the keyboard buffer of most browsers.
 ///
-/// `focus_guard` is probed before the first keystroke and again after
-/// every `TypeOp::Sleep` — the windows big enough for a notification,
-/// a dialog, or an alt-tab to steal focus (user `{DELAY}`s run up to
-/// 30 s). `Err(title)` aborts the run with `FocusChanged` before any
-/// further cleartext is dispatched. The 25 ms inter-op gaps are *not*
-/// re-checked: probing the window server per keystroke would slow
-/// typing without meaningfully shrinking the race. Kept as a closure
-/// so this module stays enigo-only (the foreground read lives in
-/// `window`).
+/// `focus_guard` is probed after the inter-op pause and immediately before
+/// every dispatch, including every `SecretText` operation. `Err(title)`
+/// aborts before further cleartext is sent. A rendered sequence has only a
+/// handful of operations, so the extra foreground reads are preferable to a
+/// stale target check. The guard remains a closure so this module stays
+/// enigo-only (the foreground read lives in `window`).
 pub fn perform(
     ops: &[TypeOp],
     inter_op: Duration,
@@ -68,24 +65,22 @@ pub fn perform(
     let mut enigo =
         Enigo::new(&Settings::default()).map_err(|e| TyperError::Init(e.to_string()))?;
 
-    let mut verify_next_dispatch = true;
     for (idx, op) in ops.iter().enumerate() {
         if idx > 0 {
             thread::sleep(inter_op);
         }
         if let TypeOp::Sleep(d) = op {
             thread::sleep(*d);
-            verify_next_dispatch = true;
             continue;
         }
-        if std::mem::take(&mut verify_next_dispatch)
+        if requires_focus_check(op)
             && let Err(current_title) = focus_guard()
         {
             return Err(TyperError::FocusChanged { current_title });
         }
         match op {
-            TypeOp::Text(s) if s.is_empty() => {}
-            TypeOp::Text(s) => enigo
+            TypeOp::Text(s) | TypeOp::SecretText(s) if s.is_empty() => {}
+            TypeOp::Text(s) | TypeOp::SecretText(s) => enigo
                 .text(s)
                 .map_err(|e| TyperError::Dispatch(e.to_string()))?,
             TypeOp::Tab => enigo
@@ -99,4 +94,24 @@ pub fn perform(
         }
     }
     Ok(())
+}
+
+fn requires_focus_check(op: &TypeOp) -> bool {
+    !matches!(op, TypeOp::Sleep(_))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_dispatch_including_secret_text_requires_a_focus_check() {
+        assert!(requires_focus_check(&TypeOp::Text("username".into())));
+        assert!(requires_focus_check(&TypeOp::SecretText("password".into())));
+        assert!(requires_focus_check(&TypeOp::Tab));
+        assert!(requires_focus_check(&TypeOp::Return));
+        assert!(!requires_focus_check(&TypeOp::Sleep(Duration::from_secs(
+            1
+        ))));
+    }
 }
