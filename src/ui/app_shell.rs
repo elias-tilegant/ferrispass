@@ -189,6 +189,12 @@ pub struct AppShell {
     /// non-`None` timeout is configured (managed alongside `totp_tick`
     /// via the state observer). Drop = cancel.
     auto_lock_task: Option<Task<()>>,
+    /// Retains the native macOS notification registrations for the lifetime
+    /// of this window and the GPUI task that consumes their coalesced events.
+    #[cfg(target_os = "macos")]
+    _session_lock_monitor: crate::session_lock::SessionLockMonitor,
+    #[cfg(target_os = "macos")]
+    _session_lock_task: Option<Task<()>>,
     /// Periodic background auto-sync + token keep-alive. Runs only while a
     /// synced vault is in memory AND `settings.auto_sync_secs` is set
     /// (managed alongside `auto_lock_task` via the state observer +
@@ -495,6 +501,10 @@ impl AppShell {
             entry_editor_was_open,
             last_activity: Instant::now(),
             auto_lock_task: None,
+            #[cfg(target_os = "macos")]
+            _session_lock_monitor: crate::session_lock::SessionLockMonitor::new(),
+            #[cfg(target_os = "macos")]
+            _session_lock_task: None,
             auto_sync_task: None,
             settings: crate::app::settings::load(),
             settings_tab: SettingsTab::General,
@@ -520,6 +530,8 @@ impl AppShell {
         // no-ops cleanly when both desired-state and current-state are
         // "no listener".
         shell.sync_auto_type_listener(cx);
+        #[cfg(target_os = "macos")]
+        shell.start_session_lock_task(cx);
         shell
     }
 
@@ -638,6 +650,27 @@ impl AppShell {
             }
             _ => {}
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_session_lock_task(&mut self, cx: &mut Context<Self>) {
+        let events = self._session_lock_monitor.events();
+        let window_handle = self.window_handle;
+        self._session_lock_task = Some(cx.spawn(async move |this, cx| {
+            while events.recv().await.is_ok() {
+                // Sleep/lock transitions commonly emit several equivalent
+                // events. One foreground lock is sufficient.
+                while events.try_recv().is_ok() {}
+
+                let updated = window_handle.update(cx, |_root, window, app| {
+                    this.update(app, |shell, cx| shell.lock_vault(window, cx))
+                        .is_ok()
+                });
+                if !matches!(updated, Ok(true)) {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Sibling of `sync_auto_lock_task` for background auto-sync + token

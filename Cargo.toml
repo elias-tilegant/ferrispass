@@ -88,6 +88,7 @@ nucleo-matcher = "0.3"
 zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+async-channel = "2"
 flate2 = "1"
 libc = "0.2"
 tar = "0.4"
@@ -110,7 +111,7 @@ core-foundation = "0.10"
 # the NSError deref in the reply block); that's why the workspace lint
 # is `unsafe_code = "deny"` rather than `forbid`.
 objc2-local-authentication = "0.3"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace"] }
 objc2-foundation = "0.3"
 objc2 = "0.6"
 block2 = "0.6"

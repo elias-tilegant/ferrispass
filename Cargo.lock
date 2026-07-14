@@ -1984,6 +1984,7 @@ version = "0.6.1"
 dependencies = [
  "active-win-pos-rs",
  "anyhow",
+ "async-channel",
  "base64",
  "block2 0.6.2",
  "cargo-packager-updater",
