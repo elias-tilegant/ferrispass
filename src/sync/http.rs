@@ -20,10 +20,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// These bodies are a few KB — 30 s only ever elapses on a dead connection.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Overall deadline for vault content transfers (download / upload). Vaults
-/// are capped at the 4 MB small-file PUT limit, so even a slow link finishes
-/// well inside this; the point is "bounded", not "tight".
-const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
+/// Maximum time a vault transfer may make no progress on an individual socket
+/// read or write. An overall deadline would reject valid 250 MB transfers on
+/// slower links even while bytes are still moving.
+const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Agent for token-endpoint and Graph metadata calls.
 pub fn agent() -> &'static ureq::Agent {
@@ -36,14 +36,16 @@ pub fn agent() -> &'static ureq::Agent {
     })
 }
 
-/// Agent for vault-content download/upload — same connect budget, longer
-/// overall deadline so multi-MB bodies on slow links don't get cut off.
+/// Agent for vault-content download/upload. Per-operation idle limits keep a
+/// half-dead connection from blocking forever without imposing a minimum
+/// transfer speed on large vaults.
 pub fn transfer_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
             .timeout_connect(CONNECT_TIMEOUT)
-            .timeout(TRANSFER_TIMEOUT)
+            .timeout_read(TRANSFER_IDLE_TIMEOUT)
+            .timeout_write(TRANSFER_IDLE_TIMEOUT)
             .build()
     })
 }

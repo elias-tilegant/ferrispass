@@ -3,9 +3,11 @@
 //!
 //! All calls are synchronous (`ureq`); the caller wraps them in
 //! `cx.background_spawn(...)`. Rate limits, throttling, retries, and
-//! resumable uploads are out of scope for MVP — small files (<4 MB) only.
+//! resumable uploads are out of scope; the simple content endpoint supports
+//! vaults up to 250 MB.
 
 use serde::Deserialize;
+use std::io;
 use thiserror::Error;
 use ureq::Error as UreqError;
 
@@ -13,6 +15,21 @@ use crate::sync::auth::AccessToken;
 use crate::sync::http;
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
+
+/// Microsoft Graph's simple `PUT .../content` endpoint accepts files up to
+/// 250 MB. Use the same bound for downloads so a remote item can always be
+/// uploaded again without switching protocols, and so an untrusted response
+/// can never grow the in-memory vault buffer without limit.
+///
+/// Interpret the published MB value conservatively as decimal bytes:
+/// <https://learn.microsoft.com/graph/api/driveitem-put-content>
+const MAX_VAULT_CONTENT_BYTES: usize = 250_000_000;
+
+/// Error responses are surfaced in toasts. A small prefix is enough to keep
+/// Graph's diagnostic code/request ID without retaining an arbitrary server
+/// body in UI state.
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub enum GraphError {
@@ -22,6 +39,12 @@ pub enum GraphError {
     Status { status: u16, body: String },
     #[error("could not parse graph response: {0}")]
     Parse(String),
+    #[error("vault exceeds Microsoft Graph's 250 MB content limit")]
+    VaultTooLarge,
+    #[error("graph returned an invalid Content-Length header")]
+    InvalidContentLength,
+    #[error("could not buffer graph response: {0}")]
+    Buffer(String),
     #[error("response was missing required field: {0}")]
     MissingField(&'static str),
     #[error("no drive on this site matches library name '{0}'")]
@@ -241,11 +264,8 @@ pub fn download_content(
         .call()
         .map_err(map_ureq_error)?;
     let etag = resp.header("ETag").unwrap_or_default().to_string();
-    let mut bytes = Vec::with_capacity(64 * 1024);
-    use std::io::Read as _;
-    resp.into_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|e| GraphError::Network(e.to_string()))?;
+    let declared_length = parse_content_length(resp.header("Content-Length"))?;
+    let bytes = read_vault_body(resp.into_reader(), declared_length, MAX_VAULT_CONTENT_BYTES)?;
     Ok((bytes, etag))
 }
 
@@ -256,8 +276,8 @@ pub fn download_content(
 ///   `if_match` was captured; the caller must download remote + diff)
 /// - Other 4xx/5xx → `Err`
 ///
-/// Files >4 MB hit the small-file limit and Graph returns 413; surface that
-/// as a regular Status error (caller can show "vault too large" toast).
+/// Files >250 MB exceed Graph's simple-content endpoint. Reject them before
+/// issuing a request so download and upload enforce the same bound.
 pub fn upload_content(
     drive_id: &str,
     item_id: &str,
@@ -265,6 +285,7 @@ pub fn upload_content(
     if_match: Option<&str>,
     token: &AccessToken,
 ) -> Result<UploadOutcome, GraphError> {
+    ensure_vault_size(bytes.len(), MAX_VAULT_CONTENT_BYTES)?;
     let url = format!("{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content");
     let mut req = http::transfer_agent()
         .put(&url)
@@ -304,17 +325,138 @@ fn http_get(url: &str, token: &AccessToken) -> Result<String, GraphError> {
 }
 
 fn parse_json<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, GraphError> {
-    serde_json::from_str(body).map_err(|e| GraphError::Parse(format!("{e}\nbody: {body}")))
+    serde_json::from_str(body).map_err(|e| {
+        GraphError::Parse(format!(
+            "{e}\nbody: {}",
+            truncate_text(body, MAX_ERROR_BODY_BYTES)
+        ))
+    })
 }
 
 fn map_ureq_error(e: UreqError) -> GraphError {
     match e {
         UreqError::Status(status, resp) => {
-            let body = resp.into_string().unwrap_or_default();
+            let body = read_truncated_text(resp.into_reader(), MAX_ERROR_BODY_BYTES)
+                .unwrap_or_else(|error| format!("could not read error response: {error}"));
             GraphError::Status { status, body }
         }
         UreqError::Transport(t) => GraphError::Network(t.to_string()),
     }
+}
+
+fn parse_content_length(header: Option<&str>) -> Result<Option<u64>, GraphError> {
+    header
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| GraphError::InvalidContentLength)
+        })
+        .transpose()
+}
+
+fn ensure_vault_size(size: usize, limit: usize) -> Result<(), GraphError> {
+    if size > limit {
+        Err(GraphError::VaultTooLarge)
+    } else {
+        Ok(())
+    }
+}
+
+/// Read a response body without trusting either `Content-Length` or transfer
+/// encoding. The declared length is checked before the reader is touched;
+/// the loop then enforces the same limit for chunked and dishonest responses.
+fn read_vault_body(
+    mut reader: impl io::Read,
+    declared_length: Option<u64>,
+    limit: usize,
+) -> Result<Vec<u8>, GraphError> {
+    if declared_length.is_some_and(|length| length > limit as u64) {
+        return Err(GraphError::VaultTooLarge);
+    }
+
+    let initial_capacity = declared_length
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(READ_CHUNK_BYTES)
+        .min(READ_CHUNK_BYTES)
+        .min(limit);
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    let mut chunk = [0_u8; READ_CHUNK_BYTES];
+
+    loop {
+        // Once exactly `limit` bytes have arrived, read one more byte to
+        // distinguish an exact-boundary body from an oversized one without
+        // ever appending beyond the cap.
+        let remaining = limit.saturating_sub(bytes.len());
+        let read_capacity = chunk.len().min(remaining.saturating_add(1));
+        let count = reader
+            .read(&mut chunk[..read_capacity])
+            .map_err(|error| GraphError::Network(error.to_string()))?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if count > remaining {
+            return Err(GraphError::VaultTooLarge);
+        }
+
+        if bytes.capacity().saturating_sub(bytes.len()) < count {
+            // Grow geometrically so a large vault does not reallocate and
+            // copy the complete prefix for every 64 KiB chunk. Keep the
+            // requested capacity within the same hard content bound.
+            let required_capacity = bytes.len() + count;
+            let target_capacity = bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(required_capacity)
+                .min(limit);
+            bytes
+                .try_reserve_exact(target_capacity - bytes.len())
+                .map_err(|error| GraphError::Buffer(error.to_string()))?;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+}
+
+fn read_truncated_text(mut reader: impl io::Read, limit: usize) -> Result<String, io::Error> {
+    let mut bytes = Vec::with_capacity(limit.min(1024));
+    let mut chunk = [0_u8; 1024];
+    let mut truncated = false;
+
+    loop {
+        let remaining = limit.saturating_sub(bytes.len());
+        let read_capacity = chunk.len().min(remaining.saturating_add(1));
+        let count = reader.read(&mut chunk[..read_capacity])?;
+        if count == 0 {
+            break;
+        }
+        let accepted = count.min(remaining);
+        bytes.extend_from_slice(&chunk[..accepted]);
+        if count > remaining {
+            truncated = true;
+            break;
+        }
+    }
+
+    let display_bytes = match std::str::from_utf8(&bytes) {
+        Err(error) if truncated && error.error_len().is_none() => &bytes[..error.valid_up_to()],
+        _ => &bytes,
+    };
+    let mut text = String::from_utf8_lossy(display_bytes).into_owned();
+    if truncated {
+        text.push_str("\n[truncated]");
+    }
+    Ok(text)
+}
+
+fn truncate_text(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[truncated]", &text[..end])
 }
 
 fn item_from_response(resp: ItemResponse) -> DriveItem {
@@ -479,6 +621,77 @@ impl SearchQueryResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Read};
+
+    struct PanicReader;
+
+    impl Read for PanicReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            panic!("oversized Content-Length must be rejected before reading")
+        }
+    }
+
+    #[test]
+    fn declared_oversized_vault_is_rejected_before_reading() {
+        let error = read_vault_body(PanicReader, Some(5), 4).unwrap_err();
+        assert!(matches!(error, GraphError::VaultTooLarge));
+    }
+
+    #[test]
+    fn chunked_oversized_vault_is_rejected_while_streaming() {
+        let error = read_vault_body(Cursor::new([1, 2, 3, 4, 5]), None, 4).unwrap_err();
+        assert!(matches!(error, GraphError::VaultTooLarge));
+    }
+
+    #[test]
+    fn dishonest_content_length_cannot_bypass_stream_limit() {
+        let error = read_vault_body(Cursor::new([1, 2, 3, 4, 5]), Some(4), 4).unwrap_err();
+        assert!(matches!(error, GraphError::VaultTooLarge));
+    }
+
+    #[test]
+    fn vault_body_at_exact_limit_is_accepted() {
+        let bytes = read_vault_body(Cursor::new([1, 2, 3, 4]), None, 4).unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn invalid_content_length_is_rejected() {
+        assert!(matches!(
+            parse_content_length(Some("not-a-number")),
+            Err(GraphError::InvalidContentLength)
+        ));
+        assert_eq!(parse_content_length(Some(" 42 ")).unwrap(), Some(42));
+        assert_eq!(parse_content_length(None).unwrap(), None);
+    }
+
+    #[test]
+    fn upload_size_uses_the_same_limit() {
+        assert!(ensure_vault_size(4, 4).is_ok());
+        assert!(matches!(
+            ensure_vault_size(5, 4),
+            Err(GraphError::VaultTooLarge)
+        ));
+    }
+
+    #[test]
+    fn status_body_is_truncated_without_splitting_utf8() {
+        let body = "ééé";
+        let text = read_truncated_text(Cursor::new(body.as_bytes()), 5).unwrap();
+        assert_eq!(text, "éé\n[truncated]");
+    }
+
+    #[test]
+    fn short_status_body_is_preserved() {
+        let text = read_truncated_text(Cursor::new(b"graph error"), 64).unwrap();
+        assert_eq!(text, "graph error");
+    }
+
+    #[test]
+    fn parse_error_body_is_utf8_safely_truncated() {
+        let body = "ééé";
+        assert_eq!(truncate_text(body, 5), "éé\n[truncated]");
+    }
 
     #[test]
     fn segment_encoder_handles_spaces_and_unicode() {
