@@ -24,6 +24,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     fs::File,
     hash::{Hash, Hasher},
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -43,7 +44,7 @@ impl KeePassRepository {
         password: &str,
         keyfile: Option<&Path>,
     ) -> Result<VaultDocument, DatabaseOpenError> {
-        let mut file = File::open(path.as_ref())?;
+        let bytes = read_database_bytes(path.as_ref())?;
         let mut key = DatabaseKey::new();
         if !password.is_empty() {
             key = key.with_password(password);
@@ -53,7 +54,7 @@ impl KeePassRepository {
             key = key.with_keyfile(&mut keyfile)?;
         }
 
-        let database = Database::open(&mut file, key)?;
+        let database = parse_database_bytes(&bytes, key)?;
         let snapshot = snapshot_from_database(&database);
 
         Ok(VaultDocument::new(
@@ -72,7 +73,6 @@ impl KeePassRepository {
         password: &str,
         keyfile: Option<&Path>,
     ) -> Result<VaultDocument, DatabaseOpenError> {
-        let mut cursor = std::io::Cursor::new(bytes);
         let mut key = DatabaseKey::new();
         if !password.is_empty() {
             key = key.with_password(password);
@@ -81,7 +81,7 @@ impl KeePassRepository {
             let mut keyfile = File::open(keyfile_path)?;
             key = key.with_keyfile(&mut keyfile)?;
         }
-        let database = Database::open(&mut cursor, key)?;
+        let database = parse_database_bytes(bytes, key)?;
         let snapshot = snapshot_from_database(&database);
         Ok(VaultDocument::new(
             database,
@@ -103,6 +103,29 @@ impl KeePassRepository {
         }
         None
     }
+}
+
+pub(crate) fn parse_database_bytes(
+    bytes: &[u8],
+    key: DatabaseKey,
+) -> Result<Database, DatabaseOpenError> {
+    crate::keepass::limits::validate_kdbx_resources(bytes)?;
+    Database::parse(bytes, key)
+}
+
+fn read_database_bytes(path: &Path) -> Result<Vec<u8>, DatabaseOpenError> {
+    let file = File::open(path)?;
+    let size = file.metadata()?.len();
+    crate::keepass::limits::validate_kdbx_size(size)?;
+
+    let capacity = usize::try_from(size).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "database is too large")
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(crate::keepass::limits::MAX_KDBX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    crate::keepass::limits::validate_kdbx_resources(&bytes)?;
+    Ok(bytes)
 }
 
 pub(crate) fn snapshot_from_database(database: &Database) -> VaultSnapshot {
@@ -366,6 +389,24 @@ fn non_empty(value: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
+    use tempfile::TempDir;
+
+    #[test]
+    fn oversized_database_is_rejected_before_reading() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("oversized.kdbx");
+        File::create(&path)
+            .expect("create sparse database")
+            .set_len(crate::keepass::limits::MAX_KDBX_BYTES + 1)
+            .expect("set sparse database length");
+
+        let result = KeePassRepository::open_with_password(&path, "password");
+        assert!(matches!(
+            result,
+            Err(DatabaseOpenError::Io(error)) if error.kind() == ErrorKind::InvalidData
+        ));
+    }
 
     #[test]
     fn favicon_letter_is_first_alpha() {

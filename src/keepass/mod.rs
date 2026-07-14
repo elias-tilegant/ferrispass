@@ -1,4 +1,5 @@
 mod document;
+pub(crate) mod limits;
 pub mod merge;
 pub mod password_gen;
 pub(crate) mod repository;
