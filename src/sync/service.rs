@@ -45,6 +45,10 @@ pub enum ServiceError {
          Sign in with the original account, or Disconnect and reconnect to pick a different file."
     )]
     AccountMismatch { expected: String, got: String },
+    #[error("remote vault response did not identify the downloaded revision")]
+    MissingRemoteEtag,
+    #[error("remote vault changed repeatedly while it was being downloaded")]
+    UnstableRemoteDownload,
 }
 
 /// Result of `complete_connect`: what the caller needs to (a) save the
@@ -108,7 +112,7 @@ pub fn complete_connect_picked(
 ) -> Result<ConnectResult, ServiceError> {
     let user = graph::me(&token)?;
     let (remote_bytes, etag_from_download) =
-        graph::download_content(&hit.drive_id, &hit.item_id, &token)?;
+        download_versioned(&hit.drive_id, &hit.item_id, &token)?;
 
     // Refresh token to keychain *before* persisting the config — if the
     // keychain write fails we never leave a sync config pointing at a
@@ -176,6 +180,9 @@ pub fn upload_after_save(
     token: &AccessToken,
     local_bytes: &[u8],
 ) -> Result<UploadAfterSave, ServiceError> {
+    if config.last_etag.trim().is_empty() {
+        return Err(ServiceError::MissingRemoteEtag);
+    }
     let outcome = graph::upload_content(
         &config.drive_id,
         &config.item_id,
@@ -186,16 +193,8 @@ pub fn upload_after_save(
     match outcome {
         UploadOutcome::Ok { new_etag, item } => Ok(UploadAfterSave::Synced { new_etag, item }),
         UploadOutcome::Conflict => {
-            let (remote_bytes, remote_etag) =
-                graph::download_content(&config.drive_id, &config.item_id, token)?;
-            // Prefer the etag header from download (always present and matches
-            // the bytes we just got); fall back to a metadata round-trip if
-            // SharePoint didn't return one (unusual).
-            let etag = if remote_etag.is_empty() {
-                graph::get_item_metadata(&config.drive_id, &config.item_id, token)?.etag
-            } else {
-                remote_etag
-            };
+            let (remote_bytes, etag) =
+                download_versioned(&config.drive_id, &config.item_id, token)?;
             Ok(UploadAfterSave::Conflict {
                 remote_bytes,
                 remote_etag: etag,
@@ -259,13 +258,44 @@ pub fn download_remote(
     config: &SyncConfig,
     token: &AccessToken,
 ) -> Result<(Vec<u8>, String), ServiceError> {
-    let (bytes, etag) = graph::download_content(&config.drive_id, &config.item_id, token)?;
-    let etag = if etag.is_empty() {
-        graph::get_item_metadata(&config.drive_id, &config.item_id, token)?.etag
-    } else {
-        etag
-    };
-    Ok((bytes, etag))
+    download_versioned(&config.drive_id, &config.item_id, token)
+}
+
+/// Download bytes together with the exact revision that produced them.
+/// Graph normally returns ETag on the content response. If a proxy strips it,
+/// a metadata value fetched only *after* the body is unsafe: the item may have
+/// changed between those requests. In that rare case we bracket a fresh
+/// download with equal, non-empty metadata ETags and discard unstable bodies.
+fn download_versioned(
+    drive_id: &str,
+    item_id: &str,
+    token: &AccessToken,
+) -> Result<(Vec<u8>, String), ServiceError> {
+    let (bytes, etag) = graph::download_content(drive_id, item_id, token)?;
+    if !etag.trim().is_empty() {
+        return Ok((bytes, etag));
+    }
+
+    for _ in 0..2 {
+        let before = graph::get_item_metadata(drive_id, item_id, token)?.etag;
+        if before.trim().is_empty() {
+            return Err(ServiceError::MissingRemoteEtag);
+        }
+        let (bytes, header_etag) = graph::download_content(drive_id, item_id, token)?;
+        if !header_etag.trim().is_empty() {
+            return Ok((bytes, header_etag));
+        }
+        let after = graph::get_item_metadata(drive_id, item_id, token)?.etag;
+        if stable_fallback_etag(&before, &after) {
+            return Ok((bytes, before));
+        }
+    }
+
+    Err(ServiceError::UnstableRemoteDownload)
+}
+
+fn stable_fallback_etag(before: &str, after: &str) -> bool {
+    !before.trim().is_empty() && before == after
 }
 
 /// Refresh the access token using the keychain-stored refresh token.
@@ -312,6 +342,19 @@ fn now_unix() -> Option<u64> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|d| d.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stable_fallback_etag;
+
+    #[test]
+    fn fallback_etag_requires_the_same_non_empty_revision() {
+        assert!(stable_fallback_etag("\"item,7\"", "\"item,7\""));
+        assert!(!stable_fallback_etag("", ""));
+        assert!(!stable_fallback_etag("   ", "   "));
+        assert!(!stable_fallback_etag("\"item,7\"", "\"item,8\""));
+    }
 }
 
 /// Helper for the AppState side: read local bytes for upload, surfacing a
