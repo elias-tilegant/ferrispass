@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{
-    Arc,
+    Arc, Condvar, Mutex,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
@@ -33,6 +33,73 @@ static NEXT_VAULT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 /// Keep only the minimum cross-cutting signal here: how many unlocked sessions
 /// still have local changes whose latest save has not succeeded.
 static UNPERSISTED_VAULT_SESSION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Debug, Default)]
+struct ConnectOperationGate {
+    inner: Arc<ConnectOperationGateInner>,
+}
+
+#[derive(Debug, Default)]
+struct ConnectOperationGateInner {
+    generation: AtomicU64,
+    cleanup_pending: AtomicUsize,
+    commit: Mutex<()>,
+    cleanup_finished: Condvar,
+}
+
+impl ConnectOperationGate {
+    /// Invalidate every older operation without ever blocking the UI thread.
+    fn advance(&self) -> u64 {
+        self.inner
+            .generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.inner.generation.load(Ordering::Acquire) == generation
+    }
+
+    /// Serialize the irreversible publication phase with cancellation.
+    /// Network preparation stays outside this lock.
+    fn commit_if_current<T>(&self, generation: u64, commit: impl FnOnce() -> T) -> Option<T> {
+        let mut commit_guard = self
+            .inner
+            .commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.inner.cleanup_pending.load(Ordering::Acquire) != 0 {
+            commit_guard = self
+                .inner
+                .cleanup_finished
+                .wait(commit_guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        self.is_current(generation).then(commit)
+    }
+
+    /// Reserve cleanup before returning to the event loop. Newer publication
+    /// waits until the matching cleanup has finished.
+    fn reserve_cleanup(&self) {
+        self.advance();
+        self.inner.cleanup_pending.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn run_reserved_cleanup<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let _commit = self
+            .inner
+            .commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = operation();
+        let previous = self.inner.cleanup_pending.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "cleanup must be reserved before it runs");
+        if previous == 1 {
+            self.inner.cleanup_finished.notify_all();
+        }
+        result
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct VaultSessionId(u64);
@@ -80,6 +147,9 @@ pub struct AppState {
     /// Active during the multi-step Connect overlay (provider pick → URL →
     /// device code → download). `None` when overlay isn't Connect.
     connect_flow: Option<ConnectFlow>,
+    /// Cancels stale async Connect callbacks and orders persistent publication
+    /// against cleanup without blocking the UI thread.
+    connect_operations: ConnectOperationGate,
     /// SharePoint binding created by the Connect flow for a vault that has
     /// been downloaded locally but not unlocked yet. Installed only after
     /// the matching vault unlock succeeds so the previously-active vault's
@@ -307,6 +377,7 @@ impl Default for AppState {
             sync_status: SyncStatus::default(),
             sync_history: Vec::new(),
             connect_flow: None,
+            connect_operations: ConnectOperationGate::default(),
             pending_sync: None,
             reconnect_target: None,
             recents: Vec::new(),
@@ -881,6 +952,7 @@ impl AppState {
     /// would also re-open into whichever sub-step the user left it on
     /// (e.g. a stale "Failed" message).
     fn unwind_connect_flow(&mut self) {
+        self.connect_operations.advance();
         self.connect_flow = None;
         // A reconnect that's abandoned (Cancel / Esc / overlay switch) must
         // not leave its target armed — otherwise the next plain Connect's
@@ -1283,6 +1355,15 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    fn rebind_sync_for_session(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        binding: SyncBinding,
+    ) -> bool {
+        self.vault_session_is_current(target, session_id) && self.rebind_sync(target, binding)
     }
 
     /// Read a clone of the sync status for the vault at `target`, whether
@@ -1740,6 +1821,9 @@ impl AppState {
     /// via SyncSettings — we don't auto-disconnect, since that would
     /// silently delete their config.
     fn try_restore_sync_binding(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(session_id) = self.vault_session_id_for(&path) else {
+            return;
+        };
         // Bail when there's no config on disk for this path — the common
         // case for local-only vaults.
         let config = match crate::sync::config::load(&path) {
@@ -1753,7 +1837,7 @@ impl AppState {
             return;
         }
 
-        self.apply_sync_status(&path, SyncStatus::Restoring, cx);
+        self.apply_sync_status_for_session(&path, session_id, SyncStatus::Restoring, cx);
 
         let email = config.account_email.clone();
         let task = cx.background_spawn(async move {
@@ -1773,9 +1857,10 @@ impl AppState {
                         config,
                         access_token,
                     };
-                    if state.rebind_sync(&path, binding) {
-                        state.apply_sync_status(
+                    if state.rebind_sync_for_session(&path, session_id, binding) {
+                        state.apply_sync_status_for_session(
                             &path,
+                            session_id,
                             SyncStatus::Synced {
                                 at: chrono::Local::now(),
                                 auto_merged: 0,
@@ -1790,12 +1875,22 @@ impl AppState {
                 Err(crate::sync::service::ServiceError::Auth(
                     crate::sync::auth::AuthError::InvalidGrant(detail),
                 )) => {
-                    state.apply_sync_status(&path, SyncStatus::Reconnect { detail }, cx);
+                    state.apply_sync_status_for_session(
+                        &path,
+                        session_id,
+                        SyncStatus::Reconnect { detail },
+                        cx,
+                    );
                 }
                 Err(e) => {
                     // Transient (network, etc.) — leave the user in
                     // Failed; the next save's sync_now will retry.
-                    state.apply_sync_status(&path, SyncStatus::Failed(e.to_string()), cx);
+                    state.apply_sync_status_for_session(
+                        &path,
+                        session_id,
+                        SyncStatus::Failed(e.to_string()),
+                        cx,
+                    );
                 }
             });
         })
@@ -2040,6 +2135,7 @@ impl AppState {
         self.sync = None;
         self.sync_status = SyncStatus::Disconnected;
         self.sync_history.clear();
+        self.connect_operations.advance();
         self.connect_flow = None;
         self.pending_sync = None;
         self.reconnect_target = None;
@@ -2066,6 +2162,7 @@ impl AppState {
         self.save_status = SaveStatus::Idle;
         self.sync = None;
         self.sync_status = SyncStatus::Disconnected;
+        self.connect_operations.advance();
         self.connect_flow = None;
         self.pending_sync = None;
         self.reconnect_target = None;
@@ -2178,6 +2275,7 @@ impl AppState {
         if matches!(self.vault, VaultStatus::LockedPendingSave) {
             return;
         }
+        self.connect_operations.advance();
         // Normal (first-time) Connect: make sure no stale reconnect target
         // survives from an abandoned reconnect, or the token poll would
         // rebind instead of showing the file picker.
@@ -2189,6 +2287,7 @@ impl AppState {
     /// Drop any in-progress Connect flow state. Called by Cancel + on
     /// successful completion.
     pub fn clear_connect_flow(&mut self, cx: &mut Context<Self>) {
+        self.connect_operations.advance();
         if self.connect_flow.is_some() {
             self.connect_flow = None;
             cx.notify();
@@ -2201,6 +2300,7 @@ impl AppState {
         if matches!(self.vault, VaultStatus::LockedPendingSave) {
             return;
         }
+        self.connect_operations.advance();
         self.connect_flow = Some(flow);
         cx.notify();
     }
@@ -3538,13 +3638,26 @@ impl AppState {
 
     /// Tear down the current sync binding: drop the in-memory token, mark
     /// status as Disconnected, then in the background remove the keychain
-    /// entry + sync-config file. UI updates immediately; cleanup is fire-
-    /// and-forget (failures here just leave a stale config we'll happily
-    /// overwrite next Connect).
+    /// entry + sync-config file. UI updates immediately; the reserved cleanup
+    /// runs before any newer Connect publication.
     pub fn disconnect_sync(&mut self, cx: &mut Context<Self>) {
-        let Some(binding) = self.sync.take() else {
-            return;
+        self.connect_operations.reserve_cleanup();
+        let current_path = match &self.vault {
+            VaultStatus::Open { path, .. } => Some(path.clone()),
+            _ => None,
         };
+        let config = self
+            .sync
+            .take()
+            .map(|binding| binding.config)
+            .or_else(|| self.reconnect_target.take())
+            .or_else(|| {
+                current_path
+                    .as_deref()
+                    .and_then(|path| crate::sync::config::load(path).ok().flatten())
+            });
+        self.connect_flow = None;
+        self.reconnect_target = None;
         self.sync_status = SyncStatus::Disconnected;
         // Activity log is tied to the connected sync — once the user
         // disconnects, the events refer to a relationship that no
@@ -3552,8 +3665,13 @@ impl AppState {
         // lines hanging around after a fresh Connect.
         self.sync_history.clear();
         cx.notify();
+        let operation_gate = self.connect_operations.clone();
         cx.background_spawn(async move {
-            let _ = crate::sync::service::disconnect(&binding.config);
+            operation_gate.run_reserved_cleanup(|| {
+                if let Some(config) = config {
+                    let _ = crate::sync::service::disconnect(&config);
+                }
+            });
         })
         .detach();
     }
@@ -3561,6 +3679,7 @@ impl AppState {
     /// Drop the Connect overlay's transient state. Wired to the Cancel
     /// button + the Escape key.
     pub fn cancel_connect(&mut self, cx: &mut Context<Self>) {
+        self.connect_operations.advance();
         self.connect_flow = None;
         self.reconnect_target = None;
         cx.notify();
@@ -3615,21 +3734,31 @@ impl AppState {
         if matches!(self.vault, VaultStatus::LockedPendingSave) || self.connect_flow.is_none() {
             return;
         }
+        let generation = self.connect_operations.advance();
         let task = cx.background_spawn(async move { crate::sync::service::request_device_code() });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |state, cx| match result {
-                Ok(challenge) => {
-                    state.connect_flow = Some(ConnectFlow::SigningIn {
-                        challenge: challenge.clone(),
-                    });
-                    cx.notify();
-                    state.start_token_polling(challenge, cx);
+            let _ = this.update(cx, |state, cx| {
+                if !state.connect_operations.is_current(generation)
+                    || !matches!(
+                        state.connect_flow,
+                        Some(ConnectFlow::PickProvider | ConnectFlow::Authorizing)
+                    )
+                {
+                    return;
                 }
-                Err(e) => {
-                    let msg = e.to_string();
-                    state.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
-                    cx.notify();
+                match result {
+                    Ok(challenge) => {
+                        state.connect_flow = Some(ConnectFlow::SigningIn {
+                            challenge: challenge.clone(),
+                        });
+                        cx.notify();
+                        state.start_token_polling(challenge, generation, cx);
+                    }
+                    Err(e) => {
+                        state.connect_flow = Some(ConnectFlow::Failed(e.to_string()));
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -3639,7 +3768,12 @@ impl AppState {
     /// Background polling loop. Runs until token received, code expired,
     /// auth declined, or the user cancels (we observe `connect_flow`
     /// transitioning out of `SigningIn` between iterations).
-    fn start_token_polling(&mut self, challenge: DeviceCodeChallenge, cx: &mut Context<Self>) {
+    fn start_token_polling(
+        &mut self,
+        challenge: DeviceCodeChallenge,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             let mut interval = challenge.interval;
             loop {
@@ -3647,7 +3781,8 @@ impl AppState {
                 // past SigningIn for any other reason), stop polling.
                 let still_signing_in = this
                     .update(cx, |s, _| {
-                        matches!(s.connect_flow, Some(ConnectFlow::SigningIn { .. }))
+                        s.connect_operations.is_current(generation)
+                            && matches!(s.connect_flow, Some(ConnectFlow::SigningIn { .. }))
                     })
                     .unwrap_or(false);
                 if !still_signing_in {
@@ -3657,6 +3792,9 @@ impl AppState {
                 // Hard timeout: if the device-code expiry passed, give up.
                 if std::time::SystemTime::now() > challenge.expires_at {
                     let _ = this.update(cx, |s, cx| {
+                        if !s.connect_operations.is_current(generation) {
+                            return;
+                        }
                         let msg = "Device code expired before sign-in.".to_string();
                         s.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
                         cx.notify();
@@ -3684,6 +3822,11 @@ impl AppState {
                     }
                     PollOutcome::Token(token) => {
                         let _ = this.update(cx, |s, cx| {
+                            if !s.connect_operations.is_current(generation)
+                                || !matches!(s.connect_flow, Some(ConnectFlow::SigningIn { .. }))
+                            {
+                                return;
+                            }
                             // Reconnect path: rebind the existing vault's
                             // config with this fresh token instead of opening
                             // the file picker. `take()` disarms the target so
@@ -3702,13 +3845,18 @@ impl AppState {
                                 error: None,
                             });
                             cx.notify();
-                            s.start_kdbx_search(token, cx);
+                            s.start_kdbx_search(token, generation, cx);
                         });
                         return;
                     }
                     PollOutcome::Failed(e) => {
                         let msg = e.to_string();
                         let _ = this.update(cx, |s, cx| {
+                            if !s.connect_operations.is_current(generation)
+                                || !matches!(s.connect_flow, Some(ConnectFlow::SigningIn { .. }))
+                            {
+                                return;
+                            }
                             s.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
                             cx.notify();
                         });
@@ -3722,7 +3870,7 @@ impl AppState {
 
     /// Step 2 of Connect: fetch the user's `.kdbx` files. Cheap (one
     /// search call); results are filtered client-side as the user types.
-    fn start_kdbx_search(&mut self, token: AccessToken, cx: &mut Context<Self>) {
+    fn start_kdbx_search(&mut self, token: AccessToken, generation: u64, cx: &mut Context<Self>) {
         let token_for_task = token.clone();
         let task =
             cx.background_spawn(
@@ -3731,6 +3879,9 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
+                if !state.connect_operations.is_current(generation) {
+                    return;
+                }
                 if let Some(ConnectFlow::Picking {
                     results,
                     loading,
@@ -3796,44 +3947,54 @@ impl AppState {
             Some(ConnectFlow::Picking { token, .. }) => token.clone(),
             _ => return,
         };
+        let generation = self.connect_operations.advance();
         self.connect_flow = Some(ConnectFlow::Downloading);
         cx.notify();
 
+        let operation_gate = self.connect_operations.clone();
         let path_for_task = local_path.clone();
         let task = cx.background_spawn(async move {
-            let result =
-                crate::sync::service::complete_connect_picked(&hit, token, &path_for_task)?;
-            // Write bytes to disk before returning so the unlock flow's
-            // `KeePassRepository::open` finds them.
-            std::fs::write(&path_for_task, &result.remote_bytes).map_err(|e| {
-                crate::sync::service::ServiceError::Io {
-                    path: path_for_task.clone(),
-                    source: e,
-                }
-            })?;
-            Ok::<_, crate::sync::service::ServiceError>(result)
+            let result = crate::sync::service::prepare_connect_picked(&hit, token, &path_for_task)?;
+            let Some(persisted) = operation_gate.commit_if_current(generation, || {
+                crate::sync::service::persist_connect_picked(&result)
+            }) else {
+                return Ok(None);
+            };
+            persisted?;
+            Ok::<_, crate::sync::service::ServiceError>(Some(result))
         });
         let final_path = local_path;
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |state, cx| match result {
-                Ok(connect_result) => {
-                    state.connect_flow = None;
-                    state.overlay = Overlay::None;
-                    state.pending_sync = Some(PendingSync {
-                        local_path: final_path.clone(),
-                        binding: SyncBinding {
-                            config: connect_result.config,
-                            access_token: connect_result.access_token,
-                        },
-                    });
-                    state.request_password(final_path, cx);
-                    cx.notify();
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    state.connect_flow = Some(ConnectFlow::Failed(msg.clone()));
-                    cx.notify();
+            let _ = this.update(cx, |state, cx| {
+                let is_current = state.connect_operations.is_current(generation)
+                    && matches!(state.connect_flow, Some(ConnectFlow::Downloading));
+                match result {
+                    Ok(Some(connect_result)) if is_current => {
+                        state.connect_operations.advance();
+                        state.connect_flow = None;
+                        state.overlay = Overlay::None;
+                        state.pending_sync = Some(PendingSync {
+                            local_path: final_path.clone(),
+                            binding: SyncBinding {
+                                config: connect_result.config,
+                                access_token: connect_result.access_token,
+                            },
+                        });
+                        state.request_password(final_path, cx);
+                        cx.notify();
+                    }
+                    // Publication crossed its commit point just before the
+                    // user cancelled or locked. Keep the completed encrypted
+                    // vault discoverable, but never restore the stale flow or
+                    // retain its access token in AppState.
+                    Ok(Some(_)) => state.push_recent(final_path, cx),
+                    Ok(None) => {}
+                    Err(e) if is_current => {
+                        state.connect_flow = Some(ConnectFlow::Failed(e.to_string()));
+                        cx.notify();
+                    }
+                    Err(_) => {}
                 }
             });
         })
@@ -3849,53 +4010,71 @@ impl AppState {
     /// drops back to `Reconnect` so the card stays actionable.
     fn finish_reconnect(&mut self, config: SyncConfig, token: AccessToken, cx: &mut Context<Self>) {
         let path = config.local_path.clone();
+        let Some(session_id) = self.vault_session_id_for(&path) else {
+            return;
+        };
+        let generation = self.connect_operations.advance();
         // Close the device-code overlay right away — the rebind is quick and
         // headless. The status pill carries the progress from here.
         self.connect_flow = None;
         self.overlay = Overlay::None;
         self.apply_sync_status(&path, SyncStatus::Connecting, cx);
 
+        let operation_gate = self.connect_operations.clone();
         let task = cx.background_spawn(async move {
-            let config = crate::sync::service::reconnect_rebind(config, &token)?;
-            Ok::<_, crate::sync::service::ServiceError>((config, token))
+            let config = crate::sync::service::prepare_reconnect_rebind(config, &token)?;
+            let Some(persisted) = operation_gate.commit_if_current(generation, || {
+                crate::sync::service::persist_reconnect_rebind(&config, &token)
+            }) else {
+                return Ok(None);
+            };
+            persisted?;
+            Ok::<_, crate::sync::service::ServiceError>(Some((config, token)))
         });
 
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |state, cx| match result {
-                Ok((config, access_token)) => {
-                    let binding = SyncBinding {
-                        config,
-                        access_token,
-                    };
-                    if state.rebind_sync(&path, binding) {
-                        state.apply_sync_status(
+            let _ = this.update(cx, |state, cx| {
+                if !state.connect_operations.is_current(generation)
+                    || !state.vault_session_is_current(&path, session_id)
+                {
+                    return;
+                }
+                state.connect_operations.advance();
+                match result {
+                    Ok(Some((config, access_token))) => {
+                        let binding = SyncBinding {
+                            config,
+                            access_token,
+                        };
+                        if state.rebind_sync_for_session(&path, session_id, binding) {
+                            state.apply_sync_status_for_session(
+                                &path,
+                                session_id,
+                                SyncStatus::Synced {
+                                    at: chrono::Local::now(),
+                                    auto_merged: 0,
+                                },
+                                cx,
+                            );
+                            // Verify the new grant works and pull anything that
+                            // landed remotely while the sign-in was dead.
+                            state.sync_now_for_path_inner(&path, session_id, true, None, cx);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        // Stay on the Reconnect card (AccountMismatch or transient
+                        // failure) so the user can retry or read the reason.
+                        state.apply_sync_status_for_session(
                             &path,
-                            SyncStatus::Synced {
-                                at: chrono::Local::now(),
-                                auto_merged: 0,
+                            session_id,
+                            SyncStatus::Reconnect {
+                                detail: Some(e.to_string()),
                             },
                             cx,
                         );
-                        // Verify the new grant works and pull anything that
-                        // landed remotely while the sign-in was dead.
-                        state.sync_now_for_path(&path, cx);
-                    } else {
-                        // Vault locked/closed mid-reconnect — config + token
-                        // are persisted, so the next open restores cleanly.
-                        cx.notify();
                     }
-                }
-                Err(e) => {
-                    // Stay on the Reconnect card (AccountMismatch or transient
-                    // failure) so the user can retry or read the reason.
-                    state.apply_sync_status(
-                        &path,
-                        SyncStatus::Reconnect {
-                            detail: Some(e.to_string()),
-                        },
-                        cx,
-                    );
                 }
             });
         })
@@ -5070,6 +5249,60 @@ mod park_tests {
     }
 
     #[test]
+    fn connect_operation_gate_rejects_stale_publication() {
+        let gate = ConnectOperationGate::default();
+        let stale = gate.advance();
+        let current = gate.advance();
+
+        assert_eq!(gate.commit_if_current(stale, || "stale"), None);
+        assert_eq!(
+            gate.commit_if_current(current, || "current"),
+            Some("current")
+        );
+    }
+
+    #[test]
+    fn connect_operation_gate_orders_cleanup_before_new_publication() {
+        let gate = ConnectOperationGate::default();
+        gate.reserve_cleanup();
+        gate.reserve_cleanup();
+        let current = gate.advance();
+        let worker_gate = gate.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let worker_events = Arc::clone(&events);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("started");
+            let result = worker_gate.commit_if_current(current, || {
+                worker_events.lock().expect("events").push("publication");
+                "published"
+            });
+            done_tx.send(result).expect("result");
+        });
+
+        started_rx.recv().expect("worker started");
+        gate.run_reserved_cleanup(|| {
+            events.lock().expect("events").push("cleanup-1");
+        });
+        gate.run_reserved_cleanup(|| {
+            events.lock().expect("events").push("cleanup-2");
+        });
+
+        assert_eq!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("publication unblocked"),
+            Some("published")
+        );
+        worker.join().expect("worker joined");
+        assert_eq!(
+            *events.lock().expect("events"),
+            ["cleanup-1", "cleanup-2", "publication"]
+        );
+    }
+
+    #[test]
     fn park_then_unpark_round_trips_the_document() {
         let mut state = AppState::default();
         let path = PathBuf::from("/tmp/round.kdbx");
@@ -5432,6 +5665,15 @@ mod park_tests {
             state.sync.as_ref().expect("binding").config.last_etag,
             "etag-0"
         );
+        assert!(!state.rebind_sync_for_session(
+            &path,
+            stale_session,
+            fake_binding("stale-rebind@example.invalid"),
+        ));
+        assert_eq!(
+            state.sync.as_ref().expect("binding").config.account_email,
+            "new@example.invalid"
+        );
 
         state.with_sync_binding_mut_for_session(&path, current_session, |binding| {
             binding.config.last_etag = "current-etag".into();
@@ -5439,6 +5681,15 @@ mod park_tests {
         assert_eq!(
             state.sync.as_ref().expect("binding").config.last_etag,
             "current-etag"
+        );
+        assert!(state.rebind_sync_for_session(
+            &path,
+            current_session,
+            fake_binding("current-rebind@example.invalid"),
+        ));
+        assert_eq!(
+            state.sync.as_ref().expect("binding").config.account_email,
+            "current-rebind@example.invalid"
         );
     }
 

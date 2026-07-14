@@ -10,7 +10,12 @@
 //! testable in isolation and makes the dependency direction one-way:
 //! `app -> sync` only, never back.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    io::{self, Write as _},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use thiserror::Error;
 
@@ -51,8 +56,8 @@ pub enum ServiceError {
     UnstableRemoteDownload,
 }
 
-/// Result of `complete_connect`: what the caller needs to (a) save the
-/// downloaded bytes locally and (b) hand off to the unlock flow.
+/// Prepared Connect result: enough to publish the encrypted local file and
+/// sync credentials, then hand off to the unlock flow.
 pub struct ConnectResult {
     pub config: SyncConfig,
     pub access_token: AccessToken,
@@ -97,15 +102,13 @@ pub fn list_kdbx_files(token: &AccessToken) -> Result<Vec<DriveItemHit>, Service
     Ok(hits)
 }
 
-/// Step 3 of connect, after the user picks a file from the search results:
-/// download the bytes, persist SyncConfig + keychain refresh token, return
-/// everything the caller needs to write the file locally + open the unlock
-/// flow.
+/// Prepare step 3 of Connect without persistent side effects. The caller
+/// publishes the result only after verifying that the operation is current.
 ///
 /// Uses the etag from the download response (not from the search hit) so
 /// our `last_etag` is exactly the version that produced these bytes —
 /// race-free with the next upload.
-pub fn complete_connect_picked(
+pub fn prepare_connect_picked(
     hit: &DriveItemHit,
     token: AccessToken,
     local_path: &Path,
@@ -113,11 +116,6 @@ pub fn complete_connect_picked(
     let user = graph::me(&token)?;
     let (remote_bytes, etag_from_download) =
         download_versioned(&hit.drive_id, &hit.item_id, &token)?;
-
-    // Refresh token to keychain *before* persisting the config — if the
-    // keychain write fails we never leave a sync config pointing at a
-    // refresh token we can't actually load.
-    tokens::store(&user.email, &token.refresh_token)?;
 
     let cfg = SyncConfig {
         provider: SyncProvider::SharePoint,
@@ -130,8 +128,6 @@ pub fn complete_connect_picked(
         remote_url: hit.web_url.clone(),
         authenticated_at: now_unix(),
     };
-    config::save(&cfg)?;
-
     Ok(ConnectResult {
         config: cfg,
         access_token: token,
@@ -139,20 +135,40 @@ pub fn complete_connect_picked(
     })
 }
 
-/// Re-authenticate an existing vault whose refresh token expired. Takes
-/// the *existing* on-disk `SyncConfig` (loaded by the caller) and a fresh
-/// interactive `token`, and:
+/// Publish a prepared Connect result transactionally. The caller only starts
+/// this while the operation is current; once publication begins it either
+/// rolls back the local file on error or completes as a discoverable vault.
+pub fn persist_connect_picked(result: &ConnectResult) -> Result<(), ServiceError> {
+    if config::load(&result.config.local_path)?.is_some() {
+        return Err(io_error(
+            &result.config.local_path,
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "sync configuration already exists for this local vault",
+            ),
+        ));
+    }
+    let mut staged = StagedVault::new(&result.config.local_path, &result.remote_bytes)?;
+    staged.publish()?;
+    tokens::store(
+        &result.config.account_email,
+        &result.access_token.refresh_token,
+    )?;
+    config::save(&result.config)?;
+    staged.commit();
+    Ok(())
+}
+
+/// Prepare re-authentication for a vault whose refresh token expired. Takes
+/// the existing `SyncConfig` and a fresh interactive token, then:
 ///   1. verifies the re-authed account matches `config.account_email`
 ///      (case-insensitive) — refuses with `AccountMismatch` otherwise, so
 ///      we never store a token that can't reach the bound drive item;
-///   2. persists the (possibly rotated) refresh token to the keychain;
-///   3. re-stamps `authenticated_at` to now and saves the config back.
+///   2. re-stamps `authenticated_at` in memory.
 ///
-/// Everything else in the config — drive_id / item_id / site_id /
-/// last_etag / local_path / remote_url — is preserved verbatim, so no new
-/// local file or duplicate sync binding is created. Returns the updated
-/// config for the caller to wrap in a fresh `SyncBinding`.
-pub fn reconnect_rebind(
+/// Persistence is deliberately deferred to `persist_reconnect_rebind`, which
+/// the caller runs only while its cancellation gate still owns the operation.
+pub fn prepare_reconnect_rebind(
     mut config: SyncConfig,
     token: &AccessToken,
 ) -> Result<SyncConfig, ServiceError> {
@@ -163,14 +179,199 @@ pub fn reconnect_rebind(
             got: user.email,
         });
     }
-    // Keychain write before config save (mirrors `complete_connect_picked`):
-    // if the keychain write fails we never leave a config claiming a grant
-    // we can't reload.
-    tokens::store(&config.account_email, &token.refresh_token)?;
     config.authenticated_at = now_unix();
-    config::save(&config)?;
     Ok(config)
 }
+
+/// Publish a prepared reconnect while the caller holds its operation gate.
+pub fn persist_reconnect_rebind(
+    config: &SyncConfig,
+    token: &AccessToken,
+) -> Result<(), ServiceError> {
+    tokens::store(&config.account_email, &token.refresh_token)?;
+    config::save(config)?;
+    Ok(())
+}
+
+struct StagedVault {
+    target: PathBuf,
+    temp: PathBuf,
+    temp_identity: Option<FileIdentity>,
+    published_identity: Option<FileIdentity>,
+    keep_target: bool,
+}
+
+impl StagedVault {
+    fn new(target: &Path, bytes: &[u8]) -> Result<Self, ServiceError> {
+        if fs::symlink_metadata(target).is_ok() {
+            return Err(io_error(
+                target,
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "refusing to replace an existing local vault",
+                ),
+            ));
+        }
+
+        let parent = target.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = target.file_name().ok_or_else(|| {
+            io_error(
+                target,
+                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no file name"),
+            )
+        })?;
+        let seq = CONNECT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp = parent.join(format!(
+            ".{}.ferrispass-connect-{}-{seq}.tmp",
+            file_name.to_string_lossy(),
+            std::process::id()
+        ));
+
+        let mut file = private_create_new(&temp)?;
+        file.write_all(bytes)
+            .map_err(|error| io_error(&temp, error))?;
+        file.sync_all().map_err(|error| io_error(&temp, error))?;
+        let temp_identity =
+            FileIdentity::from_metadata(file.metadata().map_err(|error| io_error(&temp, error))?);
+
+        Ok(Self {
+            target: target.to_path_buf(),
+            temp,
+            temp_identity,
+            published_identity: None,
+            keep_target: false,
+        })
+    }
+
+    fn publish(&mut self) -> Result<(), ServiceError> {
+        self.published_identity = match fs::hard_link(&self.temp, &self.target) {
+            Ok(()) => self.temp_identity,
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => self.publish_by_copy()?,
+            Err(error) => return Err(io_error(&self.target, error)),
+        };
+        Ok(())
+    }
+
+    fn publish_by_copy(&self) -> Result<Option<FileIdentity>, ServiceError> {
+        let mut created_identity = None;
+        let result = (|| {
+            let mut source =
+                fs::File::open(&self.temp).map_err(|error| io_error(&self.temp, error))?;
+            let mut target = private_create_new(&self.target)?;
+            created_identity = FileIdentity::from_metadata(
+                target
+                    .metadata()
+                    .map_err(|error| io_error(&self.target, error))?,
+            );
+            io::copy(&mut source, &mut target).map_err(|error| io_error(&self.target, error))?;
+            target
+                .sync_all()
+                .map_err(|error| io_error(&self.target, error))
+        })();
+        if result.is_err()
+            && created_identity.is_some_and(|identity| identity.matches(&self.target))
+        {
+            let _ = fs::remove_file(&self.target);
+        }
+        result.map(|()| created_identity)
+    }
+
+    fn commit(mut self) {
+        self.keep_target = true;
+        let _ = fs::remove_file(&self.temp);
+        #[cfg(unix)]
+        if let Some(parent) = self.target.parent() {
+            let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+        }
+    }
+}
+
+impl Drop for StagedVault {
+    fn drop(&mut self) {
+        if !self.keep_target
+            && self
+                .published_identity
+                .is_some_and(|identity| identity.matches(&self.target))
+        {
+            let _ = fs::remove_file(&self.target);
+        }
+        let _ = fs::remove_file(&self.temp);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl FileIdentity {
+    fn read(path: &Path) -> Option<Self> {
+        fs::symlink_metadata(path)
+            .ok()
+            .and_then(Self::from_metadata)
+    }
+
+    fn from_metadata(metadata: fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Some(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            None
+        }
+    }
+
+    fn matches(self, path: &Path) -> bool {
+        Self::read(path).is_some_and(|current| {
+            #[cfg(unix)]
+            {
+                current.device == self.device && current.inode == self.inode
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = current;
+                false
+            }
+        })
+    }
+}
+
+fn private_create_new(path: &Path) -> Result<fs::File, ServiceError> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path).map_err(|error| io_error(path, error))
+}
+
+#[cfg(test)]
+fn persist_downloaded_vault(target: &Path, bytes: &[u8]) -> Result<(), ServiceError> {
+    let mut staged = StagedVault::new(target, bytes)?;
+    staged.publish()?;
+    staged.commit();
+    Ok(())
+}
+
+fn io_error(path: &Path, source: io::Error) -> ServiceError {
+    ServiceError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+static CONNECT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Push local bytes to SharePoint with optimistic-concurrency guard.
 /// On 412, fetches the remote bytes so the caller can build a conflict
@@ -325,12 +526,14 @@ pub fn ensure_fresh(token: AccessToken, account_email: &str) -> Result<AccessTok
     }
 }
 
-/// Tear down the sync binding for a vault: remove the local config file
-/// and forget the refresh token. Idempotent — safe to retry after a partial
-/// failure (e.g., we cleared the keychain but the disk write failed).
+/// Tear down one vault's sync binding. The vault-local config is removed
+/// first, so a later Keychain failure cannot silently reconnect it on restart.
+/// The account-level refresh token stays while another vault still uses it.
 pub fn disconnect(config: &SyncConfig) -> Result<(), ServiceError> {
-    tokens::delete(&config.account_email)?;
     config::delete(&config.local_path)?;
+    if !config::has_account_binding(&config.account_email)? {
+        tokens::delete(&config.account_email)?;
+    }
     Ok(())
 }
 
@@ -346,7 +549,7 @@ fn now_unix() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::stable_fallback_etag;
+    use super::{persist_downloaded_vault, stable_fallback_etag};
 
     #[test]
     fn fallback_etag_requires_the_same_non_empty_revision() {
@@ -354,6 +557,48 @@ mod tests {
         assert!(!stable_fallback_etag("", ""));
         assert!(!stable_fallback_etag("   ", "   "));
         assert!(!stable_fallback_etag("\"item,7\"", "\"item,8\""));
+    }
+
+    #[test]
+    fn downloaded_vault_is_published_without_clobbering() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("vault.kdbx");
+
+        persist_downloaded_vault(&target, b"first").expect("publish vault");
+        assert_eq!(std::fs::read(&target).expect("read vault"), b"first");
+
+        let error = persist_downloaded_vault(&target, b"second").expect_err("refuse clobber");
+        assert!(error.to_string().contains("existing local vault"));
+        assert_eq!(std::fs::read(&target).expect("read vault"), b"first");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downloaded_vault_uses_private_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("private.kdbx");
+        persist_downloaded_vault(&target, b"encrypted").expect("publish vault");
+
+        let mode = std::fs::metadata(target)
+            .expect("vault metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn uncommitted_download_publication_rolls_back() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("rolled-back.kdbx");
+        {
+            let mut staged = super::StagedVault::new(&target, b"encrypted").expect("stage");
+            staged.publish().expect("publish");
+            assert!(target.exists());
+        }
+        assert!(!target.exists());
     }
 }
 

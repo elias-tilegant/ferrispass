@@ -109,6 +109,13 @@ pub fn delete(local_path: &Path) -> Result<(), ConfigError> {
     delete_in(&sync_dir()?, local_path)
 }
 
+/// Whether another vault still relies on the account-level refresh token.
+/// Disconnect uses this after deleting its own config so one vault cannot
+/// revoke every other vault connected to the same Microsoft account.
+pub fn has_account_binding(account_email: &str) -> Result<bool, ConfigError> {
+    has_account_binding_in(&sync_dir()?, account_email)
+}
+
 // --- *_in variants take the directory explicitly so tests can use a tempdir
 // without mutating $HOME (which would require unsafe under the 2024 edition,
 // blocked by the crate's `forbid(unsafe_code)` policy).
@@ -160,6 +167,29 @@ pub(crate) fn delete_in(dir: &Path, local_path: &Path) -> Result<(), ConfigError
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(ConfigError::Io(path, e)),
     }
+}
+
+pub(crate) fn has_account_binding_in(dir: &Path, account_email: &str) -> Result<bool, ConfigError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(ConfigError::Io(dir.to_path_buf(), error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| ConfigError::Io(dir.to_path_buf(), error))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let text =
+            fs::read_to_string(&path).map_err(|error| ConfigError::Io(path.clone(), error))?;
+        let config: SyncConfig =
+            serde_json::from_str(&text).map_err(|error| ConfigError::Parse(path, error))?;
+        if config.account_email.eq_ignore_ascii_case(account_email) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Hex-encoded SHA-256 of the path string. Canonicalisation isn't applied
@@ -289,6 +319,13 @@ mod tests {
             load_in(dir.path(), &b.local_path).unwrap().as_ref(),
             Some(&b)
         );
+        assert!(has_account_binding_in(dir.path(), "ALICE@contoso.onmicrosoft.com").unwrap());
+        assert!(!has_account_binding_in(dir.path(), "bob@example.invalid").unwrap());
+
+        delete_in(dir.path(), &a.local_path).unwrap();
+        assert!(has_account_binding_in(dir.path(), &b.account_email).unwrap());
+        delete_in(dir.path(), &b.local_path).unwrap();
+        assert!(!has_account_binding_in(dir.path(), &b.account_email).unwrap());
     }
 
     #[test]
