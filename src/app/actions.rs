@@ -1,4 +1,4 @@
-use gpui::{App, KeyBinding, Menu, MenuItem, actions};
+use gpui::{App, KeyBinding, Menu, MenuItem, Window, actions};
 use gpui_component::WindowExt as _;
 
 pub const APP_CONTEXT: &str = "FerrisPass";
@@ -51,6 +51,7 @@ actions!(
         OpenConflictDemo,
         CreateVault,
         ToggleTheme,
+        CloseWindow,
         Quit,
         SaveVault,
         EditEntry,
@@ -108,41 +109,59 @@ pub struct DeleteGroup {
     pub group_id: String,
 }
 
-fn block_lifecycle_action_while_saving(cx: &mut App) -> bool {
+const SAVE_IN_PROGRESS_MESSAGE: &str = "FerrisPass is still saving vault changes. Wait for the save to finish, or retry Save if it failed.";
+
+fn block_lifecycle_action_while_saving(window: Option<&mut Window>, cx: &mut App) -> bool {
     if !super::state::has_unpersisted_vault_saves() {
         return false;
     }
 
-    if let Some(window) = cx.active_window() {
+    if let Some(window) = window {
+        window.push_notification(SAVE_IN_PROGRESS_MESSAGE, cx);
+    } else if let Some(window) = cx.active_window() {
         let _ = window.update(cx, |_root, window, cx| {
-            window.push_notification(
-                "FerrisPass is still saving vault changes. Wait for the save to finish, or retry Save if it failed.",
-                cx,
-            );
+            window.push_notification(SAVE_IN_PROGRESS_MESSAGE, cx);
         });
     }
     true
+}
+
+fn request_quit(cx: &mut App) {
+    if block_lifecycle_action_while_saving(None, cx) {
+        return;
+    }
+
+    // Wipe cleartext launch payloads before the platform starts tearing down
+    // windows. GPUI schedules the macOS terminate call asynchronously.
+    crate::launch::sweeper::purge_all();
+    cx.quit();
+}
+
+/// Native window-close callbacks run while that window is already on GPUI's
+/// update stack, so notify it directly instead of resolving `active_window`.
+/// The callback always vetoes the immediate Cocoa close: on the clean path the
+/// central quit request closes the sole application window asynchronously.
+pub(crate) fn request_window_close(window: &mut Window, cx: &mut App) -> bool {
+    if !block_lifecycle_action_while_saving(Some(window), cx) {
+        crate::launch::sweeper::purge_all();
+        cx.quit();
+    }
+    false
 }
 
 pub fn init(cx: &mut App) {
     // App-global Quit handler. Wired here (not on AppShell) so the action fires
     // independently of whatever view currently holds focus.
     cx.on_action(|_: &Quit, cx: &mut App| {
-        if block_lifecycle_action_while_saving(cx) {
-            return;
-        }
-        // Wipe the launch tempdir before we hand control back to the
-        // OS — a Quit-mid-launch otherwise leaves cleartext payload
-        // files lying around. The startup sweep would catch them on
-        // the next run, but "delete on the way out" closes the window
-        // tighter and avoids the user wondering about stray files
-        // between sessions.
-        crate::launch::sweeper::purge_all();
-        cx.quit();
+        request_quit(cx);
+    });
+
+    cx.on_action(|_: &CloseWindow, cx: &mut App| {
+        request_quit(cx);
     });
 
     cx.on_action(|_: &RestartToUpdate, cx: &mut App| {
-        if block_lifecycle_action_while_saving(cx) {
+        if block_lifecycle_action_while_saving(None, cx) {
             return;
         }
         crate::launch::sweeper::purge_all();
@@ -181,6 +200,7 @@ pub fn init(cx: &mut App) {
         // No context filter — cmd-q should always quit, even if focus is in
         // some weird state (e.g. inside a modal or before the shell is wired).
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
     ]);
 
     install_app_menus(cx);
@@ -208,6 +228,8 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::action("Open Vault…", OpenVaultSwitcher),
             MenuItem::separator(),
             MenuItem::action("Save Vault", SaveVault),
+            MenuItem::separator(),
+            MenuItem::action("Close Window", CloseWindow),
         ]),
         Menu::new("Edit").items([
             MenuItem::action("New Entry", NewEntry),
