@@ -119,6 +119,7 @@ mod tests {
             version: version.into(),
             notes: "Added restart-aware updates.".into(),
             pub_date: Some("2026-05-12T10:00:00Z".into()),
+            candidate_id: None,
         }
     }
 

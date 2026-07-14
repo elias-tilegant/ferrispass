@@ -1,10 +1,9 @@
 //! Cross-platform auto-update via [`cargo-packager-updater`].
 //!
 //! Two responsibilities:
-//! 1. **Check**: ask GitHub Releases whether a newer version exists. Returns
-//!    metadata if so, `None` if we're up to date.
-//! 2. **Install**: download the new bundle, verify its minisign signature
-//!    against the embedded public key, atomic-replace the running app, restart.
+//! 1. **Check**: verify the complete release manifest before displaying it.
+//! 2. **Install**: require the confirmed version, bind the installer candidate
+//!    to that signed manifest, then verify and install the signed bundle.
 //!
 //! Both steps are blocking I/O — call from `cx.background_spawn(...)`, never
 //! from the main thread.
@@ -19,9 +18,9 @@
 //!
 //! ## Manifest URL
 //!
-//! Hosted on GitHub Releases as a static asset called `update.json`. GitHub's
-//! `/releases/latest/download/<asset>` redirect always points at the most
-//! recent release, so the URL never changes between versions.
+//! Hosted on GitHub Releases as `update.json` plus its detached
+//! `update.json.minisig`. GitHub's `/releases/latest/download/<asset>` redirect
+//! always points at the most recent release, so the URLs stay stable.
 //!
 //! ## Public key
 //!
@@ -32,6 +31,8 @@
 
 mod client;
 mod info;
+#[cfg(target_os = "macos")]
+mod macos_installer;
 mod notes;
 mod status;
 
@@ -49,9 +50,13 @@ pub use status::UpdateStatus;
 pub(crate) const UPDATE_ENDPOINT: &str =
     "https://github.com/elias-tilegant/ferrispass/releases/latest/download/update.json";
 
-/// Minisign Ed25519 public key, embedded at compile time. Used by
-/// `cargo-packager-updater` to verify the signature on every downloaded
-/// update bundle before applying it.
+/// Detached minisign signature over the exact `update.json` bytes. Signing the
+/// whole manifest binds version, bundle URL and bundle signature together.
+pub(crate) const UPDATE_SIGNATURE_ENDPOINT: &str =
+    "https://github.com/elias-tilegant/ferrispass/releases/latest/download/update.json.minisig";
+
+/// Minisign Ed25519 public key, embedded at compile time. Used to verify both
+/// the release manifest and every downloaded update bundle before applying it.
 ///
 /// The placeholder shipped in fresh checkouts is a zeroed key — it can verify
 /// nothing. Run `scripts/setup-minisign.sh` once to generate a real keypair.

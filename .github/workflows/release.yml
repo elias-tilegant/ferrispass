@@ -11,7 +11,7 @@ on:
 #   APPLE_ID                  — Apple ID email used for notarization
 #   APPLE_TEAM_ID             — 10-char Team ID (5GAMHB3974)
 #   APPLE_NOTARIZE_PASSWORD   — app-specific password from appleid.apple.com
-#   MINISIGN_PRIVATE_KEY      — full text of ~/.ferrispass/minisign.key (5 lines)
+#   MINISIGN_PRIVATE_KEY      — full text of ~/.ferrispass/minisign.key (2 lines)
 #   MINISIGN_PASSWORD         — passphrase set when generating the keypair
 #
 # Apple secrets — how to export the .p12 (one-time, on the Mac with the cert):
@@ -28,14 +28,9 @@ jobs:
     name: Build & notarize DMG
     runs-on: macos-latest
     permissions:
-      contents: write       # needed to create/update the GitHub Release
-      pull-requests: read   # git-cliff queries /pulls for PR metadata
+      contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Need full history (not just the tagged commit) so git-cliff
-          # can walk back to the previous tag and produce a proper diff.
-          fetch-depth: 0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -46,7 +41,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install build tools
-        run: brew install create-dmg minisign jq
+        run: brew install create-dmg jq
 
       - name: Import code-signing cert
         uses: apple-actions/import-codesign-certs@v3
@@ -65,43 +60,6 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_NOTARIZE_PASSWORD"
 
-      - name: Stage minisign private key
-        env:
-          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
-        run: |
-          # Drop the secret to disk where build-mac.sh expects it. The
-          # runner's ${RUNNER_TEMP} is wiped after the job, so the key
-          # never persists on the GitHub Actions infrastructure.
-          mkdir -p "${RUNNER_TEMP}/ferrispass"
-          KEY="${RUNNER_TEMP}/ferrispass/minisign.key"
-
-          # `tr -d '\r'` defends against CRLF line endings sneaking in
-          # from a clipboard round-trip on Windows / via the GitHub UI.
-          echo "$MINISIGN_PRIVATE_KEY" | tr -d '\r' > "$KEY"
-          chmod 600 "$KEY"
-
-          # Validate the file structure before letting build-mac.sh hit
-          # minisign — its error message ("base64 conversion failed") is
-          # opaque and doesn't tell you what was actually wrong.
-          if ! head -1 "$KEY" | grep -q "untrusted comment"; then
-              echo "" >&2
-              echo "✗ MINISIGN_PRIVATE_KEY secret is malformed." >&2
-              echo "  File: $(wc -l < $KEY) lines, $(wc -c < $KEY) bytes." >&2
-              echo "  First line begins with: $(head -c 30 $KEY)..." >&2
-              echo "" >&2
-              echo "  A valid minisign secret key file has TWO lines:" >&2
-              echo "    Line 1: untrusted comment: minisign encrypted secret key" >&2
-              echo "    Line 2: RWRTY0IyqOk... (base64 blob)" >&2
-              echo "" >&2
-              echo "  Fix: locally on your Mac, run" >&2
-              echo "      cat ~/.ferrispass/minisign.key | pbcopy" >&2
-              echo "  then paste the FULL clipboard content into the GitHub" >&2
-              echo "  Secret 'MINISIGN_PRIVATE_KEY' (Settings → Secrets and" >&2
-              echo "  variables → Actions). Both lines, including the comment." >&2
-              exit 1
-          fi
-          echo "✓ MINISIGN_PRIVATE_KEY format check passed ($(wc -l < $KEY) lines)."
-
       - name: Verify icon present
         run: |
           if [ ! -f bundle/icon.png ]; then
@@ -109,14 +67,44 @@ jobs:
             exit 1
           fi
 
-      - name: Build, sign, notarize, staple, generate update manifest
-        env:
-          MINISIGN_KEY: ${{ runner.temp }}/ferrispass/minisign.key
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+      - name: Verify tag matches package version
+        run: |
+          VERSION="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -1)"
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            echo "✗ Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${VERSION}" >&2
+            exit 1
+          fi
+
+      # No updater-signing secret is staged or exported until after this step.
+      # Cargo and dependency build scripts therefore cannot read the private
+      # key path or passphrase.
+      - name: Build, code-sign, notarize, staple, generate update manifest
         run: scripts/build-mac.sh
 
+      - name: Upload unsigned release artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-release
+          path: |
+            dist/*.dmg
+            dist/*.app.tar.gz
+            dist/update.json
+          if-no-files-found: error
+          retention-days: 1
+
+  notes:
+    name: Generate release notes
+    needs: build
+    runs-on: macos-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Generate release notes from conventional commits
-        id: changelog
         env:
           # Pin so a future cliff bump can't silently change the notes
           # format without us reviewing it.
@@ -150,24 +138,103 @@ jobs:
           # already a per-release context.
           "$BIN" --config cliff.toml --latest --strip header --output RELEASE_NOTES.md
 
-          # Expose the body as a step output so the release step below
-          # can drop it straight into the GitHub Release.
-          {
-            echo 'content<<RELEASE_NOTES_EOF'
-            cat RELEASE_NOTES.md
-            echo 'RELEASE_NOTES_EOF'
-          } >> "$GITHUB_OUTPUT"
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    name: Sign updater artefacts
+    needs: [build, notes]
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download unsigned release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          name: unsigned-release
+          path: dist
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+
+      - name: Install signing tools
+        run: brew install minisign jq
 
       - name: Inject release notes into update manifest
-        # build-mac.sh writes update.json without a `notes` field, so the
-        # in-app "What's new" modal shown after auto-update displays a
-        # "No release notes were included" fallback. Patch the manifest
-        # here, once git-cliff has produced the notes, before uploading.
         run: |
           set -euo pipefail
+          NOTES_SIZE="$(wc -c < RELEASE_NOTES.md | tr -d '[:space:]')"
+          if [ "${NOTES_SIZE}" -gt 131072 ]; then
+            echo "✗ Release notes exceed the 128 KiB signing limit" >&2
+            exit 1
+          fi
           jq --rawfile notes RELEASE_NOTES.md '. + {notes: $notes}' \
             dist/update.json > dist/update.json.tmp
           mv dist/update.json.tmp dist/update.json
+
+      - name: Stage minisign private key
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/ferrispass"
+          KEY="${RUNNER_TEMP}/ferrispass/minisign.key"
+          printf '%s\n' "$MINISIGN_PRIVATE_KEY" | tr -d '\r' > "$KEY"
+          chmod 600 "$KEY"
+
+          if ! head -1 "$KEY" | grep -q "untrusted comment"; then
+              echo "✗ MINISIGN_PRIVATE_KEY secret is malformed." >&2
+              echo "  Expected the complete two-line minisign secret key." >&2
+              exit 1
+          fi
+
+      - name: Sign updater payload and final manifest
+        env:
+          MINISIGN_KEY: ${{ runner.temp }}/ferrispass/minisign.key
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          trap 'rm -f "${MINISIGN_KEY}"' EXIT
+          scripts/build-mac.sh --sign-update
+
+      - name: Upload signed release artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release
+          path: |
+            dist/*.dmg
+            dist/*.app.tar.gz
+            dist/*.minisig
+            dist/update.json
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish release
+    needs: [sign, notes]
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed release artefacts
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-release
+          path: dist
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -176,18 +243,16 @@ jobs:
           # - .dmg          : human-friendly first download
           # - .app.tar.gz   : payload the in-app updater fetches
           # - .minisig      : detached signature paired with the tar.gz
-          # - update.json   : manifest the updater reads (always called update.json
-          #                   so /releases/latest/download/update.json works as
-          #                   a stable URL across versions)
+          # - update.json + .minisig: signed manifest binding version, URL and payload
           files: |
             dist/*.dmg
             dist/*.app.tar.gz
             dist/*.minisig
             dist/update.json
-          # Body comes from git-cliff (above) instead of GitHub's
+          # Body comes from git-cliff's isolated notes job instead of GitHub's
           # generate_release_notes — the latter only produces a Full
           # Changelog link when there are no PRs/labels to categorise.
-          body: ${{ steps.changelog.outputs.content }}
+          body_path: RELEASE_NOTES.md
           generate_release_notes: false
           draft: false
           prerelease: false

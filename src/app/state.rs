@@ -1774,6 +1774,7 @@ impl AppState {
         let UpdateStatus::Available(info) = self.update_status.clone() else {
             return;
         };
+        let expected = info.clone();
         self.update_status = UpdateStatus::Downloading {
             info,
             progress: 0.0,
@@ -1788,7 +1789,7 @@ impl AppState {
         let total_bg = total.clone();
         let done_bg = done.clone();
         let task = cx.background_spawn(async move {
-            let result = crate::update::install(move |bytes, content_length| {
+            let result = crate::update::install(&expected, move |bytes, content_length| {
                 downloaded_bg.store(bytes as u64, Ordering::Relaxed);
                 if let Some(len) = content_length {
                     total_bg.store(len, Ordering::Relaxed);

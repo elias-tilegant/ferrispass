@@ -67,7 +67,12 @@ The `v` prefix matters — `release.yml` matches `tags: ['v*']`. Tagging without
 
 ## What the pipeline does
 
-`release.yml` runs `scripts/build-mac.sh` on a `macos-latest` runner. Stages, with rough timing:
+`release.yml` uses separate build, notes, signing, and publishing jobs. The
+build and notes jobs never receive the updater private key. The isolated
+signing job treats the generated notes as bounded data, verifies the payload
+size, and only then signs the payload and complete manifest.
+
+Stages, with rough timing:
 
 | # | Stage | Time | Failure modes |
 |---|---|---|---|
@@ -79,7 +84,8 @@ The `v` prefix matters — `release.yml` matches `tags: ['v*']`. Tagging without
 | 6 | Codesign the DMG | <5 s | same as step 4 |
 | 7 | Notarize via `xcrun notarytool submit --wait` | 1-5 min | Apple's queue. Rejection = read the notarization log carefully |
 | 8 | Staple notarization ticket | <5 s | — |
-| 9 | Generate `.app.tar.gz` + minisign signature + `update.json` | <10 s | minisign key missing or malformed |
+| 9 | Generate `.app.tar.gz` + unsigned `update.json` with exact payload size | <10 s | `jq` missing or archive creation fails |
+| Sign | Inject notes, sign payload, then sign the complete manifest | <10 s | minisign key missing, malformed, or payload size mismatch |
 | End | `softprops/action-gh-release@v2` uploads to a GitHub Release | <30 s | `permissions: contents: write` not granted |
 
 Total wall-clock: usually 8-12 minutes.
@@ -88,7 +94,7 @@ Total wall-clock: usually 8-12 minutes.
 
 ### "base64 conversion failed - was an actual secret key given?"
 
-Step 9. The `MINISIGN_PRIVATE_KEY` GitHub Secret is malformed. Most often: the user pasted only the second line of `~/.ferrispass/minisign.key` (the base64 blob) without the `untrusted comment:` header line.
+The signing job's `MINISIGN_PRIVATE_KEY` GitHub Secret is malformed. Most often: the user pasted only the second line of `~/.ferrispass/minisign.key` (the base64 blob) without the `untrusted comment:` header line.
 
 **Fix:**
 ```sh
@@ -181,7 +187,10 @@ scripts/build-mac.sh --skip-notarize
 
 Outputs `dist/FerrisPass-X.Y.Z-arm64.dmg` that opens with a Gatekeeper warning (signed but not notarized). Useful for verifying the icon, app start-up flow, etc., before committing to a real release.
 
-If you have minisign installed locally and the keypair at `~/.ferrispass/minisign.key`, the `--skip-notarize` build also produces the `.app.tar.gz` + `.minisig` + `update.json` artefacts. Otherwise it skips Stage 9 with a warning; the DMG alone is still produced.
+`--skip-notarize` stops after the DMG and deliberately does not create updater
+artefacts. A normal notarized build produces `.app.tar.gz` and an unsigned
+`update.json`; `scripts/build-mac.sh --sign-update` then signs those existing
+artefacts. Unsigned manifests are rejected by the application.
 
 ## v0.2.1 release: cleanup recipe for affected users
 

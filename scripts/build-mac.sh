@@ -16,12 +16,15 @@
 #   6. Codesign the DMG
 #   7. Submit to Apple's notarization service (--wait)
 #   8. Staple notarization ticket onto DMG
-#   9. Tarball + minisign-sign the .app + write update.json manifest
+#   9. Tarball + update manifest (optionally minisign-sign both)
 #  10. Final spctl Gatekeeper assessment
 #
 # Flags:
 #   --skip-notarize    Stop after step 6. Useful for local iteration where
 #                      waiting ~3 min for Apple is friction.
+#   --sign-update      Sign existing updater artefacts only. This deliberately
+#                      runs separately from `cargo build` in CI so build scripts
+#                      cannot read the updater signing key or passphrase.
 #
 # Requirements:
 #   - Xcode Command Line Tools (lipo, sips, iconutil, codesign, notarytool)
@@ -46,9 +49,11 @@ MIN_MACOS="12.0"
 
 # ---------- args ----------
 SKIP_NOTARIZE=false
+SIGN_UPDATE_ONLY=false
 for arg in "$@"; do
     case $arg in
         --skip-notarize) SKIP_NOTARIZE=true ;;
+        --sign-update) SIGN_UPDATE_ONLY=true ;;
         -h|--help)
             sed -n '3,/^set -/p' "$0" | sed 's/^# \?//'
             exit 0
@@ -63,6 +68,96 @@ BUNDLE_DIR="${PROJECT_ROOT}/bundle/macos"
 ICON_PNG="${PROJECT_ROOT}/bundle/icon.png"
 DIST_DIR="${PROJECT_ROOT}/dist"
 
+# ---------- read version from Cargo.toml ----------
+VERSION=$(grep '^version' "${PROJECT_ROOT}/Cargo.toml" | head -1 \
+    | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+if [ -z "${VERSION}" ]; then
+    echo "✗ Could not parse version from Cargo.toml" >&2
+    exit 1
+fi
+
+MINISIGN_KEY="${MINISIGN_KEY:-${HOME}/.ferrispass/minisign.key}"
+TAR_NAME="${APP_NAME}-${VERSION}-arm64.app.tar.gz"
+TAR_PATH="${DIST_DIR}/${TAR_NAME}"
+SIG_PATH="${TAR_PATH}.minisig"
+MANIFEST="${DIST_DIR}/update.json"
+MANIFEST_SIG="${MANIFEST}.minisig"
+
+sign_update_artifacts() {
+    if ! command -v minisign >/dev/null 2>&1; then
+        echo "✗ minisign is required to sign updater artefacts" >&2
+        exit 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "✗ jq is required to sign updater artefacts" >&2
+        exit 1
+    fi
+    if [ ! -f "${MINISIGN_KEY}" ]; then
+        echo "✗ Minisign private key not found: ${MINISIGN_KEY}" >&2
+        exit 1
+    fi
+    if [ ! -f "${TAR_PATH}" ] || [ ! -f "${MANIFEST}" ]; then
+        echo "✗ Missing updater artefacts in ${DIST_DIR}; run a release build first" >&2
+        exit 1
+    fi
+
+    local manifest_version manifest_size expected_url actual_size
+    manifest_version="$(jq -er '.version' "${MANIFEST}")"
+    manifest_size="$(jq -er '.platforms["macos-aarch64"].size' "${MANIFEST}")"
+    actual_size="$(wc -c < "${TAR_PATH}" | tr -d '[:space:]')"
+    expected_url="https://github.com/elias-tilegant/ferrispass/releases/download/v${VERSION}/${TAR_NAME}"
+    if [ "${manifest_version}" != "${VERSION}" ]; then
+        echo "✗ Refusing to sign manifest ${manifest_version} as release ${VERSION}" >&2
+        exit 1
+    fi
+    if [ "${manifest_size}" != "${actual_size}" ]; then
+        echo "✗ Refusing to sign manifest size ${manifest_size}; payload is ${actual_size} bytes" >&2
+        exit 1
+    fi
+    if ! jq -e --arg url "${expected_url}" \
+        '.platforms["macos-aarch64"].url == $url and .platforms["macos-aarch64"].format == "app"' \
+        "${MANIFEST}" >/dev/null; then
+        echo "✗ Manifest target does not match ${TAR_NAME}" >&2
+        exit 1
+    fi
+
+    rm -f "${SIG_PATH}" "${MANIFEST_SIG}"
+    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+        printf '%s\n' "${MINISIGN_PASSWORD}" \
+            | minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}" >/dev/null
+    else
+        minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}"
+    fi
+
+    # cargo-packager-updater expects base64(contents-of-.minisig) in the
+    # platform record. Updating only that field preserves signed release notes.
+    local sig_b64
+    sig_b64="$(base64 < "${SIG_PATH}" | tr -d '\n')"
+    jq --arg sig "${sig_b64}" \
+        '.platforms["macos-aarch64"].signature = $sig' \
+        "${MANIFEST}" > "${MANIFEST}.tmp"
+    mv "${MANIFEST}.tmp" "${MANIFEST}"
+
+    # Sign the final manifest bytes after every field, including release notes
+    # and the payload signature, has been fixed.
+    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+        printf '%s\n' "${MINISIGN_PASSWORD}" \
+            | minisign -S -s "${MINISIGN_KEY}" -m "${MANIFEST}" >/dev/null
+    else
+        minisign -S -s "${MINISIGN_KEY}" -m "${MANIFEST}"
+    fi
+
+    minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${TAR_PATH}"
+    minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${MANIFEST}"
+    echo "    ✓ ${TAR_NAME}.minisig"
+    echo "    ✓ update.json.minisig"
+}
+
+if [ "${SIGN_UPDATE_ONLY}" = "true" ]; then
+    sign_update_artifacts
+    exit 0
+fi
+
 # ---------- preconditions ----------
 if [ ! -f "${ICON_PNG}" ]; then
     echo "✗ ${ICON_PNG} not found. Drop your 1024×1024 master PNG there before running." >&2
@@ -73,14 +168,6 @@ if ! security find-identity -v -p codesigning | grep -q "${SIGNING_IDENTITY}"; t
     echo "✗ Signing identity not in Keychain:" >&2
     echo "    ${SIGNING_IDENTITY}" >&2
     echo "  Create it via Xcode → Settings → Accounts → Manage Certificates → + Developer ID Application" >&2
-    exit 1
-fi
-
-# ---------- read version from Cargo.toml ----------
-VERSION=$(grep '^version' "${PROJECT_ROOT}/Cargo.toml" | head -1 \
-    | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
-if [ -z "${VERSION}" ]; then
-    echo "✗ Could not parse version from Cargo.toml" >&2
     exit 1
 fi
 
@@ -182,64 +269,51 @@ xcrun notarytool submit "${DMG_PATH}" \
 echo "▸ [8/9] Stapling notarization ticket"
 xcrun stapler staple "${DMG_PATH}"
 
-# ---------- 9. update tarball + minisign signature + manifest ----------
+# ---------- 9. update tarball + manifest ----------
 # Produces the artefacts the in-app auto-updater fetches:
 #   - ${APP_NAME}-${VERSION}-arm64.app.tar.gz   (the bundle to install)
-#   - same .minisig file                        (detached signature)
 #   - update.json                               (manifest read by the updater)
+# When a minisign key is available locally, this also signs the payload and
+# complete manifest. CI calls `--sign-update` in a later secret-bearing step.
 #
-# Skips gracefully when minisign isn't installed or the private key isn't
-# present, so a fresh contributor without the signing keypair can still
-# produce a DMG via --skip-notarize.
-echo "▸ [9/9] Generating .app.tar.gz + minisign signature + update manifest"
+echo "▸ [9/9] Generating .app.tar.gz + update manifest"
 
-MINISIGN_KEY="${MINISIGN_KEY:-${HOME}/.ferrispass/minisign.key}"
-TAR_NAME="${APP_NAME}-${VERSION}-arm64.app.tar.gz"
-TAR_PATH="${DIST_DIR}/${TAR_NAME}"
-SIG_PATH="${TAR_PATH}.minisig"
-MANIFEST="${DIST_DIR}/update.json"
+if ! command -v jq >/dev/null 2>&1; then
+    echo "✗ jq is required to generate the update manifest" >&2
+    exit 1
+fi
 
-if ! command -v minisign >/dev/null 2>&1; then
-    echo "    (skipped — minisign not installed; 'brew install minisign' to enable)"
-elif [ ! -f "${MINISIGN_KEY}" ]; then
-    echo "    (skipped — ${MINISIGN_KEY} not found; run scripts/setup-minisign.sh first)"
-else
-    tar czf "${TAR_PATH}" -C "${DIST_DIR}" "${APP_NAME}.app"
+tar czf "${TAR_PATH}" -C "${DIST_DIR}" "${APP_NAME}.app"
+DOWNLOAD_URL="https://github.com/elias-tilegant/ferrispass/releases/download/v${VERSION}/${TAR_NAME}"
+BUNDLE_SIZE="$(wc -c < "${TAR_PATH}" | tr -d '[:space:]')"
 
-    # Sign. Pull passphrase from MINISIGN_PASSWORD env var when set (CI path);
-    # otherwise minisign prompts interactively (local-dev path).
-    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
-        echo "${MINISIGN_PASSWORD}" | minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}" >/dev/null
-    else
-        minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}"
-    fi
-
-    DOWNLOAD_URL="https://github.com/elias-tilegant/ferrispass/releases/download/v${VERSION}/${TAR_NAME}"
-
-    # `cargo-packager-updater` expects the JSON `signature` field to be
-    # base64(contents-of-.minisig), not the raw minisign text. Strip wrapping
-    # newlines because the updater's decoder is strict about whitespace.
-    SIG_B64="$(base64 < "${SIG_PATH}" | tr -d '\n')"
-
-    jq -n \
-        --arg version "${VERSION}" \
-        --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --arg url "${DOWNLOAD_URL}" \
-        --arg sig "${SIG_B64}" \
-        '{
-            version: $version,
-            pub_date: $pub_date,
-            platforms: {
-                "macos-aarch64": {
-                    signature: $sig,
-                    url: $url,
-                    format: "app"
-                }
+# The signature is filled by `sign_update_artifacts` after release notes are
+# injected. An empty signature is never accepted by the client.
+jq -n \
+    --arg version "${VERSION}" \
+    --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg url "${DOWNLOAD_URL}" \
+    --argjson size "${BUNDLE_SIZE}" \
+    '{
+        version: $version,
+        pub_date: $pub_date,
+        platforms: {
+            "macos-aarch64": {
+                signature: "",
+                url: $url,
+                format: "app",
+                size: $size
             }
-        }' > "${MANIFEST}"
+        }
+    }' > "${MANIFEST}"
 
-    echo "    ✓ ${TAR_NAME}"
-    echo "    ✓ update.json"
+echo "    ✓ ${TAR_NAME}"
+echo "    ✓ update.json (unsigned)"
+
+if command -v minisign >/dev/null 2>&1 && [ -f "${MINISIGN_KEY}" ]; then
+    sign_update_artifacts
+else
+    echo "    (updater signing deferred; run '$0 --sign-update')"
 fi
 
 # ---------- final verification ----------
@@ -252,3 +326,4 @@ echo "✓ ${APP_NAME} ${VERSION} ready for distribution"
 ls -lh "${DIST_DIR}/"*.dmg 2>/dev/null || true
 ls -lh "${DIST_DIR}/"*.tar.gz 2>/dev/null || true
 ls -lh "${DIST_DIR}/"update.json 2>/dev/null || true
+ls -lh "${DIST_DIR}/"update.json.minisig 2>/dev/null || true

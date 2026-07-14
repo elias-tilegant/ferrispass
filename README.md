@@ -68,7 +68,7 @@ Requires Apple Silicon (M1 or newer) and macOS 12 (Monterey) or later. Intel Mac
 
 FerrisPass checks GitHub Releases on launch (rate-limited to once per day). When a newer build is published, a banner appears on the Welcome screen with an **Install** button — click it and the app downloads the new bundle, verifies its Ed25519 signature against an embedded public key, atomic-replaces itself, and prompts you to restart.
 
-Independent of Apple's Developer ID + notarization (which signs the DMG), every update payload carries a separate [minisign](https://jedisct1.github.io/minisign/) signature. Both must verify before an update is applied.
+Independent of Apple's Developer ID + notarization (which signs the DMG), every update payload and its complete manifest carry separate [minisign](https://jedisct1.github.io/minisign/) signatures. The signed manifest binds the version, URL, payload size, and payload signature; all checks must pass before an update is applied.
 
 To disable: Settings → General → Updates → toggle to **Off**. The "Check now" button still works manually any time. The preference persists in `~/Library/Application Support/ferrispass/settings.json`.
 

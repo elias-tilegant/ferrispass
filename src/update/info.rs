@@ -19,6 +19,11 @@ pub struct UpdateInfo {
     /// Optional publish timestamp from the manifest's `pub_date` field
     /// (RFC 3339). Display-only; we don't gate updates on it.
     pub pub_date: Option<String>,
+    /// Opaque digest of the exact signed manifest the user confirmed. It is
+    /// session-only and deliberately omitted from persisted "What's New"
+    /// metadata, where it no longer has a security purpose.
+    #[serde(skip)]
+    pub(crate) candidate_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -35,6 +40,16 @@ pub enum UpdateError {
     /// the downloaded bundle. Hard fail — never apply unverified updates.
     #[error("update signature did not verify against the embedded public key")]
     SignatureInvalid,
+
+    /// The signed release changed after the user confirmed an update. The
+    /// caller must show the new release and ask for confirmation again.
+    #[error("update changed after confirmation (expected {expected}, found {actual})")]
+    VersionMismatch { expected: String, actual: String },
+
+    /// The re-fetched signed manifest or the updater library's parsed
+    /// candidate differs from what the user confirmed. Never download it.
+    #[error("update candidate no longer matches the signed release you confirmed")]
+    ManifestMismatch,
 
     /// Disk write or atomic-replace failed during install.
     #[error("could not install update: {0}")]

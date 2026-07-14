@@ -45,10 +45,10 @@ serde_json = "1"
 keyring = { version = "3", features = ["apple-native"] }
 url = "2"
 sha2 = "0.10"
-# Auto-update: cross-platform updater (macOS/Linux/Windows) by the Tauri team.
-# Verifies update bundles via embedded minisign Ed25519 public key, downloads
-# new build over HTTPS, atomic-replaces the .app and restarts.
+# Auto-update: cargo-packager parses cross-platform release metadata. FerrisPass
+# verifies signed metadata and uses its own transactional installer on macOS.
 cargo-packager-updater = "0.2"
+minisign-verify = "0.2"
 semver = "1"
 # Used to wrap the embedded minisign public key in base64 at runtime.
 # `cargo-packager-updater` expects `Config::pubkey` as base64(file content),
@@ -88,6 +88,10 @@ nucleo-matcher = "0.3"
 zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+flate2 = "1"
+libc = "0.2"
+tar = "0.4"
+tempfile = "3"
 security-framework = "3"
 security-framework-sys = "2"
 core-foundation = "0.10"
