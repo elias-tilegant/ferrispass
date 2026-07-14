@@ -231,12 +231,18 @@ impl VaultDocument {
             .tags
             .iter()
             .any(|t| t.eq_ignore_ascii_case(FAVORITE_TAG));
-        if was_starred {
-            entry.tags.retain(|t| !t.eq_ignore_ascii_case(FAVORITE_TAG));
-        } else {
-            entry.tags.push(FAVORITE_TAG.to_string());
-        }
-        entry.times.last_modification = Some(keepass::db::Times::now());
+        let changed_at = next_change_time(entry.times.last_modification);
+        let mut entry = entry.track_changes();
+        entry.edit(|entry| {
+            if was_starred {
+                entry
+                    .tags
+                    .retain(|tag| !tag.eq_ignore_ascii_case(FAVORITE_TAG));
+            } else {
+                entry.tags.push(FAVORITE_TAG.to_string());
+            }
+        });
+        entry.times.last_modification = Some(changed_at);
         drop(entry);
         self.refresh_snapshot();
         Ok(!was_starred)
@@ -253,7 +259,10 @@ impl VaultDocument {
             .database
             .entry_mut(entry_id)
             .ok_or(MutationError::EntryNotFound)?;
-        apply_draft_to_entry(&mut entry, draft);
+        let changed_at = next_change_time(entry.times.last_modification);
+        let mut entry = entry.track_changes();
+        entry.edit(|entry| apply_draft_to_entry(entry, draft));
+        entry.times.last_modification = Some(changed_at);
         drop(entry);
         self.refresh_snapshot();
         Ok(())
@@ -279,7 +288,10 @@ impl VaultDocument {
         if group.is_expanded == expanded {
             return Ok(());
         }
-        group.is_expanded = expanded;
+        let changed_at = next_change_time(group.times.last_modification);
+        let mut group = group.track_changes();
+        group.edit(|group| group.is_expanded = expanded);
+        group.times.last_modification = Some(changed_at);
         drop(group);
         self.refresh_snapshot();
         Ok(())
@@ -302,12 +314,26 @@ impl VaultDocument {
             .database
             .entry_mut(entry_id)
             .ok_or(MutationError::EntryNotFound)?;
+        if entry
+            .as_ref()
+            .custom_icon()
+            .is_some_and(|icon| icon.data.as_slice() == bytes.as_slice())
+        {
+            return Ok(());
+        }
+        let changed_at = next_change_time(entry.times.last_modification);
+        let mut entry = entry.track_changes();
         // `set_icon_custom_new` drops any previous icon (built-in or
         // custom) and registers a fresh `CustomIconId`. We don't try to
         // dedupe identical blobs across entries — the typical vault has
         // distinct icons per site, and the dedup bookkeeping isn't worth
         // it for an explicit user action.
-        entry.set_icon_custom_new(bytes);
+        let mut current = entry.as_mut();
+        let mut icon = current.set_icon_custom_new(bytes);
+        icon.last_modification_time = Some(changed_at);
+        drop(icon);
+        drop(current);
+        entry.times.last_modification = Some(changed_at);
         drop(entry);
         self.refresh_snapshot();
         Ok(())
@@ -330,10 +356,15 @@ impl VaultDocument {
             .database
             .entry_mut(entry_id)
             .ok_or(MutationError::EntryNotFound)?;
+        if entry.as_ref().parent().id() == target_id {
+            return Ok(());
+        }
+        let changed_at = next_change_time(entry.times.location_changed);
+        let mut entry = entry.track_changes();
         entry
             .move_to(target_id)
             .map_err(|_| MutationError::GroupNotFound)?;
-        entry.times.last_modification = Some(keepass::db::Times::now());
+        entry.times.location_changed = Some(changed_at);
         drop(entry);
         self.refresh_snapshot();
         Ok(())
@@ -346,13 +377,31 @@ impl VaultDocument {
         let entry_id =
             find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
         let recycle_bin_id = self.ensure_recycle_bin();
+        let entry = self
+            .database
+            .entry(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        let previous_parent = entry.parent().id();
+        if group_is_within(&self.database, previous_parent, recycle_bin_id) {
+            return Ok(());
+        }
+        let changed_at = next_change_time(
+            entry
+                .times
+                .last_modification
+                .max(entry.times.location_changed),
+        );
         let mut entry = self
             .database
             .entry_mut(entry_id)
             .ok_or(MutationError::EntryNotFound)?;
+        let mut entry = entry.track_changes();
+        entry.previous_parent_group = Some(previous_parent);
         entry
             .move_to(recycle_bin_id)
             .map_err(|_| MutationError::RecycleBinUnavailable)?;
+        entry.times.last_modification = Some(changed_at);
+        entry.times.location_changed = Some(changed_at);
         drop(entry);
         self.refresh_snapshot();
         Ok(())
@@ -364,30 +413,75 @@ impl VaultDocument {
     pub fn delete_entry_permanent(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
         let entry_id =
             find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
-        let entry = self
-            .database
-            .entry_mut(entry_id)
-            .ok_or(MutationError::EntryNotFound)?;
-        entry.remove();
-        self.refresh_snapshot();
-        Ok(())
-    }
-
-    /// Move an entry out of the Recycle Bin back to the database root. We
-    /// don't track the entry's previous parent group on delete (KeePass
-    /// doesn't preserve that), so root is the standard place to dump
-    /// restored items — the user can re-organise from there.
-    pub fn restore_entry(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
-        let entry_id =
-            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
-        let root_id = self.database.root().id();
         let mut entry = self
             .database
             .entry_mut(entry_id)
             .ok_or(MutationError::EntryNotFound)?;
+        let deleted_at = next_change_time(
+            entry
+                .times
+                .last_modification
+                .max(entry.times.location_changed),
+        );
+        entry.track_changes().remove();
+        // `EntryTrack::remove` uses wall-clock seconds directly. A rapid edit
+        // may already have advanced the entry timestamp to preserve ordering,
+        // so make the tombstone monotonic as well or native merge can mistake
+        // the deletion for an older change and resurrect the entry.
+        self.database
+            .deleted_objects
+            .insert(entry_id.uuid(), Some(deleted_at));
+        self.refresh_snapshot();
+        Ok(())
+    }
+
+    /// Move an entry out of the Recycle Bin. KeePass' `PreviousParentGroup`
+    /// points it back to its original group; root is the safe fallback when
+    /// that group no longer exists or is itself inside the Recycle Bin.
+    pub fn restore_entry(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
+        let root_id = self.database.root().id();
+        let recycle_bin_id = self.database.recycle_bin().map(|group| group.id());
+        let entry = self
+            .database
+            .entry(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        let current_parent = entry.parent().id();
+        if !recycle_bin_id.is_some_and(|recycle_bin_id| {
+            group_is_within(&self.database, current_parent, recycle_bin_id)
+        }) {
+            return Ok(());
+        }
+        let target_id = entry
+            .previous_parent_group
+            .filter(|candidate| {
+                self.database.group(*candidate).is_some()
+                    && !recycle_bin_id.is_some_and(|recycle_bin_id| {
+                        group_is_within(&self.database, *candidate, recycle_bin_id)
+                    })
+            })
+            .unwrap_or(root_id);
+        if current_parent == target_id && entry.previous_parent_group.is_none() {
+            return Ok(());
+        }
+        let changed_at = next_change_time(
+            entry
+                .times
+                .last_modification
+                .max(entry.times.location_changed),
+        );
+        let mut entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        let mut entry = entry.track_changes();
+        entry.previous_parent_group = None;
         entry
-            .move_to(root_id)
+            .move_to(target_id)
             .map_err(|_| MutationError::RecycleBinUnavailable)?;
+        entry.times.last_modification = Some(changed_at);
+        entry.times.location_changed = Some(changed_at);
         drop(entry);
         self.refresh_snapshot();
         Ok(())
@@ -440,8 +534,13 @@ impl VaultDocument {
             .database
             .group_mut(group_id)
             .ok_or(MutationError::GroupNotFound)?;
-        group.name = new_name.to_string();
-        group.times.last_modification = Some(keepass::db::Times::now());
+        if group.name == new_name {
+            return Ok(());
+        }
+        let changed_at = next_change_time(group.times.last_modification);
+        let mut group = group.track_changes();
+        group.edit(|group| group.name = new_name.to_string());
+        group.times.last_modification = Some(changed_at);
         drop(group);
         self.refresh_snapshot();
         Ok(())
@@ -473,14 +572,32 @@ impl VaultDocument {
             return Err(MutationError::CannotDeleteRecycleBin);
         }
         let recycle_bin_id = self.ensure_recycle_bin();
+        let group = self
+            .database
+            .group(group_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        let previous_parent = group.parent().ok_or(MutationError::CannotDeleteRoot)?.id();
+        if group_is_within(&self.database, previous_parent, recycle_bin_id) {
+            return Ok(());
+        }
+        let changed_at = next_change_time(
+            group
+                .times
+                .last_modification
+                .max(group.times.location_changed),
+        );
         let mut group = self
             .database
             .group_mut(group_id)
             .ok_or(MutationError::GroupNotFound)?;
+        let mut group = group.track_changes();
+        group.previous_parent_group = Some(previous_parent);
         group.move_to(recycle_bin_id).map_err(|e| match e {
             keepass::db::MoveGroupError::CannotMoveRoot => MutationError::CannotDeleteRoot,
             _ => MutationError::RecycleBinUnavailable,
         })?;
+        group.times.last_modification = Some(changed_at);
+        group.times.location_changed = Some(changed_at);
         drop(group);
         self.refresh_snapshot();
         Ok(())
@@ -489,8 +606,12 @@ impl VaultDocument {
     /// Returns the recycle-bin group id, creating one under the root if the
     /// database doesn't already have one set in `meta.recyclebin_uuid`.
     fn ensure_recycle_bin(&mut self) -> keepass::db::GroupId {
-        if let Some(g) = self.database.recycle_bin() {
-            return g.id();
+        if let Some(id) = self.database.recycle_bin().map(|group| group.id()) {
+            if self.database.meta.recyclebin_enabled != Some(true) {
+                self.database.meta.recyclebin_enabled = Some(true);
+                self.database.meta.recyclebin_changed = Some(keepass::db::Times::now());
+            }
+            return id;
         }
         let mut root = self.database.root_mut();
         let mut bin = root.add_group();
@@ -498,7 +619,9 @@ impl VaultDocument {
         let id = bin.id();
         drop(bin);
         drop(root);
+        self.database.meta.recyclebin_enabled = Some(true);
         self.database.meta.recyclebin_uuid = Some(id.uuid());
+        self.database.meta.recyclebin_changed = Some(keepass::db::Times::now());
         id
     }
 
@@ -605,6 +728,36 @@ fn subtree_contains(root: &keepass::db::GroupRef<'_>, target: keepass::db::Group
         return true;
     }
     root.groups().any(|child| subtree_contains(&child, target))
+}
+
+fn group_is_within(
+    database: &Database,
+    candidate: keepass::db::GroupId,
+    ancestor: keepass::db::GroupId,
+) -> bool {
+    let mut current = Some(candidate);
+    while let Some(group_id) = current {
+        if group_id == ancestor {
+            return true;
+        }
+        current = database
+            .group(group_id)
+            .and_then(|group| group.parent().map(|parent| parent.id()));
+    }
+    false
+}
+
+/// KDBX timestamps have one-second precision. Advancing past an existing
+/// timestamp avoids creating two divergent revisions that native merge cannot
+/// order when a user performs multiple mutations during the same second.
+fn next_change_time(previous: Option<chrono::NaiveDateTime>) -> chrono::NaiveDateTime {
+    let now = keepass::db::Times::now();
+    match previous {
+        Some(previous) if now <= previous => previous
+            .checked_add_signed(chrono::Duration::seconds(1))
+            .unwrap_or(previous),
+        _ => now,
+    }
 }
 
 fn set_or_clear_unprotected<E>(entry: &mut E, key: &str, value: &str)
@@ -830,6 +983,16 @@ mod tests {
     use keepass::{Database, db::fields};
     use tempfile::TempDir;
 
+    fn merge_clean(mut destination: Database, source: &Database) -> Database {
+        let log = destination.merge(source).expect("native merge succeeds");
+        assert!(
+            log.warnings.is_empty(),
+            "native merge produced warnings: {:?}",
+            log.warnings,
+        );
+        destination
+    }
+
     /// Open → save → re-open round-trip on a freshly-built in-memory database.
     /// Verifies that:
     /// 1. `Database::save` actually writes a valid kdbx (i.e. the
@@ -935,6 +1098,271 @@ mod tests {
             crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("reopen");
         let pw = reopened.password_for_entry(&new_id).expect("password back");
         assert_eq!(pw, "S3cret!");
+    }
+
+    #[test]
+    fn entry_updates_keep_history_and_merge_without_timestamp_sleep() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Before".into(),
+                    password: "old-secret".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+        let entry_id = find_entry_id(&doc.database, &id).expect("entry id");
+        let original_time = doc
+            .database
+            .entry(entry_id)
+            .and_then(|entry| entry.times.last_modification)
+            .expect("original timestamp");
+        let base = doc.database.clone();
+
+        doc.update_entry(
+            &id,
+            &EntryDraft {
+                title: "After".into(),
+                password: "new-secret".into(),
+                ..Default::default()
+            },
+        )
+        .expect("update");
+        doc.toggle_starred(&id).expect("favorite");
+
+        let changed = doc.database.entry(entry_id).expect("changed entry");
+        assert!(
+            changed.times.last_modification.expect("changed timestamp") > original_time,
+            "rapid edits must advance beyond KDBX's one-second timestamp precision",
+        );
+        let history = changed.history.as_ref().expect("history");
+        assert_eq!(history.get_entries().len(), 2);
+        assert_eq!(history.get_entries()[0].get_title(), Some("After"));
+        assert_eq!(history.get_entries()[1].get_title(), Some("Before"));
+
+        let merged = merge_clean(base, doc.database());
+        let merged_entry = merged.entry(entry_id).expect("merged entry");
+        assert_eq!(merged_entry.get_title(), Some("After"));
+        assert_eq!(merged_entry.get_password(), Some("new-secret"));
+        assert!(merged_entry.tags.iter().any(|tag| tag == FAVORITE_TAG));
+    }
+
+    #[test]
+    fn entry_move_tracks_location_without_claiming_a_content_edit() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let source_id = doc.create_group(&root_id, "Source").expect("source");
+        let target_id = doc.create_group(&root_id, "Target").expect("target");
+        let id = doc
+            .create_entry(
+                &source_id,
+                &EntryDraft {
+                    title: "Movable".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("entry");
+        let entry_id = find_entry_id(&doc.database, &id).expect("entry id");
+        let before = doc.database.entry(entry_id).expect("entry before move");
+        let old_location = before.times.location_changed.expect("old location time");
+        let old_modification = before.times.last_modification;
+        let base = doc.database.clone();
+
+        doc.move_entry(&id, &target_id).expect("move");
+
+        let moved = doc.database.entry(entry_id).expect("moved entry");
+        assert!(moved.times.location_changed.expect("new location time") > old_location);
+        assert_eq!(
+            moved.times.last_modification, old_modification,
+            "a pure move must not win an unrelated concurrent content edit",
+        );
+        let merged = merge_clean(base, doc.database());
+        assert_eq!(
+            merged.entry(entry_id).expect("merged entry").parent().id(),
+            find_group_id(&merged, &target_id).expect("target id"),
+        );
+    }
+
+    #[test]
+    fn recycle_and_restore_preserve_parent_and_merge_cleanly() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let recycle_bin_id = doc.ensure_recycle_bin();
+        let original_group = doc.create_group(&root_id, "Original").expect("group");
+        let original_group_id = find_group_id(&doc.database, &original_group).expect("group id");
+        let id = doc
+            .create_entry(
+                &original_group,
+                &EntryDraft {
+                    title: "Recoverable".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("entry");
+        let entry_id = find_entry_id(&doc.database, &id).expect("entry id");
+        let base = doc.database.clone();
+
+        doc.delete_entry(&id).expect("trash");
+        let trashed = doc.database.entry(entry_id).expect("trashed entry");
+        assert_eq!(trashed.parent().id(), recycle_bin_id);
+        assert_eq!(trashed.previous_parent_group, Some(original_group_id));
+        assert!(!doc.database.deleted_objects.contains_key(&entry_id.uuid()));
+        let merged_trash = merge_clean(base, doc.database());
+        assert_eq!(
+            merged_trash
+                .entry(entry_id)
+                .expect("merged trashed entry")
+                .parent()
+                .id(),
+            recycle_bin_id,
+        );
+
+        let trashed_base = doc.database.clone();
+        doc.restore_entry(&id).expect("restore");
+        let restored = doc.database.entry(entry_id).expect("restored entry");
+        assert_eq!(restored.parent().id(), original_group_id);
+        assert_eq!(restored.previous_parent_group, None);
+        let merged_restore = merge_clean(trashed_base, doc.database());
+        assert_eq!(
+            merged_restore
+                .entry(entry_id)
+                .expect("merged restored entry")
+                .parent()
+                .id(),
+            original_group_id,
+        );
+    }
+
+    #[test]
+    fn permanent_entry_delete_records_a_mergeable_tombstone() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Delete permanently".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("entry");
+        let entry_id = find_entry_id(&doc.database, &id).expect("entry id");
+        doc.delete_entry(&id).expect("trash first");
+        let last_entry_change = doc
+            .database
+            .entry(entry_id)
+            .and_then(|entry| {
+                entry
+                    .times
+                    .last_modification
+                    .max(entry.times.location_changed)
+            })
+            .expect("trashed entry timestamp");
+        let base = doc.database.clone();
+
+        doc.delete_entry_permanent(&id).expect("permanent delete");
+
+        assert!(doc.database.entry(entry_id).is_none());
+        assert!(
+            doc.database.deleted_objects[&entry_id.uuid()].expect("tombstone timestamp")
+                > last_entry_change,
+        );
+        let merged = merge_clean(base, doc.database());
+        assert!(merged.entry(entry_id).is_none());
+        assert!(merged.deleted_objects.contains_key(&entry_id.uuid()));
+    }
+
+    #[test]
+    fn group_updates_and_recycle_move_are_native_mergeable() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let recycle_bin_id = doc.ensure_recycle_bin();
+        let id = doc.create_group(&root_id, "Before").expect("group");
+        let group_id = find_group_id(&doc.database, &id).expect("group id");
+        let original_time = doc
+            .database
+            .group(group_id)
+            .and_then(|group| group.times.last_modification)
+            .expect("group timestamp");
+        let base = doc.database.clone();
+
+        doc.rename_group(&id, "After").expect("rename");
+        doc.set_group_expanded(&id, false).expect("collapse");
+        doc.delete_group(&id).expect("trash group");
+
+        let changed = doc.database.group(group_id).expect("changed group");
+        assert_eq!(changed.name, "After");
+        assert!(!changed.is_expanded);
+        assert_eq!(changed.parent().expect("parent").id(), recycle_bin_id);
+        assert_eq!(
+            changed.previous_parent_group,
+            Some(doc.database.root().id())
+        );
+        assert!(changed.times.last_modification.expect("changed timestamp") > original_time);
+
+        let merged = merge_clean(base, doc.database());
+        let merged_group = merged.group(group_id).expect("merged group");
+        assert_eq!(merged_group.name, "After");
+        assert!(!merged_group.is_expanded);
+        assert_eq!(merged_group.parent().expect("parent").id(), recycle_bin_id);
+    }
+
+    #[test]
+    fn custom_icon_update_tracks_entry_history_and_is_idempotent() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Icon".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("entry");
+        let entry_id = find_entry_id(&doc.database, &id).expect("entry id");
+        let before = doc
+            .database
+            .entry(entry_id)
+            .and_then(|entry| entry.times.last_modification)
+            .expect("timestamp");
+
+        doc.set_entry_custom_icon(&id, vec![1, 2, 3])
+            .expect("set icon");
+        let changed = doc.database.entry(entry_id).expect("changed entry");
+        assert!(changed.times.last_modification.expect("changed timestamp") > before);
+        assert_eq!(
+            changed
+                .history
+                .as_ref()
+                .expect("history")
+                .get_entries()
+                .len(),
+            1,
+        );
+        let changed_at = changed.times.last_modification;
+        let icon_count = doc.database.num_custom_icons();
+
+        doc.set_entry_custom_icon(&id, vec![1, 2, 3])
+            .expect("same icon is a no-op");
+        let unchanged = doc.database.entry(entry_id).expect("unchanged entry");
+        assert_eq!(unchanged.times.last_modification, changed_at);
+        assert_eq!(doc.database.num_custom_icons(), icon_count);
     }
 
     #[test]
