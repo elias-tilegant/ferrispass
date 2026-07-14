@@ -1249,6 +1249,41 @@ impl SavePayload {
     }
 }
 
+/// How long lock acquisition waits for another holder (a second FerrisPass
+/// instance, another KeePass client, a stuck network share) before giving up.
+/// Quit is vetoed while a save is unfinished, so blocking indefinitely here
+/// would make the app unquittable — a bounded wait surfaces a Failed status
+/// the user can act on instead.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn lock_bounded(file: &fs::File) -> io::Result<()> {
+    lock_bounded_with(file, LOCK_WAIT, LOCK_POLL)
+}
+
+fn lock_bounded_with(
+    file: &fs::File,
+    wait: std::time::Duration,
+    poll: std::time::Duration,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "another program is holding the vault file lock",
+                    ));
+                }
+                std::thread::sleep(poll);
+            }
+            Err(fs::TryLockError::Error(source)) => return Err(source),
+        }
+    }
+}
+
 fn acquire_save_lock(target: &Path) -> Result<fs::File, SaveError> {
     let mut lock_name = target.as_os_str().to_owned();
     lock_name.push(".ferrispass.lock");
@@ -1266,7 +1301,7 @@ fn acquire_save_lock(target: &Path) -> Result<fs::File, SaveError> {
             path: lock_path.clone(),
             source,
         })?;
-    file.lock().map_err(|source| SaveError::Lock {
+    lock_bounded(&file).map_err(|source| SaveError::Lock {
         path: lock_path,
         source,
     })?;
@@ -1278,7 +1313,7 @@ fn acquire_target_lock(target: &Path) -> Result<Option<fs::File>, SaveError> {
         return Ok(None);
     }
     let file = fs::File::open(target).map_err(SaveError::OpenTargetLock)?;
-    file.lock().map_err(SaveError::TargetLock)?;
+    lock_bounded(&file).map_err(SaveError::TargetLock)?;
     Ok(Some(file))
 }
 
@@ -1521,6 +1556,31 @@ mod tests {
     use crate::domain::VaultGroup;
     use keepass::{Database, db::fields};
     use tempfile::TempDir;
+
+    #[test]
+    fn lock_bounded_times_out_instead_of_blocking() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("held.lock");
+        let holder = fs::File::create(&path).expect("create lock file");
+        holder.lock().expect("hold the lock");
+
+        let contender = fs::File::open(&path).expect("open second handle");
+        let error = lock_bounded_with(
+            &contender,
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(20),
+        )
+        .expect_err("bounded lock must give up while the lock is held");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        holder.unlock().expect("release");
+        lock_bounded_with(
+            &contender,
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(20),
+        )
+        .expect("lock acquires once released");
+    }
 
     fn merge_clean(mut destination: Database, source: &Database) -> Database {
         let log = destination.merge(source).expect("native merge succeeds");

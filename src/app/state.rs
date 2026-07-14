@@ -209,6 +209,9 @@ pub struct AppState {
     /// can finish after access has been revoked. These sessions are deliberately
     /// excluded from every browser, copy, sync, launch, and Auto-Type lookup.
     deferred_lock_sessions: HashMap<VaultSessionId, DeferredSaveSession>,
+    /// Two-step confirmation flag for "Discard changes and lock" on the
+    /// deferred-lock screen. Reset whenever that screen is entered or left.
+    discard_deferred_armed: bool,
     /// Per-platform biometric backend. Production uses
     /// `crate::biometric::default_store()` (Touch ID on macOS, noop
     /// elsewhere); tests inject `InMemoryBiometricStore`. Held as
@@ -405,6 +408,7 @@ impl Default for AppState {
             unpersisted_vault_sessions: HashSet::new(),
             lock_requested_after_save: false,
             deferred_lock_sessions: HashMap::new(),
+            discard_deferred_armed: false,
             biometric: Arc::new(NoopBiometricStore),
             biometric_registry: BiometricRegistry::new(),
             pending_biometric_enrollment: false,
@@ -2143,6 +2147,7 @@ impl AppState {
         }
 
         self.rotate_auto_type_context();
+        self.discard_deferred_armed = false;
         let previous_vault = std::mem::replace(&mut self.vault, VaultStatus::LockedPendingSave);
         let mut candidates = Vec::with_capacity(self.parked.len() + 1);
         if let VaultStatus::Open { path, document, .. } = previous_vault {
@@ -2210,6 +2215,7 @@ impl AppState {
     fn lock_vault_now(&mut self) {
         debug_assert!(!self.has_unpersisted_save_work());
         self.rotate_auto_type_context();
+        self.discard_deferred_armed = false;
         self.vault = VaultStatus::Empty;
         self.active_vault_session_id = None;
         self.overlay = Overlay::None;
@@ -2265,6 +2271,53 @@ impl AppState {
             // after the next unlock and must not delay clearing secrets.
             self.request_save_for_session(path, session_id, false, cx);
         }
+    }
+
+    /// Whether the deferred-lock screen may offer "Discard changes and
+    /// lock": every remaining save has actually failed (nothing is still
+    /// in flight that could yet succeed and must keep its session).
+    pub fn can_discard_deferred_saves(&self) -> bool {
+        matches!(self.vault, VaultStatus::LockedPendingSave)
+            && matches!(self.save_status, SaveStatus::Failed(_))
+            && self.saves_in_flight.is_empty()
+    }
+
+    pub fn discard_deferred_armed(&self) -> bool {
+        self.discard_deferred_armed
+    }
+
+    pub fn arm_discard_deferred(&mut self, armed: bool, cx: &mut Context<Self>) {
+        self.discard_deferred_armed = armed;
+        cx.notify();
+    }
+
+    /// Escape hatch for a deferred lock whose save keeps failing (volume
+    /// unmounted, disk full, file replaced externally): drop the quarantined
+    /// documents together with their unsaved changes and finish the lock.
+    /// Without this, a persistent save failure wedges the app — unlock is
+    /// refused, quit is vetoed, and retry loops forever.
+    pub fn discard_deferred_saves_and_lock(&mut self, cx: &mut Context<Self>) {
+        if self.discard_deferred_saves_and_lock_now() {
+            cx.notify();
+        }
+    }
+
+    fn discard_deferred_saves_and_lock_now(&mut self) -> bool {
+        if !self.can_discard_deferred_saves() {
+            return false;
+        }
+        let sessions: Vec<VaultSessionId> = self
+            .unpersisted_vault_sessions
+            .iter()
+            .copied()
+            .chain(self.deferred_lock_sessions.keys().copied())
+            .collect();
+        for session_id in sessions {
+            self.mark_vault_session_persisted(session_id);
+        }
+        self.lock_requested_after_save = false;
+        self.lock_vault_now();
+        true
     }
 
     /// Lock immediately when disk is current, otherwise retry failures and
@@ -5859,6 +5912,36 @@ mod park_tests {
         assert!(state.unpersisted_vault_sessions.contains(&session_id));
         assert!(state.save_payload_for_session(&path, session_id).is_some());
         assert_eq!(state.save_status, SaveStatus::Failed("disk full".into()));
+    }
+
+    #[test]
+    fn discard_deferred_saves_unwedges_a_permanently_failing_lock() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/wedged-save.kdbx");
+        fresh_open(&mut state, path.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session id");
+
+        state.mark_vault_session_unpersisted(session_id);
+        state.set_save_status_for_session(
+            &path,
+            session_id,
+            SaveStatus::Failed("volume gone".into()),
+        );
+        state.lock_requested_after_save = true;
+        state.quarantine_sessions_for_deferred_lock();
+
+        assert!(state.can_discard_deferred_saves());
+        assert!(state.discard_deferred_saves_and_lock_now());
+
+        assert!(matches!(state.vault, VaultStatus::Empty));
+        assert!(state.deferred_lock_sessions.is_empty());
+        assert!(state.unpersisted_vault_sessions.is_empty());
+        assert!(!state.has_unpersisted_save_work());
+        assert!(!state.lock_requested_after_save);
+        assert_eq!(state.save_status, SaveStatus::Idle);
+
+        // Not offered while the vault is healthy or a save could still land.
+        assert!(!state.can_discard_deferred_saves());
     }
 
     #[test]

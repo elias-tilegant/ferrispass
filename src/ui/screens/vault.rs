@@ -793,7 +793,15 @@ fn workspace(
         .into_any_element();
 
     let content: AnyElement = if is_lock_pending {
-        locked_pending_panel(summary, &save_status, cx).into_any_element()
+        let (can_discard, discard_armed) = {
+            let state = shell.state().read(cx);
+            (
+                state.can_discard_deferred_saves(),
+                state.discard_deferred_armed(),
+            )
+        };
+        locked_pending_panel(summary, &save_status, can_discard, discard_armed, cx)
+            .into_any_element()
     } else if let Some(browser) = browser {
         vault_split(browser, shell, cx).into_any_element()
     } else if is_busy {
@@ -2315,6 +2323,8 @@ fn empty_panel(summary: &VaultSummary, cx: &mut Context<AppShell>) -> impl gpui:
 fn locked_pending_panel(
     summary: &VaultSummary,
     save_status: &SaveStatus,
+    can_discard: bool,
+    discard_armed: bool,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     v_flex()
@@ -2348,6 +2358,59 @@ fn locked_pending_panel(
                     window.dispatch_action(Box::new(SaveVault), cx);
                 }),
             ))
+        })
+        // Escape hatch: when every remaining save has failed for good
+        // (volume unmounted, disk full), retry alone would wedge the app —
+        // unlock is refused and quit is vetoed while saves are pending.
+        .when(can_discard, |this| {
+            if discard_armed {
+                this.child(
+                    v_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(palette::red())
+                                .child("The unsaved changes will be lost permanently."),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(footer_button(
+                                    "locked-discard-confirm",
+                                    "Discard and lock",
+                                    FooterStyle::Danger,
+                                    cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                                        shell.state().update(cx, |state, cx| {
+                                            state.discard_deferred_saves_and_lock(cx);
+                                        });
+                                    }),
+                                ))
+                                .child(footer_button(
+                                    "locked-discard-cancel",
+                                    "Cancel",
+                                    FooterStyle::Default,
+                                    cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                                        shell.state().update(cx, |state, cx| {
+                                            state.arm_discard_deferred(false, cx);
+                                        });
+                                    }),
+                                )),
+                        ),
+                )
+            } else {
+                this.child(footer_button(
+                    "locked-discard-arm",
+                    "Discard changes and lock…",
+                    FooterStyle::Default,
+                    cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                        shell.state().update(cx, |state, cx| {
+                            state.arm_discard_deferred(true, cx);
+                        });
+                    }),
+                ))
+            }
         })
 }
 
