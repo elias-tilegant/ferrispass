@@ -129,6 +129,10 @@ pub struct AppState {
     /// A lock requested while a save was unsafe to abandon. Completion of the
     /// final successful local save consumes this flag and performs the lock.
     lock_requested_after_save: bool,
+    /// Decrypted documents retained solely so an already-requested local save
+    /// can finish after access has been revoked. These sessions are deliberately
+    /// excluded from every browser, copy, sync, launch, and Auto-Type lookup.
+    deferred_lock_sessions: HashMap<VaultSessionId, DeferredSaveSession>,
     /// Per-platform biometric backend. Production uses
     /// `crate::biometric::default_store()` (Touch ID on macOS, noop
     /// elsewhere); tests inject `InMemoryBiometricStore`. Held as
@@ -313,6 +317,7 @@ impl Default for AppState {
             parked_order: Vec::new(),
             unpersisted_vault_sessions: HashSet::new(),
             lock_requested_after_save: false,
+            deferred_lock_sessions: HashMap::new(),
             biometric: Arc::new(NoopBiometricStore),
             biometric_registry: BiometricRegistry::new(),
             pending_biometric_enrollment: false,
@@ -359,6 +364,15 @@ pub struct ParkedSession {
     /// across park/unpark so each vault keeps the events that
     /// happened while it was active.
     pub sync_history: Vec<SyncHistoryEntry>,
+}
+
+/// Minimal save-only state kept after a lock request. UI-derived caches and
+/// sync credentials are dropped when the session enters this quarantine.
+#[derive(Debug)]
+struct DeferredSaveSession {
+    path: PathBuf,
+    document: Box<VaultDocument>,
+    save_status: SaveStatus,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -544,6 +558,9 @@ pub enum VaultStatus {
         /// the map so a read-only browse never touches disk.
         last_used: HashMap<String, DateTime<Local>>,
     },
+    /// User access is already revoked, but one or more decrypted documents are
+    /// retained privately until their latest local state is durable.
+    LockedPendingSave,
     Error {
         message: String,
         path: Option<PathBuf>,
@@ -813,6 +830,14 @@ impl AppState {
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay, cx: &mut Context<Self>) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave)
+            && !matches!(
+                overlay,
+                Overlay::None | Overlay::Settings | Overlay::WhatsNew { .. } | Overlay::About
+            )
+        {
+            return;
+        }
         if self.overlay == overlay {
             return;
         }
@@ -873,6 +898,15 @@ impl AppState {
     }
 
     pub fn request_password(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave) {
+            return;
+        }
+        // Never create a second decrypted session for the same file. Two
+        // divergent documents cannot be serialized safely through the
+        // path-keyed save coordinator without arbitrarily overwriting one.
+        if self.switch_to_unlocked(&path, cx) {
+            return;
+        }
         self.vault_selection_error = None;
         self.clear_pending_sync_unless(&path);
         // Already looking at an unlocked vault? Park it so the user can
@@ -990,6 +1024,16 @@ impl AppState {
                 .is_some_and(|session| session.session_id == session_id)
     }
 
+    /// Save-only ownership check. Unlike `vault_session_is_current`, this also
+    /// admits quarantined sessions after user access has already been revoked.
+    fn save_session_is_retained(&self, target: &Path, session_id: VaultSessionId) -> bool {
+        self.vault_session_is_current(target, session_id)
+            || self
+                .deferred_lock_sessions
+                .get(&session_id)
+                .is_some_and(|session| session.path == target)
+    }
+
     fn path_for_vault_session(&self, session_id: VaultSessionId) -> Option<PathBuf> {
         if self.active_vault_session_id == Some(session_id)
             && let VaultStatus::Open { path, .. } = &self.vault
@@ -999,6 +1043,11 @@ impl AppState {
         self.parked
             .iter()
             .find_map(|(path, session)| (session.session_id == session_id).then(|| path.clone()))
+            .or_else(|| {
+                self.deferred_lock_sessions
+                    .get(&session_id)
+                    .map(|session| session.path.clone())
+            })
     }
 
     fn mark_vault_session_unpersisted(&mut self, session_id: VaultSessionId) {
@@ -1011,6 +1060,8 @@ impl AppState {
         if self.unpersisted_vault_sessions.remove(&session_id) {
             UNPERSISTED_VAULT_SESSION_COUNT.fetch_sub(1, Ordering::AcqRel);
         }
+        self.deferred_lock_sessions.remove(&session_id);
+        self.refresh_locked_pending_save_status();
     }
 
     fn has_unpersisted_save_work(&self) -> bool {
@@ -1132,6 +1183,14 @@ impl AppState {
         {
             parked.save_status = status;
             false
+        } else if let Some(session) = self
+            .deferred_lock_sessions
+            .get_mut(&session_id)
+            .filter(|session| session.path == target)
+        {
+            session.save_status = status;
+            self.refresh_locked_pending_save_status();
+            true
         } else {
             false
         }
@@ -1414,6 +1473,12 @@ impl AppState {
             .get(target)
             .filter(|session| session.session_id == session_id)
             .map(|session| session.document.generation())
+            .or_else(|| {
+                self.deferred_lock_sessions
+                    .get(&session_id)
+                    .filter(|session| session.path == target)
+                    .map(|session| session.document.generation())
+            })
     }
 
     /// Install a merged database only in the session that initiated the save.
@@ -1481,8 +1546,42 @@ impl AppState {
                 .and_then(|id| parked.document.strength_for_entry(id));
             parked.visible_entries = Rc::new(entries);
             return true;
+        } else if let Some(session) = self
+            .deferred_lock_sessions
+            .get_mut(&session_id)
+            .filter(|session| session.path == target)
+        {
+            session.document.replace_database(database);
+            return true;
         }
         false
+    }
+
+    /// Preserve a failed merge result for retry only when no newer mutation
+    /// was queued and the quarantined document still matches the merge base.
+    fn install_failed_merge_for_deferred_retry(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        base_generation: u64,
+        pending_session: Option<VaultSessionId>,
+        database: Database,
+    ) -> bool {
+        if pending_session.is_some() {
+            return false;
+        }
+        let Some(session) = self
+            .deferred_lock_sessions
+            .get_mut(&session_id)
+            .filter(|session| session.path == target)
+        else {
+            return false;
+        };
+        if session.document.generation() != base_generation {
+            return false;
+        }
+        session.document.replace_database(database);
+        true
     }
 
     pub fn set_unlock_keyfile(&mut self, keyfile: Option<PathBuf>, cx: &mut Context<Self>) {
@@ -1513,6 +1612,12 @@ impl AppState {
     }
 
     pub fn begin_open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave) {
+            return;
+        }
+        if self.switch_to_unlocked(&path, cx) {
+            return;
+        }
         // If we're transitioning from a currently-open vault directly into
         // unlocking another one (Welcome-recent → submit_password while a
         // different vault is already Open), park the active one first so it
@@ -1855,7 +1960,10 @@ impl AppState {
     }
 
     fn record_vault_selection_failure(&mut self, path: Option<PathBuf>, message: String) {
-        if matches!(self.vault, VaultStatus::Open { .. }) {
+        if matches!(
+            self.vault,
+            VaultStatus::Open { .. } | VaultStatus::LockedPendingSave
+        ) {
             self.vault_selection_error = Some(message);
             return;
         }
@@ -1863,6 +1971,89 @@ impl AppState {
         self.active_vault_session_id = None;
         self.vault_selection_error = None;
         self.vault = VaultStatus::Error { message, path };
+    }
+
+    fn refresh_locked_pending_save_status(&mut self) {
+        if !matches!(self.vault, VaultStatus::LockedPendingSave) {
+            return;
+        }
+        self.save_status = self
+            .deferred_lock_sessions
+            .values()
+            .find_map(|session| match &session.save_status {
+                SaveStatus::Failed(message) => Some(SaveStatus::Failed(message.clone())),
+                _ => None,
+            })
+            .unwrap_or(SaveStatus::Saving);
+    }
+
+    /// Revoke all user access immediately while retaining only documents that
+    /// still need a local durability retry. Every public vault lookup ignores
+    /// `deferred_lock_sessions` by construction.
+    fn quarantine_sessions_for_deferred_lock(&mut self) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave) {
+            return;
+        }
+
+        let previous_vault = std::mem::replace(&mut self.vault, VaultStatus::LockedPendingSave);
+        let mut candidates = Vec::with_capacity(self.parked.len() + 1);
+        if let VaultStatus::Open { path, document, .. } = previous_vault {
+            let session_id = self
+                .active_vault_session_id
+                .take()
+                .expect("open vault must have a session id");
+            candidates.push((
+                path,
+                session_id,
+                document,
+                std::mem::take(&mut self.save_status),
+            ));
+        }
+        for (path, session) in std::mem::take(&mut self.parked) {
+            let ParkedSession {
+                session_id,
+                document,
+                save_status,
+                ..
+            } = session;
+            candidates.push((path, session_id, document, save_status));
+        }
+
+        for (path, session_id, document, save_status) in candidates {
+            if self.unpersisted_vault_sessions.contains(&session_id)
+                || self.save_queue_contains_session(session_id)
+            {
+                self.deferred_lock_sessions.insert(
+                    session_id,
+                    DeferredSaveSession {
+                        path,
+                        document,
+                        save_status,
+                    },
+                );
+            }
+        }
+
+        self.parked_order.clear();
+        self.active_vault_session_id = None;
+        self.overlay = Overlay::None;
+        self.sync = None;
+        self.sync_status = SyncStatus::Disconnected;
+        self.sync_history.clear();
+        self.connect_flow = None;
+        self.pending_sync = None;
+        self.reconnect_target = None;
+        self.auto_sync_in_flight.clear();
+        self.syncs_in_flight.clear();
+        self.clear_biometric_attempt();
+        self.pending_biometric_enrollment = false;
+        self.refresh_locked_pending_save_status();
+
+        debug_assert!(
+            self.unpersisted_vault_sessions
+                .iter()
+                .all(|session_id| { self.deferred_lock_sessions.contains_key(session_id) })
+        );
     }
 
     /// Remove all decrypted vault state. Callers must first establish that no
@@ -1875,6 +2066,7 @@ impl AppState {
         self.save_status = SaveStatus::Idle;
         self.sync = None;
         self.sync_status = SyncStatus::Disconnected;
+        self.connect_flow = None;
         self.pending_sync = None;
         self.reconnect_target = None;
         // Clear with the rest of the session secrets — entry titles in
@@ -1885,6 +2077,7 @@ impl AppState {
         // a single idle timeout sweeps every decrypted session at once.
         self.parked.clear();
         self.parked_order.clear();
+        self.deferred_lock_sessions.clear();
         self.lock_requested_after_save = false;
         // Touch ID UI bits are session-scoped; drop them so the next
         // unlock screen starts clean rather than re-showing a stale
@@ -1930,6 +2123,7 @@ impl AppState {
     pub fn lock_vault(&mut self, cx: &mut Context<Self>) -> bool {
         if self.has_unpersisted_save_work() {
             self.lock_requested_after_save = true;
+            self.quarantine_sessions_for_deferred_lock();
             self.retry_unpersisted_vault_saves(cx);
             cx.notify();
             return false;
@@ -1981,6 +2175,9 @@ impl AppState {
     /// Reset the Connect overlay to its initial step. Called when the user
     /// opens Connect from Welcome.
     pub fn begin_connect_flow(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave) {
+            return;
+        }
         // Normal (first-time) Connect: make sure no stale reconnect target
         // survives from an abandoned reconnect, or the token poll would
         // rebind instead of showing the file picker.
@@ -2001,6 +2198,9 @@ impl AppState {
     /// Replace the current connect flow step. Used by the Connect overlay's
     /// Back / provider-pick buttons.
     pub fn connect_flow_set(&mut self, flow: ConnectFlow, cx: &mut Context<Self>) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave) {
+            return;
+        }
         self.connect_flow = Some(flow);
         cx.notify();
     }
@@ -2167,6 +2367,10 @@ impl AppState {
     }
 
     fn save_async_internal(&mut self, sync_after: bool, cx: &mut Context<Self>) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave) {
+            self.retry_unpersisted_vault_saves(cx);
+            return;
+        }
         let VaultStatus::Open { path, .. } = &self.vault else {
             return;
         };
@@ -2195,6 +2399,12 @@ impl AppState {
             .get(target)
             .filter(|session| session.session_id == session_id)
             .map(|session| session.document.save_payload())
+            .or_else(|| {
+                self.deferred_lock_sessions
+                    .get(&session_id)
+                    .filter(|session| session.path == target)
+                    .map(|session| session.document.save_payload())
+            })
     }
 
     /// Build a merged save from the exact session that owns the file. This
@@ -2213,9 +2423,16 @@ impl AppState {
         {
             return Some(document.save_payload_for_database(database));
         }
-        self.parked
+        if let Some(session) = self
+            .parked
             .get(target)
             .filter(|session| session.session_id == session_id)
+        {
+            return Some(session.document.save_payload_for_database(database));
+        }
+        self.deferred_lock_sessions
+            .get(&session_id)
+            .filter(|session| session.path == target)
             .map(|session| session.document.save_payload_for_database(database))
     }
 
@@ -2228,7 +2445,7 @@ impl AppState {
         sync_after: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.vault_session_is_current(&target, session_id) {
+        if !self.save_session_is_retained(&target, session_id) {
             return;
         }
 
@@ -2703,7 +2920,7 @@ impl AppState {
             VaultStatus::Open { path, .. }
             | VaultStatus::Opening { path }
             | VaultStatus::AwaitingPassword { path, .. } => Some(path.clone()),
-            VaultStatus::Empty => None,
+            VaultStatus::Empty | VaultStatus::LockedPendingSave => None,
             VaultStatus::Error { path, .. } => path.clone(),
         }
     }
@@ -3274,6 +3491,31 @@ impl AppState {
                 synced_at,
                 auto_merged,
             },
+            VaultStatus::LockedPendingSave => {
+                let (subtitle, status) = match &self.save_status {
+                    SaveStatus::Failed(message) => (
+                        format!("Local save failed: {message}"),
+                        "Save failed".to_string(),
+                    ),
+                    _ => (
+                        "Vault access is locked while the local save finishes.".to_string(),
+                        "Locking".to_string(),
+                    ),
+                };
+                VaultSummary {
+                    title: "Vault locked".to_string(),
+                    subtitle,
+                    status,
+                    entries: 0,
+                    groups: 0,
+                    is_open: false,
+                    is_busy: true,
+                    sync_tone: SyncTone::Neutral,
+                    provider: None,
+                    synced_at: None,
+                    auto_merged: None,
+                }
+            }
             VaultStatus::Error { message, path } => VaultSummary {
                 title: "Could not open vault".to_string(),
                 subtitle: path
@@ -3370,6 +3612,9 @@ impl AppState {
     /// No URL/path is needed up front — the user picks a file *after*
     /// signing in (see `Picking`).
     pub fn start_sharepoint_connect(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave) || self.connect_flow.is_none() {
+            return;
+        }
         let task = cx.background_spawn(async move { crate::sync::service::request_device_code() });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -4408,6 +4653,17 @@ impl AppState {
                         let error = save_error
                             .as_deref()
                             .unwrap_or("merge save failed before publication");
+                        // Access may have been revoked while the merge save was
+                        // running. Preserve the user's resolved merge inside the
+                        // save-only quarantine so a retry cannot write the older
+                        // pre-merge document back to disk.
+                        let _ = state.install_failed_merge_for_deferred_retry(
+                            &callback_path,
+                            session_id,
+                            base_generation,
+                            queued.pending_session,
+                            merged_for_document,
+                        );
                         state.apply_save_status_for_session(
                             &callback_path,
                             session_id,
@@ -5198,9 +5454,18 @@ mod park_tests {
             .saves_in_flight
             .insert(path.clone(), QueuedSave::new(session_id));
         state.lock_requested_after_save = true;
+        state.quarantine_sessions_for_deferred_lock();
 
+        assert!(matches!(state.vault, VaultStatus::LockedPendingSave));
         assert!(!state.finish_deferred_lock_if_ready());
-        assert!(state.has_any_unlocked());
+        assert!(!state.has_any_unlocked());
+        assert!(state.unlocked_paths().is_empty());
+        assert!(state.vault_browser().is_none());
+        assert!(state.database_clone_for(&path).is_none());
+        assert!(state.snapshot_sync_inputs(&path).is_none());
+        assert!(!state.vault_session_is_current(&path, session_id));
+        assert!(state.save_session_is_retained(&path, session_id));
+        assert!(state.save_payload_for_session(&path, session_id).is_some());
 
         // Even after the payload is known durable, the writer slot itself
         // must be released before decrypted state can be discarded.
@@ -5211,10 +5476,12 @@ mod park_tests {
         assert!(state.finish_deferred_lock_if_ready());
         assert!(!state.has_any_unlocked());
         assert!(state.active_vault_session_id.is_none());
+        assert!(state.deferred_lock_sessions.is_empty());
+        assert!(matches!(state.vault, VaultStatus::Empty));
     }
 
     #[test]
-    fn failed_save_keeps_deferred_lock_armed_and_vault_open() {
+    fn failed_save_keeps_deferred_lock_armed_but_inaccessible() {
         let mut state = AppState::default();
         let path = PathBuf::from("/tmp/failed-save.kdbx");
         fresh_open(&mut state, path.clone(), "pw");
@@ -5227,11 +5494,154 @@ mod park_tests {
             SaveStatus::Failed("disk full".into()),
         );
         state.lock_requested_after_save = true;
+        state.quarantine_sessions_for_deferred_lock();
 
         assert!(!state.finish_deferred_lock_if_ready());
-        assert!(state.has_any_unlocked());
+        assert!(matches!(state.vault, VaultStatus::LockedPendingSave));
+        assert!(!state.has_any_unlocked());
+        assert!(state.vault_browser().is_none());
+        assert!(state.unlocked_paths().is_empty());
         assert!(state.lock_requested_after_save);
         assert!(state.unpersisted_vault_sessions.contains(&session_id));
+        assert!(state.save_payload_for_session(&path, session_id).is_some());
+        assert_eq!(state.save_status, SaveStatus::Failed("disk full".into()));
+    }
+
+    #[test]
+    fn deferred_lock_quarantines_all_dirty_sessions_and_drops_clean_ones() {
+        let mut state = AppState::default();
+        let dirty_parked = PathBuf::from("/tmp/dirty-parked.kdbx");
+        let clean_parked = PathBuf::from("/tmp/clean-parked.kdbx");
+        let dirty_active = PathBuf::from("/tmp/dirty-active.kdbx");
+
+        fresh_open(&mut state, dirty_parked.clone(), "pw-a");
+        let parked_session = state.active_vault_session_id.expect("parked session");
+        state.mark_vault_session_unpersisted(parked_session);
+        state.park_active();
+
+        fresh_open(&mut state, clean_parked.clone(), "pw-clean");
+        let clean_session = state.active_vault_session_id.expect("clean session");
+        state.park_active();
+
+        fresh_open(&mut state, dirty_active.clone(), "pw-b");
+        let active_session = state.active_vault_session_id.expect("active session");
+        state.mark_vault_session_unpersisted(active_session);
+        state.lock_requested_after_save = true;
+
+        state.quarantine_sessions_for_deferred_lock();
+
+        assert!(matches!(state.vault, VaultStatus::LockedPendingSave));
+        assert!(state.parked.is_empty());
+        assert!(state.parked_order.is_empty());
+        assert!(state.unlocked_paths().is_empty());
+        assert_eq!(state.deferred_lock_sessions.len(), 2);
+        assert_eq!(
+            state
+                .deferred_lock_sessions
+                .get(&parked_session)
+                .map(|session| &session.path),
+            Some(&dirty_parked)
+        );
+        assert_eq!(
+            state
+                .deferred_lock_sessions
+                .get(&active_session)
+                .map(|session| &session.path),
+            Some(&dirty_active)
+        );
+        assert!(!state.deferred_lock_sessions.contains_key(&clean_session));
+    }
+
+    #[test]
+    fn failed_merge_never_overwrites_newer_quarantined_mutations() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/merged-retry.kdbx");
+        fresh_open(&mut state, path.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session id");
+        state.mark_vault_session_unpersisted(session_id);
+        state.lock_requested_after_save = true;
+        state.quarantine_sessions_for_deferred_lock();
+        let base_generation = state
+            .document_generation_for_session(&path, session_id)
+            .expect("quarantined generation");
+
+        assert!(!state.install_failed_merge_for_deferred_retry(
+            &path,
+            session_id,
+            base_generation,
+            Some(session_id),
+            Database::new(),
+        ));
+        assert_eq!(
+            state.document_generation_for_session(&path, session_id),
+            Some(base_generation)
+        );
+
+        state
+            .deferred_lock_sessions
+            .get_mut(&session_id)
+            .expect("quarantined session")
+            .document
+            .replace_database(Database::new());
+        let newer_generation = state
+            .document_generation_for_session(&path, session_id)
+            .expect("newer quarantined generation");
+        assert!(newer_generation > base_generation);
+        assert!(!state.install_failed_merge_for_deferred_retry(
+            &path,
+            session_id,
+            base_generation,
+            None,
+            Database::new(),
+        ));
+        assert_eq!(
+            state.document_generation_for_session(&path, session_id),
+            Some(newer_generation)
+        );
+
+        assert!(state.install_failed_merge_for_deferred_retry(
+            &path,
+            session_id,
+            newer_generation,
+            None,
+            Database::new(),
+        ));
+        assert!(
+            state
+                .document_generation_for_session(&path, session_id)
+                .is_some_and(|updated| updated > newer_generation)
+        );
+        assert!(state.save_payload_for_session(&path, session_id).is_some());
+    }
+
+    #[test]
+    fn invalid_selection_cannot_replace_locked_save_retry_state() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/retry-after-selection.kdbx");
+        fresh_open(&mut state, path.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session id");
+        state.mark_vault_session_unpersisted(session_id);
+        state.set_save_status_for_session(
+            &path,
+            session_id,
+            SaveStatus::Failed("disk full".into()),
+        );
+        state.lock_requested_after_save = true;
+        state.quarantine_sessions_for_deferred_lock();
+
+        state.record_vault_selection_failure(
+            Some(PathBuf::from("/tmp/not-a-vault.txt")),
+            "Selected file is not a .kdbx database.".into(),
+        );
+
+        assert!(matches!(state.vault, VaultStatus::LockedPendingSave));
+        assert!(state.lock_requested_after_save);
+        assert!(state.save_session_is_retained(&path, session_id));
+        assert!(state.save_payload_for_session(&path, session_id).is_some());
+        assert_eq!(
+            state.vault_selection_error(),
+            Some("Selected file is not a .kdbx database.")
+        );
     }
 
     #[test]

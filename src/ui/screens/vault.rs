@@ -14,7 +14,7 @@ use crate::app::{
     AppState, CopyValueKind, SaveStatus, SyncTone, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{
         DeleteGroup, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAddVault, OpenSettings,
-        OpenSyncSettings, OpenVault, OpenVaultSwitcher, RenameGroupOp, SyncNow,
+        OpenSyncSettings, OpenVault, OpenVaultSwitcher, RenameGroupOp, SaveVault, SyncNow,
     },
 };
 use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
@@ -36,6 +36,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let vault_status = state.vault_status();
     let is_busy = matches!(vault_status, VaultStatus::Opening { .. });
     let is_open = matches!(vault_status, VaultStatus::Open { .. });
+    let is_lock_pending = matches!(vault_status, VaultStatus::LockedPendingSave);
 
     // O(1) snapshot share — keeps render off the deep-clone path.
     let snapshot = match vault_status {
@@ -65,6 +66,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         cx,
         is_busy,
         is_open,
+        is_lock_pending,
     )
     .into_any_element();
 
@@ -785,10 +787,14 @@ fn workspace(
     cx: &mut Context<AppShell>,
     is_busy: bool,
     is_open: bool,
+    is_lock_pending: bool,
 ) -> impl gpui::IntoElement {
-    let toolbar = workspace_toolbar(summary, update_status, shell, is_open, cx).into_any_element();
+    let toolbar = workspace_toolbar(summary, update_status, shell, is_open, is_lock_pending, cx)
+        .into_any_element();
 
-    let content: AnyElement = if let Some(browser) = browser {
+    let content: AnyElement = if is_lock_pending {
+        locked_pending_panel(summary, &save_status, cx).into_any_element()
+    } else if let Some(browser) = browser {
         vault_split(browser, shell, cx).into_any_element()
     } else if is_busy {
         opening_panel(summary).into_any_element()
@@ -814,6 +820,7 @@ fn workspace_toolbar(
     update_status: &crate::update::UpdateStatus,
     shell: &AppShell,
     is_open: bool,
+    is_lock_pending: bool,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     let search_input = shell.search_input().clone();
@@ -831,6 +838,7 @@ fn workspace_toolbar(
             "New entry",
             Some(AppIcon::Key),
             true,
+            is_open,
             cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                 window.dispatch_action(Box::new(NewEntry), cx);
             }),
@@ -841,6 +849,7 @@ fn workspace_toolbar(
             "Group",
             Some(AppIcon::Note),
             false,
+            is_open,
             cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                 window.dispatch_action(Box::new(NewGroup), cx);
             }),
@@ -850,6 +859,7 @@ fn workspace_toolbar(
             "Sync",
             Some(AppIcon::Sync),
             false,
+            is_open,
             cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                 window.dispatch_action(Box::new(SyncNow), cx);
             }),
@@ -859,7 +869,7 @@ fn workspace_toolbar(
         .child(
             div()
                 .w(px(280.))
-                .child(Input::new(&search_input).cleanable(true)),
+                .child(Input::new(&search_input).cleanable(true).disabled(!is_open)),
         )
         .child(toolbar_button(
             if is_open {
@@ -874,6 +884,7 @@ fn workspace_toolbar(
                 AppIcon::Unlock
             }),
             is_open,
+            !is_lock_pending,
             cx.listener(move |_: &mut AppShell, _: &ClickEvent, window, cx| {
                 if is_open {
                     window.dispatch_action(Box::new(LockVault), cx);
@@ -889,6 +900,7 @@ fn toolbar_button(
     text: &'static str,
     icon: Option<AppIcon>,
     primary: bool,
+    enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl gpui::IntoElement {
     let (bg, fg, bd, hover_bg) = if primary {
@@ -920,8 +932,10 @@ fn toolbar_button(
         .border_color(bd)
         .text_xs()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .hover_press(hover_bg)
-        .on_click(on_click)
+        .when(enabled, |this| {
+            this.hover_press(hover_bg).on_click(on_click)
+        })
+        .when(!enabled, |this| this.opacity(0.45))
         .when_some(icon, |this, i| {
             this.child(
                 gpui_component::Icon::from(i)
@@ -2291,10 +2305,50 @@ fn empty_panel(summary: &VaultSummary, cx: &mut Context<AppShell>) -> impl gpui:
             "Open vault",
             Some(AppIcon::Unlock),
             true,
+            true,
             cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                 window.dispatch_action(Box::new(OpenVault), cx);
             }),
         ))
+}
+
+fn locked_pending_panel(
+    summary: &VaultSummary,
+    save_status: &SaveStatus,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    v_flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .p_6()
+        .child(
+            div()
+                .text_xl()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(palette::text())
+                .child(summary.title.clone()),
+        )
+        .child(
+            div()
+                .max_w(px(560.))
+                .text_sm()
+                .text_color(palette::text_muted())
+                .child(summary.subtitle.clone()),
+        )
+        .when(matches!(save_status, SaveStatus::Failed(_)), |this| {
+            this.child(toolbar_button(
+                "locked-retry-save",
+                "Retry save",
+                Some(AppIcon::Sync),
+                true,
+                true,
+                cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    window.dispatch_action(Box::new(SaveVault), cx);
+                }),
+            ))
+        })
 }
 
 fn opening_panel(summary: &VaultSummary) -> impl gpui::IntoElement {

@@ -2908,6 +2908,9 @@ impl AppShell {
                 }
                 _ => crate::ui::screens::vault::render(self, cx),
             },
+            crate::app::VaultStatus::LockedPendingSave => {
+                crate::ui::screens::vault::render(self, cx)
+            }
             crate::app::VaultStatus::Error { .. } => crate::ui::screens::vault::render(self, cx),
         }
     }
