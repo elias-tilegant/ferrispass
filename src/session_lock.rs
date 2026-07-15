@@ -54,8 +54,30 @@ fn classify_distributed(name: &str) -> SessionLockEvent {
 
 type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
 
-struct SessionLockObserverIvars {
+/// Channel sender plus a latch that survives a full channel. The bounded
+/// queue is only a wakeup mechanism; the latch is the authoritative "a
+/// genuine lock event happened" bit — `try_send` may drop an event when
+/// the queue is full, but the latch cannot be lost.
+#[derive(Clone)]
+struct EventSink {
     sender: Sender<SessionLockEvent>,
+    lock_latch: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl EventSink {
+    fn dispatch(&self, event: SessionLockEvent) {
+        if event == SessionLockEvent::Lock {
+            self.lock_latch
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        // Never block an OS notification thread. A full channel still
+        // wakes the consumer, which reads the latch.
+        let _ = self.sender.try_send(event);
+    }
+}
+
+struct SessionLockObserverIvars {
+    sink: EventSink,
 }
 
 define_class!(
@@ -70,12 +92,10 @@ define_class!(
     impl SessionLockObserver {
         #[unsafe(method(sessionDidLock:))]
         fn session_did_lock(&self, notification: &NSNotification) {
-            // SAFETY: reading the immutable name off a delivered notification.
-            let name = unsafe { notification.name() };
-            let _ = self
-                .ivars()
-                .sender
-                .try_send(classify_distributed(&name.to_string()));
+            let name = notification.name();
+            self.ivars()
+                .sink
+                .dispatch(classify_distributed(&name.to_string()));
         }
     }
 
@@ -84,8 +104,8 @@ define_class!(
 );
 
 impl SessionLockObserver {
-    fn new(sender: Sender<SessionLockEvent>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(SessionLockObserverIvars { sender });
+    fn new(sink: EventSink) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(SessionLockObserverIvars { sink });
         // SAFETY: invokes NSObject's designated initializer on a newly
         // allocated instance whose Rust ivars have already been initialized.
         unsafe { msg_send![super(this), init] }
@@ -95,6 +115,7 @@ impl SessionLockObserver {
 /// Retained OS registrations plus an async stream of typed lock events.
 pub struct SessionLockMonitor {
     receiver: Receiver<SessionLockEvent>,
+    lock_latch: std::sync::Arc<std::sync::atomic::AtomicBool>,
     workspace_center: Retained<NSNotificationCenter>,
     workspace_observers: Vec<Observer>,
     distributed_center: Retained<NSDistributedNotificationCenter>,
@@ -103,10 +124,14 @@ pub struct SessionLockMonitor {
 
 impl SessionLockMonitor {
     pub fn new() -> Self {
-        // Small buffer instead of 1: with typed events, a pending PostWake
-        // must never cause a genuine Lock to be dropped by `try_send`. The
-        // consumer drains the queue on every wakeup.
+        // The channel is only a wakeup; the latch carries the "genuine
+        // lock happened" bit and survives even a full queue (eight queued
+        // PostWake duplicates must never swallow a real Lock).
         let (sender, receiver) = async_channel::bounded(8);
+        let sink = EventSink {
+            sender,
+            lock_latch: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
 
         let workspace_center = NSWorkspace::sharedWorkspace().notificationCenter();
         // SAFETY: these are immutable AppKit notification-name constants.
@@ -136,11 +161,11 @@ impl SessionLockMonitor {
         };
         let workspace_observers = workspace_names
             .into_iter()
-            .map(|(name, event)| observe(&workspace_center, name, event, &sender))
+            .map(|(name, event)| observe(&workspace_center, name, event, &sink))
             .collect();
 
         let distributed_center = NSDistributedNotificationCenter::defaultCenter();
-        let distributed_observer = SessionLockObserver::new(sender.clone());
+        let distributed_observer = SessionLockObserver::new(sink.clone());
         for name in [
             SCREEN_LOCKED_NOTIFICATION,
             SCREEN_UNLOCKED_NOTIFICATION,
@@ -153,6 +178,7 @@ impl SessionLockMonitor {
 
         Self {
             receiver,
+            lock_latch: sink.lock_latch,
             workspace_center,
             workspace_observers,
             distributed_center,
@@ -162,6 +188,13 @@ impl SessionLockMonitor {
 
     pub fn events(&self) -> Receiver<SessionLockEvent> {
         self.receiver.clone()
+    }
+
+    /// Authoritative "a genuine lock event happened since the last check"
+    /// bit. Consumers must call this after draining `events()` — a Lock
+    /// dropped by a full channel is still recorded here.
+    pub fn lock_latch(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.lock_latch)
     }
 }
 
@@ -180,18 +213,17 @@ fn observe(
     center: &NSNotificationCenter,
     name: &NSNotificationName,
     event: SessionLockEvent,
-    sender: &Sender<SessionLockEvent>,
+    sink: &EventSink,
 ) -> Observer {
-    let sender = sender.clone();
+    let sink = sink.clone();
     let callback = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-        // Never block an OS notification thread. A full channel means
-        // several lock requests are already pending and being drained.
-        let _ = sender.try_send(event);
+        sink.dispatch(event);
     });
 
     // SAFETY: the notification name and center are valid Objective-C objects;
-    // the copied block captures only a thread-safe async-channel sender. The
-    // returned token is retained by SessionLockMonitor and explicitly removed.
+    // the copied block captures only a thread-safe sink (channel sender +
+    // atomic latch). The returned token is retained by SessionLockMonitor
+    // and explicitly removed.
     unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &callback) }
 }
 
@@ -235,12 +267,23 @@ fn remove_distributed_observer(
 mod tests {
     use super::*;
 
+    fn test_sink(capacity: usize) -> (EventSink, Receiver<SessionLockEvent>) {
+        let (sender, receiver) = async_channel::bounded(capacity);
+        (
+            EventSink {
+                sender,
+                lock_latch: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            receiver,
+        )
+    }
+
     #[test]
     fn notification_callback_forwards_without_blocking() {
         let center = NSNotificationCenter::new();
         let name = NSString::from_str("dev.ferrispass.session-lock-test");
-        let (sender, receiver) = async_channel::bounded(8);
-        let observer = observe(&center, &name, SessionLockEvent::Lock, &sender);
+        let (sink, receiver) = test_sink(8);
+        let observer = observe(&center, &name, SessionLockEvent::Lock, &sink);
 
         // SAFETY: the test name is a valid NSString and the object filter is
         // intentionally absent, matching the registration above.
@@ -297,9 +340,12 @@ mod tests {
         let center = NSNotificationCenter::new();
         let lock_name = NSString::from_str("dev.ferrispass.session-lock-hard");
         let wake_name = NSString::from_str("dev.ferrispass.session-lock-wake");
-        let (sender, receiver) = async_channel::bounded(8);
-        let lock_observer = observe(&center, &lock_name, SessionLockEvent::Lock, &sender);
-        let wake_observer = observe(&center, &wake_name, SessionLockEvent::PostWake, &sender);
+        // Capacity 1 on purpose: even when the queue is already full of
+        // PostWake noise and the Lock's `try_send` is dropped, the latch
+        // must still record it.
+        let (sink, receiver) = test_sink(1);
+        let lock_observer = observe(&center, &lock_name, SessionLockEvent::Lock, &sink);
+        let wake_observer = observe(&center, &wake_name, SessionLockEvent::PostWake, &sink);
 
         // SAFETY: same valid test-only notification contract as above.
         unsafe {
@@ -307,7 +353,12 @@ mod tests {
             center.postNotificationName_object(&lock_name, None);
         }
         assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::PostWake));
-        assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::Lock));
+        assert!(receiver.try_recv().is_err(), "queue was full — dropped");
+        assert!(
+            sink.lock_latch
+                .swap(false, std::sync::atomic::Ordering::AcqRel),
+            "latch must survive a dropped Lock send"
+        );
 
         // SAFETY: both observers came from `center` and are removed once.
         remove_observer(&center, &lock_observer);
@@ -317,8 +368,8 @@ mod tests {
     #[test]
     fn selector_observer_classifies_distributed_notifications() {
         let center = NSNotificationCenter::new();
-        let (sender, receiver) = async_channel::bounded(8);
-        let observer = SessionLockObserver::new(sender);
+        let (sink, receiver) = test_sink(8);
+        let observer = SessionLockObserver::new(sink);
         let observer_object: &AnyObject = observer.as_ref();
         for name in [
             SCREEN_LOCKED_NOTIFICATION,

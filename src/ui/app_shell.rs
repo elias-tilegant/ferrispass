@@ -655,18 +655,20 @@ impl AppShell {
     #[cfg(target_os = "macos")]
     fn start_session_lock_task(&mut self, cx: &mut Context<Self>) {
         let events = self._session_lock_monitor.events();
+        let lock_latch = self._session_lock_monitor.lock_latch();
         let window_handle = self.window_handle;
         self._session_lock_task = Some(cx.spawn(async move |this, cx| {
-            while let Ok(first) = events.recv().await {
+            while events.recv().await.is_ok() {
                 // Sleep/lock transitions commonly emit several events in a
-                // burst. Drain them and act on the strongest one: a single
-                // genuine Lock in the batch always locks.
-                let mut strongest = first;
-                while let Ok(event) = events.try_recv() {
-                    if event == crate::session_lock::SessionLockEvent::Lock {
-                        strongest = event;
-                    }
-                }
+                // burst. Drain the queue, then consult the latch — it is
+                // the authoritative Lock record and survives even events
+                // dropped by a full channel.
+                while events.try_recv().is_ok() {}
+                let strongest = if lock_latch.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    crate::session_lock::SessionLockEvent::Lock
+                } else {
+                    crate::session_lock::SessionLockEvent::PostWake
+                };
 
                 let updated = window_handle.update(cx, |_root, window, app| {
                     this.update(app, |shell, cx| {
