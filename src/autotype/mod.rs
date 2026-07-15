@@ -134,6 +134,10 @@ pub enum Outcome {
     NoMatch { window_title: String },
     /// The matched entry doesn't have a password set.
     NoPassword,
+    /// The entry's KeePass `AutoType/Enabled` flag is off — the user (in
+    /// any KeePass client) explicitly excluded it from auto-typing, which
+    /// binds the forced in-app route too.
+    AutoTypeDisabled { entry_title: String },
     /// The user's sequence template is broken. Carries the parse
     /// error so the toast can name what's wrong.
     BadSequence(ParseError),
@@ -216,6 +220,13 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
     // UI's last-known-good state could try to type stale credentials.
     let (entry_id, entry_title) = if let Some(forced) = input.force_entry_id.as_deref() {
         match input.snapshot.find_entry(forced) {
+            Some(entry) if !entry.auto_type_enabled => {
+                // The KeePass per-entry Enabled flag is a deliberate opt-out
+                // (set in any client); it binds the explicit route too.
+                return Err(Outcome::AutoTypeDisabled {
+                    entry_title: entry.title.clone(),
+                });
+            }
             Some(entry) if !entry.in_recycle_bin => (entry.id.clone(), entry.title.clone()),
             _ => {
                 return Err(Outcome::NoMatch {

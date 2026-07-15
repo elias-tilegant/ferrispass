@@ -22,17 +22,19 @@ const KDF_ARGON2ID: [u8; 16] = [
     0x9e, 0x29, 0x8b, 0x19, 0x56, 0xdb, 0x47, 0x73, 0xb2, 0x3d, 0xfc, 0x3e, 0xc6, 0xf0, 0xa1, 0xe6,
 ];
 
-// These are deliberately far above normal KeePass/KeePassXC settings while
-// still preventing hostile headers from requesting unbounded work or memory.
-// KeePassXC's UI allows Argon2 memory up to multiple GiB — vaults configured
-// there must keep opening here, so the memory cap sits at 4 GiB and the
-// combined memory×iterations budget stays high enough for any combination
-// the per-parameter caps admit at realistic settings (e.g. 4 GiB × 16).
+// These are deliberately above normal KeePass/KeePassXC settings while
+// still preventing hostile headers from requesting unbounded work or
+// memory. The Argon2 implementation allocates the requested memory for
+// real (`vec!`), so the memory cap is the effective DoS bound for a
+// malicious *remote* KDBX pulled by sync: 1 GiB covers the heaviest
+// settings KeePassXC users realistically configure without letting a
+// hostile header OOM a small Mac. Legitimate vaults above the cap get a
+// clear limit message (not a bogus wrong-password error).
 const MAX_AES_ROUNDS: u64 = 1_000_000_000;
-const MAX_ARGON2_MEMORY: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_ARGON2_MEMORY: u64 = 1024 * 1024 * 1024;
 const MAX_ARGON2_ITERATIONS: u64 = 100;
 const MAX_ARGON2_PARALLELISM: u32 = 64;
-const MAX_ARGON2_WORK: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_ARGON2_WORK: u64 = 32 * 1024 * 1024 * 1024;
 
 pub(crate) fn validate_kdbx_size(size: u64) -> io::Result<()> {
     if size > MAX_KDBX_BYTES {
@@ -394,9 +396,9 @@ mod tests {
             &KDF_ARGON2ID,
             &[
                 // Both individually inside the per-parameter caps, but the
-                // product busts the combined budget (4 GiB × 20 = 80 GiB).
-                (b"M", Value::U64(4 * 1024 * 1024 * 1024)),
-                (b"I", Value::U64(20)),
+                // product busts the combined budget (1 GiB × 40 = 40 GiB).
+                (b"M", Value::U64(1024 * 1024 * 1024)),
+                (b"I", Value::U64(40)),
                 (b"P", Value::U32(4)),
             ],
         );

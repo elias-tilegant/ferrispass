@@ -196,8 +196,7 @@ fn fetch_verified_manifest() -> Result<VerifiedRelease, UpdateError> {
     loop {
         attempt += 1;
         let manifest = download_limited(UPDATE_ENDPOINT, MAX_MANIFEST_BYTES)?;
-        let signature =
-            download_limited(UPDATE_SIGNATURE_ENDPOINT, MAX_MANIFEST_SIGNATURE_BYTES)?;
+        let signature = download_limited(UPDATE_SIGNATURE_ENDPOINT, MAX_MANIFEST_SIGNATURE_BYTES)?;
         match verify_manifest(&manifest, &signature) {
             Ok(()) => return VerifiedRelease::parse(&manifest),
             Err(_) if attempt < 2 => continue,

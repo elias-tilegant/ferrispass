@@ -1270,14 +1270,19 @@ impl SavePayload {
                     ) =>
                 {
                     // FAT32/ExFAT (USB sticks) and some SMB mounts have no
-                    // hard links. Fall back to rename: the exists check above
-                    // ran under the same sidecar lock, so the residual
-                    // clobber window equals the bound path's accepted one.
-                    if let Err(error) = fs::rename(&tmp_path, &write_path) {
-                        let _ = fs::remove_file(&tmp_path);
-                        return Err(SaveError::PublishNew(error));
+                    // hard links. Publish with an exclusive rename instead,
+                    // which preserves the no-clobber guarantee.
+                    match publish_new_no_clobber(&tmp_path, &write_path) {
+                        Ok(()) => None,
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                            let _ = fs::remove_file(&tmp_path);
+                            return Err(SaveError::UnboundTargetExists(write_path));
+                        }
+                        Err(error) => {
+                            let _ = fs::remove_file(&tmp_path);
+                            return Err(SaveError::PublishNew(error));
+                        }
                     }
-                    None
                 }
                 Err(error) => {
                     let _ = fs::remove_file(&tmp_path);
@@ -1393,6 +1398,50 @@ fn read_bounded_file(path: &Path) -> Result<Vec<u8>, SaveError> {
     crate::keepass::limits::validate_kdbx_size(bytes.len() as u64)
         .map_err(SaveError::ReadRevision)?;
     Ok(bytes)
+}
+
+/// Atomically publish `tmp` at `target` without ever replacing a file that
+/// appeared after the caller's exists check. On macOS `renamex_np` with
+/// `RENAME_EXCL` provides that natively even on filesystems without hard
+/// links (FAT32/ExFAT). Where the syscall itself is unsupported, fall back
+/// to a fresh exists check + rename — a small residual window, held under
+/// the sidecar lock that already fences out other FerrisPass instances.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn publish_new_no_clobber(tmp: &Path, target: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let tmp_c = std::ffi::CString::new(tmp.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let target_c = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    // SAFETY: both pointers reference NUL-terminated buffers that stay alive
+    // for the duration of the call.
+    let result = unsafe { libc::renamex_np(tmp_c.as_ptr(), target_c.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(code) if code == libc::ENOTSUP || code == libc::EINVAL || code == libc::ENOSYS => {
+            publish_new_checked_rename(tmp, target)
+        }
+        _ => Err(error),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn publish_new_no_clobber(tmp: &Path, target: &Path) -> io::Result<()> {
+    publish_new_checked_rename(tmp, target)
+}
+
+fn publish_new_checked_rename(tmp: &Path, target: &Path) -> io::Result<()> {
+    if target.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "target appeared before publication",
+        ));
+    }
+    fs::rename(tmp, target)
 }
 
 fn sync_file(file: &fs::File) -> Result<(), io::Error> {

@@ -212,6 +212,11 @@ pub struct AppState {
     /// Two-step confirmation flag for "Discard changes and lock" on the
     /// deferred-lock screen. Reset whenever that screen is entered or left.
     discard_deferred_armed: bool,
+    /// When the deferred lock started waiting for its saves. After a grace
+    /// period the discard escape opens even while a save is nominally still
+    /// in flight — blocking file I/O on a dead network volume never
+    /// completes, and only the flock acquisition itself has a deadline.
+    deferred_lock_since: Option<std::time::Instant>,
     /// When the most recent unlock completed. The session-lock monitor uses
     /// this to ignore trailing post-wake notifications that would otherwise
     /// re-lock the vault the user just unlocked (see `unlocked_within`).
@@ -313,6 +318,12 @@ struct QueuedSyncRequest {
     bytes: Option<Arc<Vec<u8>>>,
 }
 
+/// How long a deferred lock may wait on nominally in-flight saves before
+/// the "Discard changes and lock" escape opens anyway. Real saves finish in
+/// seconds (KDF + fsync); anything past this is blocked file I/O that only
+/// a process restart can interrupt.
+const DEFERRED_LOCK_STUCK_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Vault bytes for a push: either already published by the save that
 /// triggered it, or read from disk inside the background task — the read
 /// takes the same locks a save holds across KDF + fsync and must never
@@ -413,6 +424,7 @@ impl Default for AppState {
             lock_requested_after_save: false,
             deferred_lock_sessions: HashMap::new(),
             discard_deferred_armed: false,
+            deferred_lock_since: None,
             last_unlock_at: None,
             biometric: Arc::new(NoopBiometricStore),
             biometric_registry: BiometricRegistry::new(),
@@ -2154,6 +2166,7 @@ impl AppState {
 
         self.rotate_auto_type_context();
         self.discard_deferred_armed = false;
+        self.deferred_lock_since = Some(std::time::Instant::now());
         let previous_vault = std::mem::replace(&mut self.vault, VaultStatus::LockedPendingSave);
         let mut candidates = Vec::with_capacity(self.parked.len() + 1);
         if let VaultStatus::Open { path, document, .. } = previous_vault {
@@ -2285,17 +2298,26 @@ impl AppState {
     /// this grace check the session-lock monitor would re-lock the vault
     /// mid-typing on every wake.
     pub fn unlocked_within(&self, window: std::time::Duration) -> bool {
-        self.last_unlock_at
-            .is_some_and(|at| at.elapsed() < window)
+        self.last_unlock_at.is_some_and(|at| at.elapsed() < window)
     }
 
     /// Whether the deferred-lock screen may offer "Discard changes and
-    /// lock": every remaining save has actually failed (nothing is still
-    /// in flight that could yet succeed and must keep its session).
+    /// lock": every remaining save has actually failed, or the deferred
+    /// lock has been waiting long past any realistic save duration — the
+    /// flock has a deadline, but open/canonicalize/write/fsync on a dead
+    /// network volume can block a save task forever. Discarding while such
+    /// a task is stuck is safe: it holds its own payload copy, so if it
+    /// ever completes it merely writes the bytes the user chose to discard.
     pub fn can_discard_deferred_saves(&self) -> bool {
-        matches!(self.vault, VaultStatus::LockedPendingSave)
-            && matches!(self.save_status, SaveStatus::Failed(_))
-            && self.saves_in_flight.is_empty()
+        if !matches!(self.vault, VaultStatus::LockedPendingSave) {
+            return false;
+        }
+        let failed_and_settled =
+            matches!(self.save_status, SaveStatus::Failed(_)) && self.saves_in_flight.is_empty();
+        let stuck = self
+            .deferred_lock_since
+            .is_some_and(|since| since.elapsed() >= DEFERRED_LOCK_STUCK_AFTER);
+        failed_and_settled || stuck
     }
 
     pub fn discard_deferred_armed(&self) -> bool {
@@ -2331,7 +2353,13 @@ impl AppState {
         for session_id in sessions {
             self.mark_vault_session_persisted(session_id);
         }
+        // Stuck-path discard: forget any save slot whose task is blocked in
+        // file I/O. The task owns its payload and its completion callback
+        // tolerates a missing slot; a post-restart save racing it is fenced
+        // by the sidecar flock (bounded, surfaces as a Failed status).
+        self.saves_in_flight.clear();
         self.lock_requested_after_save = false;
+        self.deferred_lock_since = None;
         self.lock_vault_now();
         true
     }

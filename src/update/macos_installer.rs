@@ -48,10 +48,14 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
     }
 
     // A kill/crash mid-install orphans the hidden staging directory (up to
-    // the full bundle size) next to the app forever. The working bundle was
-    // just verified above, so leftovers from earlier attempts are redundant
-    // by now — sweep them before creating this run's staging directory.
-    sweep_stale_staging(parent);
+    // the full bundle size) next to the app forever. Sweep leftovers ONLY
+    // when the installed bundle validates as a working app: after a failed
+    // rollback the staging directory holds the only known-good old bundle,
+    // and `target.is_dir()` alone cannot tell that state apart. The age
+    // gate additionally protects a concurrent instance's live staging.
+    if validate_bundle(&target).is_ok() {
+        sweep_stale_staging(parent);
+    }
 
     // Keeping this directory until the transaction is resolved is deliberate:
     // after a failed rollback it contains the only known-good old bundle.
@@ -88,9 +92,14 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
     }
 }
 
+/// How old a leftover staging directory must be before the sweep may touch
+/// it. Far above any real install duration, so a second FerrisPass instance
+/// mid-install never loses its live staging to this cleanup.
+const STAGING_SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// Remove `.ferrispass-update-*` directories left behind by a crashed or
-/// killed earlier install. Only called after the installed bundle has been
-/// verified to exist, so nothing in these leftovers is still needed. Best
+/// killed earlier install. Only called after the installed bundle passed
+/// `validate_bundle`, so nothing in these leftovers is still needed. Best
 /// effort — a failure here must never block the actual update.
 fn sweep_stale_staging(parent: &Path) {
     let Ok(entries) = fs::read_dir(parent) else {
@@ -98,11 +107,16 @@ fn sweep_stale_staging(parent: &Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let is_stale_staging = name
+        let is_staging = name
             .to_str()
             .is_some_and(|name| name.starts_with(".ferrispass-update-"))
             && entry.file_type().is_ok_and(|kind| kind.is_dir());
-        if is_stale_staging {
+        let is_old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .and_then(|modified| modified.elapsed().map_err(io::Error::other))
+            .is_ok_and(|age| age >= STAGING_SWEEP_MIN_AGE);
+        if is_staging && is_old {
             let _ = fs::remove_dir_all(entry.path());
         }
     }

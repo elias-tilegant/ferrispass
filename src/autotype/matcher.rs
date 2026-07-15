@@ -258,11 +258,7 @@ mod tests {
 
     #[test]
     fn explicit_association_matches_by_window_title() {
-        let snap = snapshot_with(vec![entry_with_association(
-            "sap",
-            "",
-            &["SAP Logon ?60*"],
-        )]);
+        let snap = snapshot_with(vec![entry_with_association("sap", "", &["SAP Logon ?60*"])]);
         let ranked = rank(&snap, &fg("SAP Logon", "SAP Logon 760 — PRD"));
         assert_eq!(ranked.len(), 1);
         assert_eq!(
