@@ -33,6 +33,35 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 use crate::sync::http::TRANSFER_MAX_WALL_CLOCK;
 
+/// Wraps the upload body so every chunk ureq pulls re-checks the overall
+/// transfer deadline (see `TRANSFER_MAX_WALL_CLOCK` for why the agent's
+/// own `timeout` cannot provide this).
+struct DeadlineReader<'a> {
+    inner: io::Cursor<&'a [u8]>,
+    deadline: std::time::Instant,
+}
+
+impl<'a> DeadlineReader<'a> {
+    fn new(bytes: &'a [u8], deadline: std::time::Instant) -> Self {
+        Self {
+            inner: io::Cursor::new(bytes),
+            deadline,
+        }
+    }
+}
+
+impl io::Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if std::time::Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "vault transfer exceeded the overall time budget",
+            ));
+        }
+        self.inner.read(buf)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum GraphError {
     #[error("network error: {0}")]
@@ -296,10 +325,16 @@ pub fn upload_content(
     if let Some(etag) = if_match {
         req = req.set("If-Match", etag);
     }
-    // The transfer agent's overall deadline (ureq `DeadlineStream`) bounds
-    // the entire request — body send, response headers, response body — so
-    // a drip-reading peer cannot hold the upload past the wall clock.
-    match req.send_bytes(bytes) {
+    // ureq polls this reader once per body chunk it writes, and each socket
+    // write is bounded by the agent's idle timeout — so a drip-reading peer
+    // cannot hold the upload past the wall clock plus one idle window.
+    // Content-Length is set explicitly because streaming via `send` would
+    // otherwise switch to chunked encoding.
+    let body = DeadlineReader::new(bytes, std::time::Instant::now() + TRANSFER_MAX_WALL_CLOCK);
+    match req
+        .set("Content-Length", &bytes.len().to_string())
+        .send(body)
+    {
         Ok(resp) => {
             let body = resp
                 .into_string()
@@ -653,6 +688,25 @@ impl SearchQueryResponse {
 mod tests {
     use super::*;
     use std::io::{Cursor, Read};
+
+    #[test]
+    fn deadline_reader_times_out_a_dripping_upload() {
+        let bytes = [0_u8; 16];
+        let mut buf = [0_u8; 8];
+
+        // Live deadline: bytes flow normally.
+        let mut fresh = DeadlineReader::new(
+            &bytes,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        assert_eq!(fresh.read(&mut buf).unwrap(), 8);
+
+        // Expired deadline — as after a peer dripped past the budget: the
+        // next chunk poll must fail instead of continuing forever.
+        let mut expired = DeadlineReader::new(&bytes, std::time::Instant::now());
+        let error = expired.read(&mut buf).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 
     struct PanicReader;
 

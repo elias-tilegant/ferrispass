@@ -25,12 +25,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// minimum transfer speed on large vaults.
 const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Hard overall deadline for one vault transfer, enforced by ureq's
-/// `DeadlineStream` across the whole request — body send, response
-/// headers, and response-body reads. Idle timeouts alone let a peer that
-/// trickles one byte per idle window hold the request (and the per-path
-/// sync slot) forever. One hour covers the full 250 MB Graph content cap
-/// even on a ~0.6 Mbit/s link.
+/// Overall wall-clock budget for one vault transfer. NOT set via ureq's
+/// `Agent::timeout` — in ureq 2.x that deadline displaces the per-operation
+/// idle timeouts and is not re-checked before each body write. Instead the
+/// two body loops enforce it per chunk (`read_vault_body` on download,
+/// `DeadlineReader` on upload); each individual socket operation is bounded
+/// by the idle timeouts, so the effective hard ceiling is this budget plus
+/// one idle window. One hour covers the full 250 MB Graph content cap even
+/// on a ~0.6 Mbit/s link.
 pub(crate) const TRANSFER_MAX_WALL_CLOCK: Duration = Duration::from_secs(60 * 60);
 
 /// Agent for token-endpoint and Graph metadata calls.
@@ -44,9 +46,10 @@ pub fn agent() -> &'static ureq::Agent {
     })
 }
 
-/// Agent for vault-content download/upload. Idle limits catch dead
-/// connections fast; the overall deadline is the hard upper bound for the
-/// entire request in either direction.
+/// Agent for vault-content download/upload. Idle limits bound every single
+/// socket operation (including the wait for response headers); the overall
+/// wall clock is enforced per body chunk by the callers — see
+/// [`TRANSFER_MAX_WALL_CLOCK`].
 pub fn transfer_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -54,7 +57,6 @@ pub fn transfer_agent() -> &'static ureq::Agent {
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(TRANSFER_IDLE_TIMEOUT)
             .timeout_write(TRANSFER_IDLE_TIMEOUT)
-            .timeout(TRANSFER_MAX_WALL_CLOCK)
             .build()
     })
 }

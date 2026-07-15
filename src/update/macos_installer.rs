@@ -68,7 +68,14 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
 
     let prepared = extract_bundle(&bytes, &staging_root, bundle_name)
         .and_then(|()| validate_bundle(&staged_bundle))
-        .and_then(|()| sync_tree(&staged_bundle));
+        .and_then(|()| sync_tree(&staged_bundle))
+        // Durable keep-marker BEFORE the first swap, like a transaction
+        // journal: from the moment the swap can have moved the old bundle
+        // into staging, a crash at any point must leave the directory
+        // marked, or a later sweep could delete the only good app copy.
+        // Failure to write it aborts the install while nothing has been
+        // touched yet.
+        .and_then(|()| write_keep_marker(&staging_root));
     if let Err(error) = prepared {
         let _ = fs::remove_dir_all(&staging_root);
         return Err(error);
@@ -84,13 +91,7 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
             Ok(())
         }
         Err(failure) => {
-            if failure.preserve_staging {
-                // After a failed rollback this directory holds the only
-                // known-good old bundle. Mark it so no later sweep —
-                // regardless of age or how healthy the target *looks* —
-                // ever removes it automatically.
-                let _ = fs::write(staging_root.join(STAGING_KEEP_MARKER), b"");
-            } else {
+            if !failure.preserve_staging {
                 let _ = fs::remove_dir_all(&staging_root);
             }
             Err(install_error(failure.message))
@@ -98,16 +99,27 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
     }
 }
 
+/// Write and fsync the keep-marker, then fsync the staging directory so the
+/// marker's directory entry is durable before any swap runs.
+fn write_keep_marker(staging_root: &Path) -> Result<(), UpdateError> {
+    let path = staging_root.join(STAGING_KEEP_MARKER);
+    let file = File::create(&path).map_err(|error| install_io("write staging marker", error))?;
+    file.sync_all()
+        .map_err(|error| install_io("sync staging marker", error))?;
+    sync_directory(staging_root).map_err(|error| install_io("sync staging directory", error))?;
+    Ok(())
+}
+
 /// How old a leftover staging directory must be before the sweep may touch
 /// it. Far above any real install duration, so a second FerrisPass instance
 /// mid-install never loses its live staging to this cleanup.
 const STAGING_SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-/// Marker file written into a staging directory that must never be swept:
-/// after a failed rollback it contains the only known-good old bundle.
-/// `validate_bundle` on the target is structural only — it cannot prove
-/// the new bundle actually starts — so the marker, not the target's
-/// apparent health, is what protects recovery data.
+/// Marker file that makes a staging directory unsweepable. Written durably
+/// BEFORE the first swap, because from that point on the directory may hold
+/// the only known-good old bundle — and `validate_bundle` on the target is
+/// structural only, it cannot prove the new bundle actually starts. Only a
+/// fully successful install removes the directory (marker included).
 const STAGING_KEEP_MARKER: &str = ".ferrispass-keep";
 
 /// Remove `.ferrispass-update-*` directories left behind by a crashed or
@@ -124,7 +136,16 @@ fn sweep_stale_staging(parent: &Path) {
             .to_str()
             .is_some_and(|name| name.starts_with(".ferrispass-update-"))
             && entry.file_type().is_ok_and(|kind| kind.is_dir());
-        if !is_staging || entry.path().join(STAGING_KEEP_MARKER).exists() {
+        if !is_staging {
+            continue;
+        }
+        // Fail closed: an unreadable marker state must protect the
+        // directory exactly like a present marker — this may be the only
+        // good copy of the old app.
+        if !matches!(
+            entry.path().join(STAGING_KEEP_MARKER).try_exists(),
+            Ok(false)
+        ) {
             continue;
         }
         let is_old = entry
