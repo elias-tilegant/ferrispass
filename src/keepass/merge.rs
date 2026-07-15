@@ -33,7 +33,9 @@ use keepass::db::{
 };
 
 use crate::domain::CustomField;
-use crate::keepass::repository::{STANDARD_FIELDS, collect_custom_fields};
+use crate::keepass::repository::{
+    STANDARD_FIELDS, collect_custom_fields, find_entry_id, find_group_id,
+};
 
 /// Value snapshot of an entry at the moment of diffing — owned, no borrows
 /// of the source `Database`. Safe to keep around in UI state for as long as
@@ -401,7 +403,7 @@ pub fn apply_picks(
         .warnings
         .iter()
         .map(String::as_str)
-        .filter(|warning| !warning_is_policy_resolved(warning))
+        .filter(|warning| !warning_is_harmless(warning, local, remote))
         .collect();
     if !lossy.is_empty() {
         return Err(ApplyError::DatabaseMergeWarnings(lossy.join("; ")));
@@ -434,6 +436,56 @@ fn warning_is_policy_resolved(warning: &str) -> bool {
         || (warning.contains(" history entry ")
             && warning.contains("did not have a last modification timestamp"))
         || warning.ends_with("had no history.")
+}
+
+/// Extends `warning_is_policy_resolved` with a divergence check for
+/// missing-timestamp warnings on *current* entries/groups: the fork emits
+/// those before ever comparing the object, so a legacy entry that is
+/// byte-identical on both sides would otherwise make every merge attempt
+/// fatal forever — while a genuinely divergent one must stay fatal (the
+/// epoch substitute would silently pick a winner). Compares the full fork
+/// object (fields, times, history) via its derived `PartialEq`.
+fn warning_is_harmless(warning: &str, local: &Database, remote: &Database) -> bool {
+    if warning_is_policy_resolved(warning) {
+        return true;
+    }
+    if !warning.contains("did not have a last modification timestamp") {
+        return false;
+    }
+    // "Source entry <id> did not …" / "Destination group <id> did not …"
+    // ("… history entry …" was already accepted above.)
+    let mut words = warning.split_whitespace();
+    let kind = words.nth(1);
+    let Some(id) = words.next() else {
+        return false;
+    };
+    match kind {
+        Some("entry") => entries_identical(local, remote, id),
+        Some("group") => groups_identical(local, remote, id),
+        _ => false,
+    }
+}
+
+fn entries_identical(local: &Database, remote: &Database, id: &str) -> bool {
+    let (Some(local_id), Some(remote_id)) = (find_entry_id(local, id), find_entry_id(remote, id))
+    else {
+        return false;
+    };
+    match (local.entry(local_id), remote.entry(remote_id)) {
+        (Some(local_entry), Some(remote_entry)) => *local_entry == *remote_entry,
+        _ => false,
+    }
+}
+
+fn groups_identical(local: &Database, remote: &Database, id: &str) -> bool {
+    let (Some(local_id), Some(remote_id)) = (find_group_id(local, id), find_group_id(remote, id))
+    else {
+        return false;
+    };
+    match (local.group(local_id), remote.group(remote_id)) {
+        (Some(local_group), Some(remote_group)) => *local_group == *remote_group,
+        _ => false,
+    }
 }
 
 fn preserve_auto_resolved_history(
@@ -1598,6 +1650,29 @@ mod tests {
         ] {
             assert!(!warning_is_policy_resolved(lossy), "misclassified: {lossy}");
         }
+    }
+
+    #[test]
+    fn missing_timestamp_warning_is_harmless_only_for_identical_objects() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Legacy", "pw");
+        let remote = fork(&local);
+        let warning = format!("Source entry {id} did not have a last modification timestamp");
+
+        // Identical on both sides: the epoch substitute cannot lose anything.
+        assert!(warning_is_harmless(&warning, &local, &remote));
+
+        // Divergent: the substitute would silently pick a winner — fatal.
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "changed");
+        assert!(!warning_is_harmless(&warning, &local, &remote));
+
+        // Unknown object: fail closed.
+        let unknown = "Source entry 00000000-0000-0000-0000-000000000000 \
+                       did not have a last modification timestamp";
+        assert!(!warning_is_harmless(unknown, &local, &remote));
     }
 
     #[test]

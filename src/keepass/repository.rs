@@ -185,9 +185,10 @@ fn group_from_ref(
     let group_id_str = group.id().to_string();
     let in_bin = recycle_bin_id.is_some_and(|bin| bin == group_id_str);
 
-    // KeePass group `EnableAutoType` is tri-state and inherits down the
-    // tree; an explicit `false` anywhere on the path disables auto-type
-    // for every contained entry.
+    // KeePass group `EnableAutoType` is tri-state: unset inherits the
+    // parent's effective value, an explicit value overrides it — so a
+    // child group's explicit `true` re-enables auto-type under a parent
+    // that disabled it, exactly like KeePass 2.x.
     let auto_type = group.enable_autotype.unwrap_or(inherited_auto_type);
 
     let mut groups = group
@@ -443,6 +444,55 @@ mod tests {
             result,
             Err(DatabaseOpenError::Io(error)) if error.kind() == ErrorKind::InvalidData
         ));
+    }
+
+    #[test]
+    fn group_auto_type_tristate_inherits_and_child_override_wins() {
+        let mut db = Database::new();
+        let mut root = db.root_mut();
+        let mut root_entry = root.add_entry();
+        root_entry.set_unprotected(keepass::db::fields::TITLE, "RootEntry");
+        drop(root_entry);
+
+        let mut disabled = root.add_group();
+        disabled.name = "Disabled".to_string();
+        disabled.enable_autotype = Some(false);
+        let mut disabled_entry = disabled.add_entry();
+        disabled_entry.set_unprotected(keepass::db::fields::TITLE, "DisabledEntry");
+        drop(disabled_entry);
+
+        let mut reenabled = disabled.add_group();
+        reenabled.name = "Reenabled".to_string();
+        reenabled.enable_autotype = Some(true);
+        let mut reenabled_entry = reenabled.add_entry();
+        reenabled_entry.set_unprotected(keepass::db::fields::TITLE, "ReenabledEntry");
+        drop(reenabled_entry);
+        drop(reenabled);
+
+        let mut inherits = disabled.add_group();
+        inherits.name = "Inherits".to_string();
+        let mut inherits_entry = inherits.add_entry();
+        inherits_entry.set_unprotected(keepass::db::fields::TITLE, "InheritsEntry");
+        drop(inherits_entry);
+        drop(inherits);
+        drop(disabled);
+        drop(root);
+
+        let snapshot = snapshot_from_database(&db);
+        let enabled_by_title: std::collections::HashMap<String, bool> = snapshot
+            .entries_recursive()
+            .into_iter()
+            .map(|entry| (entry.title.clone(), entry.auto_type_enabled))
+            .collect();
+
+        // Root default: enabled.
+        assert_eq!(enabled_by_title.get("RootEntry"), Some(&true));
+        // Explicit false disables contained entries…
+        assert_eq!(enabled_by_title.get("DisabledEntry"), Some(&false));
+        // …and inherits into unset children…
+        assert_eq!(enabled_by_title.get("InheritsEntry"), Some(&false));
+        // …but a child's explicit true overrides the parent's false.
+        assert_eq!(enabled_by_title.get("ReenabledEntry"), Some(&true));
     }
 
     #[test]
