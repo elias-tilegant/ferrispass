@@ -1263,6 +1263,22 @@ impl SavePayload {
                     let _ = fs::remove_file(&tmp_path);
                     return Err(SaveError::UnboundTargetExists(write_path));
                 }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    // FAT32/ExFAT (USB sticks) and some SMB mounts have no
+                    // hard links. Fall back to rename: the exists check above
+                    // ran under the same sidecar lock, so the residual
+                    // clobber window equals the bound path's accepted one.
+                    if let Err(error) = fs::rename(&tmp_path, &write_path) {
+                        let _ = fs::remove_file(&tmp_path);
+                        return Err(SaveError::PublishNew(error));
+                    }
+                    None
+                }
                 Err(error) => {
                     let _ = fs::remove_file(&tmp_path);
                     return Err(SaveError::PublishNew(error));

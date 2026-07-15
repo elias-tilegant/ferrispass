@@ -4744,15 +4744,27 @@ impl AppState {
                 self.overlay = Overlay::Conflict;
                 cx.notify();
             }
-            Err(_) => {
+            Err(error) => {
+                // Only credential/crypto failures mean "wrong password".
+                // The resource limits in `keepass::limits` surface as
+                // `Io(InvalidData)` with a user-readable message (vault too
+                // large, Argon2 memory over the cap, malformed header) —
+                // blaming the master password for those sends the user
+                // chasing a credential problem that does not exist.
+                let message = match &error {
+                    keepass::db::DatabaseOpenError::Io(io_error)
+                        if io_error.kind() == std::io::ErrorKind::InvalidData =>
+                    {
+                        format!("Cannot read the remote vault: {io_error}")
+                    }
+                    _ => "Remote file uses a different master password — \
+                          cannot merge automatically."
+                        .to_string(),
+                };
                 self.apply_sync_status_for_session(
                     target,
                     session_id,
-                    SyncStatus::Failed(
-                        "Remote file uses a different master password — \
-                         cannot merge automatically."
-                            .into(),
-                    ),
+                    SyncStatus::Failed(message),
                     cx,
                 );
             }
