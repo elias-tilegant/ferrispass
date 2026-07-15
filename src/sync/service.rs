@@ -14,7 +14,10 @@ use std::{
     fs,
     io::{self, Write as _},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use thiserror::Error;
@@ -383,7 +386,7 @@ static CONNECT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub fn upload_after_save(
     config: &SyncConfig,
     token: &AccessToken,
-    local_bytes: &[u8],
+    local_bytes: &Arc<Vec<u8>>,
 ) -> Result<UploadAfterSave, ServiceError> {
     if config.last_etag.trim().is_empty() {
         // Legacy configs (pre-etag-hardening) can carry an empty revision.
@@ -424,7 +427,7 @@ pub fn upload_after_save(
 pub fn force_upload(
     config: &SyncConfig,
     token: &AccessToken,
-    local_bytes: &[u8],
+    local_bytes: &Arc<Vec<u8>>,
 ) -> Result<DriveItem, ServiceError> {
     match graph::upload_content(
         &config.drive_id,

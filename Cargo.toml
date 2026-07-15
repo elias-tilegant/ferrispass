@@ -36,9 +36,14 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zxcvbn = { version = "3", default-features = false }
 thiserror = "2"
 rand = "0.9"
-# SharePoint sync stack. ureq stays sync (runs cleanly inside cx.background_spawn
-# without dragging tokio in). keyring uses the macOS Keychain on Darwin.
+# SharePoint metadata remains synchronous through ureq. Vault and update-bundle
+# transfers use reqwest's async transport inside a small dedicated Tokio runtime:
+# unlike ureq 2.x, its total timeout covers DNS, pooled connections, request-body
+# writes, response headers, and response-body reads.
 ureq = { version = "2", features = ["json", "tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `apple-native` enables the macOS Keychain backend (the only platform we

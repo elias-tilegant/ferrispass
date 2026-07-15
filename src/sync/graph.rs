@@ -1,13 +1,15 @@
 //! Tiny Microsoft Graph v1.0 client — exactly the endpoints the SharePoint
 //! sync flow needs, no crate-wide HTTP framework.
 //!
-//! All calls are synchronous (`ureq`); the caller wraps them in
-//! `cx.background_spawn(...)`. Rate limits, throttling, retries, and
-//! resumable uploads are out of scope; the simple content endpoint supports
-//! vaults up to 250 MB.
+//! The public API is synchronous because callers already run it through
+//! `cx.background_spawn(...)`. Small metadata calls use `ureq`; vault
+//! transfers enter the bounded async client in `sync::http`. Rate limits,
+//! throttling, retries, and resumable uploads are out of scope; the simple
+//! content endpoint supports vaults up to 250 MB.
 
 use serde::Deserialize;
 use std::io;
+use std::sync::Arc;
 use thiserror::Error;
 use ureq::Error as UreqError;
 
@@ -29,36 +31,14 @@ const MAX_VAULT_CONTENT_BYTES: usize = 250_000_000;
 /// Graph's diagnostic code/request ID without retaining an arbitrary server
 /// body in UI state.
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+const MAX_ITEM_RESPONSE_BYTES: usize = 1024 * 1024;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
-use crate::sync::http::TRANSFER_MAX_WALL_CLOCK;
+struct SharedVaultBytes(Arc<Vec<u8>>);
 
-/// Wraps the upload body so every chunk ureq pulls re-checks the overall
-/// transfer deadline (see `TRANSFER_MAX_WALL_CLOCK` for why the agent's
-/// own `timeout` cannot provide this).
-struct DeadlineReader<'a> {
-    inner: io::Cursor<&'a [u8]>,
-    deadline: std::time::Instant,
-}
-
-impl<'a> DeadlineReader<'a> {
-    fn new(bytes: &'a [u8], deadline: std::time::Instant) -> Self {
-        Self {
-            inner: io::Cursor::new(bytes),
-            deadline,
-        }
-    }
-}
-
-impl io::Read for DeadlineReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if std::time::Instant::now() >= self.deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "vault transfer exceeded the overall time budget",
-            ));
-        }
-        self.inner.read(buf)
+impl AsRef<[u8]> for SharedVaultBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
     }
 }
 
@@ -289,15 +269,24 @@ pub fn download_content(
     token: &AccessToken,
 ) -> Result<(Vec<u8>, String), GraphError> {
     let url = format!("{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content");
-    let resp = http::transfer_agent()
+    let request = http::transfer_client()
+        .map_err(|error| GraphError::Network(error.to_string()))?
         .get(&url)
-        .set("Authorization", &format!("Bearer {}", token.access_token))
-        .call()
-        .map_err(map_ureq_error)?;
-    let etag = resp.header("ETag").unwrap_or_default().to_string();
-    let declared_length = parse_content_length(resp.header("Content-Length"))?;
-    let bytes = read_vault_body(resp.into_reader(), declared_length, MAX_VAULT_CONTENT_BYTES)?;
-    Ok((bytes, etag))
+        .bearer_auth(&token.access_token);
+    http::run_transfer(async move {
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        let response = reqwest_success(response).await?;
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let declared_length = parse_reqwest_content_length(response.headers())?;
+        let bytes = read_vault_response(response, declared_length, MAX_VAULT_CONTENT_BYTES).await?;
+        Ok((bytes, etag))
+    })
+    .map_err(|error| GraphError::Network(error.to_string()))?
 }
 
 /// Upload bytes via the small-file PUT endpoint with optional `If-Match`.
@@ -312,57 +301,167 @@ pub fn download_content(
 pub fn upload_content(
     drive_id: &str,
     item_id: &str,
-    bytes: &[u8],
+    bytes: &Arc<Vec<u8>>,
     if_match: Option<&str>,
     token: &AccessToken,
 ) -> Result<UploadOutcome, GraphError> {
     ensure_vault_size(bytes.len(), MAX_VAULT_CONTENT_BYTES)?;
     let url = format!("{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content");
-    let mut req = http::transfer_agent()
+    let mut request = http::transfer_client()
+        .map_err(|error| GraphError::Network(error.to_string()))?
         .put(&url)
-        .set("Authorization", &format!("Bearer {}", token.access_token))
-        .set("Content-Type", "application/octet-stream");
+        .bearer_auth(&token.access_token)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream");
     if let Some(etag) = if_match {
-        req = req.set("If-Match", etag);
+        request = request.header(reqwest::header::IF_MATCH, etag);
     }
-    // ureq polls this reader once per body chunk it writes, and each socket
-    // write is bounded by the agent's idle timeout — so a drip-reading peer
-    // cannot hold the upload past the wall clock plus one idle window.
-    // Content-Length is set explicitly because streaming via `send` would
-    // otherwise switch to chunked encoding.
-    let body = DeadlineReader::new(bytes, std::time::Instant::now() + TRANSFER_MAX_WALL_CLOCK);
-    match req
-        .set("Content-Length", &bytes.len().to_string())
-        .send(body)
-    {
-        Ok(resp) => {
-            let body = resp
-                .into_string()
-                .map_err(|e| GraphError::Network(e.to_string()))?;
-            let item_resp: ItemResponse = parse_json(&body)?;
-            let item = item_from_response(item_resp);
-            // Callers persist `new_etag` as the optimistic-concurrency
-            // revision for every future push, so an empty one must never
-            // escape. Do NOT patch it up with a metadata GET: between our
-            // PUT and that GET a concurrent client may have uploaded, and
-            // adopting *its* eTag would let our next push overwrite that
-            // change without ever seeing a conflict. Failing keeps the
-            // caller's previous eTag — the retry then gets a 412 and heals
-            // through the normal conflict/merge path.
-            if item.etag.trim().is_empty() {
-                return Err(GraphError::MissingField("eTag"));
-            }
-            Ok(UploadOutcome::Ok {
-                new_etag: item.etag.clone(),
-                item,
-            })
+    let body = bytes::Bytes::from_owner(SharedVaultBytes(Arc::clone(bytes)));
+    request = request
+        .header(reqwest::header::CONTENT_LENGTH, body.len())
+        .body(body);
+
+    http::run_transfer(async move {
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Ok(UploadOutcome::Conflict);
         }
-        Err(UreqError::Status(412, _)) => Ok(UploadOutcome::Conflict),
-        Err(e) => Err(map_ureq_error(e)),
-    }
+        let response = reqwest_success(response).await?;
+        let body = read_reqwest_text_limited(response, MAX_ITEM_RESPONSE_BYTES).await?;
+        let item_resp: ItemResponse = parse_json(&body)?;
+        let item = item_from_response(item_resp);
+        // Callers persist `new_etag` as the optimistic-concurrency
+        // revision for every future push, so an empty one must never
+        // escape. Do NOT patch it up with a metadata GET: between our
+        // PUT and that GET a concurrent client may have uploaded, and
+        // adopting *its* eTag would let our next push overwrite that
+        // change without ever seeing a conflict. Failing keeps the
+        // caller's previous eTag — the retry then gets a 412 and heals
+        // through the normal conflict/merge path.
+        if item.etag.trim().is_empty() {
+            return Err(GraphError::MissingField("eTag"));
+        }
+        Ok(UploadOutcome::Ok {
+            new_etag: item.etag.clone(),
+            item,
+        })
+    })
+    .map_err(|error| GraphError::Network(error.to_string()))?
 }
 
 // ---------- internals ----------
+
+async fn reqwest_success(response: reqwest::Response) -> Result<reqwest::Response, GraphError> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status().as_u16();
+    let body = read_reqwest_text_truncated(response, MAX_ERROR_BODY_BYTES)
+        .await
+        .unwrap_or_else(|error| format!("could not read error response: {error}"));
+    Err(GraphError::Status { status, body })
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> GraphError {
+    GraphError::Network(error.to_string())
+}
+
+fn parse_reqwest_content_length(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Option<u64>, GraphError> {
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .ok_or(GraphError::InvalidContentLength)
+        })
+        .transpose()
+}
+
+async fn read_vault_response(
+    mut response: reqwest::Response,
+    declared_length: Option<u64>,
+    limit: usize,
+) -> Result<Vec<u8>, GraphError> {
+    if declared_length.is_some_and(|length| length > limit as u64) {
+        return Err(GraphError::VaultTooLarge);
+    }
+
+    let initial_capacity = declared_length
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(READ_CHUNK_BYTES)
+        .min(READ_CHUNK_BYTES)
+        .min(limit);
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response.chunk().await.map_err(map_reqwest_error)? {
+        let new_len = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(GraphError::VaultTooLarge)?;
+        if new_len > limit {
+            return Err(GraphError::VaultTooLarge);
+        }
+        if bytes.capacity() < new_len {
+            let target_capacity = bytes.capacity().saturating_mul(2).max(new_len).min(limit);
+            bytes
+                .try_reserve_exact(target_capacity - bytes.len())
+                .map_err(|error| GraphError::Buffer(error.to_string()))?;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn read_reqwest_text_limited(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<String, GraphError> {
+    let mut bytes = Vec::with_capacity(limit.min(1024));
+    while let Some(chunk) = response.chunk().await.map_err(map_reqwest_error)? {
+        let new_len = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| GraphError::Buffer("response size overflow".into()))?;
+        if new_len > limit {
+            return Err(GraphError::Buffer(format!(
+                "graph response exceeded the {limit}-byte limit"
+            )));
+        }
+        bytes
+            .try_reserve(chunk.len())
+            .map_err(|error| GraphError::Buffer(error.to_string()))?;
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|error| GraphError::Parse(error.to_string()))
+}
+
+async fn read_reqwest_text_truncated(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<String, reqwest::Error> {
+    let mut bytes = Vec::with_capacity(limit.min(1024));
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await? {
+        let remaining = limit.saturating_sub(bytes.len());
+        let accepted = chunk.len().min(remaining);
+        bytes.extend_from_slice(&chunk[..accepted]);
+        if accepted < chunk.len() {
+            truncated = true;
+            break;
+        }
+    }
+    let display_bytes = match std::str::from_utf8(&bytes) {
+        Err(error) if truncated && error.error_len().is_none() => &bytes[..error.valid_up_to()],
+        _ => &bytes,
+    };
+    let mut text = String::from_utf8_lossy(display_bytes).into_owned();
+    if truncated {
+        text.push_str("\n[truncated]");
+    }
+    Ok(text)
+}
 
 fn http_get(url: &str, token: &AccessToken) -> Result<String, GraphError> {
     http::agent()
@@ -395,6 +494,7 @@ fn map_ureq_error(e: UreqError) -> GraphError {
     }
 }
 
+#[cfg(test)]
 fn parse_content_length(header: Option<&str>) -> Result<Option<u64>, GraphError> {
     header
         .map(|value| {
@@ -417,6 +517,7 @@ fn ensure_vault_size(size: usize, limit: usize) -> Result<(), GraphError> {
 /// Read a response body without trusting either `Content-Length` or transfer
 /// encoding. The declared length is checked before the reader is touched;
 /// the loop then enforces the same limit for chunked and dishonest responses.
+#[cfg(test)]
 fn read_vault_body(
     mut reader: impl io::Read,
     declared_length: Option<u64>,
@@ -434,22 +535,7 @@ fn read_vault_body(
     let mut bytes = Vec::with_capacity(initial_capacity);
     let mut chunk = [0_u8; READ_CHUNK_BYTES];
 
-    // The agent's idle timeouts bound each individual read, but a server
-    // dribbling one chunk per 119 s would keep this loop — and with it the
-    // per-path `syncs_in_flight` slot — alive indefinitely, leaving sync
-    // dead until an app restart. One hour covers the full 250 MB content
-    // cap even on a ~0.6 Mbit/s link; anything slower is not going to
-    // finish anyway.
-    // ponytail: uploads have no equivalent wall clock (ureq owns that write
-    // loop); add one if drip-feed uploads ever show up in practice.
-    let deadline = std::time::Instant::now() + TRANSFER_MAX_WALL_CLOCK;
-
     loop {
-        if std::time::Instant::now() >= deadline {
-            return Err(GraphError::Network(
-                "vault transfer exceeded the overall time budget".into(),
-            ));
-        }
         // Once exactly `limit` bytes have arrived, read one more byte to
         // distinguish an exact-boundary body from an oversized one without
         // ever appending beyond the cap.
@@ -688,25 +774,6 @@ impl SearchQueryResponse {
 mod tests {
     use super::*;
     use std::io::{Cursor, Read};
-
-    #[test]
-    fn deadline_reader_times_out_a_dripping_upload() {
-        let bytes = [0_u8; 16];
-        let mut buf = [0_u8; 8];
-
-        // Live deadline: bytes flow normally.
-        let mut fresh = DeadlineReader::new(
-            &bytes,
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-        );
-        assert_eq!(fresh.read(&mut buf).unwrap(), 8);
-
-        // Expired deadline — as after a peer dripped past the budget: the
-        // next chunk poll must fail instead of continuing forever.
-        let mut expired = DeadlineReader::new(&bytes, std::time::Instant::now());
-        let error = expired.read(&mut buf).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-    }
 
     struct PanicReader;
 

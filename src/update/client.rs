@@ -230,27 +230,78 @@ fn download_bundle<F>(platform: &ReleasePlatform, on_progress: F) -> Result<Vec<
 where
     F: Fn(usize, Option<u64>),
 {
-    let response = crate::sync::http::transfer_agent()
+    let request = crate::sync::http::transfer_client()
+        .map_err(|error| UpdateError::Network(error.to_string()))?
         .get(platform.url.as_str())
-        .set("Accept", "application/octet-stream")
-        .set("User-Agent", "FerrisPass updater")
-        .call()
-        .map_err(|error| UpdateError::Network(error.to_string()))?;
-
-    if let Some(content_length) = response
-        .header("Content-Length")
-        .and_then(|value| value.parse::<u64>().ok())
-        && content_length != platform.size
-    {
-        return Err(UpdateError::Network(format!(
-            "update bundle length mismatch (signed {}, received {content_length})",
-            platform.size
-        )));
-    }
-
-    read_exact_bundle(response.into_reader(), platform.size, on_progress)
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .header(reqwest::header::USER_AGENT, "FerrisPass updater");
+    let expected = platform.size;
+    crate::sync::http::run_transfer(async move {
+        let response = request
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| UpdateError::Network(error.to_string()))?;
+        if let Some(content_length) = response.content_length()
+            && content_length != expected
+        {
+            return Err(UpdateError::Network(format!(
+                "update bundle length mismatch (signed {expected}, received {content_length})"
+            )));
+        }
+        read_exact_bundle_response(response, expected, on_progress).await
+    })
+    .map_err(|error| UpdateError::Network(error.to_string()))?
 }
 
+async fn read_exact_bundle_response<F>(
+    mut response: reqwest::Response,
+    expected: u64,
+    on_progress: F,
+) -> Result<Vec<u8>, UpdateError>
+where
+    F: Fn(usize, Option<u64>),
+{
+    if expected == 0 || expected > MAX_BUNDLE_BYTES {
+        return Err(UpdateError::Parse(
+            "signed update bundle size is out of range".into(),
+        ));
+    }
+    let capacity = usize::try_from(expected)
+        .map_err(|_| UpdateError::Parse("signed update bundle size is too large".into()))?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(capacity).map_err(|error| {
+        UpdateError::Install(format!("could not reserve bundle buffer: {error}"))
+    })?;
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| UpdateError::Network(error.to_string()))?
+    {
+        let new_len = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| UpdateError::Network("update bundle size overflow".into()))?;
+        if new_len > capacity {
+            return Err(UpdateError::Network(format!(
+                "update bundle length mismatch (signed {expected}, received more than {expected})"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+        on_progress(bytes.len(), Some(expected));
+    }
+
+    if bytes.len() != capacity {
+        return Err(UpdateError::Network(format!(
+            "update bundle length mismatch (signed {expected}, received {})",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
 fn read_exact_bundle<R, F>(
     mut reader: R,
     expected: u64,
