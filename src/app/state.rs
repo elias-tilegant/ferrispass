@@ -220,7 +220,10 @@ pub struct AppState {
     /// When the most recent unlock completed. The session-lock monitor uses
     /// this to ignore trailing post-wake notifications that would otherwise
     /// re-lock the vault the user just unlocked (see `unlocked_within`).
-    last_unlock_at: Option<std::time::Instant>,
+    /// `SystemTime`, not `Instant`: `Instant` does not advance during sleep
+    /// on macOS, so an unlock right before a lid-close would still read as
+    /// "seconds ago" hours later and grace away the wake-up fail-safes.
+    last_unlock_at: Option<std::time::SystemTime>,
     /// Per-platform biometric backend. Production uses
     /// `crate::biometric::default_store()` (Touch ID on macOS, noop
     /// elsewhere); tests inject `InMemoryBiometricStore`. Held as
@@ -279,7 +282,7 @@ pub struct AppState {
 }
 
 /// Bookkeeping value for `AppState::saves_in_flight` — see the field docs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct QueuedSave {
     /// Session whose immutable payload is currently being written.
     owner: VaultSessionId,
@@ -290,6 +293,11 @@ struct QueuedSave {
     /// At least one of the coalesced requests wanted the cloud-sync push
     /// that normally chains off a successful save.
     sync_after: bool,
+    /// Shared with the background save task. "Discard changes and lock"
+    /// sets it so a task stuck in blocking file I/O can never publish the
+    /// discarded bytes once it un-sticks (`save_to_with_abort` re-checks it
+    /// immediately before publication).
+    abort: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl QueuedSave {
@@ -298,6 +306,7 @@ impl QueuedSave {
             owner,
             pending_session: None,
             sync_after: false,
+            abort: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -1820,7 +1829,7 @@ impl AppState {
 
                 opened_path = Some(path.clone());
                 opened_session_id = Some(VaultSessionId::next());
-                self.last_unlock_at = Some(std::time::Instant::now());
+                self.last_unlock_at = Some(std::time::SystemTime::now());
                 VaultStatus::Open {
                     path,
                     document: Box::new(document),
@@ -2298,7 +2307,13 @@ impl AppState {
     /// this grace check the session-lock monitor would re-lock the vault
     /// mid-typing on every wake.
     pub fn unlocked_within(&self, window: std::time::Duration) -> bool {
-        self.last_unlock_at.is_some_and(|at| at.elapsed() < window)
+        // A backwards clock jump makes `duration_since` fail — treat that
+        // as "grace expired": the fail-safe direction is locking.
+        self.last_unlock_at.is_some_and(|at| {
+            std::time::SystemTime::now()
+                .duration_since(at)
+                .is_ok_and(|elapsed| elapsed < window)
+        })
     }
 
     /// Whether the deferred-lock screen may offer "Discard changes and
@@ -2353,10 +2368,17 @@ impl AppState {
         for session_id in sessions {
             self.mark_vault_session_persisted(session_id);
         }
-        // Stuck-path discard: forget any save slot whose task is blocked in
-        // file I/O. The task owns its payload and its completion callback
-        // tolerates a missing slot; a post-restart save racing it is fenced
-        // by the sidecar flock (bounded, surfaces as a Failed status).
+        // Stuck-path discard: tell every blocked save task to abandon its
+        // write (checked immediately before publication), then forget the
+        // slots. A task that un-sticks later can therefore never publish
+        // the discarded bytes; its completion callback tolerates a missing
+        // slot. The task's cleartext copy of the database lives until the
+        // task dies — only a killable save process could reclaim that.
+        for queued in self.saves_in_flight.values() {
+            queued
+                .abort
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         self.saves_in_flight.clear();
         self.lock_requested_after_save = false;
         self.deferred_lock_since = None;
@@ -2373,6 +2395,21 @@ impl AppState {
             self.lock_requested_after_save = true;
             self.quarantine_sessions_for_deferred_lock();
             self.retry_unpersisted_vault_saves(cx);
+            // The stuck-save escape (`can_discard_deferred_saves`) is
+            // time-gated, but a genuinely hung save emits no further state
+            // events to re-render on — poke the UI once the gate opens so
+            // the discard button actually appears.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(DEFERRED_LOCK_STUCK_AFTER + std::time::Duration::from_secs(1))
+                    .await;
+                let _ = this.update(cx, |state, cx| {
+                    if matches!(state.vault, VaultStatus::LockedPendingSave) {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
             cx.notify();
             return false;
         }
@@ -2711,11 +2748,13 @@ impl AppState {
         let Some(payload) = self.save_payload_for_session(&target, session_id) else {
             return;
         };
-        self.saves_in_flight
-            .insert(target.clone(), QueuedSave::new(session_id));
+        let queued_save = QueuedSave::new(session_id);
+        let abort = Arc::clone(&queued_save.abort);
+        self.saves_in_flight.insert(target.clone(), queued_save);
 
         let save_target = target.clone();
-        let task = cx.background_spawn(async move { payload.save_to(&save_target) });
+        let task =
+            cx.background_spawn(async move { payload.save_to_with_abort(&save_target, &abort) });
 
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -4947,8 +4986,9 @@ impl AppState {
         // saves queue behind the merge write instead of racing it on disk.
         self.mark_vault_session_unpersisted(session_id);
         self.apply_save_status_for_session(target, session_id, SaveStatus::Saving, cx);
-        self.saves_in_flight
-            .insert(local_path.clone(), QueuedSave::new(session_id));
+        let queued_save = QueuedSave::new(session_id);
+        let abort = Arc::clone(&queued_save.abort);
+        self.saves_in_flight.insert(local_path.clone(), queued_save);
 
         let if_match = remote_etag;
 
@@ -4962,7 +5002,8 @@ impl AppState {
         // sat on disk — the next ordinary save would clobber the merge
         // with stale data.
         let save_path = local_path.clone();
-        let local_save_task = cx.background_spawn(async move { payload.save_to(&save_path) });
+        let local_save_task =
+            cx.background_spawn(async move { payload.save_to_with_abort(&save_path, &abort) });
 
         let callback_path = local_path;
 

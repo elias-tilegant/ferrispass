@@ -1152,6 +1152,20 @@ impl SavePayload {
     /// the target so a crash mid-write can never leave a half-written
     /// `.kdbx`.
     pub fn save_to(self, target_path: &Path) -> Result<SaveReceipt, SaveError> {
+        self.save_to_with_abort(target_path, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Like [`Self::save_to`], but re-checks `abort` immediately before
+    /// publication. "Discard changes and lock" flips the flag for a save
+    /// whose task is stuck in blocking file I/O — if that task ever
+    /// un-sticks, it must not publish bytes the user explicitly discarded.
+    /// (The task's own cleartext copy of the database lives until the task
+    /// dies; only a killable process could reclaim that earlier.)
+    pub fn save_to_with_abort(
+        self,
+        target_path: &Path,
+        abort: &std::sync::atomic::AtomicBool,
+    ) -> Result<SaveReceipt, SaveError> {
         // This guard serializes every payload cloned from one unlocked
         // document and remains held until the published revision is recorded.
         let mut storage = self.storage.lock().map_err(|_| SaveError::StorageState)?;
@@ -1245,6 +1259,13 @@ impl SavePayload {
         if let Err(error) = reject_hardlinked_target(&write_path) {
             let _ = fs::remove_file(&tmp_path);
             return Err(error);
+        }
+
+        // Last exit before publication: a discard that raced this save's
+        // blocking I/O must win here.
+        if abort.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(SaveError::Aborted);
         }
 
         let cleanup_error = if expected_revision.is_some() {
@@ -1577,6 +1598,9 @@ fn temp_path_for(target: &Path) -> PathBuf {
 
 #[derive(Debug, Error)]
 pub enum SaveError {
+    #[error("save was abandoned because its changes were discarded")]
+    Aborted,
+
     #[error("could not create temp file for save: {0}")]
     CreateTemp(#[source] io::Error),
 
