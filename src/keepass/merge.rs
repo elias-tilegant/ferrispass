@@ -28,8 +28,8 @@ use std::{
 
 use chrono::NaiveDateTime;
 use keepass::db::{
-    AutoType, Color, CustomDataItem, Database, Entry, EntryId, EntryRef, GroupId, Icon, Times,
-    Value, fields,
+    AutoType, Color, CustomDataItem, Database, Entry, EntryId, EntryRef, GroupId, GroupRef, Icon,
+    Times, Value, fields,
 };
 
 use crate::domain::CustomField;
@@ -443,8 +443,12 @@ fn warning_is_policy_resolved(warning: &str) -> bool {
 /// those before ever comparing the object, so a legacy entry that is
 /// byte-identical on both sides would otherwise make every merge attempt
 /// fatal forever — while a genuinely divergent one must stay fatal (the
-/// epoch substitute would silently pick a winner). Compares the full fork
-/// object (fields, times, history) via its derived `PartialEq`.
+/// epoch substitute would silently pick a winner). The comparison mirrors
+/// the pinned fork's own divergence checks: timestamps and history never
+/// define current-entry content, while group membership and parent location
+/// are merged independently. A parent difference is accepted only when the
+/// location timestamps identify one strictly newer side; missing location
+/// timestamps also produce a separate fatal move warning.
 fn warning_is_harmless(warning: &str, local: &Database, remote: &Database) -> bool {
     if warning_is_policy_resolved(warning) {
         return true;
@@ -460,32 +464,88 @@ fn warning_is_harmless(warning: &str, local: &Database, remote: &Database) -> bo
         return false;
     };
     match kind {
-        Some("entry") => entries_identical(local, remote, id),
-        Some("group") => groups_identical(local, remote, id),
+        Some("entry") => entries_equivalent_for_timestamp_warning(local, remote, id),
+        Some("group") => groups_equivalent_for_timestamp_warning(local, remote, id),
         _ => false,
     }
 }
 
-fn entries_identical(local: &Database, remote: &Database, id: &str) -> bool {
+fn entries_equivalent_for_timestamp_warning(local: &Database, remote: &Database, id: &str) -> bool {
     let (Some(local_id), Some(remote_id)) = (find_entry_id(local, id), find_entry_id(remote, id))
     else {
         return false;
     };
     match (local.entry(local_id), remote.entry(remote_id)) {
-        (Some(local_entry), Some(remote_entry)) => *local_entry == *remote_entry,
+        (Some(local_entry), Some(remote_entry)) => entry_content_eq(&local_entry, &remote_entry),
         _ => false,
     }
 }
 
-fn groups_identical(local: &Database, remote: &Database, id: &str) -> bool {
+fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
+    entry_location_is_resolved(local, remote)
+        && local.fields == remote.fields
+        && local.autotype == remote.autotype
+        && local.tags == remote.tags
+        && local.custom_data == remote.custom_data
+        && local.icon() == remote.icon()
+        && local.foreground_color == remote.foreground_color
+        && local.background_color == remote.background_color
+        && local.override_url == remote.override_url
+        && local.quality_check == remote.quality_check
+        && local.previous_parent_group == remote.previous_parent_group
+        // The fork does not expose attachment names. Reference IDs are the
+        // strongest public comparison and are also enforced by preflight.
+        && sorted_attachment_ids(local) == sorted_attachment_ids(remote)
+}
+
+fn entry_location_is_resolved(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
+    local.parent().id() == remote.parent().id()
+        || matches!(
+            (local.times.location_changed, remote.times.location_changed),
+            (Some(local_changed), Some(remote_changed)) if local_changed != remote_changed
+        )
+}
+
+fn sorted_attachment_ids(entry: &EntryRef<'_>) -> Vec<usize> {
+    let mut ids: Vec<_> = entry
+        .attachments()
+        .map(|attachment| attachment.id().id())
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+fn groups_equivalent_for_timestamp_warning(local: &Database, remote: &Database, id: &str) -> bool {
     let (Some(local_id), Some(remote_id)) = (find_group_id(local, id), find_group_id(remote, id))
     else {
         return false;
     };
     match (local.group(local_id), remote.group(remote_id)) {
-        (Some(local_group), Some(remote_group)) => *local_group == *remote_group,
+        (Some(local_group), Some(remote_group)) => group_content_eq(&local_group, &remote_group),
         _ => false,
     }
+}
+
+fn group_content_eq(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> bool {
+    group_location_is_resolved(local, remote)
+        && local.name == remote.name
+        && local.notes == remote.notes
+        && local.icon() == remote.icon()
+        && local.custom_data == remote.custom_data
+        && local.is_expanded == remote.is_expanded
+        && local.default_autotype_sequence == remote.default_autotype_sequence
+        && local.enable_autotype == remote.enable_autotype
+        && local.enable_searching == remote.enable_searching
+        && local.previous_parent_group == remote.previous_parent_group
+        && local.tags == remote.tags
+}
+
+fn group_location_is_resolved(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> bool {
+    local.parent().map(|parent| parent.id()) == remote.parent().map(|parent| parent.id())
+        || matches!(
+            (local.times.location_changed, remote.times.location_changed),
+            (Some(local_changed), Some(remote_changed)) if local_changed != remote_changed
+        )
 }
 
 fn preserve_auto_resolved_history(
@@ -1653,23 +1713,165 @@ mod tests {
     }
 
     #[test]
-    fn missing_timestamp_warning_is_harmless_only_for_identical_objects() {
+    fn missing_entry_timestamp_allows_resolved_move_and_history_merge() {
+        let earlier = Times::epoch() + chrono::Duration::seconds(1);
+        let later = earlier + chrono::Duration::seconds(1);
         let mut local = Database::new();
-        let id = add(&mut local, "Legacy", "pw");
-        let remote = fork(&local);
-        let warning = format!("Source entry {id} did not have a last modification timestamp");
+        let origin_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Origin".into();
+            group.id()
+        };
+        let target_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Target".into();
+            group.id()
+        };
+        let entry_id = {
+            let mut origin = local.group_mut(origin_id).unwrap();
+            let mut entry = origin.add_entry();
+            entry.set_unprotected(fields::TITLE, "Legacy");
+            entry.set_protected(fields::PASSWORD, "pw");
+            entry.times.last_modification = Some(earlier);
+            entry.times.location_changed = Some(earlier);
+            entry.id()
+        };
 
-        // Identical on both sides: the epoch substitute cannot lose anything.
-        assert!(warning_is_harmless(&warning, &local, &remote));
-
-        // Divergent: the substitute would silently pick a winner — fatal.
-        local
-            .entry_mut(id)
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(entry_id)
             .unwrap()
-            .set_protected(fields::PASSWORD, "changed");
-        assert!(!warning_is_harmless(&warning, &local, &remote));
+            .move_to(target_id)
+            .unwrap();
+        remote.entry_mut(entry_id).unwrap().times.location_changed = Some(later);
+        remote.entry_mut(entry_id).unwrap().times.last_modification = None;
+        let mut historical = clone_entry(&remote, entry_id, Side::Remote).unwrap();
+        historical.history = None;
+        historical.times.last_modification = Some(Times::epoch());
+        historical.set_unprotected(fields::NOTES, "legacy history");
+        remote
+            .entry_mut(entry_id)
+            .unwrap()
+            .history
+            .get_or_insert_default()
+            .add_entry(historical);
 
-        // Unknown object: fail closed.
+        // Exercise the real fork warning: the current content is unchanged,
+        // while location and history are independently and safely merged.
+        let mut raw_merged = local.clone();
+        let log = raw_merged.merge(&remote).expect("fork merge precondition");
+        let warning = format!("Source entry {entry_id} did not have a last modification timestamp");
+        assert!(log.warnings.contains(&warning));
+
+        let report = diff(&local, &remote);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("resolved move and history must not make timestamp warning fatal");
+        let entry = merged.entry(entry_id).unwrap();
+        assert_eq!(entry.parent().id(), target_id);
+        assert_eq!(entry.history.as_ref().unwrap().get_entries().len(), 1);
+    }
+
+    #[test]
+    fn missing_entry_timestamp_with_ambiguous_move_remains_fatal() {
+        let timestamp = Times::epoch() + chrono::Duration::seconds(1);
+        let mut local = Database::new();
+        let origin_id = {
+            let mut root = local.root_mut();
+            root.add_group().id()
+        };
+        let target_id = {
+            let mut root = local.root_mut();
+            root.add_group().id()
+        };
+        let entry_id = {
+            let mut origin = local.group_mut(origin_id).unwrap();
+            let mut entry = origin.add_entry();
+            entry.set_unprotected(fields::TITLE, "Ambiguous move");
+            entry.times.last_modification = Some(timestamp);
+            entry.times.location_changed = Some(timestamp);
+            entry.id()
+        };
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(entry_id)
+            .unwrap()
+            .move_to(target_id)
+            .unwrap();
+        remote.entry_mut(entry_id).unwrap().times.last_modification = None;
+        remote.entry_mut(entry_id).unwrap().times.location_changed = Some(timestamp);
+
+        // Equal concrete location timestamps do not emit the fork's missing-
+        // location warning, but they also do not identify which move won.
+        let mut raw_merged = local.clone();
+        let log = raw_merged.merge(&remote).expect("fork merge precondition");
+        let warning = format!("Source entry {entry_id} did not have a last modification timestamp");
+        assert!(log.warnings.contains(&warning));
+
+        let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
+            .expect_err("an unorderable move must remain fail-closed");
+        assert!(matches!(
+            error,
+            ApplyError::DatabaseMergeWarnings(message) if message.contains(&warning)
+        ));
+    }
+
+    #[test]
+    fn missing_group_timestamp_allows_independent_child_addition() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Legacy".into();
+            group.id()
+        };
+        let mut remote = fork(&local);
+        let child_id = {
+            let mut group = remote.group_mut(group_id).unwrap();
+            let mut child = group.add_entry();
+            child.set_unprotected(fields::TITLE, "Added elsewhere");
+            child.id()
+        };
+        remote.group_mut(group_id).unwrap().times.last_modification = None;
+
+        let mut raw_merged = local.clone();
+        let log = raw_merged.merge(&remote).expect("fork merge precondition");
+        let warning = format!("Source group {group_id} did not have a last modification timestamp");
+        assert!(log.warnings.contains(&warning));
+
+        let report = diff(&local, &remote);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("group membership must not make timestamp warning fatal");
+        assert_eq!(merged.entry(child_id).unwrap().parent().id(), group_id);
+    }
+
+    #[test]
+    fn missing_group_timestamp_with_divergent_content_remains_fatal() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Local name".into();
+            group.id()
+        };
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().name = "Remote name".into();
+        remote.group_mut(group_id).unwrap().times.last_modification = None;
+
+        let mut raw_merged = local.clone();
+        let log = raw_merged.merge(&remote).expect("fork merge precondition");
+        let warning = format!("Source group {group_id} did not have a last modification timestamp");
+        assert!(log.warnings.contains(&warning));
+
+        let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
+            .expect_err("divergent current group content must stay fatal");
+        assert!(matches!(
+            error,
+            ApplyError::DatabaseMergeWarnings(message) if message.contains(&warning)
+        ));
+
+        // Unknown object IDs remain fail-closed as well.
         let unknown = "Source entry 00000000-0000-0000-0000-000000000000 \
                        did not have a last modification timestamp";
         assert!(!warning_is_harmless(unknown, &local, &remote));
