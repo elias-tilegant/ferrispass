@@ -75,7 +75,12 @@ fn write_secret_to(pasteboard: &NSPasteboard, text: &str) -> ClipboardResult<Cli
         return Err(ClipboardError::WriteFailed);
     }
 
-    Ok(ClipboardChangeCount::from_raw(pasteboard.changeCount()))
+    // Return the generation `prepareForNewContents` reserved for *our*
+    // write, not a live `changeCount()` read: another app writing between
+    // `writeObjects` and that read would hand us its generation, and the
+    // auto-clear timer would later erase that app's clipboard content —
+    // exactly the race `clear_if_unchanged` exists to prevent.
+    Ok(prepared_count)
 }
 
 fn clear_if_unchanged_on(pasteboard: &NSPasteboard, expected: ClipboardChangeCount) -> bool {

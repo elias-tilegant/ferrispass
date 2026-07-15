@@ -31,6 +31,10 @@ const MAX_VAULT_CONTENT_BYTES: usize = 250_000_000;
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
+/// Overall wall-clock budget for one vault body download. See the comment
+/// in `read_vault_body` — idle timeouts alone leave transfers unbounded.
+const TRANSFER_MAX_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 #[derive(Debug, Error)]
 pub enum GraphError {
     #[error("network error: {0}")]
@@ -394,7 +398,22 @@ fn read_vault_body(
     let mut bytes = Vec::with_capacity(initial_capacity);
     let mut chunk = [0_u8; READ_CHUNK_BYTES];
 
+    // The agent's idle timeouts bound each individual read, but a server
+    // dribbling one chunk per 119 s would keep this loop — and with it the
+    // per-path `syncs_in_flight` slot — alive indefinitely, leaving sync
+    // dead until an app restart. One hour covers the full 250 MB content
+    // cap even on a ~0.6 Mbit/s link; anything slower is not going to
+    // finish anyway.
+    // ponytail: uploads have no equivalent wall clock (ureq owns that write
+    // loop); add one if drip-feed uploads ever show up in practice.
+    let deadline = std::time::Instant::now() + TRANSFER_MAX_WALL_CLOCK;
+
     loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(GraphError::Network(
+                "vault transfer exceeded the overall time budget".into(),
+            ));
+        }
         // Once exactly `limit` bytes have arrived, read one more byte to
         // distinguish an exact-boundary body from an oversized one without
         // ever appending beyond the cap.

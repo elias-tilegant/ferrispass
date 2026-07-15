@@ -663,8 +663,20 @@ impl AppShell {
                 while events.try_recv().is_ok() {}
 
                 let updated = window_handle.update(cx, |_root, window, app| {
-                    this.update(app, |shell, cx| shell.lock_vault(window, cx))
-                        .is_ok()
+                    this.update(app, |shell, cx| {
+                        // Post-wake notifications (DidWake, ScreensDidWake,
+                        // SessionDidBecomeActive, …) are delivered seconds
+                        // after the user is back. If they already unlocked
+                        // the vault again, a trailing event must not wipe
+                        // that unlock mid-typing.
+                        const POST_UNLOCK_GRACE: std::time::Duration =
+                            std::time::Duration::from_secs(5);
+                        if shell.state.read(cx).unlocked_within(POST_UNLOCK_GRACE) {
+                            return;
+                        }
+                        shell.lock_vault(window, cx);
+                    })
+                    .is_ok()
                 });
                 if !matches!(updated, Ok(true)) {
                     break;

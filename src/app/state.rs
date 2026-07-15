@@ -212,6 +212,10 @@ pub struct AppState {
     /// Two-step confirmation flag for "Discard changes and lock" on the
     /// deferred-lock screen. Reset whenever that screen is entered or left.
     discard_deferred_armed: bool,
+    /// When the most recent unlock completed. The session-lock monitor uses
+    /// this to ignore trailing post-wake notifications that would otherwise
+    /// re-lock the vault the user just unlocked (see `unlocked_within`).
+    last_unlock_at: Option<std::time::Instant>,
     /// Per-platform biometric backend. Production uses
     /// `crate::biometric::default_store()` (Touch ID on macOS, noop
     /// elsewhere); tests inject `InMemoryBiometricStore`. Held as
@@ -409,6 +413,7 @@ impl Default for AppState {
             lock_requested_after_save: false,
             deferred_lock_sessions: HashMap::new(),
             discard_deferred_armed: false,
+            last_unlock_at: None,
             biometric: Arc::new(NoopBiometricStore),
             biometric_registry: BiometricRegistry::new(),
             pending_biometric_enrollment: false,
@@ -1803,6 +1808,7 @@ impl AppState {
 
                 opened_path = Some(path.clone());
                 opened_session_id = Some(VaultSessionId::next());
+                self.last_unlock_at = Some(std::time::Instant::now());
                 VaultStatus::Open {
                     path,
                     document: Box::new(document),
@@ -2271,6 +2277,16 @@ impl AppState {
             // after the next unlock and must not delay clearing secrets.
             self.request_save_for_session(path, session_id, false, cx);
         }
+    }
+
+    /// `true` when a vault finished unlocking less than `window` ago.
+    /// `NSWorkspaceDidWakeNotification` and friends routinely arrive
+    /// seconds after the user is already back and re-authenticated; without
+    /// this grace check the session-lock monitor would re-lock the vault
+    /// mid-typing on every wake.
+    pub fn unlocked_within(&self, window: std::time::Duration) -> bool {
+        self.last_unlock_at
+            .is_some_and(|at| at.elapsed() < window)
     }
 
     /// Whether the deferred-lock screen may offer "Discard changes and
