@@ -75,7 +75,7 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
         // marked, or a later sweep could delete the only good app copy.
         // Failure to write it aborts the install while nothing has been
         // touched yet.
-        .and_then(|()| write_keep_marker(&staging_root));
+        .and_then(|()| write_keep_marker(&staging_root, parent));
     if let Err(error) = prepared {
         let _ = fs::remove_dir_all(&staging_root);
         return Err(error);
@@ -99,14 +99,15 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
     }
 }
 
-/// Write and fsync the keep-marker, then fsync the staging directory so the
-/// marker's directory entry is durable before any swap runs.
-fn write_keep_marker(staging_root: &Path) -> Result<(), UpdateError> {
+/// Write and fsync the keep-marker, then fsync both directory entries needed
+/// to recover the staging tree before any swap runs.
+fn write_keep_marker(staging_root: &Path, parent: &Path) -> Result<(), UpdateError> {
     let path = staging_root.join(STAGING_KEEP_MARKER);
     let file = File::create(&path).map_err(|error| install_io("write staging marker", error))?;
     file.sync_all()
         .map_err(|error| install_io("sync staging marker", error))?;
     sync_directory(staging_root).map_err(|error| install_io("sync staging directory", error))?;
+    sync_directory(parent).map_err(|error| install_io("sync staging parent directory", error))?;
     Ok(())
 }
 
@@ -333,19 +334,34 @@ struct ReplaceFailure {
 }
 
 fn replace_bundle(target: &Path, staged: &Path) -> Result<(), ReplaceFailure> {
-    match atomic_swap(target, staged) {
+    replace_bundle_with(target, staged, atomic_swap, sync_swap_parents)
+}
+
+fn replace_bundle_with(
+    target: &Path,
+    staged: &Path,
+    mut swap: impl FnMut(&Path, &Path) -> io::Result<()>,
+    mut sync_parents: impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> Result<(), ReplaceFailure> {
+    match swap(target, staged) {
         Ok(()) => {
-            if let Err(error) = sync_swap_parents(target, staged) {
-                return match atomic_swap(target, staged) {
-                    Ok(()) => {
-                        let _ = sync_swap_parents(target, staged);
-                        Err(ReplaceFailure {
+            if let Err(error) = sync_parents(target, staged) {
+                return match swap(target, staged) {
+                    Ok(()) => match sync_parents(target, staged) {
+                        Ok(()) => Err(ReplaceFailure {
                             message: format!(
                                 "could not persist update; restored previous app: {error}"
                             ),
                             preserve_staging: false,
-                        })
-                    }
+                        }),
+                        Err(rollback_sync) => Err(ReplaceFailure {
+                            message: format!(
+                                "could not persist update ({error}); swapped the previous app back but could not persist the rollback ({rollback_sync}); both app copies retained at {}",
+                                staged.display()
+                            ),
+                            preserve_staging: true,
+                        }),
+                    },
                     Err(rollback) => Err(ReplaceFailure {
                         message: format!(
                             "could not persist update and rollback failed ({rollback}); previous app retained at {}",
@@ -507,5 +523,59 @@ mod tests {
             Some(Path::new("MacOS/ferrispass")),
             bundle,
         ));
+    }
+
+    #[test]
+    fn failed_rollback_sync_preserves_both_app_copies() {
+        let target = Path::new("/Applications/FerrisPass.app");
+        let staged = Path::new("/Applications/.ferrispass-update-test/FerrisPass.app");
+        let mut swaps = 0;
+        let mut syncs = 0;
+
+        let failure = replace_bundle_with(
+            target,
+            staged,
+            |_, _| {
+                swaps += 1;
+                Ok(())
+            },
+            |_, _| {
+                syncs += 1;
+                Err(io::Error::other("injected sync failure"))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(swaps, 2);
+        assert_eq!(syncs, 2);
+        assert!(failure.preserve_staging);
+        assert!(failure.message.contains("could not persist the rollback"));
+        assert!(failure.message.contains(&staged.display().to_string()));
+    }
+
+    #[test]
+    fn durable_rollback_allows_staging_cleanup() {
+        let target = Path::new("/Applications/FerrisPass.app");
+        let staged = Path::new("/Applications/.ferrispass-update-test/FerrisPass.app");
+        let mut syncs = 0;
+
+        let failure = replace_bundle_with(
+            target,
+            staged,
+            |_, _| Ok(()),
+            |_, _| {
+                syncs += 1;
+                if syncs == 1 {
+                    Err(io::Error::other("injected initial sync failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(syncs, 2);
+        assert!(!failure.preserve_staging);
+        assert!(failure.message.contains("restored previous app"));
     }
 }
