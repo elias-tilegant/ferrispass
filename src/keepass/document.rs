@@ -1152,19 +1152,21 @@ impl SavePayload {
     /// the target so a crash mid-write can never leave a half-written
     /// `.kdbx`.
     pub fn save_to(self, target_path: &Path) -> Result<SaveReceipt, SaveError> {
-        self.save_to_with_abort(target_path, &std::sync::atomic::AtomicBool::new(false))
+        self.save_to_with_abort(target_path, &SaveAbortHandle::new())
     }
 
-    /// Like [`Self::save_to`], but re-checks `abort` immediately before
-    /// publication. "Discard changes and lock" flips the flag for a save
-    /// whose task is stuck in blocking file I/O — if that task ever
-    /// un-sticks, it must not publish bytes the user explicitly discarded.
+    /// Like [`Self::save_to`], but arbitrates against "Discard changes and
+    /// lock" through `abort`'s atomic state machine: immediately before
+    /// publication the worker claims the `Publishing` state — exactly one
+    /// of {publish, abort} can ever win, so a discard that succeeded means
+    /// these bytes never reach the disk, and a worker that reached
+    /// `Publishing` makes the discard report failure instead of lying.
     /// (The task's own cleartext copy of the database lives until the task
     /// dies; only a killable process could reclaim that earlier.)
     pub fn save_to_with_abort(
         self,
         target_path: &Path,
-        abort: &std::sync::atomic::AtomicBool,
+        abort: &SaveAbortHandle,
     ) -> Result<SaveReceipt, SaveError> {
         // This guard serializes every payload cloned from one unlocked
         // document and remains held until the published revision is recorded.
@@ -1261,9 +1263,12 @@ impl SavePayload {
             return Err(error);
         }
 
-        // Last exit before publication: a discard that raced this save's
-        // blocking I/O must win here.
-        if abort.load(std::sync::atomic::Ordering::Acquire) {
+        // Last exit before publication: atomically claim the Publishing
+        // state. Losing means a discard already won — these bytes must
+        // never reach the target. Winning means a concurrent discard from
+        // here on reports failure instead of pretending the (now
+        // published) changes were dropped.
+        if !abort.try_begin_publish() {
             let _ = fs::remove_file(&tmp_path);
             return Err(SaveError::Aborted);
         }
@@ -1316,6 +1321,7 @@ impl SavePayload {
         // represented as a pre-commit error. Record the revision first, then
         // return a receipt that distinguishes full durability from a failed
         // directory fsync.
+        abort.mark_published();
         *storage = Some(StorageState {
             path: write_path.clone(),
             revision: new_revision,
@@ -1331,6 +1337,65 @@ impl SavePayload {
             bytes: Arc::new(published_bytes),
             durability,
         })
+    }
+}
+
+const SAVE_WRITING: u8 = 0;
+const SAVE_PUBLISHING: u8 = 1;
+const SAVE_PUBLISHED: u8 = 2;
+const SAVE_ABORTED: u8 = 3;
+
+/// Atomic `Writing → (Publishing → Published) | Aborted` state machine
+/// shared between one save task and "Discard changes and lock". The worker
+/// claims publication, the discard claims abortion — the CAS guarantees
+/// exactly one side wins: a successful discard means the bytes never reach
+/// the target, and a worker that reached `Publishing` makes any later
+/// discard attempt report failure instead of claiming the changes were
+/// dropped.
+#[derive(Clone, Debug)]
+pub struct SaveAbortHandle(Arc<std::sync::atomic::AtomicU8>);
+
+impl Default for SaveAbortHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SaveAbortHandle {
+    pub fn new() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicU8::new(SAVE_WRITING)))
+    }
+
+    /// Worker side: claim the exclusive right to publish. Fails iff a
+    /// discard already won.
+    fn try_begin_publish(&self) -> bool {
+        self.0
+            .compare_exchange(
+                SAVE_WRITING,
+                SAVE_PUBLISHING,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn mark_published(&self) {
+        self.0
+            .store(SAVE_PUBLISHED, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Discard side: claim abortion. Fails iff the worker already claimed
+    /// (or finished) publication — the bytes are on disk or about to be,
+    /// so a "discarded" claim would be false.
+    pub fn try_abort(&self) -> bool {
+        self.0
+            .compare_exchange(
+                SAVE_WRITING,
+                SAVE_ABORTED,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 
@@ -1741,6 +1806,28 @@ mod tests {
             .as_ref()
             .map_or(0, |history| history.get_entries().len());
         assert_eq!(history_len, 4);
+    }
+
+    #[test]
+    fn save_abort_state_machine_lets_exactly_one_side_win() {
+        // Discard wins while the worker is still writing…
+        let handle = SaveAbortHandle::new();
+        assert!(handle.try_abort());
+        assert!(!handle.try_begin_publish(), "aborted save must not publish");
+        assert!(!handle.try_abort(), "abort is claimed exactly once");
+
+        // …and once the worker claimed publication, discard must fail.
+        let handle = SaveAbortHandle::new();
+        assert!(handle.try_begin_publish());
+        assert!(
+            !handle.try_abort(),
+            "publishing save must not be discardable"
+        );
+        handle.mark_published();
+        assert!(
+            !handle.try_abort(),
+            "published save must not be discardable"
+        );
     }
 
     #[test]

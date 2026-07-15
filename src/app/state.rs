@@ -294,10 +294,12 @@ struct QueuedSave {
     /// that normally chains off a successful save.
     sync_after: bool,
     /// Shared with the background save task. "Discard changes and lock"
-    /// sets it so a task stuck in blocking file I/O can never publish the
-    /// discarded bytes once it un-sticks (`save_to_with_abort` re-checks it
-    /// immediately before publication).
-    abort: Arc<std::sync::atomic::AtomicBool>,
+    /// races the worker through this atomic state machine: the worker
+    /// claims publication immediately before the rename, the discard
+    /// claims abortion — exactly one side wins, so a discarded save can
+    /// never publish later and a published save can never be reported as
+    /// discarded.
+    abort: crate::keepass::SaveAbortHandle,
 }
 
 impl QueuedSave {
@@ -306,7 +308,7 @@ impl QueuedSave {
             owner,
             pending_session: None,
             sync_after: false,
-            abort: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            abort: crate::keepass::SaveAbortHandle::new(),
         }
     }
 }
@@ -2368,16 +2370,21 @@ impl AppState {
         for session_id in sessions {
             self.mark_vault_session_persisted(session_id);
         }
-        // Stuck-path discard: tell every blocked save task to abandon its
-        // write (checked immediately before publication), then forget the
-        // slots. A task that un-sticks later can therefore never publish
-        // the discarded bytes; its completion callback tolerates a missing
-        // slot. The task's cleartext copy of the database lives until the
-        // task dies — only a killable save process could reclaim that.
-        for queued in self.saves_in_flight.values() {
-            queued
-                .abort
-                .store(true, std::sync::atomic::Ordering::Release);
+        // Stuck-path discard: atomically win the race against every
+        // in-flight writer. `try_abort` fails for a worker that already
+        // claimed publication — its bytes are on disk or about to be, so
+        // reporting "discarded" would be false. In that case leave
+        // everything in place and let that save's completion callback
+        // finish the deferred lock; already-aborted siblings surface as
+        // Failed and remain retryable/discardable. The task's cleartext
+        // copy of the database lives until the task dies — only a killable
+        // save process could reclaim that earlier.
+        let all_aborted = self
+            .saves_in_flight
+            .values()
+            .fold(true, |all, queued| queued.abort.try_abort() && all);
+        if !all_aborted {
+            return false;
         }
         self.saves_in_flight.clear();
         self.lock_requested_after_save = false;
@@ -2749,7 +2756,7 @@ impl AppState {
             return;
         };
         let queued_save = QueuedSave::new(session_id);
-        let abort = Arc::clone(&queued_save.abort);
+        let abort = queued_save.abort.clone();
         self.saves_in_flight.insert(target.clone(), queued_save);
 
         let save_target = target.clone();
@@ -4987,7 +4994,7 @@ impl AppState {
         self.mark_vault_session_unpersisted(session_id);
         self.apply_save_status_for_session(target, session_id, SaveStatus::Saving, cx);
         let queued_save = QueuedSave::new(session_id);
-        let abort = Arc::clone(&queued_save.abort);
+        let abort = queued_save.abort.clone();
         self.saves_in_flight.insert(local_path.clone(), queued_save);
 
         let if_match = remote_etag;
