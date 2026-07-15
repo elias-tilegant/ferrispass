@@ -31,9 +31,29 @@ const MAX_VAULT_CONTENT_BYTES: usize = 250_000_000;
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Overall wall-clock budget for one vault body download. See the comment
-/// in `read_vault_body` — idle timeouts alone leave transfers unbounded.
+/// Overall wall-clock budget for one vault body transfer (either
+/// direction). See the comment in `read_vault_body` — idle timeouts alone
+/// leave transfers unbounded.
 const TRANSFER_MAX_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Wraps the upload body so each socket-write chunk re-checks the overall
+/// transfer deadline.
+struct DeadlineReader<'a> {
+    inner: io::Cursor<&'a [u8]>,
+    deadline: std::time::Instant,
+}
+
+impl io::Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if std::time::Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "vault transfer exceeded the overall time budget",
+            ));
+        }
+        self.inner.read(buf)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum GraphError {
@@ -298,23 +318,36 @@ pub fn upload_content(
     if let Some(etag) = if_match {
         req = req.set("If-Match", etag);
     }
-    match req.send_bytes(bytes) {
+    // Mirror of the download wall clock: idle write timeouts alone let a
+    // peer that reads one byte per timeout window keep the upload — and the
+    // per-path sync slot — alive indefinitely. The reader is polled once
+    // per socket-write chunk, so it observes the deadline even while bytes
+    // are still trickling. Content-Length is set explicitly because
+    // streaming via `send` would otherwise switch to chunked encoding.
+    let body = DeadlineReader {
+        inner: io::Cursor::new(bytes),
+        deadline: std::time::Instant::now() + TRANSFER_MAX_WALL_CLOCK,
+    };
+    match req
+        .set("Content-Length", &bytes.len().to_string())
+        .send(body)
+    {
         Ok(resp) => {
             let body = resp
                 .into_string()
                 .map_err(|e| GraphError::Network(e.to_string()))?;
             let item_resp: ItemResponse = parse_json(&body)?;
-            let mut item = item_from_response(item_resp);
+            let item = item_from_response(item_resp);
             // Callers persist `new_etag` as the optimistic-concurrency
-            // revision for every future push. An upload response without an
-            // eTag would store "" and permanently fail the empty-revision
-            // guard in `upload_after_save`, so fall back to a metadata fetch
-            // rather than ever handing out an empty revision.
+            // revision for every future push, so an empty one must never
+            // escape. Do NOT patch it up with a metadata GET: between our
+            // PUT and that GET a concurrent client may have uploaded, and
+            // adopting *its* eTag would let our next push overwrite that
+            // change without ever seeing a conflict. Failing keeps the
+            // caller's previous eTag — the retry then gets a 412 and heals
+            // through the normal conflict/merge path.
             if item.etag.trim().is_empty() {
-                item.etag = get_item_metadata(drive_id, item_id, token)?.etag;
-                if item.etag.trim().is_empty() {
-                    return Err(GraphError::MissingField("eTag"));
-                }
+                return Err(GraphError::MissingField("eTag"));
             }
             Ok(UploadOutcome::Ok {
                 new_etag: item.etag.clone(),
