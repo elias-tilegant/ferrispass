@@ -793,15 +793,23 @@ fn workspace(
         .into_any_element();
 
     let content: AnyElement = if is_lock_pending {
-        let (can_discard, discard_armed) = {
+        let (can_discard, discard_armed, is_publishing) = {
             let state = shell.state().read(cx);
             (
                 state.can_discard_deferred_saves(),
                 state.discard_deferred_armed(),
+                state.deferred_save_is_publishing(),
             )
         };
-        locked_pending_panel(summary, &save_status, can_discard, discard_armed, cx)
-            .into_any_element()
+        locked_pending_panel(
+            summary,
+            &save_status,
+            can_discard,
+            discard_armed,
+            is_publishing,
+            cx,
+        )
+        .into_any_element()
     } else if let Some(browser) = browser {
         vault_split(browser, shell, cx).into_any_element()
     } else if is_busy {
@@ -2325,6 +2333,7 @@ fn locked_pending_panel(
     save_status: &SaveStatus,
     can_discard: bool,
     discard_armed: bool,
+    is_publishing: bool,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     v_flex()
@@ -2347,6 +2356,17 @@ fn locked_pending_panel(
                 .text_color(palette::text_muted())
                 .child(summary.subtitle.clone()),
         )
+        .when(is_publishing, |this| {
+            this.child(
+                div()
+                    .max_w(px(560.))
+                    .text_sm()
+                    .text_color(palette::red())
+                    .child(
+                        "The save has started publishing and cannot be interrupted safely. If storage remains unresponsive, macOS Force Quit is the only escape; the file may already contain these changes.",
+                    ),
+            )
+        })
         .when(matches!(save_status, SaveStatus::Failed(_)), |this| {
             this.child(toolbar_button(
                 "locked-retry-save",

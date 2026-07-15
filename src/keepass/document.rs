@@ -1368,7 +1368,7 @@ impl SaveAbortHandle {
 
     /// Worker side: claim the exclusive right to publish. Fails iff a
     /// discard already won.
-    fn try_begin_publish(&self) -> bool {
+    pub(crate) fn try_begin_publish(&self) -> bool {
         self.0
             .compare_exchange(
                 SAVE_WRITING,
@@ -1384,18 +1384,31 @@ impl SaveAbortHandle {
             .store(SAVE_PUBLISHED, std::sync::atomic::Ordering::Release);
     }
 
-    /// Discard side: claim abortion. Fails iff the worker already claimed
-    /// (or finished) publication — the bytes are on disk or about to be,
-    /// so a "discarded" claim would be false.
-    pub fn try_abort(&self) -> bool {
-        self.0
-            .compare_exchange(
-                SAVE_WRITING,
-                SAVE_ABORTED,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
+    /// Discard side: ensure that publication is aborted. Idempotently returns
+    /// `true` once abortion has won; returns `false` iff the worker already
+    /// claimed (or finished) publication, when a "discarded" claim would be
+    /// false.
+    pub(crate) fn try_abort(&self) -> bool {
+        match self.0.compare_exchange(
+            SAVE_WRITING,
+            SAVE_ABORTED,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) | Err(SAVE_ABORTED) => true,
+            Err(SAVE_PUBLISHING | SAVE_PUBLISHED) => false,
+            Err(state) => {
+                debug_assert!(false, "unknown save abort state: {state}");
+                false
+            }
+        }
+    }
+
+    pub(crate) fn publication_started(&self) -> bool {
+        matches!(
+            self.0.load(std::sync::atomic::Ordering::Acquire),
+            SAVE_PUBLISHING | SAVE_PUBLISHED
+        )
     }
 }
 
@@ -1814,11 +1827,13 @@ mod tests {
         let handle = SaveAbortHandle::new();
         assert!(handle.try_abort());
         assert!(!handle.try_begin_publish(), "aborted save must not publish");
-        assert!(!handle.try_abort(), "abort is claimed exactly once");
+        assert!(handle.try_abort(), "an established abort is idempotent");
+        assert!(!handle.publication_started());
 
         // …and once the worker claimed publication, discard must fail.
         let handle = SaveAbortHandle::new();
         assert!(handle.try_begin_publish());
+        assert!(handle.publication_started());
         assert!(
             !handle.try_abort(),
             "publishing save must not be discardable"

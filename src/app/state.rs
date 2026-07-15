@@ -2322,10 +2322,14 @@ impl AppState {
     /// lock": every remaining save has actually failed, or the deferred
     /// lock has been waiting long past any realistic save duration — the
     /// flock has a deadline, but open/canonicalize/write/fsync on a dead
-    /// network volume can block a save task forever. Discarding while such
-    /// a task is stuck is safe: it holds its own payload copy, so if it
-    /// ever completes it merely writes the bytes the user chose to discard.
+    /// network volume can block a save task forever. The action is hidden once
+    /// a worker has claimed publication because those bytes can no longer be
+    /// truthfully described as discarded.
     pub fn can_discard_deferred_saves(&self) -> bool {
+        self.deferred_discard_gate_open() && !self.deferred_save_is_publishing()
+    }
+
+    fn deferred_discard_gate_open(&self) -> bool {
         if !matches!(self.vault, VaultStatus::LockedPendingSave) {
             return false;
         }
@@ -2335,6 +2339,17 @@ impl AppState {
             .deferred_lock_since
             .is_some_and(|since| since.elapsed() >= DEFERRED_LOCK_STUCK_AFTER);
         failed_and_settled || stuck
+    }
+
+    /// A writer has crossed the last abortable point and may already have
+    /// replaced the vault file. Its task must report the result before the app
+    /// can truthfully discard anything or release the lifecycle guard.
+    pub fn deferred_save_is_publishing(&self) -> bool {
+        matches!(self.vault, VaultStatus::LockedPendingSave)
+            && self
+                .saves_in_flight
+                .values()
+                .any(|queued| queued.abort.publication_started())
     }
 
     pub fn discard_deferred_armed(&self) -> bool {
@@ -2354,13 +2369,36 @@ impl AppState {
     pub fn discard_deferred_saves_and_lock(&mut self, cx: &mut Context<Self>) {
         if self.discard_deferred_saves_and_lock_now() {
             cx.notify();
+        } else if self.deferred_save_is_publishing() {
+            // The confirmation may have raced the worker's publication CAS.
+            // Disarm it and redraw so the UI can represent that waiting (or
+            // Force Quit) is now the only honest choice.
+            self.discard_deferred_armed = false;
+            cx.notify();
         }
     }
 
     fn discard_deferred_saves_and_lock_now(&mut self) -> bool {
-        if !self.can_discard_deferred_saves() {
+        // Use the time/status gate directly rather than `can_discard`: the UI
+        // may have rendered the action while all writers were still abortable
+        // and then lose the CAS race to a publisher before this callback.
+        if !self.deferred_discard_gate_open() {
             return false;
         }
+        // Arbitrate every writer before mutating AppState. This can partially
+        // abort a mixed Writing/Publishing set, but if any publisher already
+        // won, every session, document and lifecycle-guard contribution stays
+        // retained until its normal completion callback establishes what is
+        // durable. `try_abort` is idempotent so a later attempt can safely
+        // finish after the publishing slot settles.
+        let mut all_aborted = true;
+        for queued in self.saves_in_flight.values() {
+            all_aborted &= queued.abort.try_abort();
+        }
+        if !all_aborted {
+            return false;
+        }
+
         let sessions: Vec<VaultSessionId> = self
             .unpersisted_vault_sessions
             .iter()
@@ -2369,22 +2407,6 @@ impl AppState {
             .collect();
         for session_id in sessions {
             self.mark_vault_session_persisted(session_id);
-        }
-        // Stuck-path discard: atomically win the race against every
-        // in-flight writer. `try_abort` fails for a worker that already
-        // claimed publication — its bytes are on disk or about to be, so
-        // reporting "discarded" would be false. In that case leave
-        // everything in place and let that save's completion callback
-        // finish the deferred lock; already-aborted siblings surface as
-        // Failed and remain retryable/discardable. The task's cleartext
-        // copy of the database lives until the task dies — only a killable
-        // save process could reclaim that earlier.
-        let all_aborted = self
-            .saves_in_flight
-            .values()
-            .fold(true, |all, queued| queued.abort.try_abort() && all);
-        if !all_aborted {
-            return false;
         }
         self.saves_in_flight.clear();
         self.lock_requested_after_save = false;
@@ -6046,6 +6068,109 @@ mod park_tests {
 
         // Not offered while the vault is healthy or a save could still land.
         assert!(!state.can_discard_deferred_saves());
+    }
+
+    #[test]
+    fn discard_aborts_every_writing_slot_before_releasing_deferred_state() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/writing-save.kdbx");
+        fresh_open(&mut state, path.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session id");
+
+        state.mark_vault_session_unpersisted(session_id);
+        let queued = QueuedSave::new(session_id);
+        let abort = queued.abort.clone();
+        state.saves_in_flight.insert(path, queued);
+        state.lock_requested_after_save = true;
+        state.quarantine_sessions_for_deferred_lock();
+        state.deferred_lock_since = Some(
+            std::time::Instant::now()
+                .checked_sub(DEFERRED_LOCK_STUCK_AFTER + std::time::Duration::from_secs(1))
+                .expect("representable deadline"),
+        );
+
+        assert!(state.can_discard_deferred_saves());
+        assert!(state.discard_deferred_saves_and_lock_now());
+
+        assert!(matches!(state.vault, VaultStatus::Empty));
+        assert!(state.deferred_lock_sessions.is_empty());
+        assert!(state.unpersisted_vault_sessions.is_empty());
+        assert!(state.saves_in_flight.is_empty());
+        assert!(abort.try_abort(), "the worker remains safely aborted");
+        assert!(!abort.publication_started());
+    }
+
+    #[test]
+    fn mixed_discard_keeps_all_state_when_one_writer_is_publishing() {
+        let mut state = AppState::default();
+        let writing_path = PathBuf::from("/tmp/mixed-writing-save.kdbx");
+        let publishing_path = PathBuf::from("/tmp/mixed-publishing-save.kdbx");
+
+        fresh_open(&mut state, writing_path.clone(), "writing-pw");
+        let writing_session = state.active_vault_session_id.expect("writing session");
+        state.mark_vault_session_unpersisted(writing_session);
+        let writing = QueuedSave::new(writing_session);
+        let writing_abort = writing.abort.clone();
+        state.saves_in_flight.insert(writing_path.clone(), writing);
+        state.park_active();
+
+        fresh_open(&mut state, publishing_path.clone(), "publishing-pw");
+        let publishing_session = state.active_vault_session_id.expect("publishing session");
+        state.mark_vault_session_unpersisted(publishing_session);
+        let publishing = QueuedSave::new(publishing_session);
+        let publishing_abort = publishing.abort.clone();
+        assert!(publishing_abort.try_begin_publish());
+        state
+            .saves_in_flight
+            .insert(publishing_path.clone(), publishing);
+
+        state.lock_requested_after_save = true;
+        state.quarantine_sessions_for_deferred_lock();
+        state.deferred_lock_since = Some(
+            std::time::Instant::now()
+                .checked_sub(DEFERRED_LOCK_STUCK_AFTER + std::time::Duration::from_secs(1))
+                .expect("representable deadline"),
+        );
+
+        assert!(
+            !state.can_discard_deferred_saves(),
+            "the UI must not offer an action once publication is known"
+        );
+        assert!(!state.discard_deferred_saves_and_lock_now());
+
+        assert!(matches!(state.vault, VaultStatus::LockedPendingSave));
+        assert!(state.lock_requested_after_save);
+        assert!(state.deferred_save_is_publishing());
+        assert_eq!(state.deferred_lock_sessions.len(), 2);
+        assert!(state.deferred_lock_sessions.contains_key(&writing_session));
+        assert!(
+            state
+                .deferred_lock_sessions
+                .contains_key(&publishing_session)
+        );
+        assert!(state.unpersisted_vault_sessions.contains(&writing_session));
+        assert!(
+            state
+                .unpersisted_vault_sessions
+                .contains(&publishing_session)
+        );
+        assert_eq!(state.saves_in_flight.len(), 2);
+        assert!(
+            state
+                .save_payload_for_session(&writing_path, writing_session)
+                .is_some()
+        );
+        assert!(
+            state
+                .save_payload_for_session(&publishing_path, publishing_session)
+                .is_some()
+        );
+        assert!(has_unpersisted_vault_saves());
+
+        assert!(writing_abort.try_abort(), "the writing sibling was aborted");
+        assert!(!writing_abort.publication_started());
+        assert!(publishing_abort.publication_started());
+        assert!(!publishing_abort.try_abort());
     }
 
     #[test]
