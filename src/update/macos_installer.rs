@@ -34,6 +34,25 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
         return Err(install_error("installed application bundle was not found"));
     }
 
+    // Gatekeeper-translocated apps run from a read-only mount; staging next
+    // to the bundle would fail every time with an unactionable "Read-only
+    // file system". Name the actual remedy instead.
+    if target
+        .components()
+        .any(|component| component.as_os_str() == "AppTranslocation")
+    {
+        return Err(install_error(
+            "FerrisPass is running from a macOS security quarantine location. \
+             Move FerrisPass.app to /Applications and start it from there, then update again.",
+        ));
+    }
+
+    // A kill/crash mid-install orphans the hidden staging directory (up to
+    // the full bundle size) next to the app forever. The working bundle was
+    // just verified above, so leftovers from earlier attempts are redundant
+    // by now — sweep them before creating this run's staging directory.
+    sweep_stale_staging(parent);
+
     // Keeping this directory until the transaction is resolved is deliberate:
     // after a failed rollback it contains the only known-good old bundle.
     let staging_root = tempfile::Builder::new()
@@ -65,6 +84,26 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
                 let _ = fs::remove_dir_all(&staging_root);
             }
             Err(install_error(failure.message))
+        }
+    }
+}
+
+/// Remove `.ferrispass-update-*` directories left behind by a crashed or
+/// killed earlier install. Only called after the installed bundle has been
+/// verified to exist, so nothing in these leftovers is still needed. Best
+/// effort — a failure here must never block the actual update.
+fn sweep_stale_staging(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_stale_staging = name
+            .to_str()
+            .is_some_and(|name| name.starts_with(".ferrispass-update-"))
+            && entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if is_stale_staging {
+            let _ = fs::remove_dir_all(entry.path());
         }
     }
 }

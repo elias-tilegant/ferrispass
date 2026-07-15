@@ -187,10 +187,23 @@ impl VerifiedRelease {
 }
 
 fn fetch_verified_manifest() -> Result<VerifiedRelease, UpdateError> {
-    let manifest = download_limited(UPDATE_ENDPOINT, MAX_MANIFEST_BYTES)?;
-    let signature = download_limited(UPDATE_SIGNATURE_ENDPOINT, MAX_MANIFEST_SIGNATURE_BYTES)?;
-    verify_manifest(&manifest, &signature)?;
-    VerifiedRelease::parse(&manifest)
+    // The manifest and its .minisig are two separate requests against
+    // `/releases/latest/download/…`. A release publishing between them
+    // pairs the old manifest with the new signature — a benign transient
+    // race that would otherwise surface as an alarming signature failure.
+    // Re-fetch the pair once before reporting the error for real.
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let manifest = download_limited(UPDATE_ENDPOINT, MAX_MANIFEST_BYTES)?;
+        let signature =
+            download_limited(UPDATE_SIGNATURE_ENDPOINT, MAX_MANIFEST_SIGNATURE_BYTES)?;
+        match verify_manifest(&manifest, &signature) {
+            Ok(()) => return VerifiedRelease::parse(&manifest),
+            Err(_) if attempt < 2 => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn download_limited(url: &str, max_bytes: u64) -> Result<Vec<u8>, UpdateError> {
