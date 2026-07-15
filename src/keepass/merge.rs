@@ -417,15 +417,18 @@ pub fn apply_picks(
 
 /// Warnings the pinned fork emits for situations it has already resolved
 /// without dropping data: same-second diverged history versions (both are
-/// kept), moves it cannot order (the destination location is kept), and
+/// kept), moves it cannot *order* (the destination location is kept), and
 /// missing timestamps/history (deterministic epoch/now substitutes). The
 /// warning set is closed because the fork is pinned by revision; anything
-/// unrecognized — notably "Cannot add entry … parent group does not exist",
-/// which silently drops an entry — stays fatal.
+/// unrecognized stays fatal. Deliberately NOT in this list: "Cannot add
+/// entry …" (the entry is silently dropped) and "Cannot move entry/group …
+/// because the group does not exist" (the remote move is discarded) — both
+/// are real fidelity loss. Only the root group, which cannot move anywhere,
+/// is exempt.
 fn warning_is_policy_resolved(warning: &str) -> bool {
     warning.starts_with("History entries for ")
         || warning.starts_with("Cannot determine which ")
-        || warning.starts_with("Cannot move ")
+        || warning.starts_with("Cannot move root group ")
         || warning.contains("did not have a last modification timestamp")
         || warning.ends_with("had no history.")
 }
@@ -484,6 +487,7 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
 }
 
 fn attachment_stores_diverge(local: &Database, remote: &Database) -> bool {
+    // Store identity: same ids resolving to the same bytes on both sides.
     if local.num_attachments() != remote.num_attachments() {
         return true;
     }
@@ -491,11 +495,44 @@ fn attachment_stores_diverge(local: &Database, remote: &Database) -> bool {
         .iter_all_attachments()
         .map(|attachment| (attachment.id().id(), attachment))
         .collect();
-    !local.iter_all_attachments().all(|attachment| {
+    if !local.iter_all_attachments().all(|attachment| {
         remote_by_id
             .get(&attachment.id().id())
             .is_some_and(|remote| remote.data == attachment.data)
+    }) {
+        return true;
+    }
+
+    // Identical blobs are not enough: the fork's merge does not carry the
+    // per-entry attachment *references* either, so attaching an existing
+    // blob to another entry (or detaching one) remotely would be silently
+    // dropped by the merged result. For every entry present on both sides,
+    // the reference sets must agree. One-sided entries are covered by the
+    // store-identity check above: any blob they reference exists (or is
+    // missing) in the store itself.
+    // ponytail: reference *names* are not publicly readable off the fork's
+    // Entry, so a pure rename (same blob, same entry, new name) still slips
+    // through — the bytes stay attached under the old name. Compare names
+    // too if the fork ever exposes them.
+    let remote_refs = entry_attachment_refs(remote);
+    entry_attachment_refs(local).iter().any(|(id, local_ids)| {
+        remote_refs
+            .get(id)
+            .is_some_and(|remote_ids| remote_ids != local_ids)
     })
+}
+
+fn entry_attachment_refs(db: &Database) -> HashMap<String, Vec<usize>> {
+    db.iter_all_entries()
+        .map(|entry| {
+            let mut ids: Vec<usize> = entry
+                .attachments()
+                .map(|attachment| attachment.id().id())
+                .collect();
+            ids.sort_unstable();
+            (entry.id().to_string(), ids)
+        })
+        .collect()
 }
 
 fn custom_icon_store(
@@ -1520,7 +1557,10 @@ mod tests {
             .expect("identical attachment stores must not block conflict resolution");
 
         assert_eq!(merged.num_attachments(), 1);
-        assert_eq!(merged.entry(id).unwrap().get_password(), Some("remote-newer"));
+        assert_eq!(
+            merged.entry(id).unwrap().get_password(),
+            Some("remote-newer")
+        );
     }
 
     #[test]
@@ -1532,16 +1572,24 @@ mod tests {
             "Cannot determine which entry 1234 move is more recent because one of the entries does not have a location changed timestamp.",
             "Cannot determine which group 1234 move is more recent because one of the groups does not have a location changed timestamp.",
             "Cannot move root group 1234",
-            "Cannot move entry 1234 to group 5678 because the group does not exist in the destination database.",
             "Source entry 1234 did not have a last modification timestamp",
             "Destination history entry 1234 did not have a last modification timestamp",
             "Source entry 1234 had no history.",
         ] {
-            assert!(warning_is_policy_resolved(benign), "misclassified: {benign}");
+            assert!(
+                warning_is_policy_resolved(benign),
+                "misclassified: {benign}"
+            );
         }
-        assert!(!warning_is_policy_resolved(
-            "Cannot add entry 1234 because its parent group 5678 does not exist in the destination database."
-        ));
+        // Real fidelity loss stays fatal: a dropped entry and a discarded
+        // remote move.
+        for lossy in [
+            "Cannot add entry 1234 because its parent group 5678 does not exist in the destination database.",
+            "Cannot move entry 1234 to group 5678 because the group does not exist in the destination database.",
+            "Cannot move group 1234 to group 5678 because the group does not exist in the destination database.",
+        ] {
+            assert!(!warning_is_policy_resolved(lossy), "misclassified: {lossy}");
+        }
     }
 
     #[test]
