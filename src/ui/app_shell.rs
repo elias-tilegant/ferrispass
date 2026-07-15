@@ -657,21 +657,30 @@ impl AppShell {
         let events = self._session_lock_monitor.events();
         let window_handle = self.window_handle;
         self._session_lock_task = Some(cx.spawn(async move |this, cx| {
-            while events.recv().await.is_ok() {
-                // Sleep/lock transitions commonly emit several equivalent
-                // events. One foreground lock is sufficient.
-                while events.try_recv().is_ok() {}
+            while let Ok(first) = events.recv().await {
+                // Sleep/lock transitions commonly emit several events in a
+                // burst. Drain them and act on the strongest one: a single
+                // genuine Lock in the batch always locks.
+                let mut strongest = first;
+                while let Ok(event) = events.try_recv() {
+                    if event == crate::session_lock::SessionLockEvent::Lock {
+                        strongest = event;
+                    }
+                }
 
                 let updated = window_handle.update(cx, |_root, window, app| {
                     this.update(app, |shell, cx| {
                         // Post-wake notifications (DidWake, ScreensDidWake,
-                        // SessionDidBecomeActive, …) are delivered seconds
-                        // after the user is back. If they already unlocked
-                        // the vault again, a trailing event must not wipe
-                        // that unlock mid-typing.
+                        // SessionDidBecomeActive, …) are trailing fail-safes
+                        // delivered seconds after the user is back. If they
+                        // already unlocked the vault again, such an event
+                        // must not wipe that unlock mid-typing. Genuine Lock
+                        // events never get this grace.
                         const POST_UNLOCK_GRACE: std::time::Duration =
                             std::time::Duration::from_secs(5);
-                        if shell.state.read(cx).unlocked_within(POST_UNLOCK_GRACE) {
+                        if strongest == crate::session_lock::SessionLockEvent::PostWake
+                            && shell.state.read(cx).unlocked_within(POST_UNLOCK_GRACE)
+                        {
                             return;
                         }
                         shell.lock_vault(window, cx);
@@ -1641,6 +1650,12 @@ impl AppShell {
             }
             Outcome::NoPassword => {
                 window.push_notification("The matched entry has no password set.", cx);
+            }
+            Outcome::AutoTypeDisabled { entry_title } => {
+                window.push_notification(
+                    format!("Auto-Type is disabled for \"{entry_title}\" (KeePass entry setting)."),
+                    cx,
+                );
             }
             Outcome::BadSequence(error) => {
                 // Cache for the Settings tab and surface inline so the

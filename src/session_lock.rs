@@ -32,10 +32,30 @@ const SCREEN_UNLOCKED_NOTIFICATION: &str = "com.apple.screenIsUnlocked";
 const SCREENSAVER_STARTED_NOTIFICATION: &str = "com.apple.screensaver.didstart";
 const SCREENSAVER_STOPPED_NOTIFICATION: &str = "com.apple.screensaver.didstop";
 
+/// Why the monitor fired. `Lock` means the session is genuinely going away
+/// (sleep imminent, screen locked, fast user switch, screensaver started)
+/// and must always lock the vault. `PostWake` events are trailing
+/// fail-safes (DidWake, screen unlocked, …) delivered after the user is
+/// already back — the consumer may apply a short grace window to those, but
+/// never to `Lock`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionLockEvent {
+    Lock,
+    PostWake,
+}
+
+fn classify_distributed(name: &str) -> SessionLockEvent {
+    if name == SCREEN_UNLOCKED_NOTIFICATION || name == SCREENSAVER_STOPPED_NOTIFICATION {
+        SessionLockEvent::PostWake
+    } else {
+        SessionLockEvent::Lock
+    }
+}
+
 type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
 
 struct SessionLockObserverIvars {
-    sender: Sender<()>,
+    sender: Sender<SessionLockEvent>,
 }
 
 define_class!(
@@ -49,8 +69,13 @@ define_class!(
 
     impl SessionLockObserver {
         #[unsafe(method(sessionDidLock:))]
-        fn session_did_lock(&self, _notification: &NSNotification) {
-            let _ = self.ivars().sender.try_send(());
+        fn session_did_lock(&self, notification: &NSNotification) {
+            // SAFETY: reading the immutable name off a delivered notification.
+            let name = unsafe { notification.name() };
+            let _ = self
+                .ivars()
+                .sender
+                .try_send(classify_distributed(&name.to_string()));
         }
     }
 
@@ -59,7 +84,7 @@ define_class!(
 );
 
 impl SessionLockObserver {
-    fn new(sender: Sender<()>) -> Retained<Self> {
+    fn new(sender: Sender<SessionLockEvent>) -> Retained<Self> {
         let this = Self::alloc().set_ivars(SessionLockObserverIvars { sender });
         // SAFETY: invokes NSObject's designated initializer on a newly
         // allocated instance whose Rust ivars have already been initialized.
@@ -67,9 +92,9 @@ impl SessionLockObserver {
     }
 }
 
-/// Retained OS registrations plus an async stream of coalesced lock events.
+/// Retained OS registrations plus an async stream of typed lock events.
 pub struct SessionLockMonitor {
-    receiver: Receiver<()>,
+    receiver: Receiver<SessionLockEvent>,
     workspace_center: Retained<NSNotificationCenter>,
     workspace_observers: Vec<Observer>,
     distributed_center: Retained<NSDistributedNotificationCenter>,
@@ -78,9 +103,10 @@ pub struct SessionLockMonitor {
 
 impl SessionLockMonitor {
     pub fn new() -> Self {
-        // A single pending event is enough: locking is idempotent, and sleep
-        // commonly emits several notifications in quick succession.
-        let (sender, receiver) = async_channel::bounded(1);
+        // Small buffer instead of 1: with typed events, a pending PostWake
+        // must never cause a genuine Lock to be dropped by `try_send`. The
+        // consumer drains the queue on every wakeup.
+        let (sender, receiver) = async_channel::bounded(8);
 
         let workspace_center = NSWorkspace::sharedWorkspace().notificationCenter();
         // SAFETY: these are immutable AppKit notification-name constants.
@@ -88,17 +114,29 @@ impl SessionLockMonitor {
         // be suspended while the matching sleep/resign event is delivered.
         let workspace_names = unsafe {
             [
-                NSWorkspaceWillSleepNotification,
-                NSWorkspaceDidWakeNotification,
-                NSWorkspaceScreensDidSleepNotification,
-                NSWorkspaceScreensDidWakeNotification,
-                NSWorkspaceSessionDidResignActiveNotification,
-                NSWorkspaceSessionDidBecomeActiveNotification,
+                (NSWorkspaceWillSleepNotification, SessionLockEvent::Lock),
+                (NSWorkspaceDidWakeNotification, SessionLockEvent::PostWake),
+                (
+                    NSWorkspaceScreensDidSleepNotification,
+                    SessionLockEvent::Lock,
+                ),
+                (
+                    NSWorkspaceScreensDidWakeNotification,
+                    SessionLockEvent::PostWake,
+                ),
+                (
+                    NSWorkspaceSessionDidResignActiveNotification,
+                    SessionLockEvent::Lock,
+                ),
+                (
+                    NSWorkspaceSessionDidBecomeActiveNotification,
+                    SessionLockEvent::PostWake,
+                ),
             ]
         };
         let workspace_observers = workspace_names
             .into_iter()
-            .map(|name| observe(&workspace_center, name, &sender))
+            .map(|(name, event)| observe(&workspace_center, name, event, &sender))
             .collect();
 
         let distributed_center = NSDistributedNotificationCenter::defaultCenter();
@@ -122,7 +160,7 @@ impl SessionLockMonitor {
         }
     }
 
-    pub fn events(&self) -> Receiver<()> {
+    pub fn events(&self) -> Receiver<SessionLockEvent> {
         self.receiver.clone()
     }
 }
@@ -141,13 +179,14 @@ impl Drop for SessionLockMonitor {
 fn observe(
     center: &NSNotificationCenter,
     name: &NSNotificationName,
-    sender: &Sender<()>,
+    event: SessionLockEvent,
+    sender: &Sender<SessionLockEvent>,
 ) -> Observer {
     let sender = sender.clone();
     let callback = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-        // Never block an OS notification thread. A full channel means an
-        // equivalent lock request is already pending.
-        let _ = sender.try_send(());
+        // Never block an OS notification thread. A full channel means
+        // several lock requests are already pending and being drained.
+        let _ = sender.try_send(event);
     });
 
     // SAFETY: the notification name and center are valid Objective-C objects;
@@ -200,34 +239,46 @@ mod tests {
     fn notification_callback_forwards_without_blocking() {
         let center = NSNotificationCenter::new();
         let name = NSString::from_str("dev.ferrispass.session-lock-test");
-        let (sender, receiver) = async_channel::bounded(1);
-        let observer = observe(&center, &name, &sender);
+        let (sender, receiver) = async_channel::bounded(8);
+        let observer = observe(&center, &name, SessionLockEvent::Lock, &sender);
 
         // SAFETY: the test name is a valid NSString and the object filter is
         // intentionally absent, matching the registration above.
         unsafe { center.postNotificationName_object(&name, None) };
-        assert_eq!(receiver.try_recv(), Ok(()));
+        assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::Lock));
 
         // SAFETY: `observer` came from `center` and is removed once.
         remove_observer(&center, &observer);
     }
 
     #[test]
-    fn monitor_forwards_pre_and_post_workspace_events() {
+    fn monitor_types_pre_events_as_lock_and_post_events_as_wake() {
         let monitor = SessionLockMonitor::new();
         // SAFETY: these are immutable AppKit notification-name constants.
         let names = unsafe {
             [
-                NSWorkspaceWillSleepNotification,
-                NSWorkspaceDidWakeNotification,
-                NSWorkspaceScreensDidSleepNotification,
-                NSWorkspaceScreensDidWakeNotification,
-                NSWorkspaceSessionDidResignActiveNotification,
-                NSWorkspaceSessionDidBecomeActiveNotification,
+                (NSWorkspaceWillSleepNotification, SessionLockEvent::Lock),
+                (NSWorkspaceDidWakeNotification, SessionLockEvent::PostWake),
+                (
+                    NSWorkspaceScreensDidSleepNotification,
+                    SessionLockEvent::Lock,
+                ),
+                (
+                    NSWorkspaceScreensDidWakeNotification,
+                    SessionLockEvent::PostWake,
+                ),
+                (
+                    NSWorkspaceSessionDidResignActiveNotification,
+                    SessionLockEvent::Lock,
+                ),
+                (
+                    NSWorkspaceSessionDidBecomeActiveNotification,
+                    SessionLockEvent::PostWake,
+                ),
             ]
         };
 
-        for name in names {
+        for (name, expected) in names {
             // SAFETY: the test posts a valid AppKit name to the exact center
             // on which the monitor registered, without an object filter.
             unsafe {
@@ -235,49 +286,64 @@ mod tests {
                     .workspace_center
                     .postNotificationName_object(name, None)
             };
-            assert_eq!(monitor.receiver.try_recv(), Ok(()));
+            assert_eq!(monitor.receiver.try_recv(), Ok(expected));
         }
     }
 
     #[test]
-    fn duplicate_notifications_are_coalesced() {
+    fn queued_post_wake_never_drops_a_genuine_lock() {
+        // Regression guard for the bounded(1) coalescing this replaced:
+        // a pending PostWake must not swallow a subsequent Lock event.
         let center = NSNotificationCenter::new();
-        let name = NSString::from_str("dev.ferrispass.session-lock-coalesce-test");
-        let (sender, receiver) = async_channel::bounded(1);
-        let observer = observe(&center, &name, &sender);
+        let lock_name = NSString::from_str("dev.ferrispass.session-lock-hard");
+        let wake_name = NSString::from_str("dev.ferrispass.session-lock-wake");
+        let (sender, receiver) = async_channel::bounded(8);
+        let lock_observer = observe(&center, &lock_name, SessionLockEvent::Lock, &sender);
+        let wake_observer = observe(&center, &wake_name, SessionLockEvent::PostWake, &sender);
 
         // SAFETY: same valid test-only notification contract as above.
         unsafe {
-            center.postNotificationName_object(&name, None);
-            center.postNotificationName_object(&name, None);
+            center.postNotificationName_object(&wake_name, None);
+            center.postNotificationName_object(&lock_name, None);
         }
-        assert_eq!(receiver.try_recv(), Ok(()));
-        assert!(receiver.try_recv().is_err());
+        assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::PostWake));
+        assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::Lock));
 
-        // SAFETY: `observer` came from `center` and is removed once.
-        remove_observer(&center, &observer);
+        // SAFETY: both observers came from `center` and are removed once.
+        remove_observer(&center, &lock_observer);
+        remove_observer(&center, &wake_observer);
     }
 
     #[test]
-    fn selector_observer_forwards_notifications() {
+    fn selector_observer_classifies_distributed_notifications() {
         let center = NSNotificationCenter::new();
-        let name = NSString::from_str("dev.ferrispass.session-lock-distributed-test");
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = async_channel::bounded(8);
         let observer = SessionLockObserver::new(sender);
         let observer_object: &AnyObject = observer.as_ref();
-        // SAFETY: the selector is implemented by the retained observer with
-        // the standard single-NSNotification argument.
-        unsafe {
-            center.addObserver_selector_name_object(
-                observer_object,
-                sel!(sessionDidLock:),
-                Some(&name),
-                None,
-            )
+        for name in [
+            SCREEN_LOCKED_NOTIFICATION,
+            SCREEN_UNLOCKED_NOTIFICATION,
+            SCREENSAVER_STARTED_NOTIFICATION,
+            SCREENSAVER_STOPPED_NOTIFICATION,
+        ] {
+            let name = NSString::from_str(name);
+            // SAFETY: the selector is implemented by the retained observer
+            // with the standard single-NSNotification argument.
+            unsafe {
+                center.addObserver_selector_name_object(
+                    observer_object,
+                    sel!(sessionDidLock:),
+                    Some(&name),
+                    None,
+                )
+            }
+            // SAFETY: valid test name and no object filter.
+            unsafe { center.postNotificationName_object(&name, None) };
         }
-        // SAFETY: valid test name and no object filter.
-        unsafe { center.postNotificationName_object(&name, None) };
-        assert_eq!(receiver.try_recv(), Ok(()));
+        assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::Lock));
+        assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::PostWake));
+        assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::Lock));
+        assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::PostWake));
 
         // SAFETY: removes the retained observer once from its registering
         // center.
