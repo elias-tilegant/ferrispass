@@ -31,29 +31,7 @@ const MAX_VAULT_CONTENT_BYTES: usize = 250_000_000;
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Overall wall-clock budget for one vault body transfer (either
-/// direction). See the comment in `read_vault_body` — idle timeouts alone
-/// leave transfers unbounded.
-const TRANSFER_MAX_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-
-/// Wraps the upload body so each socket-write chunk re-checks the overall
-/// transfer deadline.
-struct DeadlineReader<'a> {
-    inner: io::Cursor<&'a [u8]>,
-    deadline: std::time::Instant,
-}
-
-impl io::Read for DeadlineReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if std::time::Instant::now() >= self.deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "vault transfer exceeded the overall time budget",
-            ));
-        }
-        self.inner.read(buf)
-    }
-}
+use crate::sync::http::TRANSFER_MAX_WALL_CLOCK;
 
 #[derive(Debug, Error)]
 pub enum GraphError {
@@ -318,20 +296,10 @@ pub fn upload_content(
     if let Some(etag) = if_match {
         req = req.set("If-Match", etag);
     }
-    // Mirror of the download wall clock: idle write timeouts alone let a
-    // peer that reads one byte per timeout window keep the upload — and the
-    // per-path sync slot — alive indefinitely. The reader is polled once
-    // per socket-write chunk, so it observes the deadline even while bytes
-    // are still trickling. Content-Length is set explicitly because
-    // streaming via `send` would otherwise switch to chunked encoding.
-    let body = DeadlineReader {
-        inner: io::Cursor::new(bytes),
-        deadline: std::time::Instant::now() + TRANSFER_MAX_WALL_CLOCK,
-    };
-    match req
-        .set("Content-Length", &bytes.len().to_string())
-        .send(body)
-    {
+    // The transfer agent's overall deadline (ureq `DeadlineStream`) bounds
+    // the entire request — body send, response headers, response body — so
+    // a drip-reading peer cannot hold the upload past the wall clock.
+    match req.send_bytes(bytes) {
         Ok(resp) => {
             let body = resp
                 .into_string()

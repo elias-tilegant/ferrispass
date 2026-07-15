@@ -21,9 +21,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum time a vault transfer may make no progress on an individual socket
-/// read or write. An overall deadline would reject valid 250 MB transfers on
-/// slower links even while bytes are still moving.
+/// read or write. Catches dead connections quickly without imposing a
+/// minimum transfer speed on large vaults.
 const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Hard overall deadline for one vault transfer, enforced by ureq's
+/// `DeadlineStream` across the whole request — body send, response
+/// headers, and response-body reads. Idle timeouts alone let a peer that
+/// trickles one byte per idle window hold the request (and the per-path
+/// sync slot) forever. One hour covers the full 250 MB Graph content cap
+/// even on a ~0.6 Mbit/s link.
+pub(crate) const TRANSFER_MAX_WALL_CLOCK: Duration = Duration::from_secs(60 * 60);
 
 /// Agent for token-endpoint and Graph metadata calls.
 pub fn agent() -> &'static ureq::Agent {
@@ -36,9 +44,9 @@ pub fn agent() -> &'static ureq::Agent {
     })
 }
 
-/// Agent for vault-content download/upload. Per-operation idle limits keep a
-/// half-dead connection from blocking forever without imposing a minimum
-/// transfer speed on large vaults.
+/// Agent for vault-content download/upload. Idle limits catch dead
+/// connections fast; the overall deadline is the hard upper bound for the
+/// entire request in either direction.
 pub fn transfer_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -46,6 +54,7 @@ pub fn transfer_agent() -> &'static ureq::Agent {
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(TRANSFER_IDLE_TIMEOUT)
             .timeout_write(TRANSFER_IDLE_TIMEOUT)
+            .timeout(TRANSFER_MAX_WALL_CLOCK)
             .build()
     })
 }

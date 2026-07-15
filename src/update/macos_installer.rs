@@ -84,7 +84,13 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
             Ok(())
         }
         Err(failure) => {
-            if !failure.preserve_staging {
+            if failure.preserve_staging {
+                // After a failed rollback this directory holds the only
+                // known-good old bundle. Mark it so no later sweep —
+                // regardless of age or how healthy the target *looks* —
+                // ever removes it automatically.
+                let _ = fs::write(staging_root.join(STAGING_KEEP_MARKER), b"");
+            } else {
                 let _ = fs::remove_dir_all(&staging_root);
             }
             Err(install_error(failure.message))
@@ -96,6 +102,13 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
 /// it. Far above any real install duration, so a second FerrisPass instance
 /// mid-install never loses its live staging to this cleanup.
 const STAGING_SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Marker file written into a staging directory that must never be swept:
+/// after a failed rollback it contains the only known-good old bundle.
+/// `validate_bundle` on the target is structural only — it cannot prove
+/// the new bundle actually starts — so the marker, not the target's
+/// apparent health, is what protects recovery data.
+const STAGING_KEEP_MARKER: &str = ".ferrispass-keep";
 
 /// Remove `.ferrispass-update-*` directories left behind by a crashed or
 /// killed earlier install. Only called after the installed bundle passed
@@ -111,12 +124,15 @@ fn sweep_stale_staging(parent: &Path) {
             .to_str()
             .is_some_and(|name| name.starts_with(".ferrispass-update-"))
             && entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if !is_staging || entry.path().join(STAGING_KEEP_MARKER).exists() {
+            continue;
+        }
         let is_old = entry
             .metadata()
             .and_then(|metadata| metadata.modified())
             .and_then(|modified| modified.elapsed().map_err(io::Error::other))
             .is_ok_and(|age| age >= STAGING_SWEEP_MIN_AGE);
-        if is_staging && is_old {
+        if is_old {
             let _ = fs::remove_dir_all(entry.path());
         }
     }
