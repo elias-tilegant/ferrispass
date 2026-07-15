@@ -417,19 +417,22 @@ pub fn apply_picks(
 
 /// Warnings the pinned fork emits for situations it has already resolved
 /// without dropping data: same-second diverged history versions (both are
-/// kept), moves it cannot *order* (the destination location is kept), and
-/// missing timestamps/history (deterministic epoch/now substitutes). The
-/// warning set is closed because the fork is pinned by revision; anything
-/// unrecognized stays fatal. Deliberately NOT in this list: "Cannot add
-/// entry …" (the entry is silently dropped) and "Cannot move entry/group …
-/// because the group does not exist" (the remote move is discarded) — both
-/// are real fidelity loss. Only the root group, which cannot move anywhere,
-/// is exempt.
+/// kept), missing *history-entry* timestamps (deterministic substitutes
+/// inside a history list that is unioned anyway), and missing history (an
+/// empty default). The warning set is closed because the fork is pinned by
+/// revision; anything unrecognized stays fatal. Deliberately NOT in this
+/// list, because each one silently discards a remote change: "Cannot add
+/// entry …" (entry dropped), "Cannot move entry/group …" (move dropped),
+/// "Cannot determine which … move is more recent" (the fork keeps the
+/// local location and the following upload overwrites the remote move),
+/// and missing timestamps on *current* entries/groups (a remote rename
+/// without a timestamp loses against the epoch substitute). Only the root
+/// group, which cannot move anywhere, is exempt.
 fn warning_is_policy_resolved(warning: &str) -> bool {
     warning.starts_with("History entries for ")
-        || warning.starts_with("Cannot determine which ")
         || warning.starts_with("Cannot move root group ")
-        || warning.contains("did not have a last modification timestamp")
+        || (warning.contains(" history entry ")
+            && warning.contains("did not have a last modification timestamp"))
         || warning.ends_with("had no history.")
 }
 
@@ -1569,11 +1572,9 @@ mod tests {
         // resolved without loss — and the one that genuinely drops data.
         for benign in [
             "History entries for 1234 have the same modification timestamp 2026-01-01 but have diverged.",
-            "Cannot determine which entry 1234 move is more recent because one of the entries does not have a location changed timestamp.",
-            "Cannot determine which group 1234 move is more recent because one of the groups does not have a location changed timestamp.",
             "Cannot move root group 1234",
-            "Source entry 1234 did not have a last modification timestamp",
             "Destination history entry 1234 did not have a last modification timestamp",
+            "Source history entry 1234 did not have a last modification timestamp",
             "Source entry 1234 had no history.",
         ] {
             assert!(
@@ -1581,12 +1582,19 @@ mod tests {
                 "misclassified: {benign}"
             );
         }
-        // Real fidelity loss stays fatal: a dropped entry and a discarded
-        // remote move.
+        // Everything that silently discards a remote change stays fatal:
+        // dropped entries, discarded moves, unorderable moves (the fork
+        // keeps local and the next upload overwrites the remote move), and
+        // missing timestamps on *current* entries/groups (a remote rename
+        // would lose against the epoch substitute).
         for lossy in [
             "Cannot add entry 1234 because its parent group 5678 does not exist in the destination database.",
             "Cannot move entry 1234 to group 5678 because the group does not exist in the destination database.",
             "Cannot move group 1234 to group 5678 because the group does not exist in the destination database.",
+            "Cannot determine which entry 1234 move is more recent because one of the entries does not have a location changed timestamp.",
+            "Cannot determine which group 1234 move is more recent because one of the groups does not have a location changed timestamp.",
+            "Source entry 1234 did not have a last modification timestamp",
+            "Destination group 1234 did not have a last modification timestamp",
         ] {
             assert!(!warning_is_policy_resolved(lossy), "misclassified: {lossy}");
         }

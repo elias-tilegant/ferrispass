@@ -146,6 +146,8 @@ pub(crate) fn snapshot_from_database(database: &Database) -> VaultSnapshot {
         &mut Vec::new(),
         now,
         recycle_bin_id_for_traversal.as_deref(),
+        // KeePass semantics: the root inherits "enabled" unless set.
+        true,
     ));
     snap.recycle_bin_id = recycle_bin_id;
     snap
@@ -175,6 +177,7 @@ fn group_from_ref(
     parent_path: &mut Vec<String>,
     now: NaiveDateTime,
     recycle_bin_id: Option<&str>,
+    inherited_auto_type: bool,
 ) -> VaultGroup {
     let name = non_empty(&group.name, "Root");
     parent_path.push(name.clone());
@@ -182,15 +185,20 @@ fn group_from_ref(
     let group_id_str = group.id().to_string();
     let in_bin = recycle_bin_id.is_some_and(|bin| bin == group_id_str);
 
+    // KeePass group `EnableAutoType` is tri-state and inherits down the
+    // tree; an explicit `false` anywhere on the path disables auto-type
+    // for every contained entry.
+    let auto_type = group.enable_autotype.unwrap_or(inherited_auto_type);
+
     let mut groups = group
         .groups()
-        .map(|child| group_from_ref(&child, parent_path, now, recycle_bin_id))
+        .map(|child| group_from_ref(&child, parent_path, now, recycle_bin_id, auto_type))
         .collect::<Vec<_>>();
     groups.sort_by_key(|child| child.name.to_lowercase());
 
     let mut entries = group
         .entries()
-        .map(|entry| entry_from_ref(&entry, parent_path, now, in_bin))
+        .map(|entry| entry_from_ref(&entry, parent_path, now, in_bin, auto_type))
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.title.to_lowercase());
 
@@ -219,6 +227,7 @@ fn entry_from_ref(
     group_path: &[String],
     now: NaiveDateTime,
     in_recycle_bin: bool,
+    group_auto_type: bool,
 ) -> VaultEntry {
     let title = non_empty(entry.get_title().unwrap_or_default(), "Untitled");
     let username = entry.get_username().unwrap_or_default().to_string();
@@ -261,9 +270,11 @@ fn entry_from_ref(
     let custom_fields = collect_custom_fields(entry);
 
     // KeePass semantics: absent AutoType settings mean "enabled, no
-    // associations". The association window patterns are user-authored and
-    // feed the trustworthy hotkey match signal in `autotype::matcher`.
-    let (auto_type_enabled, auto_type_windows) = match &entry.autotype {
+    // associations", and the inherited group flag combines with the
+    // entry-level one — an explicit `false` on either side disables. The
+    // association window patterns are user-authored and feed the
+    // trustworthy hotkey match signal in `autotype::matcher`.
+    let (entry_auto_type, auto_type_windows) = match &entry.autotype {
         Some(autotype) => (
             autotype.enabled,
             autotype
@@ -274,6 +285,7 @@ fn entry_from_ref(
         ),
         None => (true, Vec::new()),
     };
+    let auto_type_enabled = group_auto_type && entry_auto_type;
 
     VaultEntry {
         id: entry.id().to_string(),
