@@ -159,7 +159,21 @@ revisions before saving or uploading.
 
 ## Why a forked keepass-rs
 
-Pinned to `elias-tilegant/keepass-rs@cc6845a` because upstream's KDBX-4 write path produced files unreadable by KeePassXC. The fork carries three interop fixes: AES-KDF UUID handling, omit-None XML field serialization, and base64-encoded timestamp formatting. The pin in `Cargo.toml` is the single source of truth for the fork commit; bump it deliberately and re-run interop tests against KeePassXC + KeePass2 before shipping.
+Pinned to the `elias-tilegant/keepass-rs` fork because upstream's KDBX-4 write path produced files unreadable by KeePassXC. The fork carries three interop fixes: AES-KDF UUID handling, omit-None XML field serialization, and base64-encoded timestamp formatting. The pin in `Cargo.toml` is the single source of truth for the exact fork commit; bump it deliberately and re-run interop tests against KeePassXC + KeePass2 before shipping.
+
+### Attachment-aware database merge
+
+The fork's database merge translates database-local attachment IDs, copies new blobs, preserves attachment names and current/history references, and reuses equal protected or unprotected values. FerrisPass can therefore resolve local/remote attachment divergence without dropping binaries or leaving dangling references.
+
+Coverage for the fork and FerrisPass proves that the merge preserves:
+
+- attachment bytes and protected/unprotected value state;
+- attachment names and per-entry references;
+- deduplication and stable reference remapping when database-local attachment IDs differ;
+- current and historical entry versions;
+- additions, removals, renames, and concurrent conflicts without dangling blobs or lost data.
+
+Continue exercising round trips through FerrisPass, KeePassXC, and KeePass2 with divergent local/remote fixtures when changing this path.
 
 ## Async runtime
 

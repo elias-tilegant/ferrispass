@@ -102,9 +102,17 @@ impl fmt::Debug for EntryView {
 struct EntrySnapshot {
     view: EntryView,
     fields: HashMap<String, Value<String>>,
+    attachments: Vec<AttachmentFingerprint>,
     icon: Option<Icon>,
     quality_check: Option<bool>,
     previous_parent_group: Option<GroupId>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AttachmentFingerprint {
+    name: String,
+    protected: bool,
+    data: Vec<u8>,
 }
 
 /// One field's local-vs-remote comparison. `local` and `remote` are the
@@ -217,8 +225,6 @@ pub enum Side {
 /// surface the error as a sync conflict/failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
-    #[error("attachment-aware merge is not supported yet (local: {local}, remote: {remote})")]
-    AttachmentsUnsupported { local: usize, remote: usize },
     #[error(
         "custom-icon stores differ and cannot be merged safely (local: {local}, remote: {remote})"
     )]
@@ -493,9 +499,7 @@ fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
         && local.override_url == remote.override_url
         && local.quality_check == remote.quality_check
         && local.previous_parent_group == remote.previous_parent_group
-        // The fork does not expose attachment names. Reference IDs are the
-        // strongest public comparison and are also enforced by preflight.
-        && sorted_attachment_ids(local) == sorted_attachment_ids(remote)
+        && attachment_fingerprint(local) == attachment_fingerprint(remote)
 }
 
 fn entry_location_is_resolved(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
@@ -506,13 +510,17 @@ fn entry_location_is_resolved(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bo
         )
 }
 
-fn sorted_attachment_ids(entry: &EntryRef<'_>) -> Vec<usize> {
-    let mut ids: Vec<_> = entry
-        .attachments()
-        .map(|attachment| attachment.id().id())
+fn attachment_fingerprint(entry: &EntryRef<'_>) -> Vec<AttachmentFingerprint> {
+    let mut attachments: Vec<_> = entry
+        .named_attachments()
+        .map(|(name, attachment)| AttachmentFingerprint {
+            name: name.to_string(),
+            protected: attachment.data.is_protected(),
+            data: attachment.data.get().clone(),
+        })
         .collect();
-    ids.sort_unstable();
-    ids
+    attachments.sort_by(|left, right| left.name.cmp(&right.name));
+    attachments
 }
 
 fn groups_equivalent_for_timestamp_warning(local: &Database, remote: &Database, id: &str) -> bool {
@@ -576,19 +584,6 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
         return Err(ApplyError::DifferentRoots);
     }
 
-    // The pinned fork's merge does not carry attachments across databases
-    // (its own `// TODO: attachments`), so divergent stores would produce
-    // dangling references or lost bytes. Identical stores are safe: every
-    // attachment id a winning entry references resolves to the same bytes
-    // on either side. Rejecting mere *presence* would make a vault with one
-    // attachment permanently unable to resolve any conflict.
-    if attachment_stores_diverge(local, remote) {
-        return Err(ApplyError::AttachmentsUnsupported {
-            local: local.num_attachments(),
-            remote: remote.num_attachments(),
-        });
-    }
-
     let local_icons = custom_icon_store(local);
     let remote_icons = custom_icon_store(remote);
     if local_icons != remote_icons {
@@ -599,55 +594,6 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
     }
 
     Ok(())
-}
-
-fn attachment_stores_diverge(local: &Database, remote: &Database) -> bool {
-    // Store identity: same ids resolving to the same bytes on both sides.
-    if local.num_attachments() != remote.num_attachments() {
-        return true;
-    }
-    let remote_by_id: HashMap<usize, _> = remote
-        .iter_all_attachments()
-        .map(|attachment| (attachment.id().id(), attachment))
-        .collect();
-    if !local.iter_all_attachments().all(|attachment| {
-        remote_by_id
-            .get(&attachment.id().id())
-            .is_some_and(|remote| remote.data == attachment.data)
-    }) {
-        return true;
-    }
-
-    // Identical blobs are not enough: the fork's merge does not carry the
-    // per-entry attachment *references* either, so attaching an existing
-    // blob to another entry (or detaching one) remotely would be silently
-    // dropped by the merged result. For every entry present on both sides,
-    // the reference sets must agree. One-sided entries are covered by the
-    // store-identity check above: any blob they reference exists (or is
-    // missing) in the store itself.
-    // ponytail: reference *names* are not publicly readable off the fork's
-    // Entry, so a pure rename (same blob, same entry, new name) still slips
-    // through — the bytes stay attached under the old name. Compare names
-    // too if the fork ever exposes them.
-    let remote_refs = entry_attachment_refs(remote);
-    entry_attachment_refs(local).iter().any(|(id, local_ids)| {
-        remote_refs
-            .get(id)
-            .is_some_and(|remote_ids| remote_ids != local_ids)
-    })
-}
-
-fn entry_attachment_refs(db: &Database) -> HashMap<String, Vec<usize>> {
-    db.iter_all_entries()
-        .map(|entry| {
-            let mut ids: Vec<usize> = entry
-                .attachments()
-                .map(|attachment| attachment.id().id())
-                .collect();
-            ids.sort_unstable();
-            (entry.id().to_string(), ids)
-        })
-        .collect()
 }
 
 fn custom_icon_store(
@@ -805,6 +751,7 @@ fn entry_to_snapshot(e: &EntryRef<'_>) -> EntrySnapshot {
             override_url: e.override_url.clone(),
         },
         fields: e.fields.clone(),
+        attachments: attachment_fingerprint(e),
         icon: e.icon().cloned(),
         quality_check: e.quality_check,
         previous_parent_group: e.previous_parent_group,
@@ -836,6 +783,13 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
         });
     }
 
+    diffs.push(FieldDiff {
+        label: "Attachments",
+        local: attachment_summary(local.attachments.len()),
+        remote: attachment_summary(remote.attachments.len()),
+        differs: local.attachments != remote.attachments,
+    });
+
     let local_protected = protected_field_names(&local.fields);
     let remote_protected = protected_field_names(&remote.fields);
     if !local_protected.is_empty() || !remote_protected.is_empty() {
@@ -859,6 +813,13 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
     }
 
     diffs
+}
+
+fn attachment_summary(count: usize) -> String {
+    match count {
+        1 => "1 attachment".into(),
+        count => format!("{count} attachments"),
+    }
 }
 
 fn entry_field_diff(
@@ -1632,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn attachments_fail_closed_instead_of_being_dropped() {
+    fn attachment_added_only_locally_is_preserved_by_merge() {
         let mut local = Database::new();
         let id = add(&mut local, "With attachment", "pw");
         let remote = fork(&local);
@@ -1641,15 +1602,82 @@ mod tests {
             .unwrap()
             .add_attachment("secret.bin", Value::protected(vec![1, 2, 3]));
 
-        let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
-            .expect_err("attachment merge must be refused");
-        assert!(matches!(
-            error,
-            ApplyError::AttachmentsUnsupported {
-                local: 1,
-                remote: 0
-            }
-        ));
+        let report = diff(&local, &remote);
+        let picks = HashMap::from([(id.to_string(), Side::Local)]);
+        let merged = apply_picks(&local, &remote, &picks, &report)
+            .expect("the locally selected attachment must survive the merge");
+
+        let entry = merged.entry(id).unwrap();
+        let attachment = entry.attachment_by_name("secret.bin").unwrap();
+        assert_eq!(attachment.data.get(), &[1, 2, 3]);
+        assert!(attachment.data.is_protected());
+    }
+
+    #[test]
+    fn equal_attachment_counts_with_different_data_can_pick_remote() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Changed attachment", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .add_attachment("secret.bin", Value::protected(vec![1, 2, 3]));
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .attachment_by_name_mut("secret.bin")
+            .unwrap()
+            .data = Value::protected(vec![4, 5, 6]);
+
+        let report = diff(&local, &remote);
+        assert_eq!(report.conflicts.len(), 1);
+        assert!(
+            report.conflicts[0]
+                .fields
+                .iter()
+                .any(|field| field.label == "Attachments" && field.differs)
+        );
+
+        let picks = HashMap::from([(id.to_string(), Side::Remote)]);
+        let merged = apply_picks(&local, &remote, &picks, &report)
+            .expect("remote attachment bytes must be selectable");
+        let entry = merged.entry(id).unwrap();
+        let attachment = entry.attachment_by_name("secret.bin").unwrap();
+        assert_eq!(attachment.data.get(), &[4, 5, 6]);
+        assert!(attachment.data.is_protected());
+        assert_eq!(
+            merged.num_attachments(),
+            2,
+            "losing bytes remain in history"
+        );
+    }
+
+    #[test]
+    fn attachment_rename_with_unchanged_bytes_is_detected_and_applied() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Renamed attachment", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .add_attachment("old.bin", Value::unprotected(vec![7, 8, 9]));
+        let mut remote = fork(&local);
+        {
+            let mut entry = remote.entry_mut(id).unwrap();
+            entry.remove_attachment_by_name("old.bin");
+            entry.add_attachment("new.bin", Value::unprotected(vec![7, 8, 9]));
+        }
+
+        let report = diff(&local, &remote);
+        assert_eq!(report.conflicts.len(), 1);
+        let picks = HashMap::from([(id.to_string(), Side::Remote)]);
+        let merged = apply_picks(&local, &remote, &picks, &report)
+            .expect("attachment rename must be mergeable");
+        let entry = merged.entry(id).unwrap();
+        assert!(entry.attachment_by_name("old.bin").is_none());
+        assert_eq!(
+            entry.attachment_by_name("new.bin").unwrap().data.get(),
+            &[7, 8, 9]
+        );
     }
 
     #[test]
