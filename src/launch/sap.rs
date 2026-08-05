@@ -85,14 +85,6 @@ pub static SAP_GUI_MAC: SapGuiMacLauncher = SapGuiMacLauncher;
 pub struct SapGuiMacLauncher;
 
 impl Launcher for SapGuiMacLauncher {
-    fn id(&self) -> &'static str {
-        "sap-gui"
-    }
-
-    fn label(&self) -> &'static str {
-        "Open in SAP GUI"
-    }
-
     fn supports(&self, entry: &VaultEntry) -> bool {
         // Both HOST and INSTANCE are needed to compose a working
         // conn string. Either alone is meaningless — surface the

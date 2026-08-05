@@ -67,6 +67,24 @@ enum Command {
         #[command(subcommand)]
         command: SyncCommand,
     },
+    /// Launch an entry in its native external application.
+    Launch {
+        #[command(subcommand)]
+        command: LaunchCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LaunchCommand {
+    /// Start a logged-in SAP GUI session from an entry's SAP_* fields.
+    Sap(LaunchEntry),
+}
+
+#[derive(Args)]
+struct LaunchEntry {
+    /// Exact KeePass entry UUID to launch.
+    #[arg(long)]
+    id: String,
 }
 
 #[derive(Subcommand)]
@@ -362,6 +380,7 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         } => Ok(vault_info(&document)),
         Command::Group { command } => execute_group(command, &mut document, vault),
         Command::Entry { command } => execute_entry(command, &mut document, vault),
+        Command::Launch { command } => execute_launch(command, &document),
         Command::Sync {
             command: SyncCommand::Now(args),
         } => execute_sync(
@@ -374,6 +393,61 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         Command::Sync {
             command: SyncCommand::Status,
         } => unreachable!(),
+    }
+}
+
+fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<Value, CliError> {
+    let (target, args) = match command {
+        LaunchCommand::Sap(args) => (crate::launch::LaunchTarget::Sap, args),
+    };
+    let entry = document
+        .snapshot()
+        .find_entry(&args.id)
+        .cloned()
+        .ok_or_else(not_found)?;
+    if entry.in_recycle_bin {
+        return Err(CliError::new(
+            "entry_in_trash",
+            6,
+            "entries in the Recycle Bin cannot be launched",
+        ));
+    }
+    let password = document.password_for_entry(&args.id).map(Zeroizing::new);
+    let context = crate::launch::LaunchContext {
+        entry: &entry,
+        password: password.as_deref().map(String::as_str),
+        custom_fields: &entry.custom_fields,
+    };
+    let handle = crate::launch::launch(target, context).map_err(launch_error)?;
+
+    // `open` returns after handing the file to Launch Services, before SAP GUI
+    // necessarily reads it. Keep ownership (and thus the 0600 payload) alive
+    // for the same minimum grace period used by the GUI settings clamp.
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    drop(handle);
+    Ok(json!({"launched":true,"target":target.id(),"entry_id":args.id}))
+}
+
+fn launch_error(error: crate::launch::LaunchError) -> CliError {
+    match error {
+        crate::launch::LaunchError::MissingField(field) => CliError::new(
+            "invalid_launch_profile",
+            6,
+            format!("missing required field: {field}"),
+        ),
+        crate::launch::LaunchError::NoPassword => {
+            CliError::new("invalid_launch_profile", 6, "entry has no password")
+        }
+        crate::launch::LaunchError::UnsupportedTarget(target) => CliError::new(
+            "launch_unsupported",
+            6,
+            format!("{target} launch is unsupported on this platform"),
+        ),
+        crate::launch::LaunchError::Io(error) => CliError::new(
+            "launch_failed",
+            7,
+            format!("launch failed: {}", error.kind()),
+        ),
     }
 }
 
@@ -1002,6 +1076,41 @@ fn print_human(data: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_sap_requires_an_explicit_entry_id() {
+        let parsed = Cli::try_parse_from([
+            "ferrispass-cli",
+            "--vault",
+            "vault.kdbx",
+            "launch",
+            "sap",
+            "--id",
+            "entry-uuid",
+        ])
+        .expect("launch command parses");
+        assert!(matches!(
+            parsed.command,
+            Command::Launch {
+                command: LaunchCommand::Sap(LaunchEntry { id })
+            } if id == "entry-uuid"
+        ));
+        assert!(
+            Cli::try_parse_from(["ferrispass-cli", "--vault", "vault.kdbx", "launch", "sap"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn launch_io_errors_do_not_expose_paths_or_payloads() {
+        let sentinel = "secret-launch-payload";
+        let error = launch_error(crate::launch::LaunchError::Io(std::io::Error::other(
+            sentinel,
+        )));
+        assert_eq!(error.code, "launch_failed");
+        assert_eq!(error.exit, 7);
+        assert!(!error.message.contains(sentinel));
+    }
 
     #[test]
     fn patch_distinguishes_missing_null_and_value() {

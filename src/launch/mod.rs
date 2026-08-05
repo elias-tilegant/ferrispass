@@ -27,12 +27,30 @@ pub mod tempfile;
 
 pub use tempfile::{TempLaunchFile, launch_dir};
 
+/// Closed set of launch protocols supported by FerrisPass. Keeping routing
+/// typed avoids making CLI/API callers depend on backend registry strings and
+/// gives future SSH/RDP launchers an explicit, exhaustively matched home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchTarget {
+    Sap,
+}
+
+impl LaunchTarget {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Sap => "sap",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sap => "Open in SAP GUI",
+        }
+    }
+}
+
 /// Backend that knows how to open one entry in one external app.
-pub trait Launcher: Send + Sync {
-    /// Stable id, e.g. `"sap-gui"`. Routing key — never user-visible.
-    fn id(&self) -> &'static str;
-    /// User-facing button label, e.g. `"Open in SAP GUI"`.
-    fn label(&self) -> &'static str;
+pub(crate) trait Launcher: Send + Sync {
     /// Cheap detection from the snapshot. Must not touch the password
     /// or do I/O — that's reserved for `launch`.
     fn supports(&self, entry: &VaultEntry) -> bool;
@@ -75,6 +93,10 @@ pub enum LaunchError {
     #[error("entry has no password")]
     NoPassword,
 
+    /// The requested protocol has no backend on this operating system.
+    #[error("{0} launch is unsupported on this platform")]
+    UnsupportedTarget(&'static str),
+
     /// I/O during temp-file write or process spawn. Display value is
     /// safe (no body) — only the kind + path; never log the file
     /// contents themselves.
@@ -82,27 +104,70 @@ pub enum LaunchError {
     Io(#[from] std::io::Error),
 }
 
-/// All launchers that match this entry, in registry order. Used by
-/// the future "open with…" submenu when more than one applies. v0.3
-/// always returns 0 or 1.
-pub fn launchers_for(entry: &VaultEntry) -> Vec<&'static dyn Launcher> {
-    REGISTRY
-        .iter()
-        .copied()
-        .filter(|l| l.supports(entry))
-        .collect()
+/// Launch an entry through an explicitly selected protocol. Both GUI and CLI
+/// ultimately use the same backend implementation; only target selection and
+/// handle lifetime differ between those frontends.
+pub fn launch(target: LaunchTarget, ctx: LaunchContext<'_>) -> Result<LaunchHandle, LaunchError> {
+    match target {
+        LaunchTarget::Sap => {
+            #[cfg(target_os = "macos")]
+            {
+                sap::SAP_GUI_MAC.launch(ctx)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = ctx;
+                Err(LaunchError::UnsupportedTarget("SAP"))
+            }
+        }
+    }
 }
 
-/// First applicable launcher, or `None` when no backend supports the
-/// entry. Drives the conditional Launch button in the detail panel.
-pub fn primary_launcher_for(entry: &VaultEntry) -> Option<&'static dyn Launcher> {
-    launchers_for(entry).into_iter().next()
-}
-
-/// Static registry — order = priority. Backends are gated by
-/// `cfg(target_os)` so a Linux build doesn't carry the macOS-only
-/// `open` path or vice versa.
-static REGISTRY: &[&dyn Launcher] = &[
+/// Infer the typed protocol from entry metadata. This is deliberately based
+/// on backend validation rather than titles or other fuzzy user content.
+pub fn target_for_entry(entry: &VaultEntry) -> Option<LaunchTarget> {
     #[cfg(target_os = "macos")]
-    &sap::SAP_GUI_MAC,
-];
+    if sap::SAP_GUI_MAC.supports(entry) {
+        return Some(LaunchTarget::Sap);
+    }
+    let _ = entry;
+    None
+}
+
+/// Primary typed target for UI auto-detection. Kept as a named helper because
+/// a future multi-target entry may add an "open with…" chooser while retaining
+/// one deterministic default.
+pub fn primary_launcher_for(entry: &VaultEntry) -> Option<LaunchTarget> {
+    target_for_entry(entry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{domain::CustomField, launch::sap};
+
+    #[test]
+    fn target_ids_are_stable_cli_routing_values() {
+        assert_eq!(LaunchTarget::Sap.id(), "sap");
+        assert_eq!(LaunchTarget::Sap.label(), "Open in SAP GUI");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sap_target_is_inferred_only_from_complete_metadata() {
+        let mut entry = VaultEntry::default();
+        assert_eq!(target_for_entry(&entry), None);
+        entry.custom_fields.push(CustomField {
+            key: sap::KEY_HOST.into(),
+            value: "sap.example.com".into(),
+            protected: false,
+        });
+        assert_eq!(target_for_entry(&entry), None);
+        entry.custom_fields.push(CustomField {
+            key: sap::KEY_INSTANCE.into(),
+            value: "00".into(),
+            protected: false,
+        });
+        assert_eq!(target_for_entry(&entry), Some(LaunchTarget::Sap));
+    }
+}

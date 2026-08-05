@@ -25,6 +25,7 @@ The bundled executable remains part of the app. Verify a registration with
 vault info
 group list | create | rename | move | trash | restore
 entry list | search | get | secret | create | update | move | favorite | trash | restore
+launch sap
 sync status | now
 ```
 
@@ -86,6 +87,27 @@ move objects to the KeePass Recycle Bin; the CLI has no permanent-delete command
 
 Run `ferrispass-cli --help`, `entry --help`, or `group --help` for the complete
 command tree and stable option names.
+
+## Launching external connections
+
+Launch an SAP system from an exact entry UUID:
+
+```sh
+ferrispass-cli --vault team.kdbx launch sap --id UUID
+```
+
+The SAP launcher uses the same backend and entry-field model as the GUI. The
+entry must contain non-empty `SAP_HOST` and `SAP_INSTANCE` custom fields and a
+password. Optional fields are `SAP_USER`, `SAP_LANG`, `SAP_CLIENT`, and
+`SAP_EXPERT`; the standard entry username is used when `SAP_USER` is absent.
+
+FerrisPass passes only a private temporary file path to macOS Launch Services;
+the password never appears in process arguments, stdout, JSON output, or error
+messages. The command keeps the protected payload alive briefly so SAP GUI can
+consume it, removes it before returning, and does not modify the vault. SAP
+launch is currently supported on macOS. The typed launch command is designed
+to add protocols such as SSH later without changing vault unlocking or entry
+selection semantics.
 
 ## SharePoint sync
 

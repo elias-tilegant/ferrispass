@@ -2793,7 +2793,7 @@ impl AppShell {
             password: password.as_deref(),
             custom_fields: &entry.custom_fields,
         };
-        match launcher.launch(ctx) {
+        match launch::launch(launcher, ctx) {
             Ok(handle) => {
                 window.push_notification(format!("Starting {}…", launcher.label()), cx);
                 self.pending_launches.push(handle);
@@ -2808,6 +2808,9 @@ impl AppShell {
             }
             Err(LaunchError::MissingField(key)) => {
                 window.push_notification(format!("Missing field: {key}"), cx);
+            }
+            Err(LaunchError::UnsupportedTarget(target)) => {
+                window.push_notification(format!("{target} launch is not supported here."), cx);
             }
             Err(LaunchError::Io(e)) => {
                 // Show only the kind, never the file body. The path is
