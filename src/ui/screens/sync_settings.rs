@@ -38,10 +38,43 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
     let status = snapshot.sync_status().clone();
     let history: Vec<SyncHistoryEntry> = snapshot.sync_history().to_vec();
 
-    match (&binding, &status) {
-        (_, SyncStatus::Reconnect { detail }) => render_reconnect(detail.as_deref(), cx),
-        (Some(b), _) => render_connected(b, &status, &history, cx),
-        (None, _) => render_disconnected(cx),
+    match sync_tab_mode(binding.is_some(), &status) {
+        SyncTabMode::Reconnect => {
+            let SyncStatus::Reconnect { detail } = &status else {
+                unreachable!("mode is derived from status")
+            };
+            render_reconnect(detail.as_deref(), cx)
+        }
+        SyncTabMode::Connected => render_connected(
+            binding.as_ref().expect("connected mode requires a binding"),
+            &status,
+            &history,
+            cx,
+        ),
+        SyncTabMode::Restoring => render_restore(&status, cx),
+        SyncTabMode::Disconnected => render_disconnected(cx),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncTabMode {
+    Connected,
+    Restoring,
+    Reconnect,
+    Disconnected,
+}
+
+fn sync_tab_mode(has_binding: bool, status: &SyncStatus) -> SyncTabMode {
+    match (has_binding, status) {
+        (_, SyncStatus::Reconnect { .. }) => SyncTabMode::Reconnect,
+        (true, _) => SyncTabMode::Connected,
+        // A restore starts only after the per-vault config was loaded from
+        // disk. Until token refresh succeeds there is deliberately no live
+        // SyncBinding yet, so treating this as "local-only" is misleading.
+        // A binding-less failure is the corresponding failed restore and
+        // should retain that context instead of offering a fresh Connect.
+        (false, SyncStatus::Restoring | SyncStatus::Failed(_)) => SyncTabMode::Restoring,
+        (false, _) => SyncTabMode::Disconnected,
     }
 }
 
@@ -431,6 +464,50 @@ fn render_disconnected(cx: &mut Context<AppShell>) -> AnyElement {
         .into_any_element()
 }
 
+fn render_restore(status: &SyncStatus, _cx: &mut Context<AppShell>) -> AnyElement {
+    let (title, detail, tone) = match status {
+        SyncStatus::Failed(message) => (
+            "Cloud sync could not be restored",
+            message.as_str(),
+            ChipTone::Orange,
+        ),
+        _ => (
+            "Restoring cloud sync…",
+            "Loading the saved SharePoint connection and refreshing sign-in.",
+            ChipTone::Blue,
+        ),
+    };
+
+    v_flex()
+        .gap_3()
+        .p_4()
+        .rounded(px(10.))
+        .bg(palette::sidebar())
+        .border_1()
+        .border_color(palette::border())
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(div().text_sm().text_color(palette::text()).child(title))
+                .child(chip(
+                    if matches!(status, SyncStatus::Failed(_)) {
+                        "Failed"
+                    } else {
+                        "Connecting"
+                    },
+                    tone,
+                )),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(detail.to_string()),
+        )
+        .into_any_element()
+}
+
 fn render_reconnect(detail: Option<&str>, cx: &mut Context<AppShell>) -> AnyElement {
     v_flex()
         .gap_4()
@@ -575,5 +652,42 @@ impl BindingForRender for Option<&SyncBinding> {
             remote_url: b.config.remote_url.clone(),
             authenticated_at: b.config.authenticated_at,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bindingless_restore_is_not_rendered_as_disconnected() {
+        assert_eq!(
+            sync_tab_mode(false, &SyncStatus::Restoring),
+            SyncTabMode::Restoring
+        );
+    }
+
+    #[test]
+    fn bindingless_restore_failure_keeps_restore_context() {
+        assert_eq!(
+            sync_tab_mode(false, &SyncStatus::Failed("keychain unavailable".into())),
+            SyncTabMode::Restoring
+        );
+    }
+
+    #[test]
+    fn genuinely_disconnected_vault_stays_disconnected() {
+        assert_eq!(
+            sync_tab_mode(false, &SyncStatus::Disconnected),
+            SyncTabMode::Disconnected
+        );
+    }
+
+    #[test]
+    fn live_binding_takes_precedence_over_failed_status() {
+        assert_eq!(
+            sync_tab_mode(true, &SyncStatus::Failed("upload failed".into())),
+            SyncTabMode::Connected
+        );
     }
 }
