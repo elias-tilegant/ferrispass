@@ -168,10 +168,10 @@ fn extract_host(url: &str) -> Option<String> {
     if url.trim().is_empty() {
         return None;
     }
-    if let Ok(parsed) = url::Url::parse(url) {
-        if let Some(h) = parsed.host_str() {
-            return Some(h.to_lowercase());
-        }
+    if let Ok(parsed) = url::Url::parse(url)
+        && let Some(h) = parsed.host_str()
+    {
+        return Some(h.to_lowercase());
     }
     url::Url::parse(&format!("https://{url}"))
         .ok()

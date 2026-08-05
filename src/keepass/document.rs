@@ -354,9 +354,6 @@ impl VaultDocument {
         // the editor produces authoritative drafts on every save.
         entry.tags = draft.tags.clone();
         let id = entry.id().to_string();
-        // Force the borrows to drop before we touch `self` again.
-        drop(entry);
-        drop(group);
         self.refresh_snapshot();
         Ok(id)
     }
@@ -436,7 +433,6 @@ impl VaultDocument {
         let changed_at = next_change_time(entry.times.last_modification);
         entry.tags = tags;
         entry.times.last_modification = Some(changed_at);
-        drop(entry);
         self.refresh_snapshot();
         Ok(())
     }
@@ -465,7 +461,6 @@ impl VaultDocument {
         // do not make a local collapse outrank a concurrent rename during
         // merge by advancing the group's content timestamp.
         group.is_expanded = expanded;
-        drop(group);
         self.refresh_snapshot();
         Ok(())
     }
@@ -504,8 +499,6 @@ impl VaultDocument {
         let mut current = entry.as_mut();
         let mut icon = current.set_icon_custom_new(bytes);
         icon.last_modification_time = Some(changed_at);
-        drop(icon);
-        drop(current);
         entry.times.last_modification = Some(changed_at);
         drop(entry);
         self.refresh_snapshot();
@@ -692,8 +685,6 @@ impl VaultDocument {
         new_group.name = name.to_string();
         new_group.times.last_modification = Some(keepass::db::Times::now());
         let id = new_group.id().to_string();
-        drop(new_group);
-        drop(parent);
         self.refresh_snapshot();
         Ok(id)
     }
@@ -723,7 +714,6 @@ impl VaultDocument {
         let mut group = group.track_changes();
         group.edit(|group| group.name = new_name.to_string());
         group.times.last_modification = Some(changed_at);
-        drop(group);
         self.refresh_snapshot();
         Ok(())
     }
@@ -773,7 +763,6 @@ impl VaultDocument {
             .move_to(target_id)
             .map_err(|_| MutationError::WouldCreateCycle)?;
         group.times.location_changed = Some(changed_at);
-        drop(group);
         self.refresh_snapshot();
         Ok(())
     }
@@ -790,10 +779,10 @@ impl VaultDocument {
         if root_id.to_string() == group_id_str {
             return Err(MutationError::CannotDeleteRoot);
         }
-        if let Some(rb) = self.database.recycle_bin() {
-            if rb.id().to_string() == group_id_str {
-                return Err(MutationError::CannotDeleteRecycleBin);
-            }
+        if let Some(rb) = self.database.recycle_bin()
+            && rb.id().to_string() == group_id_str
+        {
+            return Err(MutationError::CannotDeleteRecycleBin);
         }
         let group_id =
             find_group_id(&self.database, group_id_str).ok_or(MutationError::GroupNotFound)?;
@@ -830,7 +819,6 @@ impl VaultDocument {
         })?;
         group.times.last_modification = Some(changed_at);
         group.times.location_changed = Some(changed_at);
-        drop(group);
         self.refresh_snapshot();
         Ok(())
     }
@@ -868,7 +856,6 @@ impl VaultDocument {
             .move_to(target_id)
             .map_err(|_| MutationError::RecycleBinUnavailable)?;
         group.times.location_changed = Some(changed_at);
-        drop(group);
         self.refresh_snapshot();
         Ok(())
     }
@@ -887,8 +874,6 @@ impl VaultDocument {
         let mut bin = root.add_group();
         bin.name = "Recycle Bin".to_string();
         let id = bin.id();
-        drop(bin);
-        drop(root);
         self.database.meta.recyclebin_enabled = Some(true);
         self.database.meta.recyclebin_uuid = Some(id.uuid());
         self.database.meta.recyclebin_changed = Some(keepass::db::Times::now());
@@ -1214,7 +1199,7 @@ fn query_has_param(url: &str, key: &str) -> bool {
 /// that strip whitespace; copy-to-clipboard should pass the raw digits.
 fn format_code(raw: &str) -> String {
     let n = raw.chars().count();
-    if n % 2 == 0 && (4..=10).contains(&n) {
+    if n.is_multiple_of(2) && (4..=10).contains(&n) {
         let half = n / 2;
         let first: String = raw.chars().take(half).collect();
         let second: String = raw.chars().skip(half).collect();

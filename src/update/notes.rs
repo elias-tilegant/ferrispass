@@ -70,7 +70,7 @@ fn mark_auto_shown_in(dir: &Path, version: &str) -> Result<(), WhatsNewError> {
         return Ok(());
     }
     pending.auto_shown = true;
-    save_in(&dir, &pending)
+    save_in(dir, &pending)
 }
 
 fn app_support_dir() -> Result<PathBuf, WhatsNewError> {

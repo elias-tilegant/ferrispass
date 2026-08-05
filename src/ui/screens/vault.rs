@@ -778,6 +778,7 @@ fn nav_pill_icon(icon: AppIcon, icon_image: Option<&FaviconImage>, icon_color: H
         .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn workspace(
     summary: &VaultSummary,
     save_status: SaveStatus,

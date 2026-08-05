@@ -1413,10 +1413,10 @@ impl AppState {
             if let Some(b) = self.sync.as_mut() {
                 f(b);
             }
-        } else if let Some(parked) = self.parked.get_mut(target) {
-            if let Some(b) = parked.sync.as_mut() {
-                f(b);
-            }
+        } else if let Some(parked) = self.parked.get_mut(target)
+            && let Some(b) = parked.sync.as_mut()
+        {
+            f(b);
         }
     }
 
@@ -2656,14 +2656,14 @@ impl AppState {
                     .await;
 
                 let _ = this.update(cx, |state, cx| {
-                    if let Ok(bytes) = bytes_result {
-                        if let VaultStatus::Open { document, .. } = &mut state.vault {
-                            // Errors here mean the entry vanished
-                            // mid-run (e.g. user deleted it) — fine to
-                            // silently skip.
-                            if document.set_entry_custom_icon(&entry_id, bytes).is_ok() {
-                                succeeded += 1;
-                            }
+                    if let Ok(bytes) = bytes_result
+                        && let VaultStatus::Open { document, .. } = &mut state.vault
+                    {
+                        // Errors here mean the entry vanished
+                        // mid-run (e.g. user deleted it) — fine to
+                        // silently skip.
+                        if document.set_entry_custom_icon(&entry_id, bytes).is_ok() {
+                            succeeded += 1;
                         }
                     }
                     state.favicon_status = FaviconDownloadStatus::Running {
@@ -5101,9 +5101,7 @@ impl AppState {
                     // Release the per-path save slot taken above; pick up
                     // any ordinary-save request that queued behind the
                     // merge write meanwhile.
-                    let Some(queued) = state.saves_in_flight.remove(&callback_path) else {
-                        return None;
-                    };
+                    let queued = state.saves_in_flight.remove(&callback_path)?;
                     if queued.owner != session_id {
                         state.saves_in_flight.insert(callback_path.clone(), queued);
                         return None;

@@ -1010,7 +1010,7 @@ impl AppShell {
             let Ok(Ok(Some(path))) = picker.await else {
                 return;
             };
-            let _ = state.update(cx, |state, cx| {
+            state.update(cx, |state, cx| {
                 state.pick_kdbx_file(hit, path, cx);
             });
         })
@@ -1097,7 +1097,7 @@ impl AppShell {
             let already_present = self
                 .new_entry_custom_fields
                 .iter()
-                .any(|row| row.key_input.read(cx).value().to_string() == *key);
+                .any(|row| row.key_input.read(cx).value().as_ref() == *key);
             if already_present {
                 continue;
             }
@@ -2843,7 +2843,7 @@ impl AppShell {
                     // that just woke us up). Letting it drop cancels
                     // its slot — `remove(0)` returns the Task by
                     // value, which is then dropped immediately.
-                    let _ = this.launch_cleanup_tasks.remove(0);
+                    drop(this.launch_cleanup_tasks.remove(0));
                 }
             });
         });

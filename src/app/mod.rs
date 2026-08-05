@@ -72,8 +72,7 @@ fn open_main_window(cx: &mut App, app_state: Entity<AppState>) {
         };
 
         cx.open_window(window_options, |window, cx| {
-            window
-                .on_window_should_close(cx, |window, cx| actions::request_window_close(window, cx));
+            window.on_window_should_close(cx, actions::request_window_close);
 
             let shell = cx.new(|cx| AppShell::new(app_state, window, cx));
 

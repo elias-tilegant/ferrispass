@@ -83,9 +83,9 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             .new_entry_target_group_id()
             .map(ToOwned::to_owned)
             .or_else(|| {
-                state.vault_browser().and_then(|b| match b.selection {
-                    crate::app::LibrarySelection::Group(id) => Some(id),
-                    _ => Some(b.snapshot.root.id.clone()),
+                state.vault_browser().map(|b| match b.selection {
+                    crate::app::LibrarySelection::Group(id) => id,
+                    _ => b.snapshot.root.id.clone(),
                 })
             })
     };

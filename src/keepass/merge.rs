@@ -596,9 +596,9 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
     Ok(())
 }
 
-fn custom_icon_store(
-    db: &Database,
-) -> HashMap<uuid::Uuid, (Vec<u8>, Option<String>, Option<NaiveDateTime>)> {
+type CustomIconSnapshot = (Vec<u8>, Option<String>, Option<NaiveDateTime>);
+
+fn custom_icon_store(db: &Database) -> HashMap<uuid::Uuid, CustomIconSnapshot> {
     db.iter_all_custom_icons()
         .map(|icon| {
             (
@@ -723,7 +723,7 @@ fn live_entries(db: &Database) -> HashMap<String, EntrySnapshot> {
             // "Live" = not directly inside the recycle bin. We don't recurse
             // into recycle-bin subgroups because (a) they're rare and (b)
             // surfacing those as conflicts is more annoying than helpful.
-            recycle_bin_id.map_or(true, |bin| e.parent().id() != bin)
+            recycle_bin_id.is_none_or(|bin| e.parent().id() != bin)
         })
         .map(|e| {
             let snapshot = entry_to_snapshot(&e);

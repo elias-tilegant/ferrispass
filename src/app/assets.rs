@@ -23,6 +23,12 @@ impl AppAssets {
     }
 }
 
+impl Default for AppAssets {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path.is_empty() {

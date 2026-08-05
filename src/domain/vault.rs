@@ -270,6 +270,7 @@ impl VaultSnapshot {
     /// Walk the tree once and return the counts the sidebar header
     /// chips render every frame. Replaces calling `entries_starred().len()`
     /// + `entries_with_otp().len()` from the renderer, which allocated
+    ///
     /// two `Vec<&VaultEntry>`s and walked the tree twice on every tick.
     pub fn library_counts(&self) -> LibraryCounts {
         fn walk(group: &VaultGroup, counts: &mut LibraryCounts) {

@@ -59,7 +59,7 @@ pub fn install() -> Result<PathBuf, InstallError> {
             shell_quote(&source),
         );
         run_as_administrator(&script)?;
-        return Ok(target);
+        Ok(target)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -88,7 +88,7 @@ pub fn uninstall() -> Result<PathBuf, InstallError> {
             shell_quote(&source),
         );
         run_as_administrator(&script)?;
-        return Ok(target);
+        Ok(target)
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -753,7 +753,7 @@ fn vault_info(doc: &VaultDocument) -> Value {
 fn group_json(group: &VaultGroup, parent_id: Option<&str>) -> Value {
     json!({"id":group.id,"name":group.name,"parent_id":parent_id,"entries":group.entries.len(),"groups":group.groups.len()})
 }
-fn collect_groups<'a>(group: &'a VaultGroup, parent: Option<&str>, out: &mut Vec<Value>) {
+fn collect_groups(group: &VaultGroup, parent: Option<&str>, out: &mut Vec<Value>) {
     out.push(group_json(group, parent));
     for child in &group.groups {
         collect_groups(child, Some(&group.id), out);
