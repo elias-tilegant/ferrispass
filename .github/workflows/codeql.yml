@@ -39,6 +39,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Buildless Rust extraction still needs rustup, cargo, and the toolchain's
+      # proc-macro server to resolve types and expand macros accurately.
+      - name: Set up Rust
+        if: matrix.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
