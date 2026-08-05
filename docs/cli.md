@@ -19,12 +19,25 @@ Choose **Uninstall CLI** in the same settings card to remove the registration.
 The bundled executable remains part of the app. Verify a registration with
 `ferrispass-cli --version`.
 
+## Command overview
+
+```text
+vault info
+group list | create | rename | move | trash | restore
+entry list | search | get | secret | create | update | move | favorite | trash | restore
+sync status | now
+```
+
+Use `ferrispass-cli <command> --help` for command-specific arguments. Most
+commands require `--vault FILE`; `sync status` only reads the local SharePoint
+binding and does not unlock the database.
+
 ## Unlocking safely
 
 The CLI never accepts a master password in an argument or environment variable.
-Without an explicit option it uses an enrolled Touch ID identity when available,
-then falls back to a hidden terminal prompt. Automation must inherit a dedicated
-descriptor (3 or higher):
+Without an explicit option it uses an enrolled Touch ID identity when available.
+If no biometric enrollment is available, it uses a hidden terminal prompt.
+Automation must inherit a dedicated descriptor (3 or higher):
 
 ```sh
 ferrispass-cli --vault team.kdbx --master-password-fd 3 --format json vault info 3<password.pipe
@@ -32,6 +45,17 @@ ferrispass-cli --vault team.kdbx --master-password-fd 3 --format json vault info
 
 `--touch-id` requires an existing FerrisPass enrollment. macOS account-password
 fallback is disabled unless `--allow-device-passcode` is also supplied.
+
+When a MacBook is in clamshell mode, its Touch ID sensor is unavailable. Allow
+the macOS account-password fallback explicitly:
+
+```sh
+ferrispass-cli --touch-id --allow-device-passcode \
+  --vault team.kdbx vault info
+```
+
+Without `--allow-device-passcode`, cancelling or being unable to reach the
+sensor fails closed. The CLI does not silently weaken a Touch ID-only request.
 
 ## Reading
 
@@ -95,3 +119,28 @@ printf '%s' '{"resolutions":[{"entry_id":"UUID","keep":"remote"}]}' |
 
 Uploads retain the SharePoint ETag guard. If the remote file changes between
 planning and publication, the command stops and requires a fresh plan.
+
+## Automation contract
+
+`--format json` emits the versioned `ferrispass-cli/v1` envelope. Successful
+results go to stdout; structured errors go to stderr. Programs should inspect
+both the process exit code and the error `code` instead of matching messages.
+
+| Exit code | Meaning |
+|---:|---|
+| 0 | Success |
+| 2 | Command-line usage or missing vault |
+| 3 | Unlock or credential input failed |
+| 4 | Entry, group or secret not found |
+| 5 | Revision conflict or stale sync plan |
+| 6 | Invalid input, validation error or missing sync setup |
+| 7 | I/O, save, network or sync service failure |
+
+Agent workflows should follow these rules:
+
+- Request JSON output.
+- Address entries by UUID, not by title.
+- Read one explicit secret field at a time and only with `--reveal`.
+- Pass passwords through an inherited descriptor, never an argument or
+  environment variable.
+- Review mutation and sync plans before repeating them with `--commit`.

@@ -22,9 +22,15 @@ src/
 │               component that observes AppState and renders the active screen.
 ├── update/     Auto-update system. Wraps cargo-packager-updater. Handles
 │               manifest fetch, version compare, download + verify + install.
+├── cli.rs      Headless command tree, stable JSON envelope, secret-output
+│               policy and two-step SharePoint sync.
+├── cli_install.rs  macOS registration of the bundled CLI in /usr/local/bin.
 ├── favicon.rs  DuckDuckGo favicon fetcher (per-entry icon enrichment).
-├── lib.rs      Module root — declares the eight pub mods above.
+├── lib.rs      Module root.
 └── main.rs     Entry point — calls `ferrispass::app::run()`.
+
+src/bin/
+└── ferrispass-cli.rs  Thin CLI entry point that delegates to `cli::run()`.
 
 bundle/
 ├── icon.png            App icon master (1024×1024).
@@ -134,6 +140,22 @@ Reference implementation: `try_restore_sync_binding` in `state.rs:541`. Copy thi
 ```
 
 The cloud only ever sees ciphertext. The master password never leaves process memory; it's required to re-encrypt on save and is wiped when the vault locks.
+
+## CLI trust boundary
+
+The CLI opens KDBX files through the same `KeePassRepository` and saves through
+the same atomic `VaultDocument` publication path as the GUI. It does not run the
+GPUI application or expose a local service.
+
+Human output is intended for terminals. `--format json` wraps every result in
+the versioned `ferrispass-cli/v1` envelope for scripts and agents. Entry output
+never contains passwords, TOTP seeds or protected custom values. An explicit
+entry UUID, field name and `--reveal` are required to read one secret.
+
+CLI mutations are applied in memory first and only reach disk with `--commit`.
+SharePoint sync adds another guard: a read-only plan binds the local ciphertext
+hash and remote ETag into a token, and the commit invocation revalidates both
+revisions before saving or uploading.
 
 ## Why a forked keepass-rs
 
