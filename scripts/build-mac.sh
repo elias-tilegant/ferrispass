@@ -41,6 +41,7 @@ set -euo pipefail
 # ---------- configuration ----------
 APP_NAME="FerrisPass"
 BINARY_NAME="ferrispass"
+CLI_BINARY_NAME="ferrispass-cli"
 BUNDLE_ID="rs.ferrispass.app"
 TEAM_ID="5GAMHB3974"
 SIGNING_IDENTITY="Developer ID Application: Sonar Analytics - FZCO (${TEAM_ID})"
@@ -82,6 +83,9 @@ TAR_PATH="${DIST_DIR}/${TAR_NAME}"
 SIG_PATH="${TAR_PATH}.minisig"
 MANIFEST="${DIST_DIR}/update.json"
 MANIFEST_SIG="${MANIFEST}.minisig"
+CLI_TAR_NAME="FerrisPass-CLI-${VERSION}-aarch64-apple-darwin.tar.gz"
+CLI_TAR_PATH="${DIST_DIR}/${CLI_TAR_NAME}"
+CLI_SIG_PATH="${CLI_TAR_PATH}.minisig"
 
 sign_update_artifacts() {
     if ! command -v minisign >/dev/null 2>&1; then
@@ -96,7 +100,7 @@ sign_update_artifacts() {
         echo "✗ Minisign private key not found: ${MINISIGN_KEY}" >&2
         exit 1
     fi
-    if [ ! -f "${TAR_PATH}" ] || [ ! -f "${MANIFEST}" ]; then
+    if [ ! -f "${TAR_PATH}" ] || [ ! -f "${CLI_TAR_PATH}" ] || [ ! -f "${MANIFEST}" ]; then
         echo "✗ Missing updater artefacts in ${DIST_DIR}; run a release build first" >&2
         exit 1
     fi
@@ -121,12 +125,18 @@ sign_update_artifacts() {
         exit 1
     fi
 
-    rm -f "${SIG_PATH}" "${MANIFEST_SIG}"
+    rm -f "${SIG_PATH}" "${CLI_SIG_PATH}" "${MANIFEST_SIG}"
     if [ -n "${MINISIGN_PASSWORD:-}" ]; then
         printf '%s\n' "${MINISIGN_PASSWORD}" \
             | minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}" >/dev/null
     else
         minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}"
+    fi
+    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+        printf '%s\n' "${MINISIGN_PASSWORD}" \
+            | minisign -S -s "${MINISIGN_KEY}" -m "${CLI_TAR_PATH}" >/dev/null
+    else
+        minisign -S -s "${MINISIGN_KEY}" -m "${CLI_TAR_PATH}"
     fi
 
     # cargo-packager-updater expects base64(contents-of-.minisig) in the
@@ -148,8 +158,10 @@ sign_update_artifacts() {
     fi
 
     minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${TAR_PATH}"
+    minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${CLI_TAR_PATH}"
     minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${MANIFEST}"
     echo "    ✓ ${TAR_NAME}.minisig"
+    echo "    ✓ ${CLI_TAR_NAME}.minisig"
     echo "    ✓ update.json.minisig"
 }
 
@@ -190,7 +202,9 @@ rustup target add aarch64-apple-darwin >/dev/null
 cargo build --release --target aarch64-apple-darwin
 
 BIN_PATH="${DIST_DIR}/${BINARY_NAME}"
+CLI_BIN_PATH="${DIST_DIR}/${CLI_BINARY_NAME}"
 cp "${PROJECT_ROOT}/target/aarch64-apple-darwin/release/${BINARY_NAME}" "${BIN_PATH}"
+cp "${PROJECT_ROOT}/target/aarch64-apple-darwin/release/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}"
 echo "    ✓ $(file "${BIN_PATH}" | sed 's|.*: ||')"
 
 # ---------- 2. icon ----------
@@ -211,6 +225,7 @@ echo "▸ [3/9] Assembling .app bundle"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
 mv "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${BINARY_NAME}"
+cp "${CLI_BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${CLI_BINARY_NAME}"
 mv "${DIST_DIR}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 echo "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
 sed "s/__VERSION__/${VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
@@ -218,6 +233,10 @@ sed "s/__VERSION__/${VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
 
 # ---------- 4. codesign ----------
 echo "▸ [4/9] Code-signing with Hardened Runtime"
+codesign --force --options runtime --timestamp \
+    --sign "${SIGNING_IDENTITY}" "${CLI_BIN_PATH}"
+codesign --force --options runtime --timestamp \
+    --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}/Contents/MacOS/${CLI_BINARY_NAME}"
 codesign --force --options runtime --timestamp \
     --entitlements "${BUNDLE_DIR}/entitlements.plist" \
     --sign "${SIGNING_IDENTITY}" \
@@ -284,6 +303,7 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 tar czf "${TAR_PATH}" -C "${DIST_DIR}" "${APP_NAME}.app"
+tar czf "${CLI_TAR_PATH}" -C "${DIST_DIR}" "${CLI_BINARY_NAME}"
 DOWNLOAD_URL="https://github.com/elias-tilegant/ferrispass/releases/download/v${VERSION}/${TAR_NAME}"
 BUNDLE_SIZE="$(wc -c < "${TAR_PATH}" | tr -d '[:space:]')"
 

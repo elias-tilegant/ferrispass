@@ -24,5 +24,8 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
+      - name: Build headless CLI
+        run: cargo build --bin ferrispass-cli --verbose
+
       - name: Test
         run: cargo test --verbose

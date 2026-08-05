@@ -66,6 +66,8 @@ base64 = "0.22"
 # dep already pulls in transitively; pinning major matches keepass-rs's
 # expectation (1.x).
 uuid = "1"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
 
 # Auto-type stack. The crates encapsulate macOS FFI internally so our
 # workspace `unsafe_code = "forbid"` lint stays intact — `src/autotype/`

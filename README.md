@@ -6,6 +6,8 @@ A native macOS, KeePass-compatible client built in Rust on top of [GPUI](https:/
 
 Reads and writes KDBX 4 files (AES-256 + Argon2id), interoperable with KeePassXC and KeePass2.
 
+For headless and agent-oriented workflows, see the [FerrisPass CLI](docs/cli.md).
+
 ## Features
 
 - **Vault**: open, browse, search, add, edit, delete (with recycle bin + restore), permanent delete
