@@ -25,11 +25,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Rust's CodeQL extractor supports buildless analysis. Keep the macOS
-          # runner so platform-specific source is evaluated for the app's target.
+          # Rust's CodeQL extractor supports buildless analysis. Use the x86-64
+          # macOS image: CodeQL's Apple Silicon support is still in beta, and
+          # the ARM image cannot currently locate rust-analyzer's proc-macro
+          # server, which substantially degrades call-target resolution.
           - language: rust
             build-mode: none
-            runner: macos-latest
+            runner: macos-15-intel
           # Workflow analysis needs no compilation and can use a Linux runner.
           - language: actions
             build-mode: none
