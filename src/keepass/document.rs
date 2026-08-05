@@ -461,10 +461,10 @@ impl VaultDocument {
         if group.is_expanded == expanded {
             return Ok(());
         }
-        let changed_at = next_change_time(group.times.last_modification);
-        let mut group = group.track_changes();
-        group.edit(|group| group.is_expanded = expanded);
-        group.times.last_modification = Some(changed_at);
+        // IsExpanded is presentation state, not group content. In particular,
+        // do not make a local collapse outrank a concurrent rename during
+        // merge by advancing the group's content timestamp.
+        group.is_expanded = expanded;
         drop(group);
         self.refresh_snapshot();
         Ok(())
@@ -532,11 +532,20 @@ impl VaultDocument {
         if entry.as_ref().parent().id() == target_id {
             return Ok(());
         }
-        let changed_at = next_change_time(entry.times.location_changed);
+        // The native merge compares the parent as part of entry divergence,
+        // but only applies relocation when the moving side is newer. Advance
+        // both clocks so a pure move cannot wedge on equal modification times.
+        let changed_at = next_change_time(
+            entry
+                .times
+                .last_modification
+                .max(entry.times.location_changed),
+        );
         let mut entry = entry.track_changes();
         entry
             .move_to(target_id)
             .map_err(|_| MutationError::GroupNotFound)?;
+        entry.times.last_modification = Some(changed_at);
         entry.times.location_changed = Some(changed_at);
         drop(entry);
         self.refresh_snapshot();
@@ -2543,7 +2552,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_move_tracks_location_without_claiming_a_content_edit() {
+    fn entry_move_advances_merge_clocks_and_merges_cleanly() {
         let db = Database::new();
         let snapshot = VaultSnapshot::new(VaultGroup::default());
         let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
@@ -2569,14 +2578,51 @@ mod tests {
 
         let moved = doc.database.entry(entry_id).expect("moved entry");
         assert!(moved.times.location_changed.expect("new location time") > old_location);
-        assert_eq!(
-            moved.times.last_modification, old_modification,
-            "a pure move must not win an unrelated concurrent content edit",
+        assert!(
+            moved.times.last_modification > old_modification,
+            "a pure move must advance the modification clock used by native merge",
         );
         let merged = merge_clean(base, doc.database());
         assert_eq!(
             merged.entry(entry_id).expect("merged entry").parent().id(),
             find_group_id(&merged, &target_id).expect("target id"),
+        );
+    }
+
+    #[test]
+    fn group_expansion_does_not_override_a_concurrent_remote_rename() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut local = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = local.database.root().id().to_string();
+        let id = local.create_group(&root_id, "Banking").expect("group");
+        let group_id = find_group_id(&local.database, &id).expect("group id");
+        let original_time = local
+            .database
+            .group(group_id)
+            .and_then(|group| group.times.last_modification);
+
+        let remote_db = local.database.clone();
+        let remote_snapshot = snapshot_from_database(&remote_db);
+        let mut remote = VaultDocument::new(remote_db, remote_snapshot, "pw".into(), None);
+
+        local.set_group_expanded(&id, false).expect("collapse");
+        assert_eq!(
+            local
+                .database
+                .group(group_id)
+                .unwrap()
+                .times
+                .last_modification,
+            original_time,
+            "presentation-only expansion state must not claim a content edit",
+        );
+        remote.rename_group(&id, "Accounts").expect("remote rename");
+
+        let merged = merge_clean(local.database.clone(), remote.database());
+        assert_eq!(
+            merged.group(group_id).expect("merged group").name,
+            "Accounts"
         );
     }
 

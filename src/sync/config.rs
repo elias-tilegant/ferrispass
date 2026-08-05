@@ -183,8 +183,12 @@ pub(crate) fn has_account_binding_in(dir: &Path, account_email: &str) -> Result<
         }
         let text =
             fs::read_to_string(&path).map_err(|error| ConfigError::Io(path.clone(), error))?;
-        let config: SyncConfig =
-            serde_json::from_str(&text).map_err(|error| ConfigError::Parse(path, error))?;
+        // A damaged config for an unrelated vault must not prevent account
+        // cleanup after the current vault's binding has already been removed.
+        // It cannot reliably prove that it binds this account, so ignore it.
+        let Ok(config) = serde_json::from_str::<SyncConfig>(&text) else {
+            continue;
+        };
         if config.account_email.eq_ignore_ascii_case(account_email) {
             return Ok(true);
         }
@@ -326,6 +330,18 @@ mod tests {
         assert!(has_account_binding_in(dir.path(), &b.account_email).unwrap());
         delete_in(dir.path(), &b.local_path).unwrap();
         assert!(!has_account_binding_in(dir.path(), &b.account_email).unwrap());
+    }
+
+    #[test]
+    fn corrupt_config_does_not_block_account_binding_scan() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("corrupt.json"), "{ definitely not json").unwrap();
+
+        assert!(!has_account_binding_in(dir.path(), "alice@example.invalid").unwrap());
+
+        let cfg = fixture("/tmp/still-bound.kdbx");
+        save_in(dir.path(), &cfg).unwrap();
+        assert!(has_account_binding_in(dir.path(), &cfg.account_email).unwrap());
     }
 
     #[test]

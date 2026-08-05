@@ -171,16 +171,22 @@ fn fallback_temp_dir() -> PathBuf {
 }
 
 fn is_cloud_storage_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        name == "cloudstorage"
-            || name.starts_with("onedrive")
-            || name.contains("onedrive -")
-            || name == "icloud drive"
-            || name == "dropbox"
-            || name == "google drive"
-            || name == "box sync"
-    })
+    let components = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    components
+        .windows(2)
+        .any(|pair| pair[0] == "mobile documents" && pair[1] == "com~apple~clouddocs")
+        || components.iter().any(|name| {
+            name == "cloudstorage"
+                || name.starts_with("onedrive")
+                || name.contains("onedrive -")
+                || name == "icloud drive"
+                || name == "dropbox"
+                || name == "google drive"
+                || name == "box sync"
+        })
 }
 
 /// Stable per-user tag mixed into the tempdir name. Username + uid
@@ -315,6 +321,9 @@ mod tests {
         )));
         assert!(is_cloud_storage_path(Path::new(
             "/Users/alice/OneDrive - Contoso/Documents"
+        )));
+        assert!(is_cloud_storage_path(Path::new(
+            "/Users/alice/Library/Mobile Documents/com~apple~CloudDocs/T"
         )));
     }
 
