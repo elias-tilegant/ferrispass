@@ -1,14 +1,12 @@
 name: CodeQL
 
 on:
+  push:
+    branches: [master, main]
   pull_request:
     branches: [master, main]
   schedule:
-    # Weekly re-scan covers `master` — push triggers were dropped because
-    # the Rust build inside CodeQL takes 5–15 min (KDF crates dominate)
-    # and adding that to every commit on master wasn't worth it. PRs
-    # still get a full scan before merge, and the cron picks up newly-
-    # published CodeQL rules against the existing tree.
+    # Pick up newly published queries even when the repository is unchanged.
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
@@ -19,30 +17,47 @@ permissions:
 
 jobs:
   analyze:
-    name: Analyze (rust)
-    runs-on: macos-latest
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A manual macOS build gives CodeQL the most complete Rust database.
+          - language: rust
+            build-mode: manual
+            runner: macos-latest
+          # Workflow analysis needs no compilation and can use a Linux runner.
+          - language: actions
+            build-mode: none
+            runner: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Rust
+        if: matrix.language == 'rust'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
+        if: matrix.language == 'rust'
         uses: Swatinem/rust-cache@v2
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
-          languages: rust
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Build
+        if: matrix.language == 'rust'
         run: cargo build --verbose
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
-          category: "/language:rust"
+          category: "/language:${{ matrix.language }}"
