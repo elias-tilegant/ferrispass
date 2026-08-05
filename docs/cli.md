@@ -5,6 +5,20 @@ never starts the GUI. SharePoint is contacted only by `sync now`; all other
 commands remain local. Use `--format json` for the versioned
 `ferrispass-cli/v1` agent contract.
 
+## Installation
+
+The signed macOS app contains the matching CLI binary. Open **Settings →
+General → Command-line interface** and choose **Register CLI**. After approval
+in the macOS administrator dialog, FerrisPass creates
+`/usr/local/bin/ferrispass-cli` as a symbolic link to the signed CLI inside the
+app bundle. Because the link targets the bundle, FerrisPass app updates also
+update the CLI automatically. FerrisPass never replaces an unrelated file or
+link at that location.
+
+Choose **Uninstall CLI** in the same settings card to remove the registration.
+The bundled executable remains part of the app. Verify a registration with
+`ferrispass-cli --version`.
+
 ## Unlocking safely
 
 The CLI never accepts a master password in an argument or environment variable.
