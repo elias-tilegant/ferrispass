@@ -1682,9 +1682,14 @@ impl AppShell {
     fn on_action_open_connect(
         &mut self,
         _: &OpenConnect,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The input entity outlives an individual Connect overlay. Clear its
+        // displayed value as well as resetting ConnectFlow::Picking::query,
+        // otherwise reopening the flow shows the previous session's filter.
+        self.picker_query_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::Connect, cx);
             state.begin_connect_flow(cx);
@@ -1708,9 +1713,11 @@ impl AppShell {
     fn on_action_add_sharepoint_vault(
         &mut self,
         _: &AddSharePointVault,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.picker_query_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::Connect, cx);
             state.begin_connect_flow(cx);

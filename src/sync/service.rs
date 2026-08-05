@@ -102,11 +102,22 @@ pub fn request_device_code() -> Result<auth::DeviceCodeChallenge, ServiceError> 
 
 /// Step 2 of connect, after sign-in: enumerate every `.kdbx` file the
 /// user has access to (across all SharePoint sites + personal OneDrive).
-/// Returned list is sorted alphabetically by name for deterministic UI.
+/// Returned list is sorted newest-first; name is the deterministic tie-breaker.
 pub fn list_kdbx_files(token: &AccessToken) -> Result<Vec<DriveItemHit>, ServiceError> {
     let mut hits = graph::search_kdbx_files(token)?;
-    hits.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    sort_kdbx_files(&mut hits);
     Ok(hits)
+}
+
+fn sort_kdbx_files(hits: &mut [DriveItemHit]) {
+    // Graph returns lastModifiedDateTime as ISO 8601 UTC, whose lexical order
+    // is chronological. Reversing the comparison puts newest entries first
+    // and naturally leaves missing timestamps (empty strings) at the bottom.
+    hits.sort_by(|a, b| {
+        b.last_modified
+            .cmp(&a.last_modified)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
 }
 
 /// Prepare step 3 of Connect without persistent side effects. The caller
@@ -566,7 +577,42 @@ fn now_unix() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{persist_downloaded_vault, stable_fallback_etag};
+    use super::{persist_downloaded_vault, sort_kdbx_files, stable_fallback_etag};
+    use crate::sync::graph::DriveItemHit;
+
+    fn search_hit(name: &str, last_modified: &str) -> DriveItemHit {
+        DriveItemHit {
+            item_id: name.into(),
+            site_id: "site".into(),
+            drive_id: "drive".into(),
+            name: name.into(),
+            web_url: String::new(),
+            path: String::new(),
+            last_modified: last_modified.into(),
+        }
+    }
+
+    #[test]
+    fn kdbx_picker_results_are_sorted_newest_first() {
+        let mut hits = vec![
+            search_hit("older.kdbx", "2026-04-29T12:00:00Z"),
+            search_hit("missing-date.kdbx", ""),
+            search_hit("z-new.kdbx", "2026-05-01T08:30:00Z"),
+            search_hit("a-new.kdbx", "2026-05-01T08:30:00Z"),
+        ];
+
+        sort_kdbx_files(&mut hits);
+
+        assert_eq!(
+            hits.iter().map(|hit| hit.name.as_str()).collect::<Vec<_>>(),
+            [
+                "a-new.kdbx",
+                "z-new.kdbx",
+                "older.kdbx",
+                "missing-date.kdbx"
+            ]
+        );
+    }
 
     #[test]
     fn fallback_etag_requires_the_same_non_empty_revision() {
