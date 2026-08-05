@@ -177,25 +177,35 @@ fn recents_section(recents: &[RecentEntry], cx: &mut Context<AppShell>) -> impl 
                         .enumerate()
                         .map(|(idx, entry)| {
                             let path_for_listener = entry.path.clone();
+                            let path_for_remove = entry.path.clone();
                             let on_click = cx.listener(
                                 move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
                                     shell.open_recent(path_for_listener.clone(), window, cx);
                                 },
                             );
-                            recent_row(idx, entry, now, on_click).into_any_element()
+                            let on_remove =
+                                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    shell.state().update(cx, |state, cx| {
+                                        state.remove_recent(&path_for_remove, cx);
+                                    });
+                                });
+                            recent_row(idx, entry, now, on_click, on_remove).into_any_element()
                         }),
                 ),
         )
 }
 
-fn recent_row<F>(
+fn recent_row<F, R>(
     idx: usize,
     entry: &RecentEntry,
     now: chrono::DateTime<chrono::Local>,
     on_click: F,
+    on_remove: R,
 ) -> impl IntoElement
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    R: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
     let file_name: SharedString = entry
         .path
@@ -212,15 +222,85 @@ where
         .into();
     let elapsed: SharedString = relative_time_label(entry.last_opened_at, now).into();
 
-    command_row(
-        SharedString::from(format!("welcome-recent-{idx}")),
-        AppIcon::Note,
-        file_name,
-        parent,
-        RowTone::Default,
-        Some(elapsed),
-        on_click,
-    )
+    h_flex()
+        .id(SharedString::from(format!("welcome-recent-{idx}")))
+        .h(px(58.))
+        .gap_3()
+        .items_center()
+        .px_3()
+        .rounded(px(7.))
+        .bg(palette::panel())
+        .border_1()
+        .border_color(palette::border())
+        .hover(|row| {
+            row.bg(palette::sidebar())
+                .border_color(palette::border_strong())
+        })
+        .pressable()
+        .on_click(on_click)
+        .child(
+            div()
+                .size(px(30.))
+                .flex_shrink_0()
+                .rounded(px(6.))
+                .bg(palette::sidebar())
+                .text_color(palette::text_muted())
+                .border_1()
+                .border_color(palette::border())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    gpui_component::Icon::from(AppIcon::Note)
+                        .with_size(gpui_component::Size::Size(px(14.))),
+                ),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .gap_0p5()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(palette::text())
+                        .child(file_name),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(palette::text_faint())
+                        .child(parent),
+                ),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(palette::text_faint())
+                .child(elapsed),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("welcome-recent-remove-{idx}")))
+                .flex_shrink_0()
+                .h(px(26.))
+                .px_2()
+                .rounded(px(4.))
+                .text_xs()
+                .text_color(palette::text_faint())
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|button| button.bg(palette::orange_soft()).text_color(palette::red()))
+                .pressable()
+                .child("Remove")
+                .on_click(on_remove),
+        )
 }
 
 fn footer(cx: &mut Context<AppShell>) -> AnyElement {

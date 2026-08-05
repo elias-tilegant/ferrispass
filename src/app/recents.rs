@@ -114,6 +114,14 @@ pub fn push_front_in(entries: &mut Vec<RecentEntry>, path: PathBuf, max: usize) 
     }
 }
 
+/// Remove the entry for `path`, returning whether the list changed.
+/// Path matching deliberately follows `push_front_in`'s byte-exact policy.
+pub fn remove_path_in(entries: &mut Vec<RecentEntry>, path: &Path) -> bool {
+    let before = entries.len();
+    entries.retain(|entry| entry.path != path);
+    entries.len() != before
+}
+
 // --- *_in variants take the directory explicitly so tests can use a
 // tempdir without touching $HOME. Mirrors the same split in sync/config.rs.
 
@@ -236,6 +244,19 @@ mod tests {
             entries[0].last_opened_at > old.last_opened_at,
             "timestamp must advance on re-open"
         );
+    }
+
+    #[test]
+    fn remove_path_removes_only_the_matching_vault() {
+        let retained = entry("/tmp/b.kdbx");
+        let mut entries = vec![entry("/tmp/a.kdbx"), retained.clone()];
+
+        assert!(remove_path_in(&mut entries, Path::new("/tmp/a.kdbx")));
+        assert_eq!(entries, vec![retained]);
+        assert!(!remove_path_in(
+            &mut entries,
+            Path::new("/tmp/missing.kdbx")
+        ));
     }
 
     #[test]
