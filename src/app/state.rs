@@ -3306,6 +3306,21 @@ impl AppState {
         }
     }
 
+    /// Vault eligible for an automatic biometric attempt right now.
+    /// Automatic unlock is deliberately stricter than the manual button:
+    /// it requires the sensor itself to be reachable, so opening a vault in
+    /// clamshell mode never surprises the user with a macOS-password sheet.
+    pub fn automatic_biometric_unlock_path(&self) -> Option<PathBuf> {
+        let path = match &self.vault {
+            VaultStatus::AwaitingPassword { path, .. } => path,
+            _ => return None,
+        };
+        (matches!(self.biometric_attempt, BiometricAttempt::Idle)
+            && self.biometric_registry.get(path).is_some()
+            && self.biometric.is_available())
+        .then(|| path.clone())
+    }
+
     pub fn begin_biometric_unlock(&mut self, cx: &mut Context<Self>) -> Option<BiometricLaunch> {
         // Only valid while sitting on the Unlock screen for a vault
         // that has an enrolment. Anything else is the UI dispatching
@@ -6483,6 +6498,35 @@ mod biometric_tests {
         // unlock screen isn't on the stage, so we must not surface
         // the enrollment.
         assert!(state.biometric_for_pending().is_none());
+    }
+
+    #[test]
+    fn automatic_biometric_unlock_requires_enrollment_and_available_sensor() {
+        let path = PathBuf::from("/tmp/a.kdbx");
+        let available = Arc::new(InMemoryBiometricStore::available());
+        let mut registry = BiometricRegistry::new();
+        registry.upsert(
+            path.clone(),
+            BiometricEnrollment {
+                id: EnrollmentId::new_random(),
+                keyfile: None,
+                enrolled_at: Local::now(),
+            },
+        );
+        let mut state = AppState::with_biometric(available, registry.clone());
+        state.vault = awaiting("/tmp/a.kdbx");
+        assert_eq!(state.automatic_biometric_unlock_path(), Some(path.clone()));
+
+        state.biometric_attempt = BiometricAttempt::Error {
+            path: path.clone(),
+            message: "cancelled".into(),
+        };
+        assert_eq!(state.automatic_biometric_unlock_path(), None);
+
+        let unavailable = Arc::new(InMemoryBiometricStore::supported_but_unavailable());
+        let mut state = AppState::with_biometric(unavailable, registry);
+        state.vault = awaiting("/tmp/a.kdbx");
+        assert_eq!(state.automatic_biometric_unlock_path(), None);
     }
 
     #[test]

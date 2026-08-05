@@ -261,6 +261,10 @@ pub struct AppShell {
     /// surface a clear "this combo is in use by another app" hint
     /// rather than letting the feature silently appear broken.
     auto_type_hotkey_error: Option<String>,
+    /// Vault for which this visit to the unlock screen already launched an
+    /// automatic Touch ID prompt. Cleared after leaving AwaitingPassword so
+    /// a later lock can auto-prompt again without looping after cancellation.
+    automatic_biometric_attempted_for: Option<PathBuf>,
     /// Handle to the window that hosts this shell. Captured at
     /// construction so the global-hotkey poll task can dispatch
     /// `perform_auto_type` directly into this window's context — bypassing
@@ -518,6 +522,7 @@ impl AppShell {
             auto_type_poll_task: None,
             auto_type_sequence_error: None,
             auto_type_hotkey_error: None,
+            automatic_biometric_attempted_for: None,
             window_handle: window.window_handle(),
             _subscriptions,
         };
@@ -2539,6 +2544,10 @@ impl AppShell {
     /// "Never crosses AppState" applies to the transient buffer, not
     /// to the opened document.
     pub fn submit_biometric_unlock(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.start_biometric_unlock(cx);
+    }
+
+    fn start_biometric_unlock(&mut self, cx: &mut Context<Self>) {
         let Some(launch) = self
             .state
             .update(cx, |state, cx| state.begin_biometric_unlock(cx))
@@ -2616,6 +2625,37 @@ impl AppShell {
             });
         })
         .detach();
+    }
+
+    fn schedule_automatic_biometric_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (path, overlay_active, awaiting_password) = {
+            let state = self.state.read(cx);
+            (
+                state.automatic_biometric_unlock_path(),
+                state.overlay().is_active(),
+                state.pending_unlock_path().is_some(),
+            )
+        };
+
+        match path {
+            Some(path)
+                if !overlay_active
+                    && self.automatic_biometric_attempted_for.as_ref() != Some(&path) =>
+            {
+                self.automatic_biometric_attempted_for = Some(path);
+                // Never mutate AppState while rendering. Defer the launch to
+                // the next foreground turn, where begin_biometric_unlock
+                // revalidates every eligibility condition before prompting.
+                window.defer(cx, |window, cx| {
+                    window
+                        .dispatch_action(Box::new(crate::app::actions::SubmitBiometricUnlock), cx);
+                });
+            }
+            None if !awaiting_password => {
+                self.automatic_biometric_attempted_for = None;
+            }
+            _ => {}
+        }
     }
 
     pub fn cancel_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3069,6 +3109,7 @@ impl AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        self.schedule_automatic_biometric_unlock(window, cx);
         let body = AppShell::render_body(self, cx);
         // Without this layer the `Root::notification` `NotificationList`
         // never gets painted — `window.push_notification(...)` queues
