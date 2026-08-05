@@ -87,7 +87,7 @@ jobs:
           name: unsigned-release
           path: |
             dist/*.dmg
-            dist/*.app.tar.gz
+            dist/*.tar.gz
             dist/update.json
           if-no-files-found: error
           retention-days: 1
@@ -211,7 +211,7 @@ jobs:
           name: signed-release
           path: |
             dist/*.dmg
-            dist/*.app.tar.gz
+            dist/*.tar.gz
             dist/*.minisig
             dist/update.json
           if-no-files-found: error
@@ -246,7 +246,7 @@ jobs:
           # - update.json + .minisig: signed manifest binding version, URL and payload
           files: |
             dist/*.dmg
-            dist/*.app.tar.gz
+            dist/*.tar.gz
             dist/*.minisig
             dist/update.json
           # Body comes from git-cliff's isolated notes job instead of GitHub's

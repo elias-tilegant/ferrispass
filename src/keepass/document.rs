@@ -416,6 +416,31 @@ impl VaultDocument {
         Ok(())
     }
 
+    /// Replace tags explicitly. The GUI's generic update path deliberately
+    /// preserves tags because its editor does not expose them; headless patch
+    /// clients need an opt-in authoritative operation instead.
+    pub fn set_entry_tags(
+        &mut self,
+        entry_id_str: &str,
+        tags: Vec<String>,
+    ) -> Result<(), MutationError> {
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
+        let mut entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        if entry.tags == tags {
+            return Ok(());
+        }
+        let changed_at = next_change_time(entry.times.last_modification);
+        entry.tags = tags;
+        entry.times.last_modification = Some(changed_at);
+        drop(entry);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
     /// Toggle the KeePass `IsExpanded` flag on a group. Persisting via
     /// the standard save flow keeps the user's sidebar collapse state
     /// across sessions and across other clients (KeePassXC and KeePass2
@@ -694,6 +719,56 @@ impl VaultDocument {
         Ok(())
     }
 
+    /// Move a group below another group while rejecting root moves, recycle
+    /// bin moves, and cycles. Used by headless clients as well as future UI
+    /// drag-and-drop support.
+    pub fn move_group(
+        &mut self,
+        group_id_str: &str,
+        target_group_id_str: &str,
+    ) -> Result<(), MutationError> {
+        let root_id = self.database.root().id();
+        let group_id =
+            find_group_id(&self.database, group_id_str).ok_or(MutationError::GroupNotFound)?;
+        let target_id = find_group_id(&self.database, target_group_id_str)
+            .ok_or(MutationError::GroupNotFound)?;
+        if group_id == root_id {
+            return Err(MutationError::CannotMoveRoot);
+        }
+        if self
+            .database
+            .recycle_bin()
+            .is_some_and(|rb| rb.id() == group_id)
+        {
+            return Err(MutationError::CannotMoveRecycleBin);
+        }
+        if group_id == target_id || group_is_within(&self.database, target_id, group_id) {
+            return Err(MutationError::WouldCreateCycle);
+        }
+        let group = self
+            .database
+            .group(group_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        if group
+            .parent()
+            .is_some_and(|parent| parent.id() == target_id)
+        {
+            return Ok(());
+        }
+        let changed_at = next_change_time(group.times.location_changed);
+        let mut group = self
+            .database
+            .group_mut(group_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        group
+            .move_to(target_id)
+            .map_err(|_| MutationError::WouldCreateCycle)?;
+        group.times.location_changed = Some(changed_at);
+        drop(group);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
     /// Soft-delete a group: move the entire subtree to the Recycle Bin.
     /// Mirrors `delete_entry`'s contract — reversible via the Trash view.
     /// Refuses to delete the root, the Recycle Bin itself, or any group
@@ -745,6 +820,44 @@ impl VaultDocument {
             _ => MutationError::RecycleBinUnavailable,
         })?;
         group.times.last_modification = Some(changed_at);
+        group.times.location_changed = Some(changed_at);
+        drop(group);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
+    /// Restore a group from the Recycle Bin to its previous parent, falling
+    /// back to the root if that parent no longer exists or is also trashed.
+    pub fn restore_group(&mut self, group_id_str: &str) -> Result<(), MutationError> {
+        let group_id =
+            find_group_id(&self.database, group_id_str).ok_or(MutationError::GroupNotFound)?;
+        let root_id = self.database.root().id();
+        let recycle_bin_id = self.database.recycle_bin().map(|group| group.id());
+        let group = self
+            .database
+            .group(group_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        let current_parent = group.parent().ok_or(MutationError::CannotMoveRoot)?.id();
+        if !recycle_bin_id.is_some_and(|rb| group_is_within(&self.database, current_parent, rb)) {
+            return Ok(());
+        }
+        let target_id = group
+            .previous_parent_group
+            .filter(|candidate| {
+                self.database.group(*candidate).is_some()
+                    && !recycle_bin_id
+                        .is_some_and(|rb| group_is_within(&self.database, *candidate, rb))
+            })
+            .unwrap_or(root_id);
+        let changed_at = next_change_time(group.times.location_changed);
+        let mut group = self
+            .database
+            .group_mut(group_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        group.previous_parent_group = None;
+        group
+            .move_to(target_id)
+            .map_err(|_| MutationError::RecycleBinUnavailable)?;
         group.times.location_changed = Some(changed_at);
         drop(group);
         self.refresh_snapshot();
@@ -1000,6 +1113,12 @@ pub enum MutationError {
     CannotDeleteRoot,
     #[error("the Recycle Bin cannot be deleted")]
     CannotDeleteRecycleBin,
+    #[error("the root group cannot be moved")]
+    CannotMoveRoot,
+    #[error("the Recycle Bin cannot be moved")]
+    CannotMoveRecycleBin,
+    #[error("moving the group would create a cycle")]
+    WouldCreateCycle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

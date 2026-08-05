@@ -6,6 +6,8 @@ A native macOS, KeePass-compatible client built in Rust on top of [GPUI](https:/
 
 Reads and writes KDBX 4 files (AES-256 + Argon2id), interoperable with KeePassXC and KeePass2.
 
+For headless and agent-oriented workflows, see the [FerrisPass CLI](docs/cli.md).
+
 ## Features
 
 - **Vault**: open, browse, search, add, edit, delete (with recycle bin + restore), permanent delete
@@ -18,6 +20,7 @@ Reads and writes KDBX 4 files (AES-256 + Argon2id), interoperable with KeePassXC
 - **Auto-Type**: global hotkey (default ⌃⌥⌘V) types `{USERNAME}{TAB}{PASSWORD}{ENTER}` into the previously-focused window; foreground app is matched to a vault entry by URL hostname. Off by default — enable in Settings → Auto-Type. Requires the macOS Accessibility permission.
 - **Resume**: most-recently-opened vault auto-loads at startup; Recents list on the welcome screen
 - **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, three-way merge) — see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) for the connect walkthrough
+- **CLI**: headless vault access for scripts and local AI agents, with JSON output, explicit secret reads, dry-run writes, Touch ID and two-step SharePoint sync
 - **Theming**: light + dark mode (⌘⇧D)
 
 ## Feature matrix
@@ -48,6 +51,8 @@ FerrisPass is still young, so this matrix is intentionally honest about what is 
 ```text
 src/
   app/        application bootstrap, AppState, recents, settings, time helpers
+  cli.rs      headless command tree, JSON contract and sync planning
+  cli_install.rs  macOS CLI registration and removal
   domain/     UI-safe vault snapshot types (no secrets in visible models)
   keepass/    keepass-rs adapter, document, password generator, three-way merge
   sync/       SharePoint device-code auth, Graph API, sync service, keychain tokens
@@ -63,6 +68,32 @@ Download `FerrisPass-X.Y.Z-arm64.dmg` from the [Releases](https://github.com/eli
 The app is signed with a Developer ID and Apple-notarized, so first launch opens cleanly with no Gatekeeper override.
 
 Requires Apple Silicon (M1 or newer) and macOS 12 (Monterey) or later. Intel Macs are not supported.
+
+## Command-line interface
+
+FerrisPass ships `ferrispass-cli` inside the signed app bundle. Register it
+from **Settings → General → Command-line interface**. macOS creates
+`/usr/local/bin/ferrispass-cli` as a link to the bundled binary, so app updates
+also update the CLI. The same settings card can remove the registration.
+
+```sh
+ferrispass-cli --vault ~/Documents/team.kdbx vault info
+ferrispass-cli --vault ~/Documents/team.kdbx entry search github
+```
+
+The CLI prompts for the master password without echoing it. Enrolled vaults can
+use Touch ID. In clamshell mode, explicitly allow the macOS account-password
+fallback:
+
+```sh
+ferrispass-cli --touch-id --allow-device-passcode \
+  --vault ~/Documents/team.kdbx vault info
+```
+
+Use `--format json` for scripts and agents. Secret fields are redacted unless a
+specific entry, field and `--reveal` are requested. Mutations are dry runs until
+`--commit` is supplied. See the [CLI guide](./docs/cli.md) for the complete
+command overview, safe password input and SharePoint sync flow.
 
 ## Auto-updates
 

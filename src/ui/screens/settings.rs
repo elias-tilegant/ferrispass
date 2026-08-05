@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder, px,
 };
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 
 use crate::app::actions::{DownloadFavicons, InstallUpdate, OpenWhatsNew, RestartToUpdate};
 use crate::app::{AppSettings, FaviconDownloadStatus, VaultStatus};
@@ -303,6 +303,7 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
         .child(clipboard_section(&settings, cx))
         .child(auto_sync_section(&settings, cx))
         .child(launch_cleanup_section(&settings, cx))
+        .child(cli_section(cx))
         .child(favicon_section(&favicon_status, vault_open, cx))
         .child(updates_section(
             &settings,
@@ -310,6 +311,96 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
             whats_new_available,
             cx,
         ))
+}
+
+fn cli_section(cx: &mut Context<AppShell>) -> AnyElement {
+    let (action, status): (AnyElement, SharedString) = match crate::cli_install::status() {
+        crate::cli_install::InstallStatus::Available { target } => (
+            action_button(
+                "install-cli",
+                "Register CLI",
+                ActionKind::Primary,
+                true,
+                cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    match crate::cli_install::install() {
+                        Ok(path) => window.push_notification(
+                            format!("FerrisPass CLI registered at {}.", path.display()),
+                            cx,
+                        ),
+                        Err(error) => {
+                            window.push_notification(format!("Could not register CLI: {error}"), cx)
+                        }
+                    }
+                    cx.notify();
+                }),
+            ),
+            SharedString::from(format!(
+                "Not registered. macOS will ask for permission to create {}.",
+                target.display()
+            )),
+        ),
+        crate::cli_install::InstallStatus::Installed { source, target } => (
+            action_button(
+                "uninstall-cli",
+                "Uninstall CLI",
+                ActionKind::Ghost,
+                true,
+                cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
+                    match crate::cli_install::uninstall() {
+                        Ok(path) => window.push_notification(
+                            format!("FerrisPass CLI removed from {}.", path.display()),
+                            cx,
+                        ),
+                        Err(error) => window
+                            .push_notification(format!("Could not uninstall CLI: {error}"), cx),
+                    }
+                    cx.notify();
+                }),
+            ),
+            SharedString::from(format!(
+                "Registered at {} → {}. App updates update the CLI automatically.",
+                target.display(),
+                source.display()
+            )),
+        ),
+        crate::cli_install::InstallStatus::Conflict { detail, .. } => (
+            action_button(
+                "cli-conflict",
+                "Registration blocked",
+                ActionKind::Ghost,
+                false,
+                |_, _, _| {},
+            ),
+            SharedString::from(detail),
+        ),
+        crate::cli_install::InstallStatus::Unavailable(reason) => (
+            action_button(
+                "cli-unavailable",
+                "CLI unavailable",
+                ActionKind::Ghost,
+                false,
+                |_, _, _| {},
+            ),
+            SharedString::from(reason),
+        ),
+    };
+
+    let body = v_flex()
+        .gap_3()
+        .child(h_flex().self_start().child(action))
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(status),
+        );
+
+    section_card(
+        "Command-line interface",
+        "Register the bundled, signed ferrispass-cli for terminal use and local AI agents. \
+         The system link follows FerrisPass app updates and can be removed here at any time.",
+        body,
+    )
 }
 
 fn touch_id_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {

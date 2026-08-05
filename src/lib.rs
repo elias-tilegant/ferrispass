@@ -1,6 +1,8 @@
 pub mod app;
 pub mod autotype;
 pub mod biometric;
+pub mod cli;
+pub mod cli_install;
 pub mod clipboard;
 pub mod domain;
 pub mod favicon;
