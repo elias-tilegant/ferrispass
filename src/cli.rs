@@ -9,6 +9,7 @@ use std::{
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -71,7 +72,37 @@ enum Command {
 #[derive(Subcommand)]
 enum SyncCommand {
     Status,
-    Now,
+    Now(SyncNow),
+}
+
+#[derive(Args)]
+struct SyncNow {
+    #[arg(long)]
+    commit: bool,
+    #[arg(long, requires = "commit")]
+    plan_token: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    input_fd: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyncResolutions {
+    resolutions: Vec<SyncResolution>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyncResolution {
+    entry_id: String,
+    keep: ResolutionSide,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ResolutionSide {
+    Local,
+    Remote,
 }
 
 #[derive(Subcommand)]
@@ -287,10 +318,6 @@ impl CliError {
             details: None,
         }
     }
-    fn with_details(mut self, details: Value) -> Self {
-        self.details = Some(details);
-        self
-    }
 }
 
 pub fn run() -> i32 {
@@ -318,6 +345,14 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         .vault
         .as_deref()
         .ok_or_else(|| CliError::new("missing_vault", 2, "--vault is required"))?;
+    if matches!(
+        &cli.command,
+        Command::Sync {
+            command: SyncCommand::Status
+        }
+    ) {
+        return sync_status(vault);
+    }
     let password = unlock_password(cli)?;
     let mut document = KeePassRepository::open(vault, &password, cli.key_file.as_deref())
         .map_err(|e| CliError::new("unlock_failed", 3, e.to_string()))?;
@@ -327,18 +362,40 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         } => Ok(vault_info(&document)),
         Command::Group { command } => execute_group(command, &mut document, vault),
         Command::Entry { command } => execute_entry(command, &mut document, vault),
-        Command::Sync { command } => execute_sync(
-            command,
+        Command::Sync {
+            command: SyncCommand::Now(args),
+        } => execute_sync(
+            args,
             &mut document,
             vault,
             &password,
             cli.key_file.as_deref(),
         ),
+        Command::Sync {
+            command: SyncCommand::Status,
+        } => unreachable!(),
     }
 }
 
+fn sync_status(vault: &Path) -> Result<Value, CliError> {
+    let canonical =
+        std::fs::canonicalize(vault).map_err(|e| CliError::new("io", 7, e.to_string()))?;
+    let config = crate::sync::config::load(&canonical)
+        .map_err(sync_error)?
+        .ok_or_else(|| {
+            CliError::new(
+                "sync_not_configured",
+                6,
+                "vault is not connected to SharePoint",
+            )
+        })?;
+    Ok(
+        json!({"provider":"sharepoint","account":config.account_email,"remote_url":config.remote_url,"configured":true,"network_checked":false}),
+    )
+}
+
 fn execute_sync(
-    command: &SyncCommand,
+    args: &SyncNow,
     document: &mut VaultDocument,
     vault: &Path,
     password: &str,
@@ -355,91 +412,172 @@ fn execute_sync(
                 "vault is not connected to SharePoint",
             )
         })?;
-    if matches!(command, SyncCommand::Status) {
-        return Ok(json!({
-            "provider":"sharepoint",
-            "account":config.account_email,
-            "remote_url":config.remote_url,
-            "configured":true
-        }));
-    }
-
     let token =
         crate::sync::service::refresh_access_token(&config.account_email).map_err(sync_error)?;
     let local_bytes = document
         .read_current_bytes()
         .map_err(|e| CliError::new("local_revision_changed", 5, e.to_string()))?;
-    match crate::sync::service::upload_after_save(&config, &token, &local_bytes)
-        .map_err(sync_error)?
-    {
-        crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
-            config.last_etag = new_etag;
-            crate::sync::config::save(&config).map_err(sync_error)?;
-            Ok(json!({"status":"synced","uploaded":true,"merged":0}))
-        }
-        crate::sync::service::UploadAfterSave::Conflict {
-            remote_bytes,
-            remote_etag,
-        } => {
-            let remote = KeePassRepository::open_bytes(&remote_bytes, password, key_file)
-                .map_err(|e| CliError::new("remote_unlock_failed", 3, e.to_string()))?;
-            let report = crate::keepass::merge::diff(document.database(), remote.database());
-            if !report.conflicts.is_empty() {
-                let conflicts: Vec<Value> = report
-                    .conflicts
-                    .iter()
-                    .map(|conflict| {
-                        let fields: Vec<&str> = conflict
-                            .fields
-                            .iter()
-                            .filter(|field| field.differs)
-                            .map(|field| field.label)
-                            .collect();
-                        json!({"entry_id":conflict.id,"fields":fields})
-                    })
-                    .collect();
-                return Err(CliError::new(
-                    "sync_conflict",
-                    5,
-                    "ambiguous remote changes require manual resolution",
-                )
-                .with_details(json!({"conflicts":conflicts})));
-            }
-            let merged_count = report.remote_only.len() + report.auto_resolved.len();
-            let needs_upload = report.has_local_contribution();
-            let merged = crate::keepass::merge::apply_picks(
-                document.database(),
-                remote.database(),
-                &std::collections::HashMap::new(),
-                &report,
-            )
+    let (remote_bytes, remote_etag) =
+        crate::sync::service::download_remote(&config, &token).map_err(sync_error)?;
+    let remote = KeePassRepository::open_bytes(&remote_bytes, password, key_file)
+        .map_err(|e| CliError::new("remote_unlock_failed", 3, e.to_string()))?;
+    let report = crate::keepass::merge::diff(document.database(), remote.database());
+    let conflicts: Vec<Value> = report
+        .conflicts
+        .iter()
+        .map(|conflict| {
+            let fields: Vec<&str> = conflict
+                .fields
+                .iter()
+                .filter(|field| field.differs)
+                .map(|field| field.label)
+                .collect();
+            json!({"entry_id":conflict.id,"fields":fields})
+        })
+        .collect();
+    let plan_token = sync_plan_token(&local_bytes, &remote_etag, &report);
+    let needs_upload = report.has_local_contribution();
+    let remote_changes = report.remote_only.len()
+        + report
+            .auto_resolved
+            .iter()
+            .filter(|r| matches!(r.winner, crate::keepass::merge::Side::Remote))
+            .count();
+    if !args.commit {
+        return Ok(json!({
+            "status":if conflicts.is_empty(){"ready"}else{"conflict"},
+            "committed":false,
+            "plan_token":plan_token,
+            "would_upload":needs_upload || !report.conflicts.is_empty(),
+            "remote_changes":remote_changes,
+            "conflicts":conflicts
+        }));
+    }
+    let supplied = args
+        .plan_token
+        .as_deref()
+        .ok_or_else(|| CliError::new("plan_token_required", 6, "--commit requires --plan-token"))?;
+    if supplied != plan_token {
+        return Err(CliError::new(
+            "stale_sync_plan",
+            5,
+            "local or remote revision changed; create a new sync plan",
+        ));
+    }
+    let picks = validated_resolutions(args.input_fd, &report)?;
+    let merged_count = report.remote_only.len() + report.auto_resolved.len();
+    let merged =
+        crate::keepass::merge::apply_picks(document.database(), remote.database(), &picks, &report)
             .map_err(|e| CliError::new("merge_failed", 5, e.to_string()))?;
-            let receipt = document
-                .save_payload_for_database(merged.clone())
-                .save_to(vault)
-                .map_err(|e| CliError::new("save_failed", 7, e.to_string()))?;
-            document.replace_database(merged);
-            config.last_etag = remote_etag;
-            if needs_upload {
-                match crate::sync::service::upload_after_save(&config, &token, &receipt.bytes())
-                    .map_err(sync_error)?
-                {
-                    crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
-                        config.last_etag = new_etag
-                    }
-                    crate::sync::service::UploadAfterSave::Conflict { .. } => {
-                        return Err(CliError::new(
-                            "remote_changed_during_sync",
-                            5,
-                            "remote vault changed again; rerun sync",
-                        ));
-                    }
-                }
+    let needs_local_save = !report.remote_only.is_empty()
+        || !report.auto_resolved.is_empty()
+        || !report.conflicts.is_empty()
+        || report.structural_writeback_required;
+    let upload_bytes = if needs_local_save {
+        let receipt = document
+            .save_payload_for_database(merged.clone())
+            .save_to(vault)
+            .map_err(|e| CliError::new("save_failed", 7, e.to_string()))?;
+        document.replace_database(merged);
+        receipt.bytes()
+    } else {
+        local_bytes
+    };
+    config.last_etag = remote_etag;
+    let resolved_upload = needs_upload || !report.conflicts.is_empty();
+    if resolved_upload {
+        match crate::sync::service::upload_after_save(&config, &token, &upload_bytes)
+            .map_err(sync_error)?
+        {
+            crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
+                config.last_etag = new_etag
             }
-            crate::sync::config::save(&config).map_err(sync_error)?;
-            Ok(json!({"status":"synced","uploaded":needs_upload,"merged":merged_count}))
+            crate::sync::service::UploadAfterSave::Conflict { .. } => {
+                return Err(CliError::new(
+                    "remote_changed_during_sync",
+                    5,
+                    "remote vault changed again; rerun sync",
+                ));
+            }
         }
     }
+    crate::sync::config::save(&config).map_err(sync_error)?;
+    Ok(
+        json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":picks.len()}),
+    )
+}
+
+fn sync_plan_token(
+    local: &[u8],
+    remote_etag: &str,
+    report: &crate::keepass::merge::ConflictReport,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ferrispass-cli-sync-plan-v1\0");
+    hasher.update(Sha256::digest(local));
+    hasher.update(remote_etag.as_bytes());
+    for conflict in &report.conflicts {
+        hasher.update(conflict.id.as_bytes());
+        for field in conflict.fields.iter().filter(|field| field.differs) {
+            hasher.update(field.label.as_bytes());
+        }
+    }
+    format!(
+        "v1:{}",
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn validated_resolutions(
+    fd: u32,
+    report: &crate::keepass::merge::ConflictReport,
+) -> Result<std::collections::HashMap<String, crate::keepass::merge::Side>, CliError> {
+    if report.conflicts.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let input: SyncResolutions = read_json_fd(fd)?;
+    let expected: std::collections::HashSet<String> =
+        report.conflicts.iter().map(|c| c.id.clone()).collect();
+    validate_resolution_input(input, &expected)
+}
+
+fn validate_resolution_input(
+    input: SyncResolutions,
+    expected: &std::collections::HashSet<String>,
+) -> Result<std::collections::HashMap<String, crate::keepass::merge::Side>, CliError> {
+    let mut picks = std::collections::HashMap::new();
+    for resolution in input.resolutions {
+        if !expected.contains(&resolution.entry_id) {
+            return Err(CliError::new(
+                "invalid_resolution",
+                6,
+                "resolution contains an unknown entry UUID",
+            ));
+        }
+        let side = match resolution.keep {
+            ResolutionSide::Local => crate::keepass::merge::Side::Local,
+            ResolutionSide::Remote => crate::keepass::merge::Side::Remote,
+        };
+        if picks.insert(resolution.entry_id, side).is_some() {
+            return Err(CliError::new(
+                "invalid_resolution",
+                6,
+                "resolution contains a duplicate entry UUID",
+            ));
+        }
+    }
+    if picks.len() != expected.len() {
+        return Err(CliError::new(
+            "incomplete_resolution",
+            6,
+            "every conflict requires exactly one resolution",
+        ));
+    }
+    Ok(picks)
 }
 
 fn sync_error(error: impl std::fmt::Display) -> CliError {
@@ -900,5 +1038,77 @@ mod tests {
         let rendered = value.to_string();
         assert!(rendered.contains("shown"));
         assert!(!rendered.contains("hidden"));
+    }
+
+    #[test]
+    fn sync_plan_token_is_stable_and_revision_bound() {
+        let report = crate::keepass::merge::ConflictReport::default();
+        let token = sync_plan_token(b"local revision", "etag-1", &report);
+
+        assert_eq!(token, sync_plan_token(b"local revision", "etag-1", &report));
+        assert_ne!(token, sync_plan_token(b"changed", "etag-1", &report));
+        assert_ne!(token, sync_plan_token(b"local revision", "etag-2", &report));
+        assert!(token.starts_with("v1:"));
+        assert_eq!(token.len(), 67);
+    }
+
+    #[test]
+    fn sync_status_does_not_try_to_unlock_the_vault() {
+        let vault = std::env::temp_dir().join(format!(
+            "ferrispass-cli-status-{}-{}.kdbx",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::write(&vault, b"not a kdbx").unwrap();
+        let cli = Cli::try_parse_from([
+            "ferrispass-cli",
+            "--vault",
+            vault.to_str().unwrap(),
+            "sync",
+            "status",
+        ])
+        .unwrap();
+
+        let error = execute(&cli).unwrap_err();
+        std::fs::remove_file(&vault).unwrap();
+        assert_eq!(error.code, "sync_not_configured");
+    }
+
+    #[test]
+    fn sync_resolutions_require_one_known_unique_choice_per_conflict() {
+        let expected = ["entry-a".to_owned(), "entry-b".to_owned()]
+            .into_iter()
+            .collect();
+        let valid: SyncResolutions = serde_json::from_str(
+            r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"entry-b","keep":"remote"}]}"#,
+        )
+        .unwrap();
+        let picks = validate_resolution_input(valid, &expected).unwrap();
+        assert_eq!(picks.len(), 2);
+        assert_eq!(picks["entry-a"], crate::keepass::merge::Side::Local);
+        assert_eq!(picks["entry-b"], crate::keepass::merge::Side::Remote);
+
+        for (json, code) in [
+            (
+                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"}]}"#,
+                "incomplete_resolution",
+            ),
+            (
+                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"entry-a","keep":"remote"}]}"#,
+                "invalid_resolution",
+            ),
+            (
+                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"unknown","keep":"remote"}]}"#,
+                "invalid_resolution",
+            ),
+        ] {
+            let input = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                validate_resolution_input(input, &expected)
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
     }
 }

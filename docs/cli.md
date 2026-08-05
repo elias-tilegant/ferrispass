@@ -1,8 +1,9 @@
 # FerrisPass CLI
 
-`ferrispass-cli` is the headless interface for local KeePass-compatible vaults.
-It never starts the GUI or contacts SharePoint. Use `--format json` for the
-versioned `ferrispass-cli/v1` agent contract.
+`ferrispass-cli` is the headless interface for KeePass-compatible vaults. It
+never starts the GUI. SharePoint is contacted only by `sync now`; all other
+commands remain local. Use `--format json` for the versioned
+`ferrispass-cli/v1` agent contract.
 
 ## Unlocking safely
 
@@ -50,13 +51,33 @@ command tree and stable option names.
 
 ## SharePoint sync
 
-For a vault already connected by the FerrisPass GUI, `sync status` reads the
-existing binding and `sync now` refreshes the Keychain token, uploads with an
-ETag guard, and automatically merges conflict-free remote changes. Ambiguous
-entry conflicts fail closed with UUIDs and differing field names; no secret
-values are included. Initial SharePoint connection remains a GUI operation.
+For a vault already connected by the FerrisPass GUI, `sync status` reads only
+the local binding. It neither unlocks the vault nor contacts SharePoint.
+Initial SharePoint connection remains a GUI operation.
+
+`sync now` is a two-step operation. The first invocation downloads and checks
+the remote revision but does not change the local vault or SharePoint. Its JSON
+result contains a `plan_token`, the proposed changes, and any ambiguous
+conflicts. A second invocation with `--commit` repeats the checks and accepts
+the plan only if both revisions still match:
 
 ```sh
 ferrispass-cli --vault team.kdbx --format json sync status
 ferrispass-cli --vault team.kdbx --format json sync now
+ferrispass-cli --vault team.kdbx --format json sync now \
+  --commit --plan-token 'v1:...'
 ```
+
+When the plan reports conflicts, pass exactly one choice for every reported
+entry UUID on stdin (or a dedicated `--input-fd`). Unknown, duplicate, and
+missing UUIDs fail closed. Only UUIDs and differing field names appear in the
+plan; secret values are never emitted.
+
+```sh
+printf '%s' '{"resolutions":[{"entry_id":"UUID","keep":"remote"}]}' |
+  ferrispass-cli --vault team.kdbx --format json sync now \
+    --commit --plan-token 'v1:...'
+```
+
+Uploads retain the SharePoint ETag guard. If the remote file changes between
+planning and publication, the command stops and requires a fresh plan.
