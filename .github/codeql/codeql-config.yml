@@ -2,7 +2,7 @@ name: "FerrisPass CodeQL config"
 
 # Rust idiomatic unit tests live in `#[cfg(test)] mod tests { … }` blocks
 # inline with the production code, so path-based filters can't separate
-# them. The `rs/hardcoded-cryptographic-value` query flags every test
+# them. The `rust/hard-coded-cryptographic-value` query flags every test
 # fixture password (e.g. "vault-pw", "pw", "secret") and produces dozens
 # of false positives per scan.
 #
@@ -13,4 +13,4 @@ name: "FerrisPass CodeQL config"
 # password manager (taint flow, unsafe blocks, weak crypto APIs) stay on.
 query-filters:
   - exclude:
-      id: rs/hardcoded-cryptographic-value
+      id: rust/hard-coded-cryptographic-value
