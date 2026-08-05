@@ -961,6 +961,25 @@ impl AppState {
         &self.recents
     }
 
+    /// Forget a vault from the Welcome screen's recent list and persist the
+    /// updated list. This does not delete the vault or any related keychain or
+    /// sync configuration.
+    pub fn remove_recent(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        if !recents::remove_path_in(&mut self.recents, path) {
+            return false;
+        }
+
+        let snapshot = recents::RecentVaults {
+            entries: self.recents.clone(),
+        };
+        cx.background_spawn(async move {
+            let _ = recents::save(&snapshot);
+        })
+        .detach();
+        cx.notify();
+        true
+    }
+
     pub fn favicon_status(&self) -> &FaviconDownloadStatus {
         &self.favicon_status
     }
@@ -3320,19 +3339,21 @@ impl AppState {
         }
     }
 
-    /// Vault eligible for an automatic biometric attempt right now.
-    /// Automatic unlock is deliberately stricter than the manual button:
-    /// it requires the sensor itself to be reachable, so opening a vault in
-    /// clamshell mode never surprises the user with a macOS-password sheet.
-    pub fn automatic_biometric_unlock_path(&self) -> Option<PathBuf> {
+    /// Vault eligible for an automatic biometric attempt right now. Mirrors
+    /// the Unlock screen's manual-button policy: an enrolled vault may prompt
+    /// when Touch ID is directly reachable, or when the user enabled device
+    /// authentication fallback. The latter keeps automatic unlock useful in
+    /// clamshell mode, where macOS reports the built-in sensor unavailable but
+    /// can still present its Touch ID / account-password authentication sheet.
+    pub fn automatic_biometric_unlock_path(&self, allow_device_passcode: bool) -> Option<PathBuf> {
         let path = match &self.vault {
             VaultStatus::AwaitingPassword { path, .. } => path,
             _ => return None,
         };
         (matches!(self.biometric_attempt, BiometricAttempt::Idle)
             && self.biometric_registry.get(path).is_some()
-            && self.biometric.is_available())
-        .then(|| path.clone())
+            && (self.biometric.is_available() || allow_device_passcode))
+            .then(|| path.clone())
     }
 
     pub fn begin_biometric_unlock(&mut self, cx: &mut Context<Self>) -> Option<BiometricLaunch> {
@@ -6515,7 +6536,7 @@ mod biometric_tests {
     }
 
     #[test]
-    fn automatic_biometric_unlock_requires_enrollment_and_available_sensor() {
+    fn automatic_biometric_unlock_uses_sensor_or_device_auth_fallback() {
         let path = PathBuf::from("/tmp/a.kdbx");
         let available = Arc::new(InMemoryBiometricStore::available());
         let mut registry = BiometricRegistry::new();
@@ -6529,18 +6550,26 @@ mod biometric_tests {
         );
         let mut state = AppState::with_biometric(available, registry.clone());
         state.vault = awaiting("/tmp/a.kdbx");
-        assert_eq!(state.automatic_biometric_unlock_path(), Some(path.clone()));
+        assert_eq!(
+            state.automatic_biometric_unlock_path(false),
+            Some(path.clone())
+        );
 
         state.biometric_attempt = BiometricAttempt::Error {
             path: path.clone(),
             message: "cancelled".into(),
         };
-        assert_eq!(state.automatic_biometric_unlock_path(), None);
+        assert_eq!(state.automatic_biometric_unlock_path(false), None);
 
         let unavailable = Arc::new(InMemoryBiometricStore::supported_but_unavailable());
         let mut state = AppState::with_biometric(unavailable, registry);
         state.vault = awaiting("/tmp/a.kdbx");
-        assert_eq!(state.automatic_biometric_unlock_path(), None);
+        assert_eq!(state.automatic_biometric_unlock_path(false), None);
+        assert_eq!(
+            state.automatic_biometric_unlock_path(true),
+            Some(path),
+            "clamshell mode should auto-prompt when device auth fallback is enabled"
+        );
     }
 
     #[test]

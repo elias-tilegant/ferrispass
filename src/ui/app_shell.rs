@@ -2631,7 +2631,9 @@ impl AppShell {
         let (path, overlay_active, awaiting_password) = {
             let state = self.state.read(cx);
             (
-                state.automatic_biometric_unlock_path(),
+                state.automatic_biometric_unlock_path(
+                    self.settings.biometric_allow_passcode_fallback,
+                ),
                 state.overlay().is_active(),
                 state.pending_unlock_path().is_some(),
             )
