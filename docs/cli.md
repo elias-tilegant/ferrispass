@@ -47,3 +47,16 @@ move objects to the KeePass Recycle Bin; the CLI has no permanent-delete command
 
 Run `ferrispass-cli --help`, `entry --help`, or `group --help` for the complete
 command tree and stable option names.
+
+## SharePoint sync
+
+For a vault already connected by the FerrisPass GUI, `sync status` reads the
+existing binding and `sync now` refreshes the Keychain token, uploads with an
+ETag guard, and automatically merges conflict-free remote changes. Ambiguous
+entry conflicts fail closed with UUIDs and differing field names; no secret
+values are included. Initial SharePoint connection remains a GUI operation.
+
+```sh
+ferrispass-cli --vault team.kdbx --format json sync status
+ferrispass-cli --vault team.kdbx --format json sync now
+```

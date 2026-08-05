@@ -62,6 +62,16 @@ enum Command {
         #[command(subcommand)]
         command: EntryCommand,
     },
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCommand {
+    Status,
+    Now,
 }
 
 #[derive(Subcommand)]
@@ -266,6 +276,7 @@ struct CliError {
     code: &'static str,
     message: String,
     exit: i32,
+    details: Option<Value>,
 }
 impl CliError {
     fn new(code: &'static str, exit: i32, message: impl Into<String>) -> Self {
@@ -273,7 +284,12 @@ impl CliError {
             code,
             exit,
             message: message.into(),
+            details: None,
         }
+    }
+    fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 
@@ -311,7 +327,123 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         } => Ok(vault_info(&document)),
         Command::Group { command } => execute_group(command, &mut document, vault),
         Command::Entry { command } => execute_entry(command, &mut document, vault),
+        Command::Sync { command } => execute_sync(
+            command,
+            &mut document,
+            vault,
+            &password,
+            cli.key_file.as_deref(),
+        ),
     }
+}
+
+fn execute_sync(
+    command: &SyncCommand,
+    document: &mut VaultDocument,
+    vault: &Path,
+    password: &str,
+    key_file: Option<&Path>,
+) -> Result<Value, CliError> {
+    let canonical =
+        std::fs::canonicalize(vault).map_err(|e| CliError::new("io", 7, e.to_string()))?;
+    let mut config = crate::sync::config::load(&canonical)
+        .map_err(sync_error)?
+        .ok_or_else(|| {
+            CliError::new(
+                "sync_not_configured",
+                6,
+                "vault is not connected to SharePoint",
+            )
+        })?;
+    if matches!(command, SyncCommand::Status) {
+        return Ok(json!({
+            "provider":"sharepoint",
+            "account":config.account_email,
+            "remote_url":config.remote_url,
+            "configured":true
+        }));
+    }
+
+    let token =
+        crate::sync::service::refresh_access_token(&config.account_email).map_err(sync_error)?;
+    let local_bytes = document
+        .read_current_bytes()
+        .map_err(|e| CliError::new("local_revision_changed", 5, e.to_string()))?;
+    match crate::sync::service::upload_after_save(&config, &token, &local_bytes)
+        .map_err(sync_error)?
+    {
+        crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
+            config.last_etag = new_etag;
+            crate::sync::config::save(&config).map_err(sync_error)?;
+            Ok(json!({"status":"synced","uploaded":true,"merged":0}))
+        }
+        crate::sync::service::UploadAfterSave::Conflict {
+            remote_bytes,
+            remote_etag,
+        } => {
+            let remote = KeePassRepository::open_bytes(&remote_bytes, password, key_file)
+                .map_err(|e| CliError::new("remote_unlock_failed", 3, e.to_string()))?;
+            let report = crate::keepass::merge::diff(document.database(), remote.database());
+            if !report.conflicts.is_empty() {
+                let conflicts: Vec<Value> = report
+                    .conflicts
+                    .iter()
+                    .map(|conflict| {
+                        let fields: Vec<&str> = conflict
+                            .fields
+                            .iter()
+                            .filter(|field| field.differs)
+                            .map(|field| field.label)
+                            .collect();
+                        json!({"entry_id":conflict.id,"fields":fields})
+                    })
+                    .collect();
+                return Err(CliError::new(
+                    "sync_conflict",
+                    5,
+                    "ambiguous remote changes require manual resolution",
+                )
+                .with_details(json!({"conflicts":conflicts})));
+            }
+            let merged_count = report.remote_only.len() + report.auto_resolved.len();
+            let needs_upload = report.has_local_contribution();
+            let merged = crate::keepass::merge::apply_picks(
+                document.database(),
+                remote.database(),
+                &std::collections::HashMap::new(),
+                &report,
+            )
+            .map_err(|e| CliError::new("merge_failed", 5, e.to_string()))?;
+            let receipt = document
+                .save_payload_for_database(merged.clone())
+                .save_to(vault)
+                .map_err(|e| CliError::new("save_failed", 7, e.to_string()))?;
+            document.replace_database(merged);
+            config.last_etag = remote_etag;
+            if needs_upload {
+                match crate::sync::service::upload_after_save(&config, &token, &receipt.bytes())
+                    .map_err(sync_error)?
+                {
+                    crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
+                        config.last_etag = new_etag
+                    }
+                    crate::sync::service::UploadAfterSave::Conflict { .. } => {
+                        return Err(CliError::new(
+                            "remote_changed_during_sync",
+                            5,
+                            "remote vault changed again; rerun sync",
+                        ));
+                    }
+                }
+            }
+            crate::sync::config::save(&config).map_err(sync_error)?;
+            Ok(json!({"status":"synced","uploaded":needs_upload,"merged":merged_count}))
+        }
+    }
+}
+
+fn sync_error(error: impl std::fmt::Display) -> CliError {
+    CliError::new("sync_failed", 7, error.to_string())
 }
 
 fn unlock_password(cli: &Cli) -> Result<Zeroizing<String>, CliError> {
@@ -713,7 +845,7 @@ fn print_error(format: OutputFormat, e: &CliError) {
     match format {
         OutputFormat::Json => eprintln!(
             "{}",
-            json!({"schema":SCHEMA,"ok":false,"error":{"code":e.code,"message":e.message}})
+            json!({"schema":SCHEMA,"ok":false,"error":{"code":e.code,"message":e.message,"details":e.details}})
         ),
         OutputFormat::Human => eprintln!("error [{}]: {}", e.code, e.message),
     }
