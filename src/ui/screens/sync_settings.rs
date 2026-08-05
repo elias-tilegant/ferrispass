@@ -177,7 +177,7 @@ fn render_connected(
                 ),
         )
         .when(!history.is_empty(), |this| {
-            this.child(history_section(history))
+            this.child(history_section(history, cx))
         })
         .into_any_element()
 }
@@ -195,7 +195,7 @@ fn connected_since_label(authenticated_at: Option<u64>) -> Option<SharedString> 
     )))
 }
 
-fn history_section(history: &[SyncHistoryEntry]) -> AnyElement {
+fn history_section(history: &[SyncHistoryEntry], cx: &mut Context<AppShell>) -> AnyElement {
     let total = history.len();
     let now = chrono::Local::now();
     // Most recent first — visually matches the "latest at the top" reading
@@ -204,7 +204,7 @@ fn history_section(history: &[SyncHistoryEntry]) -> AnyElement {
         .iter()
         .rev()
         .enumerate()
-        .map(|(idx, entry)| history_row(idx, entry, now))
+        .map(|(idx, entry)| history_row(idx, entry, now, cx))
         .collect();
     let header_meta: Option<SharedString> = if total > 0 {
         Some(format!("{total} change{}", if total == 1 { "" } else { "s" }).into())
@@ -250,6 +250,7 @@ fn history_row(
     idx: usize,
     entry: &SyncHistoryEntry,
     now: chrono::DateTime<chrono::Local>,
+    cx: &mut Context<AppShell>,
 ) -> AnyElement {
     let (dot_color, kind_label) = match entry.kind {
         SyncChangeKind::AddedFromRemote => (palette::green(), "Added"),
@@ -268,6 +269,8 @@ fn history_row(
     // else nudges the tree (e.g. a click), which surfaces as
     // "hover only shows up after I click and is laggy".
     let id: SharedString = format!("sync-history-row-{idx}").into();
+    let remove_id: SharedString = format!("sync-history-remove-{idx}").into();
+    let entry_to_remove = entry.clone();
 
     h_flex()
         .id(id)
@@ -309,6 +312,29 @@ fn history_row(
                 .text_xs()
                 .text_color(palette::text_faint())
                 .child(elapsed),
+        )
+        .child(
+            div()
+                .id(remove_id)
+                .flex_shrink_0()
+                .h(px(22.))
+                .px_2()
+                .rounded(px(4.))
+                .text_xs()
+                .text_color(palette::text_faint())
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|button| button.bg(palette::orange_soft()).text_color(palette::red()))
+                .pressable()
+                .child("Remove")
+                .on_click(
+                    cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                        shell.state().clone().update(cx, |state, cx| {
+                            state.remove_sync_history_entry(&entry_to_remove, cx);
+                        });
+                    }),
+                ),
         )
         .into_any_element()
 }

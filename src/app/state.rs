@@ -2452,6 +2452,20 @@ impl AppState {
         &self.sync_history
     }
 
+    /// Remove one row from the active vault's session-scoped sync activity
+    /// log. This never mutates the KeePass database or its entry history.
+    pub fn remove_sync_history_entry(
+        &mut self,
+        entry: &SyncHistoryEntry,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let removed = sync_history::remove_one(&mut self.sync_history, entry);
+        if removed {
+            cx.notify();
+        }
+        removed
+    }
+
     /// Append already-computed history entries to whichever slot
     /// (active vault or parked session) currently owns `target`. Mirrors
     /// the routing done by `apply_sync_status` / `with_sync_binding_mut_for`

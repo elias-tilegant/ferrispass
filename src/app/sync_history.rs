@@ -134,6 +134,17 @@ pub fn append_capped(log: &mut Vec<SyncHistoryEntry>, mut new_entries: Vec<SyncH
     }
 }
 
+/// Remove one matching activity row. Matching by value keeps the UI action
+/// stable if a sync appends newer rows between rendering and clicking; for
+/// duplicate rows exactly one occurrence is removed.
+pub fn remove_one(log: &mut Vec<SyncHistoryEntry>, target: &SyncHistoryEntry) -> bool {
+    let Some(index) = log.iter().position(|entry| entry == target) else {
+        return false;
+    };
+    log.remove(index);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +307,20 @@ mod tests {
         }];
         append_capped(&mut log, Vec::new());
         assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn remove_one_removes_only_one_matching_row() {
+        let duplicate = SyncHistoryEntry {
+            at: fixed_now(),
+            kind: SyncChangeKind::UpdatedFromRemote,
+            entry_title: "VPN".into(),
+        };
+        let mut log = vec![duplicate.clone(), duplicate.clone()];
+
+        assert!(remove_one(&mut log, &duplicate));
+        assert_eq!(log, vec![duplicate.clone()]);
+        assert!(remove_one(&mut log, &duplicate));
+        assert!(!remove_one(&mut log, &duplicate));
     }
 }
