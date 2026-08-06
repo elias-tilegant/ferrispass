@@ -57,8 +57,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .child(
                     v_flex()
                         .id("whats-new-body")
-                        .flex_1()
-                        .min_h(px(0.))
+                        .max_h(px(470.))
                         .overflow_y_scrollbar()
                         .p_5()
                         .gap_1p5()
