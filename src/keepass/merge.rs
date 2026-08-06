@@ -327,7 +327,11 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
             != remote_group.parent().map(|parent| parent.id())
             || local_group.name != remote_group.name
             || local_group.notes != remote_group.notes
-            || local_group.icon() != remote_group.icon()
+            || !icons_equivalent(
+                local_group.icon(),
+                remote_group.icon(),
+                DEFAULT_GROUP_ICON,
+            )
             || local_group.custom_data != remote_group.custom_data
             || local_group.is_expanded != remote_group.is_expanded
             || local_group.default_autotype_sequence != remote_group.default_autotype_sequence
@@ -487,13 +491,31 @@ fn entries_equivalent_for_timestamp_warning(local: &Database, remote: &Database,
     }
 }
 
+/// KeePass2/KeePassXC always write an explicit `<IconID>` (0 "Key" for
+/// entries, 48 "Folder" for groups), while our pinned keepass fork omits the
+/// element when the icon is unset. Both spellings mean "default icon", so
+/// comparing them strictly would flag every entry of a foreign-written vault
+/// as diverged. Normalise the explicit default to `None` before comparing.
+const DEFAULT_ENTRY_ICON: usize = 0;
+const DEFAULT_GROUP_ICON: usize = 48;
+
+fn icons_equivalent(local: Option<&Icon>, remote: Option<&Icon>, default_index: usize) -> bool {
+    fn norm(icon: Option<&Icon>, default_index: usize) -> Option<&Icon> {
+        match icon {
+            Some(Icon::BuiltIn(index)) if *index == default_index => None,
+            other => other,
+        }
+    }
+    norm(local, default_index) == norm(remote, default_index)
+}
+
 fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
     entry_location_is_resolved(local, remote)
         && local.fields == remote.fields
         && local.autotype == remote.autotype
         && local.tags == remote.tags
         && local.custom_data == remote.custom_data
-        && local.icon() == remote.icon()
+        && icons_equivalent(local.icon(), remote.icon(), DEFAULT_ENTRY_ICON)
         && local.foreground_color == remote.foreground_color
         && local.background_color == remote.background_color
         && local.override_url == remote.override_url
@@ -538,7 +560,7 @@ fn group_content_eq(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> bool {
     group_location_is_resolved(local, remote)
         && local.name == remote.name
         && local.notes == remote.notes
-        && local.icon() == remote.icon()
+        && icons_equivalent(local.icon(), remote.icon(), DEFAULT_GROUP_ICON)
         && local.custom_data == remote.custom_data
         && local.is_expanded == remote.is_expanded
         && local.default_autotype_sequence == remote.default_autotype_sequence
@@ -890,7 +912,11 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<&'
     if local.view.custom_data != remote.view.custom_data {
         changed.push("custom data");
     }
-    if local.icon != remote.icon {
+    if !icons_equivalent(
+        local.icon.as_ref(),
+        remote.icon.as_ref(),
+        DEFAULT_ENTRY_ICON,
+    ) {
         changed.push("icon");
     }
     if local.view.foreground_color != remote.view.foreground_color {
@@ -965,6 +991,41 @@ mod tests {
         assert!(report.local_only.is_empty());
         assert!(report.remote_only.is_empty());
         assert!(report.is_clean());
+    }
+
+    #[test]
+    fn explicit_default_icon_vs_absent_icon_is_not_a_conflict() {
+        // KeePassXC writes <IconID>0</IconID> on every entry; our fork omits
+        // the element when unset. Both mean "default icon" — a vault
+        // round-tripped through both clients must not conflict on it.
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        local.entry_mut(id).expect("local entry").set_icon_builtin(0);
+        let mut remote = fork(&local);
+        remote.entry_mut(id).expect("remote entry").set_icon_none();
+
+        let report = diff(&local, &remote);
+        assert!(report.conflicts.is_empty(), "default-icon spelling must not conflict");
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn non_default_icon_difference_still_conflicts() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        local.entry_mut(id).expect("local entry").set_icon_builtin(5);
+        let mut remote = fork(&local);
+        remote.entry_mut(id).expect("remote entry").set_icon_none();
+
+        let report = diff(&local, &remote);
+        assert_eq!(report.conflicts.len(), 1, "a real icon change must still surface");
+        assert!(
+            report.conflicts[0]
+                .fields
+                .iter()
+                .any(|f| f.label == "Entry settings" && f.differs),
+            "icon divergence must show in the Entry settings diff row"
+        );
     }
 
     #[test]

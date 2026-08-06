@@ -11,7 +11,8 @@ use std::borrow::Cow;
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, hsla, prelude::FluentBuilder as _, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, hsla,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 
@@ -209,6 +210,13 @@ fn header(snapshot: &ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement
                         .child(subtitle),
                 ),
         )
+        .child(bulk_button("conflict-all-local", "All local", Side::Local, cx))
+        .child(bulk_button(
+            "conflict-all-remote",
+            "All remote",
+            Side::Remote,
+            cx,
+        ))
         .child(cancel_button(cx))
         .child(apply_button(cx))
         .into_any_element()
@@ -317,9 +325,15 @@ fn column(
         chip("Keep this", ChipTone::Gray)
     };
 
+    // The element id must be unique per conflict, not just per side: GPUI
+    // keys interactive state by id, and duplicated ids make the first
+    // painted column swallow every later column's mouse-up.
     let mut col = v_flex()
         .flex_1()
-        .id(("conflict-col", side as u8 as u32))
+        .id(SharedString::from(format!(
+            "conflict-col-{}-{}",
+            entry_id_for_click, side as u8
+        )))
         .rounded(px(10.))
         .border_1()
         .border_color(border)
@@ -492,6 +506,38 @@ fn apply_button(cx: &mut Context<AppShell>) -> AnyElement {
                     .state()
                     .clone()
                     .update(cx, |state, cx| state.apply_conflict_resolution(cx));
+            }),
+        )
+        .into_any_element()
+}
+
+fn bulk_button(
+    id: &'static str,
+    label: &'static str,
+    side: Side,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    div()
+        .id(id)
+        .h(px(30.))
+        .px(px(12.))
+        .rounded(px(6.))
+        .bg(palette::panel())
+        .border_1()
+        .border_color(palette::border_strong())
+        .text_sm()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(palette::text())
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(label)
+        .hover_press(palette::border())
+        .on_click(
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _window, cx| {
+                shell.state().clone().update(cx, |state, cx| {
+                    state.set_all_conflict_picks(side, cx);
+                });
             }),
         )
         .into_any_element()

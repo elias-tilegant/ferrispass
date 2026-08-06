@@ -4927,6 +4927,18 @@ impl AppState {
         cx.notify();
     }
 
+    /// Set every pick to the same side. Called by the Conflict overlay's
+    /// "All local" / "All remote" bulk buttons. Idempotent.
+    pub fn set_all_conflict_picks(&mut self, side: Side, cx: &mut Context<Self>) {
+        let SyncStatus::Conflict(state) = &mut self.sync_status else {
+            return;
+        };
+        for conflict in &state.report.conflicts {
+            state.picks.insert(conflict.id.clone(), side);
+        }
+        cx.notify();
+    }
+
     /// Finalise the conflict: build the merged DB from picks, save it
     /// locally, force-upload to SharePoint, dismiss the overlay.
     ///
