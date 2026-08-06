@@ -12,11 +12,11 @@
 //! them as live data is a future job (would need a sync-event log).
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
-    px,
+    div, prelude::FluentBuilder as _, px, AnyElement, ClickEvent, Context, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _,
 };
-use gpui_component::{Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::{h_flex, v_flex, Sizable as _, WindowExt as _};
 
 use crate::app::actions::{OpenConnect, OpenReconnect};
 use crate::app::time::relative_time_label;
@@ -24,7 +24,7 @@ use crate::app::{SyncBinding, SyncChangeKind, SyncHistoryEntry, SyncStatus};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::atoms::{ChipTone, chip};
+use crate::ui::widgets::atoms::{chip, ChipTone};
 use crate::ui::widgets::interaction::Interaction as _;
 
 /// Render the Sync tab body — content only, no chrome. The unified
@@ -88,6 +88,7 @@ fn render_connected(
 ) -> AnyElement {
     let provider_name = match binding.provider {
         crate::sync::config::SyncProvider::SharePoint => "SharePoint",
+        crate::sync::config::SyncProvider::ICloudDrive => "iCloud Drive",
     };
     let status_chip = match status {
         SyncStatus::Idle => chip("Idle", ChipTone::Gray),
@@ -455,7 +456,7 @@ fn render_disconnected(cx: &mut Context<AppShell>) -> AnyElement {
                         .with_size(gpui_component::Size::Size(px(13.)))
                         .text_color(palette::panel()),
                 )
-                .child("Connect to SharePoint")
+                .child("Connect a cloud provider")
                 .hover_press(palette::blue_hover())
                 .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                     window.dispatch_action(Box::new(OpenConnect), cx);
@@ -473,7 +474,7 @@ fn render_restore(status: &SyncStatus, _cx: &mut Context<AppShell>) -> AnyElemen
         ),
         _ => (
             "Restoring cloud sync…",
-            "Loading the saved SharePoint connection and refreshing sign-in.",
+            "Loading the saved provider connection and validating access.",
             ChipTone::Blue,
         ),
     };

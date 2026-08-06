@@ -133,6 +133,14 @@ impl fmt::Debug for AccessToken {
 }
 
 impl AccessToken {
+    pub(crate) fn provider_placeholder() -> Self {
+        Self {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: SystemTime::now() + Duration::from_secs(365 * 24 * 60 * 60),
+        }
+    }
+
     /// True when the token is within `slack` of expiring. Caller should
     /// refresh before making the next API call. 60 s is a reasonable slack
     /// to ride out clock skew + network round-trip.

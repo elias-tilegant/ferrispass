@@ -24,6 +24,11 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncConfig {
+    /// Version of the persisted binding. Missing values are legacy
+    /// SharePoint v1 files and are upgraded after the next successful
+    /// provider restore/write.
+    #[serde(default = "legacy_schema_version")]
+    pub schema_version: u8,
     pub provider: SyncProvider,
     /// User-facing identity (e.g. `alice@contoso.onmicrosoft.com`). Also used
     /// as the Keychain account key when looking up the refresh token.
@@ -53,11 +58,76 @@ pub struct SyncConfig {
     /// ("Connected" with no date) instead of failing to load.
     #[serde(default)]
     pub authenticated_at: Option<u64>,
+    /// Ordinary (non security-scoped) NSURL bookmark for an iCloud Drive
+    /// file chosen by the user. Empty for network providers and old configs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_bookmark: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SyncProvider {
     SharePoint,
+    ICloudDrive,
+}
+
+impl SyncProvider {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::SharePoint => "sharepoint",
+            Self::ICloudDrive => "icloud_drive",
+        }
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::SharePoint => "SharePoint",
+            Self::ICloudDrive => "iCloud Drive",
+        }
+    }
+}
+
+const CURRENT_SCHEMA_VERSION: u8 = 2;
+
+const fn legacy_schema_version() -> u8 {
+    1
+}
+
+impl SyncConfig {
+    pub fn new_icloud(
+        local_path: PathBuf,
+        remote_path: PathBuf,
+        bookmark: String,
+        revision: String,
+    ) -> Self {
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            provider: SyncProvider::ICloudDrive,
+            account_email: String::new(),
+            site_id: String::new(),
+            drive_id: String::new(),
+            item_id: String::new(),
+            last_etag: revision,
+            local_path,
+            remote_url: remote_path.display().to_string(),
+            authenticated_at: now_unix(),
+            remote_bookmark: Some(bookmark),
+        }
+    }
+
+    pub fn mark_current_schema(&mut self) {
+        self.schema_version = CURRENT_SCHEMA_VERSION;
+    }
+
+    pub fn provider_name(&self) -> &'static str {
+        self.provider.display_name()
+    }
+}
+
+fn now_unix() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 #[derive(Debug, Error)]
@@ -189,7 +259,9 @@ pub(crate) fn has_account_binding_in(dir: &Path, account_email: &str) -> Result<
         let Ok(config) = serde_json::from_str::<SyncConfig>(&text) else {
             continue;
         };
-        if config.account_email.eq_ignore_ascii_case(account_email) {
+        if config.provider == SyncProvider::SharePoint
+            && config.account_email.eq_ignore_ascii_case(account_email)
+        {
             return Ok(true);
         }
     }
@@ -245,6 +317,7 @@ mod tests {
 
     fn fixture(local_path: &str) -> SyncConfig {
         SyncConfig {
+            schema_version: CURRENT_SCHEMA_VERSION,
             provider: SyncProvider::SharePoint,
             account_email: "alice@contoso.onmicrosoft.com".into(),
             site_id: "contoso.sharepoint.com,abc-guid,def-guid".into(),
@@ -255,6 +328,7 @@ mod tests {
             remote_url: "https://contoso.sharepoint.com/sites/MyTeam/Shared%20Documents/p.kdbx"
                 .into(),
             authenticated_at: Some(1_700_000_000),
+            remote_bookmark: None,
         }
     }
 
@@ -286,6 +360,25 @@ mod tests {
 
         let loaded = load_in(dir.path(), &cfg.local_path).unwrap().unwrap();
         assert_eq!(loaded.authenticated_at, None);
+    }
+
+    #[test]
+    fn legacy_sharepoint_config_defaults_to_schema_one() {
+        let dir = TempDir::new().unwrap();
+        let cfg = fixture("/tmp/schema-one.kdbx");
+        let mut json = serde_json::to_value(&cfg).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("schema_version");
+        object.remove("remote_bookmark");
+        let path = dir
+            .path()
+            .join(format!("{}.json", path_hash(&cfg.local_path)));
+        fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        let loaded = load_in(dir.path(), &cfg.local_path).unwrap().unwrap();
+        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.provider, SyncProvider::SharePoint);
+        assert_eq!(loaded.remote_bookmark, None);
     }
 
     #[test]

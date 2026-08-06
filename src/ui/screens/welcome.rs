@@ -1,18 +1,18 @@
 use gpui::{
-    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    div, prelude::FluentBuilder as _, px, AnyElement, App, ClickEvent, Context,
+    InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window,
 };
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
 
-use crate::app::RecentEntry;
 use crate::app::actions::{CreateVault, OpenAbout, OpenConnect};
 use crate::app::time::relative_time_label;
+use crate::app::RecentEntry;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
 use crate::ui::widgets::brand::brand;
-use crate::ui::widgets::command_row::{RowTone, command_row};
+use crate::ui::widgets::command_row::{command_row, RowTone};
 use crate::ui::widgets::interaction::Interaction as _;
 use crate::ui::widgets::update_chip;
 use crate::update::UpdateStatus;
@@ -96,7 +96,7 @@ fn actions_section(cx: &mut Context<AppShell>) -> AnyElement {
         .child(action_row(
             "welcome-cloud",
             AppIcon::Cloud,
-            "Connect OneDrive",
+            "Connect Cloud Vault",
             "Sync an existing vault from the cloud",
             true,
             cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {

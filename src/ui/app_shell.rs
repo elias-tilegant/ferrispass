@@ -1017,6 +1017,85 @@ impl AppShell {
         .detach();
     }
 
+    /// First half of the iCloud "open existing" flow. The provider validates
+    /// that the selected path is actually ubiquitous before publishing any
+    /// local state.
+    pub fn prompt_for_icloud_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select a KeePass vault in iCloud Drive".into()),
+        });
+        let shell = cx.entity();
+        cx.spawn_in(window, async move |_, window| {
+            let remote = paths.await.ok()?.ok()??.first()?.clone();
+            window
+                .update(|window, cx| {
+                    shell.update(cx, |shell, cx| {
+                        shell.prompt_for_icloud_local_copy(remote, window, cx)
+                    })
+                })
+                .ok()
+        })
+        .detach();
+    }
+
+    fn prompt_for_icloud_local_copy(
+        &mut self,
+        remote: PathBuf,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let suggested_name = remote
+            .file_name()
+            .map_or_else(|| "vault.kdbx".to_string(), |name| name.to_string_lossy().into_owned());
+        let initial_dir = std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Documents"))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let picker = cx.prompt_for_new_path(&initial_dir, Some(&suggested_name));
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(local))) = picker.await else {
+                return;
+            };
+            state.update(cx, |state, cx| {
+                state.connect_icloud_existing(remote, local, cx);
+            });
+        })
+        .detach();
+    }
+
+    pub fn prompt_for_icloud_publish(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let suggested_name = self
+            .state
+            .read(cx)
+            .active_vault_file_name()
+            .unwrap_or_else(|| "vault.kdbx".into());
+        let initial_dir = std::env::var_os("HOME")
+            .map(|home| {
+                let cloud = PathBuf::from(&home)
+                    .join("Library/Mobile Documents/com~apple~CloudDocs");
+                if cloud.is_dir() {
+                    cloud
+                } else {
+                    PathBuf::from(home).join("Documents")
+                }
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+        let picker = cx.prompt_for_new_path(&initial_dir, Some(&suggested_name));
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(remote))) = picker.await else {
+                return;
+            };
+            state.update(cx, |state, cx| {
+                state.publish_active_to_icloud(remote, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Open a URL in the user's default browser. Used by the device-code
     /// step's "Open in browser" button — opens https://microsoft.com/devicelogin
     /// (or whatever the server gave us) so the user doesn't have to copy/paste.

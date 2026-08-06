@@ -1,10 +1,10 @@
 //! Add-vault command modal. This is intentionally separate from the
 //! vault switcher: switching chooses between known/unlocked vaults,
-//! adding opens a new local or SharePoint-backed vault.
+//! adding opens a new local or cloud-backed vault.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    div, px, AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _,
 };
 use gpui_component::{h_flex, v_flex};
 
@@ -12,7 +12,7 @@ use crate::app::actions::{AddSharePointVault, OpenVault};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::command_row::{RowTone, command_row};
+use crate::ui::widgets::command_row::{command_row, RowTone};
 
 pub fn render(cx: &mut Context<AppShell>) -> AnyElement {
     div()
@@ -83,7 +83,7 @@ fn sharepoint_row(cx: &mut Context<AppShell>) -> AnyElement {
     command_row(
         "add-vault-sharepoint",
         AppIcon::Cloud,
-        "From SharePoint...",
+        "From Cloud Provider...",
         "Download a separate synced .kdbx vault",
         RowTone::Primary,
         Some("Connect".into()),

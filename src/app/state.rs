@@ -634,6 +634,9 @@ impl std::fmt::Debug for ConflictState {
 pub enum ConnectFlow {
     /// Initial: three provider buttons (only SharePoint is wired in this MVP).
     PickProvider,
+    /// iCloud has no app-level authorization. The user chooses whether to
+    /// open an existing remote or publish the active local vault.
+    ICloudActions,
     /// Requesting the device code (reconnect path): a brief spinner shown
     /// between opening the overlay and the code arriving, so the user never
     /// sees the provider picker during a reconnect (clicking it there could
@@ -655,6 +658,8 @@ pub enum ConnectFlow {
     },
     /// User picked a file; downloading + persisting config.
     Downloading,
+    /// Coordinated iCloud download/publication is running.
+    ICloudTransferring { message: String },
     /// Anything went wrong before we hit the unlock screen. Carries a
     /// human-readable message for the UI.
     Failed(String),
@@ -1942,9 +1947,11 @@ impl AppState {
 
         self.apply_sync_status_for_session(&path, session_id, SyncStatus::Restoring, cx);
 
-        let email = config.account_email.clone();
         let task = cx.background_spawn(async move {
-            crate::sync::service::refresh_access_token(&email).map(|token| (config, token))
+            let mut config = config;
+            let token = crate::sync::service::restore_provider(&mut config)?;
+            let _ = crate::sync::config::save(&config);
+            Ok::<_, crate::sync::service::ServiceError>((config, token))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -3796,6 +3803,7 @@ impl AppState {
     pub fn summary(&self) -> VaultSummary {
         let provider = self.sync.as_ref().map(|b| match b.config.provider {
             crate::sync::config::SyncProvider::SharePoint => "SharePoint".to_string(),
+            crate::sync::config::SyncProvider::ICloudDrive => "iCloud Drive".to_string(),
         });
         let synced_at = sync_status_label(&self.sync_status);
         // Header dot tone tracks the live sync status — but only matters for
@@ -4034,6 +4042,29 @@ impl AppState {
         .detach();
     }
 
+    pub fn start_icloud_connect(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.vault, VaultStatus::LockedPendingSave) || self.connect_flow.is_none() {
+            return;
+        }
+        self.connect_operations.advance();
+        self.connect_flow = Some(ConnectFlow::ICloudActions);
+        self.sync_status = SyncStatus::Connecting;
+        cx.notify();
+    }
+
+    pub fn can_publish_active_to_icloud(&self) -> bool {
+        matches!(self.vault, VaultStatus::Open { .. }) && self.sync.is_none()
+    }
+
+    pub fn active_vault_file_name(&self) -> Option<String> {
+        match &self.vault {
+            VaultStatus::Open { path, .. } => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            _ => None,
+        }
+    }
+
     /// Background polling loop. Runs until token received, code expired,
     /// auth declined, or the user cancels (we observe `connect_flow`
     /// transitioning out of `SigningIn` between iterations).
@@ -4270,6 +4301,165 @@ impl AppState {
         .detach();
     }
 
+    /// Bind an existing user-selected iCloud Drive file to a new local copy.
+    pub fn connect_icloud_existing(
+        &mut self,
+        remote_path: PathBuf,
+        local_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_unlocked_path(&local_path) {
+            self.connect_flow = Some(ConnectFlow::Failed(
+                "That local vault is already open.".into(),
+            ));
+            cx.notify();
+            return;
+        }
+        if local_path
+            .parent()
+            .is_some_and(crate::sync::icloud::is_icloud_item)
+        {
+            self.connect_flow = Some(ConnectFlow::Failed(
+                "Choose a local destination outside iCloud Drive; FerrisPass keeps a separate working copy."
+                    .into(),
+            ));
+            cx.notify();
+            return;
+        }
+
+        let generation = self.connect_operations.advance();
+        self.connect_flow = Some(ConnectFlow::ICloudTransferring {
+            message: "Downloading the encrypted vault from iCloud Drive…".into(),
+        });
+        cx.notify();
+        let operation_gate = self.connect_operations.clone();
+        let task_local_path = local_path.clone();
+        let task = cx.background_spawn(async move {
+            let result = crate::sync::service::prepare_icloud_connect(
+                &remote_path,
+                &task_local_path,
+            )?;
+            let Some(persisted) = operation_gate.commit_if_current(generation, || {
+                crate::sync::service::persist_connect_picked(&result)
+            }) else {
+                return Ok(None);
+            };
+            persisted?;
+            Ok::<_, crate::sync::service::ServiceError>(Some(result))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| {
+                let current = state.connect_operations.is_current(generation)
+                    && matches!(
+                        state.connect_flow,
+                        Some(ConnectFlow::ICloudTransferring { .. })
+                    );
+                match result {
+                    Ok(Some(result)) if current => {
+                        state.connect_operations.advance();
+                        state.connect_flow = None;
+                        state.overlay = Overlay::None;
+                        state.pending_sync = Some(PendingSync {
+                            local_path: local_path.clone(),
+                            binding: SyncBinding {
+                                config: result.config,
+                                access_token: result.access_token,
+                            },
+                        });
+                        state.request_password(local_path.clone(), cx);
+                    }
+                    Ok(Some(_)) => state.push_recent(local_path.clone(), cx),
+                    Ok(None) => {}
+                    Err(error) if current => {
+                        state.connect_flow = Some(ConnectFlow::Failed(error.to_string()));
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Copy the currently-open local vault to a new iCloud Drive location
+    /// while retaining the local file as the canonical working copy.
+    pub fn publish_active_to_icloud(
+        &mut self,
+        remote_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let (local_path, session_id) = match (&self.vault, self.active_vault_session_id) {
+            (VaultStatus::Open { path, .. }, Some(session_id)) if self.sync.is_none() => {
+                (path.clone(), session_id)
+            }
+            _ => return,
+        };
+        if crate::sync::icloud::is_icloud_item(&local_path) {
+            self.connect_flow = Some(ConnectFlow::Failed(
+                "The open vault already lives in iCloud Drive. Open it through the iCloud provider and choose a separate local working copy."
+                    .into(),
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(reader) = self.current_bytes_reader_for_session(&local_path, session_id) else {
+            return;
+        };
+        let generation = self.connect_operations.advance();
+        self.connect_flow = Some(ConnectFlow::ICloudTransferring {
+            message: "Publishing the encrypted vault to iCloud Drive…".into(),
+        });
+        cx.notify();
+        let operation_gate = self.connect_operations.clone();
+        let task_local_path = local_path.clone();
+        let task = cx.background_spawn(async move {
+            let bytes = reader().map_err(|error| {
+                crate::sync::service::ServiceError::LocalVault(error.to_string())
+            })?;
+            let Some(result) = operation_gate.commit_if_current(generation, || {
+                crate::sync::service::publish_icloud_binding(
+                    &task_local_path,
+                    &remote_path,
+                    &bytes,
+                )
+            }) else {
+                return Ok(None);
+            };
+            Ok::<_, crate::sync::service::ServiceError>(Some(result?))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| {
+                let current = state.connect_operations.is_current(generation)
+                    && state.vault_session_is_current(&local_path, session_id);
+                match result {
+                    Ok(Some(config)) if current => {
+                        state.connect_operations.advance();
+                        state.connect_flow = None;
+                        state.overlay = Overlay::None;
+                        state.sync = Some(SyncBinding {
+                            config,
+                            access_token: AccessToken::provider_placeholder(),
+                        });
+                        state.sync_status = SyncStatus::Synced {
+                            at: chrono::Local::now(),
+                            auto_merged: 0,
+                        };
+                    }
+                    Ok(_) => {}
+                    Err(error) if current => {
+                        state.connect_flow = Some(ConnectFlow::Failed(error.to_string()));
+                        state.sync_status = SyncStatus::Failed(error.to_string());
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Finish a user-driven reconnect: rebind `config`'s vault with the
     /// freshly-acquired `token` — no new local file, no duplicate binding.
     /// `reconnect_rebind` (account match + keychain store + `authenticated_at`
@@ -4428,7 +4618,7 @@ impl AppState {
                     crate::sync::service::ServiceError::LocalVault(error.to_string())
                 })?,
             };
-            let token = crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
+            let token = crate::sync::service::ensure_provider_ready(&task_config, token)?;
             let outcome = crate::sync::service::upload_after_save(&task_config, &token, &bytes)?;
             Ok::<_, crate::sync::service::ServiceError>((outcome, token))
         });
@@ -4640,7 +4830,7 @@ impl AppState {
         self.auto_sync_in_flight.insert(target.to_path_buf());
         let task_config = config;
         let task = cx.background_spawn(async move {
-            let token = crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
+            let token = crate::sync::service::ensure_provider_ready(&task_config, token)?;
             let pulled = match crate::sync::service::refresh_check(&task_config, &token)? {
                 crate::sync::service::RefreshCheck::Same => None,
                 crate::sync::service::RefreshCheck::RemoteAhead { .. } => {
@@ -5275,15 +5465,14 @@ impl AppState {
             // the in-memory state is already aligned with disk (from phase
             // 1), so the user can dismiss the Failed status and keep
             // working without losing the merge.
-            let task_config = config.clone();
+            let mut task_config = config.clone();
+            task_config.last_etag = if_match;
             let network_task = cx.background_spawn(async move {
-                let token = crate::sync::service::ensure_fresh(token, &task_config.account_email)?;
-                let outcome = crate::sync::graph::upload_content(
-                    &task_config.drive_id,
-                    &task_config.item_id,
-                    &published_bytes,
-                    Some(&if_match),
+                let token = crate::sync::service::ensure_provider_ready(&task_config, token)?;
+                let outcome = crate::sync::service::upload_after_save(
+                    &task_config,
                     &token,
+                    &published_bytes,
                 )?;
                 Ok::<_, crate::sync::service::ServiceError>((outcome, token))
             });
@@ -5300,9 +5489,9 @@ impl AppState {
                         session_id,
                         |b| b.access_token = fresh_token,
                     );
-                    use crate::sync::graph::UploadOutcome;
+                    use crate::sync::service::UploadAfterSave;
                     match outcome {
-                        UploadOutcome::Ok { new_etag, .. } => {
+                        UploadAfterSave::Synced { new_etag, .. } => {
                             state.with_sync_binding_mut_for_session(
                                 &callback_path,
                                 session_id,
@@ -5333,7 +5522,10 @@ impl AppState {
                                 cx.notify();
                             }
                         }
-                        UploadOutcome::Conflict => {
+                        UploadAfterSave::Conflict {
+                            remote_bytes,
+                            remote_etag,
+                        } => {
                             // Third device wrote during resolution. Re-trigger
                             // the conflict flow against the freshly merged
                             // local + the new remote — for the same vault.
@@ -5343,11 +5535,12 @@ impl AppState {
                                 SyncStatus::Syncing,
                                 cx,
                             );
-                            state.sync_now_for_path_inner(
+                            state.handle_remote_conflict_for(
                                 &callback_path,
                                 session_id,
+                                remote_bytes,
+                                remote_etag,
                                 true,
-                                None,
                                 cx,
                             );
                         }
@@ -5736,6 +5929,7 @@ mod park_tests {
     fn fake_binding(email: &str) -> SyncBinding {
         SyncBinding {
             config: SyncConfig {
+                schema_version: 2,
                 provider: SyncProvider::SharePoint,
                 account_email: email.to_string(),
                 site_id: "site".into(),
@@ -5745,6 +5939,7 @@ mod park_tests {
                 local_path: PathBuf::from("/tmp/whatever.kdbx"),
                 remote_url: "https://example.invalid/foo.kdbx".into(),
                 authenticated_at: None,
+                remote_bookmark: None,
             },
             access_token: AccessToken {
                 access_token: "token-0".into(),
@@ -5757,6 +5952,7 @@ mod park_tests {
     fn fake_binding_for(email: &str, local_path: PathBuf, item_id: &str) -> SyncBinding {
         SyncBinding {
             config: SyncConfig {
+                schema_version: 2,
                 provider: SyncProvider::SharePoint,
                 account_email: email.to_string(),
                 site_id: "site".into(),
@@ -5766,6 +5962,7 @@ mod park_tests {
                 local_path,
                 remote_url: format!("https://example.invalid/{item_id}.kdbx"),
                 authenticated_at: None,
+                remote_bookmark: None,
             },
             access_token: AccessToken {
                 access_token: "token-0".into(),

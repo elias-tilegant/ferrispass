@@ -2163,6 +2163,7 @@ dependencies = [
  "libc",
  "macos-accessibility-client",
  "minisign-verify",
+ "notify",
  "nucleo-matcher",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

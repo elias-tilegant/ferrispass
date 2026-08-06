@@ -15,8 +15,8 @@ use std::{
     io::{self, Write as _},
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
 
@@ -25,6 +25,7 @@ use thiserror::Error;
 use crate::sync::auth::{self, AccessToken, AuthError};
 use crate::sync::config::{self, ConfigError, SyncConfig, SyncProvider};
 use crate::sync::graph::{self, DriveItem, DriveItemHit, GraphError, UploadOutcome};
+use crate::sync::icloud::{self, ICloudError};
 use crate::sync::tokens::{self, TokenError};
 
 #[derive(Debug, Error)]
@@ -37,6 +38,8 @@ pub enum ServiceError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Tokens(#[from] TokenError),
+    #[error(transparent)]
+    ICloud(#[from] ICloudError),
     #[error("io error on {path}: {source}")]
     Io {
         path: PathBuf,
@@ -76,7 +79,7 @@ pub struct ConnectResult {
 pub enum UploadAfterSave {
     Synced {
         new_etag: String,
-        item: DriveItem,
+        item: Option<DriveItem>,
     },
     Conflict {
         remote_bytes: Vec<u8>,
@@ -136,6 +139,7 @@ pub fn prepare_connect_picked(
         download_versioned(&hit.drive_id, &hit.item_id, &token)?;
 
     let cfg = SyncConfig {
+        schema_version: 2,
         provider: SyncProvider::SharePoint,
         account_email: user.email,
         site_id: hit.site_id.clone(),
@@ -145,12 +149,74 @@ pub fn prepare_connect_picked(
         local_path: local_path.to_path_buf(),
         remote_url: hit.web_url.clone(),
         authenticated_at: now_unix(),
+        remote_bookmark: None,
     };
     Ok(ConnectResult {
         config: cfg,
         access_token: token,
         remote_bytes,
     })
+}
+
+/// Prepare an iCloud Drive file selected by the user for the same
+/// local-copy/unlock flow used by SharePoint.
+pub fn prepare_icloud_connect(
+    remote_path: &Path,
+    local_path: &Path,
+) -> Result<ConnectResult, ServiceError> {
+    let bookmark = icloud::create_bookmark(remote_path)?;
+    let remote = icloud::read(&bookmark)?;
+    let config = SyncConfig::new_icloud(
+        local_path.to_path_buf(),
+        remote.path,
+        remote.refreshed_bookmark,
+        remote.revision,
+    );
+    Ok(ConnectResult {
+        config,
+        access_token: AccessToken::provider_placeholder(),
+        remote_bytes: remote.bytes,
+    })
+}
+
+/// Publish an already-open local vault to a brand-new iCloud Drive path.
+/// The local vault remains the working copy. If config persistence fails,
+/// remove only the remote whose bytes still match this publication.
+pub fn publish_icloud_binding(
+    local_path: &Path,
+    remote_path: &Path,
+    local_bytes: &Arc<Vec<u8>>,
+) -> Result<SyncConfig, ServiceError> {
+    if config::load(local_path)?.is_some() {
+        return Err(io_error(
+            local_path,
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "sync configuration already exists for this local vault",
+            ),
+        ));
+    }
+    let remote = icloud::create_remote(remote_path, local_bytes)?;
+    let config = SyncConfig::new_icloud(
+        local_path.to_path_buf(),
+        remote.path.clone(),
+        remote.refreshed_bookmark,
+        remote.revision.clone(),
+    );
+    if let Err(error) = config::save(&config) {
+        if icloud::read(
+            config
+                .remote_bookmark
+                .as_deref()
+                .expect("iCloud config always has bookmark"),
+        )
+        .is_ok_and(|current| current.revision == remote.revision)
+        {
+            let _ = fs::remove_file(&remote.path);
+        }
+        return Err(error.into());
+    }
+    Ok(config)
 }
 
 /// Publish a prepared Connect result transactionally. The caller only starts
@@ -168,10 +234,12 @@ pub fn persist_connect_picked(result: &ConnectResult) -> Result<(), ServiceError
     }
     let mut staged = StagedVault::new(&result.config.local_path, &result.remote_bytes)?;
     staged.publish()?;
-    tokens::store(
-        &result.config.account_email,
-        &result.access_token.refresh_token,
-    )?;
+    if result.config.provider == SyncProvider::SharePoint {
+        tokens::store(
+            &result.config.account_email,
+            &result.access_token.refresh_token,
+        )?;
+    }
     config::save(&result.config)?;
     staged.commit();
     Ok(())
@@ -399,6 +467,26 @@ pub fn upload_after_save(
     token: &AccessToken,
     local_bytes: &Arc<Vec<u8>>,
 ) -> Result<UploadAfterSave, ServiceError> {
+    if config.provider == SyncProvider::ICloudDrive {
+        let bookmark = config
+            .remote_bookmark
+            .as_deref()
+            .ok_or_else(|| ICloudError::Bookmark("binding has no bookmark".into()))?;
+        return match icloud::publish(bookmark, &config.last_etag, local_bytes) {
+            Ok(remote) => Ok(UploadAfterSave::Synced {
+                new_etag: remote.revision,
+                item: None,
+            }),
+            Err(ICloudError::Conflict) => {
+                let remote = icloud::read(bookmark)?;
+                Ok(UploadAfterSave::Conflict {
+                    remote_bytes: remote.bytes,
+                    remote_etag: remote.revision,
+                })
+            }
+            Err(error) => Err(error.into()),
+        };
+    }
     if config.last_etag.trim().is_empty() {
         // Legacy configs (pre-etag-hardening) can carry an empty revision.
         // Failing hard here would wedge every future push with no self-heal —
@@ -420,7 +508,10 @@ pub fn upload_after_save(
         token,
     )?;
     match outcome {
-        UploadOutcome::Ok { new_etag, item } => Ok(UploadAfterSave::Synced { new_etag, item }),
+        UploadOutcome::Ok { new_etag, item } => Ok(UploadAfterSave::Synced {
+            new_etag,
+            item: Some(item),
+        }),
         UploadOutcome::Conflict => {
             let (remote_bytes, etag) =
                 download_versioned(&config.drive_id, &config.item_id, token)?;
@@ -440,6 +531,11 @@ pub fn force_upload(
     token: &AccessToken,
     local_bytes: &Arc<Vec<u8>>,
 ) -> Result<DriveItem, ServiceError> {
+    if config.provider == SyncProvider::ICloudDrive {
+        return Err(ServiceError::ICloud(ICloudError::Coordination(
+            "iCloud conflict publication must retain its revision guard".into(),
+        )));
+    }
     match graph::upload_content(
         &config.drive_id,
         &config.item_id,
@@ -466,6 +562,29 @@ pub fn refresh_check(
     config: &SyncConfig,
     token: &AccessToken,
 ) -> Result<RefreshCheck, ServiceError> {
+    if config.provider == SyncProvider::ICloudDrive {
+        let bookmark = config
+            .remote_bookmark
+            .as_deref()
+            .ok_or_else(|| ICloudError::Bookmark("binding has no bookmark".into()))?;
+        return if icloud::probe(bookmark, &config.last_etag)? {
+            let remote = icloud::read(bookmark)?;
+            Ok(RefreshCheck::RemoteAhead {
+                remote_etag: remote.revision,
+                item: DriveItem {
+                    id: String::new(),
+                    name: remote
+                        .path
+                        .file_name()
+                        .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+                    etag: String::new(),
+                    last_modified: String::new(),
+                },
+            })
+        } else {
+            Ok(RefreshCheck::Same)
+        };
+    }
     let item = graph::get_item_metadata(&config.drive_id, &config.item_id, token)?;
     if item.etag == config.last_etag {
         Ok(RefreshCheck::Same)
@@ -487,6 +606,14 @@ pub fn download_remote(
     config: &SyncConfig,
     token: &AccessToken,
 ) -> Result<(Vec<u8>, String), ServiceError> {
+    if config.provider == SyncProvider::ICloudDrive {
+        let bookmark = config
+            .remote_bookmark
+            .as_deref()
+            .ok_or_else(|| ICloudError::Bookmark("binding has no bookmark".into()))?;
+        let remote = icloud::read(bookmark)?;
+        return Ok((remote.bytes, remote.revision));
+    }
     download_versioned(&config.drive_id, &config.item_id, token)
 }
 
@@ -554,12 +681,44 @@ pub fn ensure_fresh(token: AccessToken, account_email: &str) -> Result<AccessTok
     }
 }
 
+/// Restore the runtime credential/state required by a persisted provider.
+/// iCloud authentication belongs to macOS, so validating the bookmark is the
+/// equivalent of SharePoint's refresh-token exchange.
+pub fn restore_provider(config: &mut SyncConfig) -> Result<AccessToken, ServiceError> {
+    match config.provider {
+        SyncProvider::SharePoint => refresh_access_token(&config.account_email),
+        SyncProvider::ICloudDrive => {
+            let bookmark = config
+                .remote_bookmark
+                .as_deref()
+                .ok_or_else(|| ICloudError::Bookmark("binding has no bookmark".into()))?;
+            let remote = icloud::read(bookmark)?;
+            config.remote_url = remote.path.display().to_string();
+            config.remote_bookmark = Some(remote.refreshed_bookmark);
+            config.mark_current_schema();
+            Ok(AccessToken::provider_placeholder())
+        }
+    }
+}
+
+pub fn ensure_provider_ready(
+    config: &SyncConfig,
+    token: AccessToken,
+) -> Result<AccessToken, ServiceError> {
+    match config.provider {
+        SyncProvider::SharePoint => ensure_fresh(token, &config.account_email),
+        SyncProvider::ICloudDrive => Ok(token),
+    }
+}
+
 /// Tear down one vault's sync binding. The vault-local config is removed
 /// first, so a later Keychain failure cannot silently reconnect it on restart.
 /// The account-level refresh token stays while another vault still uses it.
 pub fn disconnect(config: &SyncConfig) -> Result<(), ServiceError> {
     config::delete(&config.local_path)?;
-    if !config::has_account_binding(&config.account_email)? {
+    if config.provider == SyncProvider::SharePoint
+        && !config::has_account_binding(&config.account_email)?
+    {
         tokens::delete(&config.account_email)?;
     }
     Ok(())

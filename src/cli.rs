@@ -8,7 +8,7 @@ use std::{
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
@@ -460,12 +460,17 @@ fn sync_status(vault: &Path) -> Result<Value, CliError> {
             CliError::new(
                 "sync_not_configured",
                 6,
-                "vault is not connected to SharePoint",
+                "vault is not connected to a sync provider",
             )
         })?;
-    Ok(
-        json!({"provider":"sharepoint","account":config.account_email,"remote_url":config.remote_url,"configured":true,"network_checked":false}),
-    )
+    Ok(json!({
+        "provider": config.provider.id(),
+        "provider_name": config.provider.display_name(),
+        "account": config.account_email,
+        "remote_url": config.remote_url,
+        "configured": true,
+        "network_checked": false
+    }))
 }
 
 fn execute_sync(
@@ -483,11 +488,10 @@ fn execute_sync(
             CliError::new(
                 "sync_not_configured",
                 6,
-                "vault is not connected to SharePoint",
+                "vault is not connected to a sync provider",
             )
         })?;
-    let token =
-        crate::sync::service::refresh_access_token(&config.account_email).map_err(sync_error)?;
+    let token = crate::sync::service::restore_provider(&mut config).map_err(sync_error)?;
     let local_bytes = document
         .read_current_bytes()
         .map_err(|e| CliError::new("local_revision_changed", 5, e.to_string()))?;

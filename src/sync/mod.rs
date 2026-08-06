@@ -1,4 +1,5 @@
-//! SharePoint cloud sync. Owns the OAuth flow, Microsoft Graph client,
+//! Provider-neutral cloud sync. Owns provider discovery and configuration,
+//! plus the SharePoint OAuth/Graph and Apple iCloud Drive file adapters.
 //! per-vault sync configuration, and the upload-on-save orchestration.
 //!
 //! Short overview:
@@ -20,5 +21,7 @@ pub mod auth;
 pub mod config;
 pub mod graph;
 pub mod http;
+pub mod icloud;
+pub mod provider;
 pub mod service;
 pub mod tokens;

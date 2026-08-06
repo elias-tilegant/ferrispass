@@ -15,7 +15,8 @@ src/
 ├── keepass/    Adapter over the forked keepass-rs crate. Document open/save,
 │               three-way merge for conflicts, password generator, snapshot
 │               extraction (Database → VaultSnapshot).
-├── sync/       SharePoint cloud sync. Device-code OAuth, Microsoft Graph
+├── sync/       Provider-neutral cloud sync. Registry, bindings, SharePoint
+│               Graph adapter, and Apple iCloud Drive file adapter.
 │               client, per-vault SyncConfig, upload-on-save orchestration,
 │               412-conflict handling.
 ├── ui/         GPUI views, screens, widgets. AppShell is the top-level

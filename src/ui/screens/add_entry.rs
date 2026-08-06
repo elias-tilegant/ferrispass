@@ -1,15 +1,14 @@
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div,
-    prelude::FluentBuilder as _, px,
+    div, prelude::FluentBuilder as _, px, AnyElement, ClickEvent, Context, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledImage as _,
 };
 use gpui_component::{
-    Sizable as _, WindowExt as _,
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputContentType},
     slider::Slider,
-    v_flex,
+    v_flex, Sizable as _, WindowExt as _,
 };
 
 use crate::domain::VaultGroup;
@@ -397,7 +396,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .text_xs()
                         .text_color(palette::text_muted())
                         .font_family("JetBrains Mono")
-                        .child("Saves locally, syncs to OneDrive"),
+                        .child("Saves locally, syncs to your cloud provider"),
                 )
                 .child(cancel_button)
                 .child(save_button),

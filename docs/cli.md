@@ -1,7 +1,7 @@
 # FerrisPass CLI
 
 `ferrispass-cli` is the headless interface for KeePass-compatible vaults. It
-never starts the GUI. SharePoint is contacted only by `sync now`; all other
+never starts the GUI. The configured provider is contacted only by `sync now`; all other
 commands remain local. Use `--format json` for the versioned
 `ferrispass-cli/v1` agent contract.
 
@@ -30,7 +30,7 @@ sync status | now
 ```
 
 Use `ferrispass-cli <command> --help` for command-specific arguments. Most
-commands require `--vault FILE`; `sync status` only reads the local SharePoint
+commands require `--vault FILE`; `sync status` only reads the local provider
 binding and does not unlock the database.
 
 ## Unlocking safely
@@ -109,14 +109,14 @@ launch is currently supported on macOS. The typed launch command is designed
 to add protocols such as SSH later without changing vault unlocking or entry
 selection semantics.
 
-## SharePoint sync
+## Cloud-provider sync
 
 For a vault already connected by the FerrisPass GUI, `sync status` reads only
-the local binding. It neither unlocks the vault nor contacts SharePoint.
-Initial SharePoint connection remains a GUI operation.
+the local binding. It neither unlocks the vault nor contacts the provider.
+Initial provider connection remains a GUI operation.
 
 `sync now` is a two-step operation. The first invocation downloads and checks
-the remote revision but does not change the local vault or SharePoint. Its JSON
+the remote revision but does not change the local vault or cloud copy. Its JSON
 result contains a `plan_token`, the proposed changes, and any ambiguous
 conflicts. A second invocation with `--commit` repeats the checks and accepts
 the plan only if both revisions still match:
@@ -139,7 +139,8 @@ printf '%s' '{"resolutions":[{"entry_id":"UUID","keep":"remote"}]}' |
     --commit --plan-token 'v1:...'
 ```
 
-Uploads retain the SharePoint ETag guard. If the remote file changes between
+Uploads retain the provider revision guard (SharePoint ETag or iCloud content
+revision). If the remote file changes between
 planning and publication, the command stops and requires a fresh plan.
 
 ## Automation contract

@@ -9,7 +9,7 @@
 
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, hsla, px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, hsla, px,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, input::Input, v_flex,
@@ -36,6 +36,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 
     let (step_index, body) = match &flow {
         ConnectFlow::PickProvider => (1usize, render_pick_provider(cx)),
+        ConnectFlow::ICloudActions => (2, render_icloud_actions(shell, cx)),
         ConnectFlow::Authorizing => (2, render_authorizing()),
         ConnectFlow::SigningIn { challenge } => (2, render_signing_in(challenge, cx)),
         ConnectFlow::Picking {
@@ -49,6 +50,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             render_picking(shell, results, query, *loading, error.as_deref(), cx),
         ),
         ConnectFlow::Downloading => (3, render_downloading(cx)),
+        ConnectFlow::ICloudTransferring { message } => (3, render_icloud_transferring(message)),
         ConnectFlow::Failed(msg) => (1, render_failed(msg, cx)),
     };
 
@@ -76,7 +78,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .pt_7()
                         .pb_5()
                         .child(step_indicator(
-                            &[(1, "Choose provider"), (2, "Authorize"), (3, "Pick vault")],
+                            &[(1, "Choose provider"), (2, "Connect"), (3, "Pick vault")],
                             step_index,
                             cx,
                         ))
@@ -128,12 +130,12 @@ fn render_pick_provider(cx: &mut Context<AppShell>) -> AnyElement {
                     Provider {
                         id: "provider-icloud".into(),
                         name: "iCloud Drive",
-                        meta: "Apple ID · coming soon",
+                        meta: "Apple iCloud · open or publish a vault",
                         letter: "i",
                         color: hsla(0.55, 1.0, 0.50, 1.0),
                         selected: false,
                     },
-                    false,
+                    true,
                     cx,
                 )),
         )
@@ -145,11 +147,12 @@ fn provider_row_button(
     enabled: bool,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
+    let is_sharepoint = provider.name == "SharePoint";
     let row = div()
         .id(provider.id.clone())
         .pressable_dim()
         .child(provider_row(provider));
-    if enabled {
+    if enabled && is_sharepoint {
         row.on_click(
             cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                 // SharePoint button → go straight to device-code sign-in (no
@@ -158,6 +161,16 @@ fn provider_row_button(
                     .state()
                     .clone()
                     .update(cx, |state, cx| state.start_sharepoint_connect(cx));
+            }),
+        )
+        .into_any_element()
+    } else if enabled {
+        row.on_click(
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell
+                    .state()
+                    .clone()
+                    .update(cx, |state, cx| state.start_icloud_connect(cx));
             }),
         )
         .into_any_element()
@@ -170,6 +183,111 @@ fn provider_row_button(
         }))
         .into_any_element()
     }
+}
+
+fn render_icloud_actions(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
+    let can_publish = shell.state().read(cx).can_publish_active_to_icloud();
+    let open = div()
+        .id("icloud-open-existing")
+        .h(px(54.))
+        .px_4()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(palette::border())
+        .flex()
+        .items_center()
+        .child(
+            v_flex()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("Open from iCloud Drive"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(palette::text_muted())
+                        .child("Choose an existing .kdbx and keep a separate local working copy."),
+                ),
+        )
+        .hover_press(palette::sidebar())
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.prompt_for_icloud_vault(window, cx);
+            }),
+        );
+
+    let publish =
+        div()
+            .id("icloud-publish-local")
+            .h(px(54.))
+            .px_4()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(palette::border())
+            .flex()
+            .items_center()
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Copy current vault to iCloud Drive"),
+                    )
+                    .child(div().text_xs().text_color(palette::text_muted()).child(
+                        if can_publish {
+                            "Create a new encrypted iCloud copy and keep working locally."
+                        } else {
+                            "Open an unconnected local vault first."
+                        },
+                    )),
+            );
+    let publish = if can_publish {
+        publish
+            .hover_press(palette::sidebar())
+            .on_click(
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.prompt_for_icloud_publish(window, cx);
+                }),
+            )
+            .into_any_element()
+    } else {
+        publish.opacity(0.5).into_any_element()
+    };
+
+    v_flex()
+        .gap_4()
+        .child(heading(
+            "Connect iCloud Drive",
+            "FerrisPass uses a file you choose in iCloud Drive. Apple handles transport; FerrisPass handles safe revisions and KeePass conflicts.",
+        ))
+        .child(v_flex().gap_2p5().child(open).child(publish))
+        .into_any_element()
+}
+
+fn render_icloud_transferring(message: &str) -> AnyElement {
+    v_flex()
+        .gap_4()
+        .child(heading("Connecting iCloud Drive…", message))
+        .child(
+            div()
+                .h(px(4.))
+                .w_full()
+                .rounded(px(2.))
+                .bg(palette::sidebar())
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(0.4))
+                        .rounded(px(2.))
+                        .bg(palette::blue()),
+                ),
+        )
+        .into_any_element()
 }
 
 // ---------------- Step 2a: requesting device code (reconnect) ----------------
@@ -603,20 +721,20 @@ fn render_failed(msg: &str, cx: &mut Context<AppShell>) -> AnyElement {
 
 // ---------------- shared chrome ----------------
 
-fn heading(title: &'static str, subtitle: &'static str) -> AnyElement {
+fn heading(title: impl Into<SharedString>, subtitle: impl Into<SharedString>) -> AnyElement {
     v_flex()
         .gap_1()
         .child(
             div()
                 .text_xl()
                 .font_weight(gpui::FontWeight::BOLD)
-                .child(title),
+                .child(title.into()),
         )
         .child(
             div()
                 .text_xs()
                 .text_color(palette::text_muted())
-                .child(subtitle),
+                .child(subtitle.into()),
         )
         .into_any_element()
 }
