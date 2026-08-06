@@ -178,6 +178,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", CancelUnlock, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-l", LockVault, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-f", FocusSearch, Some(APP_CONTEXT)),
+        // The standard copy gesture copies the password of the currently
+        // selected vault entry. Text inputs keep their own, more-specific
+        // native copy handling when they have focus.
+        KeyBinding::new("cmd-c", CopyPassword, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-shift-u", CopyUsername, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-shift-l", CopyUrl, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-shift-p", CopyPassword, Some(APP_CONTEXT)),
