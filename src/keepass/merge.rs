@@ -337,7 +337,10 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
             || local_group.default_autotype_sequence != remote_group.default_autotype_sequence
             || local_group.enable_autotype != remote_group.enable_autotype
             || local_group.enable_searching != remote_group.enable_searching
-            || local_group.previous_parent_group != remote_group.previous_parent_group
+            || !previous_groups_equivalent(
+                local_group.previous_parent_group,
+                remote_group.previous_parent_group,
+            )
             || local_group.tags != remote_group.tags
         {
             return true;
@@ -509,6 +512,21 @@ fn icons_equivalent(local: Option<&Icon>, remote: Option<&Icon>, default_index: 
     norm(local, default_index) == norm(remote, default_index)
 }
 
+/// Some KeePass clients serialize an absent `PreviousParentGroup` as the nil
+/// UUID while others omit the element. Both mean that the item has no former
+/// parent; a real non-nil group UUID must still participate in conflict
+/// detection so moves and recycle-bin restores remain lossless.
+fn previous_groups_equivalent(local: Option<GroupId>, remote: Option<GroupId>) -> bool {
+    previous_group_uuids_equivalent(local.map(|id| id.uuid()), remote.map(|id| id.uuid()))
+}
+
+fn previous_group_uuids_equivalent(local: Option<uuid::Uuid>, remote: Option<uuid::Uuid>) -> bool {
+    fn norm(group: Option<uuid::Uuid>) -> Option<uuid::Uuid> {
+        group.filter(|id| !id.is_nil())
+    }
+    norm(local) == norm(remote)
+}
+
 fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
     entry_location_is_resolved(local, remote)
         && local.fields == remote.fields
@@ -520,7 +538,7 @@ fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
         && local.background_color == remote.background_color
         && local.override_url == remote.override_url
         && local.quality_check == remote.quality_check
-        && local.previous_parent_group == remote.previous_parent_group
+        && previous_groups_equivalent(local.previous_parent_group, remote.previous_parent_group)
         && attachment_fingerprint(local) == attachment_fingerprint(remote)
 }
 
@@ -566,7 +584,7 @@ fn group_content_eq(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> bool {
         && local.default_autotype_sequence == remote.default_autotype_sequence
         && local.enable_autotype == remote.enable_autotype
         && local.enable_searching == remote.enable_searching
-        && local.previous_parent_group == remote.previous_parent_group
+        && previous_groups_equivalent(local.previous_parent_group, remote.previous_parent_group)
         && local.tags == remote.tags
 }
 
@@ -931,7 +949,7 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<&'
     if local.quality_check != remote.quality_check {
         changed.push("quality check");
     }
-    if local.previous_parent_group != remote.previous_parent_group {
+    if !previous_groups_equivalent(local.previous_parent_group, remote.previous_parent_group) {
         changed.push("previous group");
     }
     changed
@@ -1007,6 +1025,21 @@ mod tests {
         let report = diff(&local, &remote);
         assert!(report.conflicts.is_empty(), "default-icon spelling must not conflict");
         assert!(report.is_clean());
+    }
+
+    #[test]
+    fn nil_previous_group_vs_absent_previous_group_is_not_a_difference() {
+        assert!(previous_group_uuids_equivalent(
+            Some(uuid::Uuid::nil()),
+            None,
+        ));
+
+        let actual_group = uuid::Uuid::new_v4();
+        assert!(!previous_group_uuids_equivalent(Some(actual_group), None));
+        assert!(!previous_group_uuids_equivalent(
+            Some(actual_group),
+            Some(uuid::Uuid::new_v4()),
+        ));
     }
 
     #[test]
