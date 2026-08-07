@@ -1993,8 +1993,11 @@ impl AppState {
                     );
                 }
                 Err(e) => {
-                    // Transient (network, etc.) — leave the user in
-                    // Failed; the next save's sync_now will retry.
+                    // Transient (network, etc.) — park in Failed. Note
+                    // that without a binding `sync_now` bails silently,
+                    // so nothing retries on its own: the Retry button on
+                    // the restore card (`retry_sync_restore`) is the way
+                    // out short of relocking the vault.
                     state.apply_sync_status_for_session(
                         &path,
                         session_id,
@@ -2005,6 +2008,19 @@ impl AppState {
             });
         })
         .detach();
+    }
+
+    /// Re-run the sync-binding restore for the active vault after a
+    /// transient failure (network blip at unlock). Dispatched by the
+    /// Retry button on the Sync settings restore card. Safe to call
+    /// repeatedly: `try_restore_sync_binding` no-ops when a binding
+    /// already exists or no config is on disk.
+    pub fn retry_sync_restore(&mut self, cx: &mut Context<Self>) {
+        let VaultStatus::Open { path, .. } = &self.vault else {
+            return;
+        };
+        let path = path.clone();
+        self.try_restore_sync_binding(path, cx);
     }
 
     /// Read-only access to the auto-update flow state. Drives the welcome

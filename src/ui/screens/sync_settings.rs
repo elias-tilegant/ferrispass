@@ -465,7 +465,7 @@ fn render_disconnected(cx: &mut Context<AppShell>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_restore(status: &SyncStatus, _cx: &mut Context<AppShell>) -> AnyElement {
+fn render_restore(status: &SyncStatus, cx: &mut Context<AppShell>) -> AnyElement {
     let (title, detail, tone) = match status {
         SyncStatus::Failed(message) => (
             "Cloud sync could not be restored",
@@ -478,6 +478,40 @@ fn render_restore(status: &SyncStatus, _cx: &mut Context<AppShell>) -> AnyElemen
             ChipTone::Blue,
         ),
     };
+
+    // A failed restore has no binding, so "Sync now" never appears and
+    // nothing retries on its own — without this button the only way out
+    // of a transient network blip at unlock is relocking the vault.
+    let retry_button = matches!(status, SyncStatus::Failed(_)).then(|| {
+        div()
+            .id("sync-restore-retry")
+            .h(px(28.))
+            .px(px(12.))
+            .rounded(px(5.))
+            .bg(palette::panel())
+            .border_1()
+            .border_color(palette::border_strong())
+            .text_xs()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(palette::text())
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1p5()
+            .child(
+                gpui_component::Icon::from(AppIcon::Sync)
+                    .with_size(gpui_component::Size::Size(px(11.)))
+                    .text_color(palette::text()),
+            )
+            .child("Retry")
+            .hover_press(palette::border())
+            .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                shell
+                    .state()
+                    .clone()
+                    .update(cx, |state, cx| state.retry_sync_restore(cx));
+            }))
+    });
 
     v_flex()
         .gap_3()
@@ -506,6 +540,9 @@ fn render_restore(status: &SyncStatus, _cx: &mut Context<AppShell>) -> AnyElemen
                 .text_color(palette::text_muted())
                 .child(detail.to_string()),
         )
+        .when_some(retry_button, |this, button| {
+            this.child(h_flex().child(button))
+        })
         .into_any_element()
 }
 
