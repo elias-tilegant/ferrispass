@@ -4611,6 +4611,18 @@ impl AppState {
         let Some((config, token, _master_password)) =
             self.snapshot_sync_inputs_for_session(target, session_id)
         else {
+            // No live binding. For the active vault this usually means the
+            // unlock-time binding restore failed (network blip) — retry it
+            // so any sync trigger (save push, auto-sync, Sync now) heals
+            // the state instead of silently skipping the upload forever.
+            // This push itself is dropped; the next one after the restore
+            // completes uploads normally. `retry_sync_restore` is
+            // idempotent: it no-ops when a binding exists or no sync
+            // config is on disk. Parked vaults keep the silent bail —
+            // the restore path is active-vault-only by design.
+            if matches!(&self.vault, VaultStatus::Open { path, .. } if path == target) {
+                self.retry_sync_restore(cx);
+            }
             return;
         };
         let bytes_source = match published_bytes {
