@@ -397,6 +397,7 @@ pub fn apply_picks(
     for resolved in &report.auto_resolved {
         preserve_auto_resolved_history(&mut merged, &mut source, resolved)?;
     }
+    reconcile_unsurfaced_metadata(&mut merged, &mut source);
 
     let log = merged
         .merge(&source)
@@ -650,6 +651,116 @@ fn custom_icon_store(db: &Database) -> HashMap<uuid::Uuid, CustomIconSnapshot> {
             )
         })
         .collect()
+}
+
+/// The pinned fork's `Database::merge` fails closed when two entries or
+/// groups share a last-modification timestamp but differ on *any* field.
+/// Divergences FerrisPass deliberately does not surface as conflicts —
+/// default-icon spelling and previous-parent restore metadata — would
+/// therefore wedge the merge with "have the same modification time but
+/// have diverged". Align them on both sides before merging. Direction:
+/// a real previous-parent UUID wins over an absent one (healing vaults
+/// whose pre-0.7 saves stripped the field), otherwise the local (merged)
+/// representation wins. Pairs whose timestamps differ are left alone —
+/// the fork resolves those wholesale by the newer side.
+fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
+    fn canonical_previous_parent(
+        merged_value: Option<GroupId>,
+        source_value: Option<GroupId>,
+    ) -> Option<GroupId> {
+        merged_value
+            .filter(|id| !id.uuid().is_nil())
+            .or(source_value.filter(|id| !id.uuid().is_nil()))
+    }
+
+    let entry_ids: Vec<EntryId> = merged.iter_all_entries().map(|entry| entry.id()).collect();
+    for id in entry_ids {
+        let Some(merged_entry) = merged.entry(id) else {
+            continue;
+        };
+        let Some(source_entry) = source.entry(id) else {
+            continue;
+        };
+        if merged_entry.times.last_modification != source_entry.times.last_modification {
+            continue;
+        }
+        let merged_icon = merged_entry.icon().cloned();
+        let source_icon = source_entry.icon().cloned();
+        let merged_prev = merged_entry.previous_parent_group;
+        let source_prev = source_entry.previous_parent_group;
+
+        let canonical_prev = canonical_previous_parent(merged_prev, source_prev);
+        if merged_prev != canonical_prev
+            && let Some(mut entry) = merged.entry_mut(id)
+        {
+            entry.previous_parent_group = canonical_prev;
+        }
+        if source_prev != canonical_prev
+            && let Some(mut entry) = source.entry_mut(id)
+        {
+            entry.previous_parent_group = canonical_prev;
+        }
+
+        if merged_icon != source_icon
+            && icons_equivalent(
+                merged_icon.as_ref(),
+                source_icon.as_ref(),
+                DEFAULT_ENTRY_ICON,
+            )
+            && let Some(mut entry) = source.entry_mut(id)
+        {
+            match merged_icon {
+                Some(Icon::BuiltIn(index)) => entry.set_icon_builtin(index),
+                None => entry.set_icon_none(),
+                // Equivalent-but-different never involves custom icons.
+                Some(Icon::Custom(_)) => {}
+            }
+        }
+    }
+
+    let group_ids: Vec<GroupId> = merged.iter_all_groups().map(|group| group.id()).collect();
+    for id in group_ids {
+        let Some(merged_group) = merged.group(id) else {
+            continue;
+        };
+        let Some(source_group) = source.group(id) else {
+            continue;
+        };
+        if merged_group.times.last_modification != source_group.times.last_modification {
+            continue;
+        }
+        let merged_icon = merged_group.icon().cloned();
+        let source_icon = source_group.icon().cloned();
+        let merged_prev = merged_group.previous_parent_group;
+        let source_prev = source_group.previous_parent_group;
+
+        let canonical_prev = canonical_previous_parent(merged_prev, source_prev);
+        if merged_prev != canonical_prev
+            && let Some(mut group) = merged.group_mut(id)
+        {
+            group.previous_parent_group = canonical_prev;
+        }
+        if source_prev != canonical_prev
+            && let Some(mut group) = source.group_mut(id)
+        {
+            group.previous_parent_group = canonical_prev;
+        }
+
+        if merged_icon != source_icon
+            && icons_equivalent(
+                merged_icon.as_ref(),
+                source_icon.as_ref(),
+                DEFAULT_GROUP_ICON,
+            )
+            && let Some(mut group) = source.group_mut(id)
+        {
+            match merged_icon {
+                Some(Icon::BuiltIn(index)) => group.set_icon_builtin(index),
+                None => group.set_icon_none(),
+                Some(Icon::Custom(_)) => {}
+            }
+        }
+    }
 }
 
 fn force_manual_winner(
@@ -1065,6 +1176,51 @@ mod tests {
             "previous-parent metadata must not conflict"
         );
         assert!(report.is_clean());
+    }
+
+    #[test]
+    fn apply_picks_tolerates_stripped_previous_parent_metadata() {
+        // Unsurfaced divergence + tied timestamps used to trip the fork's
+        // fail-closed "same modification time but have diverged" check and
+        // wedge sync with "Merge blocked". The merge must reconcile before
+        // Database::merge runs — and heal: the real remote UUID survives
+        // into the merged result instead of local's stripped None.
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let mut remote = fork(&local);
+        let remote_root = remote.root().id();
+        remote
+            .entry_mut(id)
+            .expect("remote entry")
+            .previous_parent_group = Some(remote_root);
+
+        let report = diff(&local, &remote);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("previous-parent metadata must not block the merge");
+        assert_eq!(
+            merged
+                .entry(id)
+                .expect("merged entry")
+                .previous_parent_group,
+            Some(remote_root),
+            "the side carrying restore metadata must win"
+        );
+    }
+
+    #[test]
+    fn apply_picks_tolerates_default_icon_spelling_divergence() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        local
+            .entry_mut(id)
+            .expect("local entry")
+            .set_icon_builtin(0);
+        let mut remote = fork(&local);
+        remote.entry_mut(id).expect("remote entry").set_icon_none();
+
+        let report = diff(&local, &remote);
+        apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("default-icon spelling must not block the merge");
     }
 
     #[test]
