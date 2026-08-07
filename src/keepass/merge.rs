@@ -105,7 +105,6 @@ struct EntrySnapshot {
     attachments: Vec<AttachmentFingerprint>,
     icon: Option<Icon>,
     quality_check: Option<bool>,
-    previous_parent_group: Option<GroupId>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -327,11 +326,7 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
             != remote_group.parent().map(|parent| parent.id())
             || local_group.name != remote_group.name
             || local_group.notes != remote_group.notes
-            || !icons_equivalent(
-                local_group.icon(),
-                remote_group.icon(),
-                DEFAULT_GROUP_ICON,
-            )
+            || !icons_equivalent(local_group.icon(), remote_group.icon(), DEFAULT_GROUP_ICON)
             || local_group.custom_data != remote_group.custom_data
             || local_group.is_expanded != remote_group.is_expanded
             || local_group.default_autotype_sequence != remote_group.default_autotype_sequence
@@ -514,8 +509,14 @@ fn icons_equivalent(local: Option<&Icon>, remote: Option<&Icon>, default_index: 
 
 /// Some KeePass clients serialize an absent `PreviousParentGroup` as the nil
 /// UUID while others omit the element. Both mean that the item has no former
-/// parent; a real non-nil group UUID must still participate in conflict
-/// detection so moves and recycle-bin restores remain lossless.
+/// parent.
+///
+/// Used only for the *group* structural-writeback check. Entry-level
+/// `previous_parent_group` is excluded from conflict detection entirely:
+/// it is invisible restore-location metadata that KeePass2's own merge
+/// resolves silently, and vaults saved by FerrisPass before the fork
+/// round-tripped the field (pre-0.7) have it stripped on every entry —
+/// comparing it would re-conflict a whole foreign-written vault forever.
 fn previous_groups_equivalent(local: Option<GroupId>, remote: Option<GroupId>) -> bool {
     previous_group_uuids_equivalent(local.map(|id| id.uuid()), remote.map(|id| id.uuid()))
 }
@@ -538,7 +539,6 @@ fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
         && local.background_color == remote.background_color
         && local.override_url == remote.override_url
         && local.quality_check == remote.quality_check
-        && previous_groups_equivalent(local.previous_parent_group, remote.previous_parent_group)
         && attachment_fingerprint(local) == attachment_fingerprint(remote)
 }
 
@@ -584,7 +584,6 @@ fn group_content_eq(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> bool {
         && local.default_autotype_sequence == remote.default_autotype_sequence
         && local.enable_autotype == remote.enable_autotype
         && local.enable_searching == remote.enable_searching
-        && previous_groups_equivalent(local.previous_parent_group, remote.previous_parent_group)
         && local.tags == remote.tags
 }
 
@@ -794,7 +793,6 @@ fn entry_to_snapshot(e: &EntryRef<'_>) -> EntrySnapshot {
         attachments: attachment_fingerprint(e),
         icon: e.icon().cloned(),
         quality_check: e.quality_check,
-        previous_parent_group: e.previous_parent_group,
     }
 }
 
@@ -949,9 +947,6 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<&'
     if local.quality_check != remote.quality_check {
         changed.push("quality check");
     }
-    if !previous_groups_equivalent(local.previous_parent_group, remote.previous_parent_group) {
-        changed.push("previous group");
-    }
     changed
 }
 
@@ -1018,12 +1013,18 @@ mod tests {
         // round-tripped through both clients must not conflict on it.
         let mut local = Database::new();
         let id = add(&mut local, "GitHub", "secret");
-        local.entry_mut(id).expect("local entry").set_icon_builtin(0);
+        local
+            .entry_mut(id)
+            .expect("local entry")
+            .set_icon_builtin(0);
         let mut remote = fork(&local);
         remote.entry_mut(id).expect("remote entry").set_icon_none();
 
         let report = diff(&local, &remote);
-        assert!(report.conflicts.is_empty(), "default-icon spelling must not conflict");
+        assert!(
+            report.conflicts.is_empty(),
+            "default-icon spelling must not conflict"
+        );
         assert!(report.is_clean());
     }
 
@@ -1043,15 +1044,46 @@ mod tests {
     }
 
     #[test]
+    fn entry_previous_parent_metadata_never_conflicts() {
+        // FerrisPass saves before the 0.7 fork bump stripped
+        // PreviousParentGroup from every entry, so a foreign-written remote
+        // carries a real group UUID where local has None — with tied
+        // timestamps. Restore-location metadata must not surface as a
+        // per-entry conflict (KeePass2's merge never prompts for it either).
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let mut remote = fork(&local);
+        let remote_root = remote.root().id();
+        remote
+            .entry_mut(id)
+            .expect("remote entry")
+            .previous_parent_group = Some(remote_root);
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.conflicts.is_empty(),
+            "previous-parent metadata must not conflict"
+        );
+        assert!(report.is_clean());
+    }
+
+    #[test]
     fn non_default_icon_difference_still_conflicts() {
         let mut local = Database::new();
         let id = add(&mut local, "GitHub", "secret");
-        local.entry_mut(id).expect("local entry").set_icon_builtin(5);
+        local
+            .entry_mut(id)
+            .expect("local entry")
+            .set_icon_builtin(5);
         let mut remote = fork(&local);
         remote.entry_mut(id).expect("remote entry").set_icon_none();
 
         let report = diff(&local, &remote);
-        assert_eq!(report.conflicts.len(), 1, "a real icon change must still surface");
+        assert_eq!(
+            report.conflicts.len(),
+            1,
+            "a real icon change must still surface"
+        );
         assert!(
             report.conflicts[0]
                 .fields
@@ -1319,8 +1351,8 @@ mod tests {
             let mut bin = root.add_group();
             bin.name = "Recycle Bin".into();
             let id = bin.id();
-            drop(bin);
-            drop(root);
+            let _ = bin;
+            let _ = root;
             db.meta.recyclebin_uuid = Some(id.uuid());
             id
         };
@@ -2121,8 +2153,8 @@ mod tests {
             let mut bin = root.add_group();
             bin.name = "Recycle Bin".into();
             let id = bin.id();
-            drop(bin);
-            drop(root);
+            let _ = bin;
+            let _ = root;
             local.meta.recyclebin_uuid = Some(id.uuid());
             id
         };
