@@ -760,6 +760,49 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
                 Some(Icon::Custom(_)) => {}
             }
         }
+
+        // Groups never reach the conflict overlay, so a tied-timestamp
+        // divergence on any remaining field (a KeePassXC IsExpanded toggle
+        // is written without bumping the modification time; pre-0.7 saves
+        // stripped optional fields) has no user-facing resolution path and
+        // would trip the fork's fail-closed check. Break the tie in local's
+        // favor — mirroring force_manual_winner and KeePass2's keep-target
+        // tie policy. The bumped timestamp also carries fork-private view
+        // state (LastTopVisibleEntry) past the divergence check.
+        let still_diverged = match (merged.group(id), source.group(id)) {
+            (Some(merged_group), Some(source_group)) => {
+                merged_group.name != source_group.name
+                    || merged_group.notes != source_group.notes
+                    || merged_group.icon() != source_group.icon()
+                    || merged_group.custom_data != source_group.custom_data
+                    || merged_group.is_expanded != source_group.is_expanded
+                    || merged_group.default_autotype_sequence
+                        != source_group.default_autotype_sequence
+                    || merged_group.enable_autotype != source_group.enable_autotype
+                    || merged_group.enable_searching != source_group.enable_searching
+                    || merged_group.previous_parent_group != source_group.previous_parent_group
+                    || merged_group.tags != source_group.tags
+            }
+            _ => false,
+        };
+        if still_diverged {
+            let winner_time = [
+                Times::now(),
+                merged
+                    .group(id)
+                    .and_then(|group| group.times.last_modification)
+                    .unwrap_or_else(Times::epoch),
+            ]
+            .into_iter()
+            .max()
+            .expect("group tie-break timestamp candidates are non-empty");
+            if let Some(mut group) = merged.group_mut(id) {
+                group.times.last_modification = Some(winner_time);
+            }
+            if let Some(mut group) = source.group_mut(id) {
+                group.times.last_modification = Some(Times::epoch());
+            }
+        }
     }
 }
 
@@ -1221,6 +1264,36 @@ mod tests {
         let report = diff(&local, &remote);
         apply_picks(&local, &remote, &HashMap::new(), &report)
             .expect("default-icon spelling must not block the merge");
+    }
+
+    #[test]
+    fn apply_picks_breaks_tied_group_divergence_in_local_favor() {
+        // KeePassXC toggles IsExpanded without bumping the group's
+        // modification time, so both sides tie while the fork's fail-closed
+        // check sees a divergence ("Groups with UUID … have the same
+        // modification time but have diverged"). Groups have no conflict
+        // UI — the merge must break the tie itself, keeping local.
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Infrastructure".into();
+            group.is_expanded = true;
+            group.id()
+        };
+        let mut remote = fork(&local);
+        remote
+            .group_mut(group_id)
+            .expect("remote group")
+            .is_expanded = false;
+
+        let report = diff(&local, &remote);
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("tied group view-state divergence must not block the merge");
+        assert!(
+            merged.group(group_id).expect("merged group").is_expanded,
+            "local side must win the tie"
+        );
     }
 
     #[test]
