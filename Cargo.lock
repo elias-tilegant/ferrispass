@@ -3408,7 +3408,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -3806,7 +3806,7 @@ dependencies = [
 [[package]]
 name = "keepass"
 version = "0.0.0-placeholder-version"
-source = "git+https://github.com/elias-tilegant/keepass-rs?rev=c51c475#c51c475d9f6ab9f8257d629685fc8186abc09faa"
+source = "git+https://github.com/elias-tilegant/keepass-rs?rev=234a582#234a5828e80c7f7669451cd2ed921f358ab1358a"
 dependencies = [
  "aes 0.9.2",
  "base32",
