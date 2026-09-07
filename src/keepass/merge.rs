@@ -29,7 +29,7 @@ use std::{
 use chrono::NaiveDateTime;
 use keepass::db::{
     AutoType, Color, CustomDataItem, Database, Entry, EntryId, EntryRef, GroupId, GroupRef, Icon,
-    Times, Value, fields,
+    MergeWarning, Times, Value, fields,
 };
 
 use zeroize::Zeroizing;
@@ -594,11 +594,11 @@ pub fn apply_picks(
     // another client wrote entries without LocationChanged timestamps), so
     // treating it as fatal re-fails every retry identically and wedges sync
     // permanently with no user remedy.
-    let lossy: Vec<&str> = log
+    let lossy: Vec<String> = log
         .warnings
         .iter()
-        .map(String::as_str)
         .filter(|warning| !warning_is_harmless(warning, local, remote))
+        .map(MergeWarning::to_string)
         .collect();
     if !lossy.is_empty() {
         return Err(ApplyError::DatabaseMergeWarnings(lossy.join("; ")));
@@ -612,25 +612,30 @@ pub fn apply_picks(
     Ok(merged)
 }
 
-/// Warnings the pinned fork emits for situations it has already resolved
-/// without dropping data: same-second diverged history versions (both are
-/// kept), missing *history-entry* timestamps (deterministic substitutes
-/// inside a history list that is unioned anyway), and missing history (an
-/// empty default). The warning set is closed because the fork is pinned by
-/// revision; anything unrecognized stays fatal. Deliberately NOT in this
-/// list, because each one silently discards a remote change: "Cannot add
-/// entry …" (entry dropped), "Cannot move entry/group …" (move dropped),
-/// "Cannot determine which … move is more recent" (the fork keeps the
-/// local location and the following upload overwrites the remote move),
-/// and missing timestamps on *current* entries/groups (a remote rename
-/// without a timestamp loses against the epoch substitute). Only the root
-/// group, which cannot move anywhere, is exempt.
-fn warning_is_policy_resolved(warning: &str) -> bool {
-    warning.starts_with("History entries for ")
-        || warning.starts_with("Cannot move root group ")
-        || (warning.contains(" history entry ")
-            && warning.contains("did not have a last modification timestamp"))
-        || warning.ends_with("had no history.")
+/// Warnings the fork emits for situations it already resolved without
+/// dropping data: same-second diverged history versions (both are kept),
+/// missing history-entry timestamps (deterministic substitutes inside a list
+/// that is unioned anyway), missing history at all (an empty default), and
+/// the root group, which cannot move anywhere.
+///
+/// Everything else stays fatal, because each remaining variant silently
+/// discards a remote change: a dropped entry, a dropped move, a move whose
+/// direction could not be decided and so keeps the local location for the
+/// next upload to impose, or a missing timestamp on a *current* object, where
+/// the substitute decides a comparison the file did not.
+///
+/// Matched on the fork's `MergeWarning` enum. This used to read the message
+/// text with `starts_with`, `contains` and word positions, which would have
+/// flipped a fatal warning to harmless, silently, the first time the fork
+/// reworded a sentence.
+fn warning_is_policy_resolved(warning: &MergeWarning) -> bool {
+    matches!(
+        warning,
+        MergeWarning::DivergedHistory { .. }
+            | MergeWarning::MissingHistoryTimestamp { .. }
+            | MergeWarning::NoHistory { .. }
+            | MergeWarning::CannotMoveRootGroup { .. }
+    )
 }
 
 /// Extends `warning_is_policy_resolved` with a divergence check for
@@ -644,23 +649,17 @@ fn warning_is_policy_resolved(warning: &str) -> bool {
 /// are merged independently. A parent difference is accepted only when the
 /// location timestamps identify one strictly newer side; missing location
 /// timestamps also produce a separate fatal move warning.
-fn warning_is_harmless(warning: &str, local: &Database, remote: &Database) -> bool {
+fn warning_is_harmless(warning: &MergeWarning, local: &Database, remote: &Database) -> bool {
     if warning_is_policy_resolved(warning) {
         return true;
     }
-    if !warning.contains("did not have a last modification timestamp") {
-        return false;
-    }
-    // "Source entry <id> did not …" / "Destination group <id> did not …"
-    // ("… history entry …" was already accepted above.)
-    let mut words = warning.split_whitespace();
-    let kind = words.nth(1);
-    let Some(id) = words.next() else {
-        return false;
-    };
-    match kind {
-        Some("entry") => entries_equivalent_for_timestamp_warning(local, remote, id),
-        Some("group") => groups_equivalent_for_timestamp_warning(local, remote, id),
+    match warning {
+        MergeWarning::MissingEntryTimestamp { entry, .. } => {
+            entries_equivalent_for_timestamp_warning(local, remote, &entry.to_string())
+        }
+        MergeWarning::MissingGroupTimestamp { group, .. } => {
+            groups_equivalent_for_timestamp_warning(local, remote, &group.to_string())
+        }
         _ => false,
     }
 }
@@ -2310,17 +2309,32 @@ mod tests {
 
     #[test]
     fn policy_resolved_merge_warnings_are_not_fatal() {
-        // Exact strings the pinned fork emits for outcomes it already
-        // resolved without loss - and the one that genuinely drops data.
+        let mut db = Database::new();
+        let entry = add(&mut db, "Any", "pw");
+        let group = db.root().id();
+
+        // Outcomes the fork already resolved without losing anything.
         for benign in [
-            "History entries for 1234 have the same modification timestamp 2026-01-01 but have diverged.",
-            "Cannot move root group 1234",
-            "Destination history entry 1234 did not have a last modification timestamp",
-            "Source history entry 1234 did not have a last modification timestamp",
-            "Source entry 1234 had no history.",
+            MergeWarning::DivergedHistory {
+                entry,
+                at: Times::epoch(),
+            },
+            MergeWarning::CannotMoveRootGroup { group },
+            MergeWarning::MissingHistoryTimestamp {
+                side: keepass::db::MergeSide::Destination,
+                entry,
+            },
+            MergeWarning::MissingHistoryTimestamp {
+                side: keepass::db::MergeSide::Source,
+                entry,
+            },
+            MergeWarning::NoHistory {
+                side: keepass::db::MergeSide::Source,
+                entry,
+            },
         ] {
             assert!(
-                warning_is_policy_resolved(benign),
+                warning_is_policy_resolved(&benign),
                 "misclassified: {benign}"
             );
         }
@@ -2330,16 +2344,62 @@ mod tests {
         // missing timestamps on *current* entries/groups (a remote rename
         // would lose against the epoch substitute).
         for lossy in [
-            "Cannot add entry 1234 because its parent group 5678 does not exist in the destination database.",
-            "Cannot move entry 1234 to group 5678 because the group does not exist in the destination database.",
-            "Cannot move group 1234 to group 5678 because the group does not exist in the destination database.",
-            "Cannot determine which entry 1234 move is more recent because one of the entries does not have a location changed timestamp.",
-            "Cannot determine which group 1234 move is more recent because one of the groups does not have a location changed timestamp.",
-            "Source entry 1234 did not have a last modification timestamp",
-            "Destination group 1234 did not have a last modification timestamp",
+            MergeWarning::CannotAddEntry {
+                entry,
+                parent: group,
+            },
+            MergeWarning::CannotMoveEntry { entry, into: group },
+            MergeWarning::CannotMoveGroup { group, into: group },
+            MergeWarning::AmbiguousEntryMove { entry },
+            MergeWarning::AmbiguousGroupMove { group },
+            MergeWarning::MissingEntryTimestamp {
+                side: keepass::db::MergeSide::Source,
+                entry,
+            },
+            MergeWarning::MissingGroupTimestamp {
+                side: keepass::db::MergeSide::Destination,
+                group,
+            },
         ] {
-            assert!(!warning_is_policy_resolved(lossy), "misclassified: {lossy}");
+            assert!(
+                !warning_is_policy_resolved(&lossy),
+                "misclassified: {lossy}"
+            );
         }
+    }
+
+    /// The fork's `Display` text is what the user sees in "Merge blocked",
+    /// and what earlier versions of this module classified by. Pinning it
+    /// keeps a reworded message a visible change rather than a silent one.
+    #[test]
+    fn fork_warning_wording_is_pinned() {
+        let mut db = Database::new();
+        let entry = add(&mut db, "Any", "pw");
+        let group = db.root().id();
+
+        assert_eq!(
+            MergeWarning::CannotAddEntry {
+                entry,
+                parent: group
+            }
+            .to_string(),
+            format!(
+                "Cannot add entry {entry} because its parent group {group} does not exist in the \
+                 destination database."
+            )
+        );
+        assert_eq!(
+            MergeWarning::MissingEntryTimestamp {
+                side: keepass::db::MergeSide::Source,
+                entry
+            }
+            .to_string(),
+            format!("Source entry {entry} did not have a last modification timestamp")
+        );
+        assert_eq!(
+            MergeWarning::CannotMoveRootGroup { group }.to_string(),
+            format!("Cannot move root group {group}")
+        );
     }
 
     #[test]
@@ -2392,8 +2452,10 @@ mod tests {
         // while location and history are independently and safely merged.
         let mut raw_merged = local.clone();
         let log = raw_merged.merge(&remote).expect("fork merge precondition");
-        let warning = format!("Source entry {entry_id} did not have a last modification timestamp");
-        assert!(log.warnings.contains(&warning));
+        assert!(log.warnings.contains(&MergeWarning::MissingEntryTimestamp {
+            side: keepass::db::MergeSide::Source,
+            entry: entry_id,
+        }));
 
         let report = diff(&local, &remote);
         let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
@@ -2436,14 +2498,17 @@ mod tests {
         // location warning, but they also do not identify which move won.
         let mut raw_merged = local.clone();
         let log = raw_merged.merge(&remote).expect("fork merge precondition");
-        let warning = format!("Source entry {entry_id} did not have a last modification timestamp");
-        assert!(log.warnings.contains(&warning));
+        assert!(log.warnings.contains(&MergeWarning::MissingEntryTimestamp {
+            side: keepass::db::MergeSide::Source,
+            entry: entry_id,
+        }));
 
         let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
             .expect_err("an unorderable move must remain fail-closed");
         assert!(matches!(
             error,
-            ApplyError::DatabaseMergeWarnings(message) if message.contains(&warning)
+            ApplyError::DatabaseMergeWarnings(message)
+                if message.contains(&entry_id.to_string())
         ));
     }
 
@@ -2467,8 +2532,10 @@ mod tests {
 
         let mut raw_merged = local.clone();
         let log = raw_merged.merge(&remote).expect("fork merge precondition");
-        let warning = format!("Source group {group_id} did not have a last modification timestamp");
-        assert!(log.warnings.contains(&warning));
+        assert!(log.warnings.contains(&MergeWarning::MissingGroupTimestamp {
+            side: keepass::db::MergeSide::Source,
+            group: group_id,
+        }));
 
         let report = diff(&local, &remote);
         let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
@@ -2491,20 +2558,27 @@ mod tests {
 
         let mut raw_merged = local.clone();
         let log = raw_merged.merge(&remote).expect("fork merge precondition");
-        let warning = format!("Source group {group_id} did not have a last modification timestamp");
-        assert!(log.warnings.contains(&warning));
+        assert!(log.warnings.contains(&MergeWarning::MissingGroupTimestamp {
+            side: keepass::db::MergeSide::Source,
+            group: group_id,
+        }));
 
         let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
             .expect_err("divergent current group content must stay fatal");
         assert!(matches!(
             error,
-            ApplyError::DatabaseMergeWarnings(message) if message.contains(&warning)
+            ApplyError::DatabaseMergeWarnings(message)
+                if message.contains(&group_id.to_string())
         ));
 
-        // Unknown object IDs remain fail-closed as well.
-        let unknown = "Source entry 00000000-0000-0000-0000-000000000000 \
-                       did not have a last modification timestamp";
-        assert!(!warning_is_harmless(unknown, &local, &remote));
+        // An id neither side carries remains fail-closed as well: the
+        // equivalence check cannot confirm anything about an object it
+        // cannot find.
+        let unknown = MergeWarning::MissingEntryTimestamp {
+            side: keepass::db::MergeSide::Source,
+            entry: add(&mut Database::new(), "Elsewhere", "pw"),
+        };
+        assert!(!warning_is_harmless(&unknown, &local, &remote));
     }
 
     /// A remote-only custom icon used to be fatal: the fork copied the icon
@@ -2862,15 +2936,16 @@ mod tests {
         assert!(settings.remote.contains('9'), "{}", settings.remote);
     }
 
-    /// `warning_is_harmless` reads the fork's warning strings positionally:
-    /// the second word tells it whether an entry or a group is meant. Nothing
-    /// makes the fork keep that shape, and a reworded warning would flip a
-    /// harmless outcome to fatal (sync wedges) or, worse, a lossy one to
-    /// harmless (silent loss). This provokes a real warning and requires the
-    /// classifier to still recognise it, so a fork bump that rewords fails
-    /// here instead of in production.
+    /// A missing modification timestamp on an object that is byte-identical
+    /// on both sides is harmless, and blocking on it would wedge sync forever
+    /// against a vault some other client wrote. A missing timestamp on an
+    /// object that diverged is not, because the substitute decides a
+    /// comparison the file did not.
+    ///
+    /// The classifier used to read the fork's sentences positionally, so a
+    /// reworded warning would have flipped one of those verdicts silently.
     #[test]
-    fn the_forks_timestamp_warning_still_parses() {
+    fn a_missing_timestamp_is_judged_by_the_object_not_the_wording() {
         let mut local = Database::new();
         let id = add(&mut local, "Shared", "secret");
         let mut remote = fork(&local);
@@ -2883,19 +2958,20 @@ mod tests {
         apply_picks(&local, &remote, &HashMap::new(), &report)
             .expect("a missing timestamp on an otherwise identical entry is harmless");
 
-        // And the classifier really is looking at that wording.
-        let warning = format!("Source entry {id} did not have a last modification timestamp");
+        let warning = MergeWarning::MissingEntryTimestamp {
+            side: keepass::db::MergeSide::Source,
+            entry: id,
+        };
+        assert!(warning_is_harmless(&warning, &local, &remote));
+
+        // The same warning about an entry that actually diverged stays fatal.
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "changed remotely");
         assert!(
-            warning_is_harmless(&warning, &local, &remote),
-            "the wording `{warning}` is what the parser expects"
-        );
-        assert!(
-            !warning_is_harmless(
-                &warning.replace("Source entry", "Source thing"),
-                &local,
-                &remote
-            ),
-            "an unrecognised shape must stay fatal, not be waved through"
+            !warning_is_harmless(&warning, &local, &remote),
+            "a substitute timestamp must not decide a real divergence"
         );
     }
 
