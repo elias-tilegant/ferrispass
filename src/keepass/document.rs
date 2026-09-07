@@ -431,8 +431,14 @@ impl VaultDocument {
             return Ok(());
         }
         let changed_at = next_change_time(entry.times.last_modification);
-        entry.tags = tags;
+        // Through `track_changes` like every other mutator: without it the
+        // previous tag set was unrecoverable and the merge's history union
+        // had nothing to work with. `toggle_starred` writes the same field
+        // and always recorded a version.
+        let mut entry = entry.track_changes();
+        entry.as_mut().tags = tags;
         entry.times.last_modification = Some(changed_at);
+        drop(entry);
         self.refresh_snapshot();
         Ok(())
     }
@@ -765,6 +771,10 @@ impl VaultDocument {
             .move_to(target_id)
             .map_err(|_| MutationError::WouldCreateCycle)?;
         group.times.location_changed = Some(changed_at);
+        // Both clocks, like `move_entry` and `delete_group`: the native merge
+        // only applies a relocation when the moving side is newer, and a tied
+        // `last_modification` leaves a pure move to the group tie-break.
+        group.times.last_modification = Some(changed_at);
         self.refresh_snapshot();
         Ok(())
     }
@@ -858,6 +868,8 @@ impl VaultDocument {
             .move_to(target_id)
             .map_err(|_| MutationError::RecycleBinUnavailable)?;
         group.times.location_changed = Some(changed_at);
+        // See `move_group`: a restore is a relocation and needs both clocks.
+        group.times.last_modification = Some(changed_at);
         self.refresh_snapshot();
         Ok(())
     }
@@ -1078,12 +1090,20 @@ pub(crate) fn group_is_within(
 /// KDBX timestamps have one-second precision. Advancing past an existing
 /// timestamp avoids creating two divergent revisions that native merge cannot
 /// order when a user performs multiple mutations during the same second.
+/// How far past the wall clock a synthetic timestamp may be pushed. KDBX
+/// stores second precision, so back-to-back mutations need a nudge to stay
+/// ordered, but an unbounded nudge would stamp an entry minutes ahead and let
+/// it beat real concurrent edits on last-write-wins for that long. Well
+/// inside `merge::MAX_CLOCK_SKEW`, so our own writes never look implausible.
+const MAX_TIMESTAMP_LEAD: chrono::TimeDelta = chrono::TimeDelta::seconds(5);
+
 fn next_change_time(previous: Option<chrono::NaiveDateTime>) -> chrono::NaiveDateTime {
     let now = keepass::db::Times::now();
     match previous {
         Some(previous) if now <= previous => previous
             .checked_add_signed(chrono::Duration::seconds(1))
-            .unwrap_or(previous),
+            .filter(|next| *next <= now + MAX_TIMESTAMP_LEAD)
+            .unwrap_or(now),
         _ => now,
     }
 }

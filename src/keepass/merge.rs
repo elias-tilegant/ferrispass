@@ -178,6 +178,12 @@ pub struct ConflictReport {
     /// writing the merged result back may create a redundant remote version,
     /// but skipping it could strand a local deletion or empty-group change.
     pub structural_writeback_required: bool,
+    /// Names of groups that differ in user-authored content on both sides
+    /// with the same modification timestamp. Groups have no conflict overlay,
+    /// so the merge resolves these in local's favour; naming them lets the
+    /// caller tell the user which remote change was set aside instead of
+    /// dropping it without a trace.
+    pub groups_kept_local: Vec<String>,
 }
 
 impl ConflictReport {
@@ -277,6 +283,8 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         }
     }
 
+    let groups_kept_local = tied_group_content_divergences(local, remote);
+
     let mut local_only: Vec<EntryView> = local_ids
         .difference(&remote_ids)
         .map(|id| local_map[*id].view.clone())
@@ -301,6 +309,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         remote_only,
         auto_resolved,
         structural_writeback_required: structural_state_differs(local, remote),
+        groups_kept_local,
     }
 }
 
@@ -347,9 +356,13 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
         let Some(remote_entry) = remote.entry(local_entry.id()) else {
             continue;
         };
-        if local_entry.parent().id() != remote_entry.parent().id()
-            || local_entry.history.as_ref() != remote_entry.history.as_ref()
-        {
+        // Only relocation counts. Histories are *unioned* by `Database::merge`,
+        // and they diverge routinely: `enforce_history_limits` trims to this
+        // vault's `HistoryMaxItems` while another client keeps a different
+        // set. Treating that as a structural change made
+        // `has_local_contribution` unconditionally true, so the fast-forward
+        // path never fired and every pull minted a new remote version.
+        if local_entry.parent().id() != remote_entry.parent().id() {
             return true;
         }
     }
@@ -357,13 +370,26 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
     false
 }
 
-/// Returns the strictly-newer side, or `None` when timestamps are tied
-/// or either side is missing a `last_modification` (treat as ambiguous -
-/// surface to the user). Equal-second timestamps are ambiguous because
-/// KeePass file format is second-precision and a true race on the same
-/// second is the case where we *want* to prompt.
+/// How far ahead of our clock a `last_modification` may sit and still count
+/// as evidence. Covers ordinary drift between two machines; past it the
+/// timestamp is a claim about the future, not a record of the past.
+const MAX_CLOCK_SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
+
+/// Returns the strictly-newer side, or `None` when the timestamps are tied,
+/// one is missing, or one sits implausibly far in the future (all ambiguous -
+/// surface to the user). Equal-second timestamps are ambiguous because the
+/// KeePass file format is second-precision and a true race on the same second
+/// is the case where we *want* to prompt.
+///
+/// The future check matters because last-write-wins is decided entirely by a
+/// number inside the shared file. Anyone who can write that file could set a
+/// `LastModificationTime` of 2099 and have their version silently replace
+/// everyone else's on the next sync, with nothing shown to the user. A
+/// timestamp we cannot believe buys a prompt, not a win.
 fn timestamp_winner(local: Option<NaiveDateTime>, remote: Option<NaiveDateTime>) -> Option<Side> {
+    let horizon = keepass::db::Times::now() + MAX_CLOCK_SKEW;
     match (local, remote) {
+        (Some(l), Some(r)) if l > horizon || r > horizon => None,
         (Some(l), Some(r)) if l > r => Some(Side::Local),
         (Some(l), Some(r)) if r > l => Some(Side::Remote),
         _ => None,
@@ -638,6 +664,37 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
 /// whose pre-0.7 saves stripped the field), otherwise the local (merged)
 /// representation wins. Pairs whose timestamps differ are left alone -
 /// the fork resolves those wholesale by the newer side.
+/// Groups whose user-authored content differs on both sides with the same
+/// modification timestamp, so the merge will resolve them in local's favour.
+fn tied_group_content_divergences(local: &Database, remote: &Database) -> Vec<String> {
+    let mut names: Vec<String> = local
+        .iter_all_groups()
+        .filter_map(|local_group| {
+            let remote_group = remote.group(local_group.id())?;
+            let tied = local_group.times.last_modification == remote_group.times.last_modification;
+            (tied && group_content_differs(&local_group, &remote_group))
+                .then(|| local_group.name.clone())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Content the user authored, as opposed to view state a client may rewrite
+/// without bumping the modification time (`IsExpanded`, icon spelling,
+/// previous-parent normalisation). The tie-break resolves both, but only a
+/// content tie means a real edit is being set aside, so `diff` reports those
+/// separately through the same predicate.
+fn group_content_differs(a: &GroupRef<'_>, b: &GroupRef<'_>) -> bool {
+    a.name != b.name
+        || a.notes != b.notes
+        || a.custom_data != b.custom_data
+        || a.tags != b.tags
+        || a.default_autotype_sequence != b.default_autotype_sequence
+        || a.enable_autotype != b.enable_autotype
+        || a.enable_searching != b.enable_searching
+}
+
 fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
     fn canonical_previous_parent(
         merged_value: Option<GroupId>,
@@ -737,26 +794,24 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
         }
 
         // Groups never reach the conflict overlay, so a tied-timestamp
-        // divergence on any remaining field (a KeePassXC IsExpanded toggle
-        // is written without bumping the modification time; pre-0.7 saves
-        // stripped optional fields) has no user-facing resolution path and
-        // would trip the fork's fail-closed check. Break the tie in local's
-        // favor - mirroring force_manual_winner and KeePass2's keep-target
-        // tie policy. The bumped timestamp also carries fork-private view
-        // state (LastTopVisibleEntry) past the divergence check.
+        // divergence has no user-facing resolution path and would trip the
+        // fork's fail-closed check. Break the tie in local's favor, mirroring
+        // force_manual_winner and KeePass2's keep-target tie policy. The
+        // bumped timestamp also carries fork-private view state
+        // (LastTopVisibleEntry) past the divergence check.
+        //
+        // Content and view state are recorded separately. A KeePassXC
+        // IsExpanded toggle is written without bumping the modification time,
+        // so ties on it are routine and silent. A tie on the name, notes,
+        // tags or settings means someone's real edit is being set aside, and
+        // the caller surfaces that in the sync log rather than dropping it
+        // without a trace.
         let still_diverged = match (merged.group(id), source.group(id)) {
             (Some(merged_group), Some(source_group)) => {
-                merged_group.name != source_group.name
-                    || merged_group.notes != source_group.notes
+                group_content_differs(&merged_group, &source_group)
                     || merged_group.icon() != source_group.icon()
-                    || merged_group.custom_data != source_group.custom_data
                     || merged_group.is_expanded != source_group.is_expanded
-                    || merged_group.default_autotype_sequence
-                        != source_group.default_autotype_sequence
-                    || merged_group.enable_autotype != source_group.enable_autotype
-                    || merged_group.enable_searching != source_group.enable_searching
                     || merged_group.previous_parent_group != source_group.previous_parent_group
-                    || merged_group.tags != source_group.tags
             }
             _ => false,
         };
@@ -972,11 +1027,21 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
 
     let metadata = metadata_differences(local, remote);
     if !metadata.is_empty() {
-        let summary = metadata.join(", ");
+        // Per-side values, not a shared change list. The row is flagged as
+        // differing, so rendering the same string in both columns asked the
+        // user to choose between two identical cells.
         diffs.push(FieldDiff {
             label: "Entry settings",
-            local: summary.clone(),
-            remote: summary,
+            local: metadata
+                .iter()
+                .map(|difference| difference.local.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            remote: metadata
+                .iter()
+                .map(|difference| difference.remote.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             differs: true,
         });
     }
@@ -1051,34 +1116,83 @@ fn protected_field_names(fields_map: &HashMap<String, Value<String>>) -> Vec<&st
     names
 }
 
-fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<&'static str> {
+/// One entry-setting difference, with what each side actually holds.
+struct MetadataDifference {
+    local: String,
+    remote: String,
+}
+
+fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<MetadataDifference> {
+    fn describe<T: std::fmt::Debug>(label: &str, value: &Option<T>) -> String {
+        match value {
+            Some(value) => format!("{label} {value:?}"),
+            None => format!("no {label}"),
+        }
+    }
+
     let mut changed = Vec::new();
+    let mut note = |local_side: String, remote_side: String| {
+        changed.push(MetadataDifference {
+            local: local_side,
+            remote: remote_side,
+        });
+    };
+
     if local.view.autotype != remote.view.autotype {
-        changed.push("Auto-Type");
+        note(
+            describe("Auto-Type", &local.view.autotype),
+            describe("Auto-Type", &remote.view.autotype),
+        );
     }
     if local.view.custom_data != remote.view.custom_data {
-        changed.push("custom data");
+        note(
+            format!("{} custom values", local.view.custom_data.len()),
+            format!("{} custom values", remote.view.custom_data.len()),
+        );
     }
     if !icons_equivalent(
         local.icon.as_ref(),
         remote.icon.as_ref(),
         DEFAULT_ENTRY_ICON,
     ) {
-        changed.push("icon");
+        note(
+            icon_label(local.icon.as_ref()),
+            icon_label(remote.icon.as_ref()),
+        );
     }
     if local.view.foreground_color != remote.view.foreground_color {
-        changed.push("foreground color");
+        note(
+            describe("text colour", &local.view.foreground_color),
+            describe("text colour", &remote.view.foreground_color),
+        );
     }
     if local.view.background_color != remote.view.background_color {
-        changed.push("background color");
+        note(
+            describe("background", &local.view.background_color),
+            describe("background", &remote.view.background_color),
+        );
     }
     if local.view.override_url != remote.view.override_url {
-        changed.push("URL override");
+        note(
+            describe("URL override", &local.view.override_url),
+            describe("URL override", &remote.view.override_url),
+        );
     }
     if local.quality_check != remote.quality_check {
-        changed.push("quality check");
+        note(
+            describe("quality check", &local.quality_check),
+            describe("quality check", &remote.quality_check),
+        );
     }
     changed
+}
+
+fn icon_label(icon: Option<&Icon>) -> String {
+    match icon {
+        Some(Icon::BuiltIn(index)) => format!("built-in icon {index}"),
+        Some(Icon::Custom(_)) => "custom icon".to_string(),
+        None => "default icon".to_string(),
+    }
 }
 
 fn tags_diff(local: &[String], remote: &[String]) -> FieldDiff {
@@ -2273,6 +2387,213 @@ mod tests {
             entry.custom_icon().expect("icon resolves").data,
             image,
             "the image travelled with the reference"
+        );
+    }
+
+    /// Last-write-wins is decided by a number inside the shared file. Anyone
+    /// who can write that file could stamp a far-future
+    /// `LastModificationTime` and have their version silently replace
+    /// everyone else's on the next sync, with nothing shown to the user.
+    #[test]
+    fn a_remote_timestamp_from_the_future_asks_instead_of_winning() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "local-password");
+        local.entry_mut(id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() - chrono::TimeDelta::hours(1));
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "attacker-password");
+        remote.entry_mut(id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::days(365));
+
+        let report = diff(&local, &remote);
+
+        assert!(
+            report.auto_resolved.is_empty(),
+            "an unbelievable timestamp must not win silently"
+        );
+        assert_eq!(
+            report.conflicts.len(),
+            1,
+            "it becomes a decision the user gets to see"
+        );
+    }
+
+    /// Ordinary clock drift between two machines still resolves on its own.
+    /// A prompt on every sync would be worse than the problem.
+    #[test]
+    fn a_remote_timestamp_within_clock_skew_still_wins() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "local-password");
+        local.entry_mut(id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() - chrono::TimeDelta::hours(1));
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "colleague-password");
+        remote.entry_mut(id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::minutes(2));
+
+        let report = diff(&local, &remote);
+
+        assert!(report.conflicts.is_empty(), "no prompt for ordinary drift");
+        assert_eq!(report.auto_resolved.len(), 1);
+        assert!(matches!(report.auto_resolved[0].winner, Side::Remote));
+    }
+
+    /// Histories diverge routinely: this vault trims to its own
+    /// `HistoryMaxItems` while another client keeps a different set. Treating
+    /// that as a structural change made `has_local_contribution` always true,
+    /// so a pure pull still uploaded and minted a redundant remote version.
+    #[test]
+    fn a_history_difference_alone_does_not_force_an_upload() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let mut remote = fork(&local);
+
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .track_changes()
+            .as_mut()
+            .set_unprotected(fields::NOTES, "edited remotely");
+        remote.entry_mut(id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::minutes(1));
+
+        let report = diff(&local, &remote);
+
+        assert!(
+            !report.structural_writeback_required,
+            "only a relocation is structural"
+        );
+        assert!(
+            !report.has_local_contribution(),
+            "a pure pull is a fast-forward and needs no upload"
+        );
+    }
+
+    /// A group rename on both sides in the same second has no overlay to
+    /// resolve it, so the merge keeps the local name. Silently is the
+    /// problem: the sync log has to name what was set aside.
+    #[test]
+    fn a_tied_group_content_divergence_is_reported_not_swallowed() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        let tied = keepass::db::Times::now();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().name = "Finance".to_string();
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let report = diff(&local, &remote);
+        assert_eq!(report.groups_kept_local, vec!["Banking".to_string()]);
+
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("a tied group divergence must not block the merge");
+        assert_eq!(
+            merged.group(group_id).expect("group").name,
+            "Banking",
+            "the tie resolves in local's favour, as before"
+        );
+    }
+
+    /// A collapse toggle is written without bumping the modification time, so
+    /// ties on it are routine. Those must stay silent or the sync log fills
+    /// with noise nobody can act on.
+    #[test]
+    fn a_tied_group_view_state_divergence_is_not_reported() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.is_expanded = true;
+            group.id()
+        };
+        let tied = keepass::db::Times::now();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().is_expanded = false;
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.groups_kept_local.is_empty(),
+            "a collapse toggle is not a change worth telling the user about"
+        );
+    }
+
+    /// The conflict overlay asks the user to pick a side. Rendering the same
+    /// change list in both columns asked them to choose between two identical
+    /// cells.
+    #[test]
+    fn the_entry_settings_row_shows_what_each_side_holds() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Site", "pw");
+        local.entry_mut(id).unwrap().set_icon_builtin(3);
+        let mut remote = fork(&local);
+        remote.entry_mut(id).unwrap().set_icon_builtin(9);
+
+        let report = diff(&local, &remote);
+        let conflict = report.conflicts.first().expect("tied timestamps conflict");
+        let settings = conflict
+            .fields
+            .iter()
+            .find(|field| field.label == "Entry settings")
+            .expect("settings row");
+
+        assert_ne!(
+            settings.local, settings.remote,
+            "the two columns have to differ if the row says they do"
+        );
+        assert!(settings.local.contains('3'), "{}", settings.local);
+        assert!(settings.remote.contains('9'), "{}", settings.remote);
+    }
+
+    /// `warning_is_harmless` reads the fork's warning strings positionally:
+    /// the second word tells it whether an entry or a group is meant. Nothing
+    /// makes the fork keep that shape, and a reworded warning would flip a
+    /// harmless outcome to fatal (sync wedges) or, worse, a lossy one to
+    /// harmless (silent loss). This provokes a real warning and requires the
+    /// classifier to still recognise it, so a fork bump that rewords fails
+    /// here instead of in production.
+    #[test]
+    fn the_forks_timestamp_warning_still_parses() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Shared", "secret");
+        let mut remote = fork(&local);
+        // A client that wrote the entry without a modification time. The
+        // content is identical, so the fork's warning is harmless and the
+        // merge has to go through.
+        remote.entry_mut(id).unwrap().times.last_modification = None;
+
+        let report = diff(&local, &remote);
+        apply_picks(&local, &remote, &HashMap::new(), &report)
+            .expect("a missing timestamp on an otherwise identical entry is harmless");
+
+        // And the classifier really is looking at that wording.
+        let warning = format!("Source entry {id} did not have a last modification timestamp");
+        assert!(
+            warning_is_harmless(&warning, &local, &remote),
+            "the wording `{warning}` is what the parser expects"
+        );
+        assert!(
+            !warning_is_harmless(
+                &warning.replace("Source entry", "Source thing"),
+                &local,
+                &remote
+            ),
+            "an unrecognised shape must stay fatal, not be waved through"
         );
     }
 
