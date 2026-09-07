@@ -1345,10 +1345,17 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A validation message is about what was in the field a moment ago.
-        if matches!(event, InputEvent::Change) && self.entry_form_error.is_some() {
-            self.entry_form_error = None;
-            cx.notify();
+        if matches!(event, InputEvent::Change) {
+            // A validation message is about what was in the field a moment
+            // ago, and so is an armed discard: the user was warned about the
+            // draft as it stood, kept typing, and the next closing action
+            // would otherwise have thrown away edits nobody warned them
+            // about. Typing re-arms the question.
+            let stale = self.entry_form_error.take().is_some() || self.entry_discard_armed;
+            self.entry_discard_armed = false;
+            if stale {
+                cx.notify();
+            }
         }
         if matches!(event, InputEvent::PressEnter { .. }) {
             self.submit_entry_form(window, cx);
@@ -1692,6 +1699,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.state
             .update(cx, |state, cx| state.open_overlay(Overlay::AddVault, cx));
     }
@@ -2092,6 +2104,11 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         // The input entity outlives an individual Connect overlay. Clear its
         // displayed value as well as resetting ConnectFlow::Picking::query,
         // otherwise reopening the flow shows the previous session's filter.
@@ -2109,6 +2126,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         // Token-only re-auth of the active synced vault - NOT the full
         // picker-driven connect flow (which would download a duplicate
         // local copy). `start_sharepoint_reconnect` reuses the existing
@@ -2123,6 +2145,11 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.picker_query_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.state.update(cx, |state, cx| {
@@ -2192,6 +2219,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.state.update(cx, |state, cx| state.open_whats_new(cx));
     }
 
@@ -2201,6 +2233,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.state.update(cx, |state, cx| state.open_about(cx));
     }
 
@@ -2311,6 +2348,11 @@ impl AppShell {
     }
 
     fn on_action_new_group(&mut self, _: &NewGroup, window: &mut Window, cx: &mut Context<Self>) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         let root_id = self
             .state
             .read(cx)
@@ -2328,6 +2370,11 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.begin_add_group(action.parent_group_id.clone(), window, cx);
     }
 
@@ -2337,6 +2384,11 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every overlay replaces the entry editor, so a draft in it has to
+        // be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         let current_name = self
             .state
             .read(cx)
