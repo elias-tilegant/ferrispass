@@ -916,10 +916,12 @@ fn live_entries(db: &Database) -> HashMap<String, EntrySnapshot> {
     let recycle_bin_id: Option<GroupId> = db.recycle_bin().map(|g| g.id());
     db.iter_all_entries()
         .filter(|e| {
-            // "Live" = not directly inside the recycle bin. We don't recurse
-            // into recycle-bin subgroups because (a) they're rare and (b)
-            // surfacing those as conflicts is more annoying than helpful.
-            recycle_bin_id.is_none_or(|bin| e.parent().id() != bin)
+            // "Live" = nowhere below the recycle bin. Testing the direct
+            // parent only was not enough: deleting a group moves its entries
+            // one level deeper, and those raised conflicts the user could not
+            // find anywhere in the UI.
+            recycle_bin_id
+                .is_none_or(|bin| !super::document::group_is_within(db, e.parent().id(), bin))
         })
         .map(|e| {
             let snapshot = entry_to_snapshot(&e);

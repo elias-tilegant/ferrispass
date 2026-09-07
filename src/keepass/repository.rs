@@ -137,20 +137,41 @@ fn read_database_bytes(path: &Path) -> Result<Vec<u8>, DatabaseOpenError> {
 }
 
 pub(crate) fn snapshot_from_database(database: &Database) -> VaultSnapshot {
-    let now = Utc::now().naive_utc();
     let root = database.root();
     let recycle_bin_id = database.recycle_bin().map(|g| g.id().to_string());
-    let recycle_bin_id_for_traversal = recycle_bin_id.clone();
+    let context = SnapshotContext {
+        now: Utc::now().naive_utc(),
+        recycle_bin_id: recycle_bin_id.as_deref(),
+    };
     let mut snap = VaultSnapshot::new(group_from_ref(
         &root,
         &mut Vec::new(),
-        now,
-        recycle_bin_id_for_traversal.as_deref(),
-        // KeePass semantics: the root inherits "enabled" unless set.
-        true,
+        &context,
+        Inherited {
+            // KeePass semantics: the root inherits "enabled" unless set.
+            auto_type: true,
+            in_recycle_bin: false,
+        },
     ));
     snap.recycle_bin_id = recycle_bin_id;
     snap
+}
+
+/// The two values that stay fixed for one snapshot traversal. Passing them as
+/// a pair keeps `group_from_ref` at four arguments while the inherited state
+/// grows.
+struct SnapshotContext<'a> {
+    now: NaiveDateTime,
+    recycle_bin_id: Option<&'a str>,
+}
+
+/// State a group hands down to its children. Both fields are inherited, and
+/// both have bitten us when they were not: auto-type is KeePass tri-state, and
+/// deleting a group moves an entire subtree into the bin.
+#[derive(Clone, Copy)]
+struct Inherited {
+    auto_type: bool,
+    in_recycle_bin: bool,
 }
 
 /// Walk every group in `database` and return the one whose stringified id
@@ -175,31 +196,40 @@ pub(crate) fn find_entry_id(database: &Database, id_string: &str) -> Option<Entr
 fn group_from_ref(
     group: &GroupRef<'_>,
     parent_path: &mut Vec<String>,
-    now: NaiveDateTime,
-    recycle_bin_id: Option<&str>,
-    inherited_auto_type: bool,
+    context: &SnapshotContext<'_>,
+    inherited: Inherited,
 ) -> VaultGroup {
     let name = non_empty(&group.name, "Root");
     parent_path.push(name.clone());
 
     let group_id_str = group.id().to_string();
-    let in_bin = recycle_bin_id.is_some_and(|bin| bin == group_id_str);
+    // Inherited, not recomputed per group: KeePass deletes a group by moving
+    // the subtree under the bin, so only the moved group's id matches the bin's
+    // child. Everything below it is deleted too.
+    let in_bin = inherited.in_recycle_bin
+        || context
+            .recycle_bin_id
+            .is_some_and(|bin| bin == group_id_str);
 
     // KeePass group `EnableAutoType` is tri-state: unset inherits the
-    // parent's effective value, an explicit value overrides it - so a
+    // parent's effective value, an explicit value overrides it, so a
     // child group's explicit `true` re-enables auto-type under a parent
     // that disabled it, exactly like KeePass 2.x.
-    let auto_type = group.enable_autotype.unwrap_or(inherited_auto_type);
+    let auto_type = group.enable_autotype.unwrap_or(inherited.auto_type);
+    let child_state = Inherited {
+        auto_type,
+        in_recycle_bin: in_bin,
+    };
 
     let mut groups = group
         .groups()
-        .map(|child| group_from_ref(&child, parent_path, now, recycle_bin_id, auto_type))
+        .map(|child| group_from_ref(&child, parent_path, context, child_state))
         .collect::<Vec<_>>();
     groups.sort_by_key(|child| child.name.to_lowercase());
 
     let mut entries = group
         .entries()
-        .map(|entry| entry_from_ref(&entry, parent_path, now, in_bin, auto_type))
+        .map(|entry| entry_from_ref(&entry, parent_path, context.now, in_bin, auto_type))
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.title.to_lowercase());
 
@@ -220,6 +250,7 @@ fn group_from_ref(
         entries,
         is_expanded,
         icon,
+        in_recycle_bin: in_bin,
     }
 }
 

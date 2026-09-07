@@ -110,7 +110,10 @@ pub(crate) fn ranked_entries<'a>(snapshot: &'a VaultSnapshot, query: &str) -> Ve
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let entries = snapshot.entries_recursive();
+    // Deleted entries never surface here. Finding one, copying its password
+    // and never learning it was deleted months ago is the failure this
+    // prevents; the Trash view is the one place that shows them.
+    let entries = snapshot.live_entries();
     let mut scored: Vec<(u32, &VaultEntry)> = Vec::new();
     for entry in &entries {
         let haystacks = build_haystacks(entry);

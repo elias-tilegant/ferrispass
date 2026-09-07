@@ -39,6 +39,11 @@ pub struct VaultGroup {
     /// regardless of whether the source is an entry or a group.
     /// `None` for groups using a built-in icon or no icon at all.
     pub icon: Option<FaviconImage>,
+    /// True for the Recycle Bin itself and for every group below it.
+    /// KeePass deletes a group by moving the whole subtree into the bin, so
+    /// this has to be inherited: without it a group two levels down reads as
+    /// live and its entries are offered for editing instead of restoring.
+    pub in_recycle_bin: bool,
 }
 
 impl std::fmt::Debug for VaultGroup {
@@ -51,6 +56,7 @@ impl std::fmt::Debug for VaultGroup {
             .field("entry_count", &self.entries.len())
             .field("is_expanded", &self.is_expanded)
             .field("has_icon", &self.icon.is_some())
+            .field("in_recycle_bin", &self.in_recycle_bin)
             .finish()
     }
 }
@@ -64,6 +70,7 @@ impl Default for VaultGroup {
             entries: Vec::new(),
             is_expanded: true,
             icon: None,
+            in_recycle_bin: false,
         }
     }
 }
@@ -238,19 +245,41 @@ impl VaultSnapshot {
         self.root.find_entry(id)
     }
 
+    /// Every entry in the vault, deleted ones included. Only the CLI's
+    /// `--include-trash` and the merge diff want this; user-facing lists use
+    /// [`Self::live_entries`].
     pub fn entries_recursive(&self) -> Vec<&VaultEntry> {
         self.root.entries_recursive()
     }
 
+    pub fn live_entries(&self) -> Vec<&VaultEntry> {
+        self.root.live_entries_recursive()
+    }
+
+    /// Everything the Recycle Bin holds, at any depth.
+    pub fn trashed_entries(&self) -> Vec<&VaultEntry> {
+        self.root.trashed_entries_recursive()
+    }
+
+    /// Groups sitting directly inside the Recycle Bin: the units a user
+    /// restores. Their subgroups travel with them, so they are not listed
+    /// separately.
+    pub fn trashed_groups(&self) -> &[VaultGroup] {
+        self.recycle_bin_id
+            .as_deref()
+            .and_then(|id| self.root.find_group(id))
+            .map_or(&[], |bin| bin.groups.as_slice())
+    }
+
     pub fn entries_starred(&self) -> Vec<&VaultEntry> {
-        self.entries_recursive()
+        self.live_entries()
             .into_iter()
             .filter(|entry| entry.starred)
             .collect()
     }
 
     pub fn entries_with_tag(&self, tag: &str) -> Vec<&VaultEntry> {
-        self.entries_recursive()
+        self.live_entries()
             .into_iter()
             .filter(|entry| entry.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
             .collect()
@@ -261,7 +290,7 @@ impl VaultSnapshot {
     /// from a tag, so it stays accurate regardless of how the user
     /// (or another KeePass client) labels their entries.
     pub fn entries_with_otp(&self) -> Vec<&VaultEntry> {
-        self.entries_recursive()
+        self.live_entries()
             .into_iter()
             .filter(|entry| entry.has_otp)
             .collect()
@@ -275,6 +304,9 @@ impl VaultSnapshot {
     pub fn library_counts(&self) -> LibraryCounts {
         fn walk(group: &VaultGroup, counts: &mut LibraryCounts) {
             for entry in &group.entries {
+                if entry.in_recycle_bin {
+                    continue;
+                }
                 if entry.starred {
                     counts.starred += 1;
                 }
@@ -283,7 +315,9 @@ impl VaultSnapshot {
                 }
             }
             for child in &group.groups {
-                walk(child, counts);
+                if !child.in_recycle_bin {
+                    walk(child, counts);
+                }
             }
         }
         let mut counts = LibraryCounts::default();
@@ -312,6 +346,7 @@ impl VaultGroup {
             entries,
             is_expanded: true,
             icon: None,
+            in_recycle_bin: false,
         }
     }
 
@@ -347,9 +382,29 @@ impl VaultGroup {
             .or_else(|| self.groups.iter().find_map(|group| group.find_entry(id)))
     }
 
+    /// Every entry below this group, deleted ones included. Callers that
+    /// render a user-facing list want [`Self::live_entries_recursive`] or
+    /// [`Self::trashed_entries_recursive`] instead.
     pub fn entries_recursive(&self) -> Vec<&VaultEntry> {
         let mut entries = Vec::new();
         self.collect_entries(&mut entries);
+        entries
+    }
+
+    /// Every entry below this group that is not in the Recycle Bin.
+    pub fn live_entries_recursive(&self) -> Vec<&VaultEntry> {
+        let mut entries = Vec::new();
+        self.collect_entries_in_bin(false, &mut entries);
+        entries
+    }
+
+    /// Every entry below this group that is in the Recycle Bin, however
+    /// deeply nested. The Trash view needs the whole subtree: deleting a
+    /// group moves its entries down one level, out of the bin's direct
+    /// children.
+    pub fn trashed_entries_recursive(&self) -> Vec<&VaultEntry> {
+        let mut entries = Vec::new();
+        self.collect_entries_in_bin(true, &mut entries);
         entries
     }
 
@@ -358,6 +413,22 @@ impl VaultGroup {
 
         for group in &self.groups {
             group.collect_entries(entries);
+        }
+    }
+
+    fn collect_entries_in_bin<'a>(&'a self, want_trashed: bool, out: &mut Vec<&'a VaultEntry>) {
+        out.extend(
+            self.entries
+                .iter()
+                .filter(|entry| entry.in_recycle_bin == want_trashed),
+        );
+        for group in &self.groups {
+            // Collecting live entries can prune the bin subtree outright.
+            // Collecting trashed ones cannot prune anything: the bin is
+            // reachable only through live ancestors.
+            if want_trashed || !group.in_recycle_bin {
+                group.collect_entries_in_bin(want_trashed, out);
+            }
         }
     }
 }

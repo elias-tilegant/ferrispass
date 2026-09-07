@@ -1052,7 +1052,7 @@ fn subtree_contains(root: &keepass::db::GroupRef<'_>, target: keepass::db::Group
     root.groups().any(|child| subtree_contains(&child, target))
 }
 
-fn group_is_within(
+pub(crate) fn group_is_within(
     database: &Database,
     candidate: keepass::db::GroupId,
     ancestor: keepass::db::GroupId,
@@ -2905,6 +2905,107 @@ mod tests {
             !doc.snapshot().root.groups.iter().any(|g| g.id == parent),
             "parent removed from root"
         );
+    }
+
+    /// Deleting a group moves the whole subtree into the bin, so every group
+    /// and entry below it is deleted too. Before the snapshot inherited that
+    /// flag, a nested entry read as live: the detail panel offered Edit and
+    /// Delete, and Delete then hit the "already in the bin" guard and did
+    /// nothing at all.
+    #[test]
+    fn deleting_a_group_marks_its_whole_subtree_as_trashed() {
+        let doc = doc_with_trashed_parent();
+        let (parent, child, entry_id) = trashed_ids(&doc);
+        let snapshot = doc.snapshot();
+
+        assert!(
+            snapshot
+                .find_group(&child)
+                .expect("child in tree")
+                .in_recycle_bin,
+            "a group nested inside a deleted group is trashed"
+        );
+        assert!(
+            snapshot
+                .find_entry(&entry_id)
+                .expect("entry in tree")
+                .in_recycle_bin,
+            "an entry nested inside a deleted group is trashed"
+        );
+        assert!(
+            snapshot.live_entries().is_empty(),
+            "nothing is live once the only group is deleted"
+        );
+        assert_eq!(
+            snapshot.trashed_entries().len(),
+            1,
+            "the Trash view reaches entries below the bin's direct children"
+        );
+        let deleted: Vec<&str> = snapshot
+            .trashed_groups()
+            .iter()
+            .map(|group| group.id.as_str())
+            .collect();
+        assert_eq!(
+            deleted,
+            vec![parent.as_str()],
+            "only the deleted group itself is offered for restore, not its children"
+        );
+    }
+
+    /// Restoring the deleted group brings the subtree back with it.
+    #[test]
+    fn restoring_a_group_clears_the_trashed_flag_on_its_subtree() {
+        let mut doc = doc_with_trashed_parent();
+        let (parent, child, entry_id) = trashed_ids(&doc);
+
+        doc.restore_group(&parent).expect("restore");
+
+        let snapshot = doc.snapshot();
+        assert!(!snapshot.find_group(&child).expect("child").in_recycle_bin);
+        assert!(
+            !snapshot
+                .find_entry(&entry_id)
+                .expect("entry")
+                .in_recycle_bin
+        );
+        assert_eq!(snapshot.live_entries().len(), 1);
+        assert!(snapshot.trashed_entries().is_empty());
+        assert!(snapshot.trashed_groups().is_empty());
+    }
+
+    /// root -> Parent -> Child -> one entry, with Parent deleted.
+    fn doc_with_trashed_parent() -> VaultDocument {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let parent = doc.create_group(&root_id, "Parent").expect("parent");
+        let child = doc.create_group(&parent, "Child").expect("child");
+        doc.create_entry(
+            &child,
+            &EntryDraft {
+                title: "Inside".into(),
+                ..Default::default()
+            },
+        )
+        .expect("entry");
+        doc.delete_group(&parent).expect("delete");
+        doc
+    }
+
+    /// The (parent, child, entry) ids of a `doc_with_trashed_parent` vault,
+    /// read back out of the snapshot by name.
+    fn trashed_ids(doc: &VaultDocument) -> (String, String, String) {
+        let snapshot = doc.snapshot();
+        let parent = snapshot
+            .trashed_groups()
+            .first()
+            .expect("one deleted group")
+            .clone();
+        let child = parent.groups.first().expect("child group").clone();
+        let entry = child.entries.first().expect("entry").id.clone();
+        (parent.id, child.id, entry)
     }
 
     #[test]
