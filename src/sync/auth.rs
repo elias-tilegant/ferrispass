@@ -14,7 +14,6 @@ use std::{
 
 use serde::Deserialize;
 use thiserror::Error;
-use ureq::Error as UreqError;
 
 /// Multi-tenant + personal MS accounts. Use `organizations` if you want to
 /// exclude personal MS accounts; `{tenant-guid}` to lock to one tenant.
@@ -241,23 +240,19 @@ fn parse_refresh_response(body: &str) -> Result<AccessToken, AuthError> {
 // --------------- internals ---------------
 
 fn post_form(url: &str, params: &[(&str, &str)]) -> Result<String, AuthError> {
-    match crate::sync::http::agent()
-        .post(url)
-        .set("Accept", "application/json")
-        .send_form(params)
-    {
-        Ok(resp) => resp
-            .into_string()
-            .map_err(|e| AuthError::Network(e.to_string())),
-        Err(UreqError::Status(_, resp)) => {
-            // Read body so callers can interpret the JSON error envelope.
-            // This is the path the device-code "authorization_pending" error
-            // takes (HTTP 400 with a JSON body).
-            resp.into_string()
-                .map_err(|e| AuthError::Network(e.to_string()))
-        }
-        Err(UreqError::Transport(t)) => Err(AuthError::Network(t.to_string())),
-    }
+    let client = crate::sync::http::metadata_client()
+        .map_err(|error| AuthError::Network(error.to_string()))?;
+    // The body is returned for every status. The device-code poll reads its
+    // "authorization_pending" signal out of the JSON envelope of an HTTP 400,
+    // so a non-2xx response here is data, not a failure.
+    let response = crate::sync::http::send_metadata(
+        client
+            .post(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .form(params),
+    )
+    .map_err(|error| AuthError::Network(error.to_string()))?;
+    Ok(response.body)
 }
 
 /// Map a token-endpoint response body to a `PollOutcome`. Public for tests.

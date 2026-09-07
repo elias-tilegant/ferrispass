@@ -8,11 +8,11 @@
 //! content endpoint supports vaults up to 250 MB.
 
 use serde::Deserialize;
+#[cfg(test)]
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use ureq::Error as UreqError;
 
 use crate::sync::auth::AccessToken;
 use crate::sync::http;
@@ -146,16 +146,15 @@ pub fn search_kdbx_files(token: &AccessToken) -> Result<Vec<DriveItemHit>, Graph
     });
 
     let body_str = body.to_string();
-    let resp = http::agent()
-        .post(&url)
-        .set("Authorization", &format!("Bearer {}", token.access_token))
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json")
-        .send_string(&body_str)
-        .map_err(map_ureq_error)?;
-    let text = resp
-        .into_string()
-        .map_err(|e| GraphError::Network(e.to_string()))?;
+    let text = send_metadata(
+        http::metadata_client()
+            .map_err(|error| GraphError::Network(error.to_string()))?
+            .post(&url)
+            .bearer_auth(&token.access_token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .body(body_str),
+    )?;
     let parsed: SearchQueryResponse = parse_json(&text)?;
     Ok(parsed.flatten_hits())
 }
@@ -480,14 +479,33 @@ async fn read_reqwest_text_truncated(
 }
 
 fn http_get(url: &str, token: &AccessToken) -> Result<String, GraphError> {
-    http::agent()
-        .get(url)
-        .set("Authorization", &format!("Bearer {}", token.access_token))
-        .set("Accept", "application/json")
-        .call()
-        .map_err(map_ureq_error)?
-        .into_string()
-        .map_err(|e| GraphError::Network(e.to_string()))
+    send_metadata(
+        http::metadata_client()
+            .map_err(|error| GraphError::Network(error.to_string()))?
+            .get(url)
+            .bearer_auth(&token.access_token)
+            .header(reqwest::header::ACCEPT, "application/json"),
+    )
+}
+
+/// Send a metadata request and return its body, turning a non-2xx status into
+/// the matching `GraphError`. Throttles are their own variant because the
+/// recovery is to wait, not to report.
+fn send_metadata(request: reqwest::RequestBuilder) -> Result<String, GraphError> {
+    let response =
+        http::send_metadata(request).map_err(|error| GraphError::Network(error.to_string()))?;
+    if (200..300).contains(&response.status) {
+        return Ok(response.body);
+    }
+    if is_throttle_status(response.status) {
+        return Err(GraphError::Throttled {
+            retry_after: response.retry_after,
+        });
+    }
+    Err(GraphError::Status {
+        status: response.status,
+        body: truncate_text(&response.body, MAX_ERROR_BODY_BYTES),
+    })
 }
 
 fn parse_json<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, GraphError> {
@@ -497,21 +515,6 @@ fn parse_json<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, GraphError>
             truncate_text(body, MAX_ERROR_BODY_BYTES)
         ))
     })
-}
-
-fn map_ureq_error(e: UreqError) -> GraphError {
-    match e {
-        UreqError::Status(status, resp) => {
-            let retry_after = retry_after_seconds(resp.header("Retry-After"));
-            if is_throttle_status(status) {
-                return GraphError::Throttled { retry_after };
-            }
-            let body = read_truncated_text(resp.into_reader(), MAX_ERROR_BODY_BYTES)
-                .unwrap_or_else(|error| format!("could not read error response: {error}"));
-            GraphError::Status { status, body }
-        }
-        UreqError::Transport(t) => GraphError::Network(t.to_string()),
-    }
 }
 
 /// 429 is always a throttle. 503 is only one when the server says how long to
@@ -600,37 +603,6 @@ fn read_vault_body(
         }
         bytes.extend_from_slice(&chunk[..count]);
     }
-}
-
-fn read_truncated_text(mut reader: impl io::Read, limit: usize) -> Result<String, io::Error> {
-    let mut bytes = Vec::with_capacity(limit.min(1024));
-    let mut chunk = [0_u8; 1024];
-    let mut truncated = false;
-
-    loop {
-        let remaining = limit.saturating_sub(bytes.len());
-        let read_capacity = chunk.len().min(remaining.saturating_add(1));
-        let count = reader.read(&mut chunk[..read_capacity])?;
-        if count == 0 {
-            break;
-        }
-        let accepted = count.min(remaining);
-        bytes.extend_from_slice(&chunk[..accepted]);
-        if count > remaining {
-            truncated = true;
-            break;
-        }
-    }
-
-    let display_bytes = match std::str::from_utf8(&bytes) {
-        Err(error) if truncated && error.error_len().is_none() => &bytes[..error.valid_up_to()],
-        _ => &bytes,
-    };
-    let mut text = String::from_utf8_lossy(display_bytes).into_owned();
-    if truncated {
-        text.push_str("\n[truncated]");
-    }
-    Ok(text)
 }
 
 fn truncate_text(text: &str, limit: usize) -> String {
@@ -894,16 +866,8 @@ mod tests {
     }
 
     #[test]
-    fn status_body_is_truncated_without_splitting_utf8() {
-        let body = "ééé";
-        let text = read_truncated_text(Cursor::new(body.as_bytes()), 5).unwrap();
-        assert_eq!(text, "éé\n[truncated]");
-    }
-
-    #[test]
     fn short_status_body_is_preserved() {
-        let text = read_truncated_text(Cursor::new(b"graph error"), 64).unwrap();
-        assert_eq!(text, "graph error");
+        assert_eq!(truncate_text("graph error", 64), "graph error");
     }
 
     #[test]

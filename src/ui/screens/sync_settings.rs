@@ -114,11 +114,10 @@ fn render_connected(
                 base
             }
         }
-        SyncStatus::Failed(msg) if is_graph_transfer_error(msg) => {
-            "Sync failed. Your vault is saved locally. Check your network or VPN, then retry."
-                .into()
-        }
-        SyncStatus::Failed(msg) => format!("Last attempt failed: {msg}"),
+        // The message is already written for a person: `note_sync_failure`
+        // classifies the error where the type is still available, so this does
+        // not have to guess from the text.
+        SyncStatus::Failed(message) => message.clone(),
         SyncStatus::Syncing => "Syncing now…".into(),
         SyncStatus::Connecting => "Connecting…".into(),
         SyncStatus::Conflict(_) => "Awaiting conflict resolution".into(),
@@ -216,11 +215,6 @@ fn render_connected(
             this.child(history_section(history, cx))
         })
         .into_any_element()
-}
-
-fn is_graph_transfer_error(message: &str) -> bool {
-    message
-        .starts_with("network error: error sending request for url (https://graph.microsoft.com/")
 }
 
 /// "Connected since 12 May 2026" from the stored interactive-sign-in

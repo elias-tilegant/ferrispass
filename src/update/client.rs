@@ -6,6 +6,7 @@
 //! and binds the install candidate to those signed fields before downloading.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::io::Read;
 
 use base64::Engine as _;
@@ -205,25 +206,20 @@ fn fetch_verified_manifest() -> Result<VerifiedRelease, UpdateError> {
     }
 }
 
+/// Exact bytes, never a lossy string: the manifest and its signature are
+/// verified byte for byte before anything in them is parsed.
 fn download_limited(url: &str, max_bytes: u64) -> Result<Vec<u8>, UpdateError> {
-    let response = crate::sync::http::agent()
+    let request = crate::sync::http::metadata_client()
+        .map_err(|error| UpdateError::Network(error.to_string()))?
         .get(url)
-        .set("Accept", "application/octet-stream")
-        .set("User-Agent", "FerrisPass updater")
-        .call()
-        .map_err(|e| UpdateError::Network(e.to_string()))?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(max_bytes + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| UpdateError::Network(e.to_string()))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(UpdateError::Parse(format!(
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .header(reqwest::header::USER_AGENT, "FerrisPass updater");
+    crate::sync::http::fetch_metadata_bytes(request, max_bytes).map_err(|error| match error {
+        crate::sync::http::TransferError::TooLarge { max_bytes } => UpdateError::Parse(format!(
             "update metadata exceeds the {max_bytes}-byte limit"
-        )));
-    }
-    Ok(bytes)
+        )),
+        other => UpdateError::Network(other.to_string()),
+    })
 }
 
 fn download_bundle<F>(platform: &ReleasePlatform, on_progress: F) -> Result<Vec<u8>, UpdateError>

@@ -44,12 +44,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zxcvbn = { version = "3", default-features = false }
 thiserror = "2"
 rand = "0.9"
-# SharePoint metadata remains synchronous through ureq. Vault and update-bundle
-# transfers use reqwest's async transport inside a small dedicated Tokio runtime:
-# unlike ureq 2.x, its total timeout covers DNS, pooled connections, request-body
-# writes, response headers, and response-body reads. Keep system-proxy explicit
-# because default features are disabled and managed Macs may require it.
-ureq = { version = "2", features = ["json", "tls"] }
+# The only HTTP transport: sign-in, Graph metadata, vault and update-bundle
+# transfers, favicons. `ureq` used to carry the metadata half and read neither
+# the macOS system proxy nor the system trust store, so on a managed Mac behind
+# a proxy the downloads worked while sign-in and the update check failed.
+# `system-proxy` and `rustls-tls-native-roots` are explicit because default
+# features are off; both are load-bearing, not conveniences.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream", "system-proxy"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 bytes = "1"

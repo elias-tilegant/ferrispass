@@ -535,6 +535,18 @@ impl ServiceError {
             _ => None,
         }
     }
+
+    /// The request never reached the server, or its answer never came back.
+    /// The user's action is the same for all of these (check the network, the
+    /// VPN, the proxy) and quite different from an auth or a merge failure.
+    pub fn is_network(&self) -> bool {
+        match self {
+            ServiceError::Graph(GraphError::Network(_)) => true,
+            ServiceError::Auth(AuthError::Network(_)) => true,
+            ServiceError::ICloud(ICloudError::Coordination(_)) => false,
+            _ => false,
+        }
+    }
 }
 
 /// On app launch: compare the cached etag to what's currently on the server.

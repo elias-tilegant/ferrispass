@@ -19,11 +19,9 @@
 //! - 100 byte minimum (sub-100 byte responses are usually transparent
 //!   placeholders, not real icons)
 
-use std::io::Read as _;
 use std::time::Duration;
 
 use thiserror::Error;
-use url::Url;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BYTES: usize = 256 * 1024;
@@ -52,49 +50,35 @@ pub fn fetch_favicon(entry_url: &str) -> Result<Vec<u8>, FaviconError> {
     let host = host_from_url(entry_url).ok_or(FaviconError::NoHost)?;
     let target = format!("https://icons.duckduckgo.com/ip3/{host}.ico");
 
-    // Per-call agent so the timeout sticks even if a future caller wraps
-    // this in a long-running task - the global ureq default is "no
-    // timeout", which is wrong for an icon fetcher.
-    let agent = ureq::AgentBuilder::new()
+    // The shared metadata client: one connection pool and one TLS setup for
+    // a run over hundreds of entries, and the same proxy and trust store the
+    // rest of the app uses. The old per-call agent rebuilt both every time.
+    let request = crate::sync::http::metadata_client()
+        .map_err(|error| FaviconError::Network(error.to_string()))?
+        .get(&target)
         .timeout(TIMEOUT)
-        .user_agent("ferrispass/favicon-fetcher")
-        .build();
-
-    let resp = agent.get(&target).call().map_err(|e| match e {
-        ureq::Error::Status(code, _) => FaviconError::Status(code),
-        ureq::Error::Transport(t) => FaviconError::Network(t.to_string()),
-    })?;
-
-    let mut bytes = Vec::with_capacity(2048);
-    resp.into_reader()
-        .take((MAX_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| FaviconError::Network(e.to_string()))?;
-
-    if bytes.len() > MAX_BYTES {
-        return Err(FaviconError::Oversized(bytes.len()));
-    }
+        .header(reqwest::header::USER_AGENT, "ferrispass/favicon-fetcher");
+    let bytes =
+        crate::sync::http::fetch_metadata_bytes(request, MAX_BYTES as u64).map_err(|error| {
+            match error {
+                crate::sync::http::TransferError::TooLarge { max_bytes } => {
+                    FaviconError::Oversized(max_bytes as usize)
+                }
+                other => FaviconError::Network(other.to_string()),
+            }
+        })?;
     if bytes.len() < MIN_BYTES {
         return Err(FaviconError::Empty(bytes.len()));
     }
     Ok(bytes)
 }
 
-/// Extract a hostname from an entry URL. Accepts URLs with or without a
-/// scheme - many KeePass DBs store bare `github.com` style URLs that
-/// `url::Url::parse` would otherwise reject. Returns the lowercased host
-/// so `Github.COM` and `github.com` hit the same DDG cache key.
+/// Extract a hostname from an entry URL, using the same rules auto-type
+/// matches on. This module used to have its own copy that accepted a hostless
+/// `mailto:` and a single-label `localhost`, neither of which DuckDuckGo can
+/// answer for, and disagreed with the matcher on trailing dots.
 fn host_from_url(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let parsed = if trimmed.contains("://") {
-        Url::parse(trimmed).ok()
-    } else {
-        Url::parse(&format!("https://{trimmed}")).ok()
-    }?;
-    parsed.host_str().map(|s| s.to_lowercase())
+    crate::autotype::matcher::host_of(input)
 }
 
 #[cfg(test)]
