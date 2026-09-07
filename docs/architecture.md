@@ -78,7 +78,11 @@ User submits password (Unlock screen)
 
 - `VaultStatus` - Welcome, AwaitingPassword, Open, Error
 - `SaveStatus` - Idle, Saving, Saved, Failed
-- `SyncStatus` - Disconnected, Idle, Connecting, Synced, Conflict, Failed, Reconnect
+- `SyncStatus` - Disconnected, Idle, Connecting, Synced, Conflict, Failed, Reconnect.
+  `Conflict` carries both kinds: entries whose fields diverged, and groups
+  whose content diverged without a timestamp that can rank them. Groups reach
+  the screen because the fork ranks them by timestamp alone, which a tie, a
+  missing timestamp or a forged future date all defeat
 - `UpdateStatus` - Idle, Checking, Available, Downloading, ReadyToRestart, Failed
 - `FaviconDownloadStatus` - Idle, Running, Finished
 - `Overlay` - None, Connect, Settings, AddEntry, EditEntry, Conflict, VaultSwitcher

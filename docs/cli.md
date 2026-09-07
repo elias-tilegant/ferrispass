@@ -137,16 +137,26 @@ ferrispass-cli --vault team.kdbx --format json sync now \
   --commit --plan-token 'v1:...'
 ```
 
-When the plan reports conflicts, pass exactly one choice for every reported
-entry UUID on stdin (or a dedicated `--input-fd`). Unknown, duplicate, and
-missing UUIDs fail closed. Only UUIDs and differing field names appear in the
-plan; secret values are never emitted.
+The plan reports two kinds of conflict: `conflicts` for entries and
+`group_conflicts` for groups whose name, notes, tags or settings diverged
+without a timestamp that can rank them. Pass exactly one choice for every
+reported UUID of either kind on stdin (or a dedicated `--input-fd`), naming
+`entry_id` or `group_id` to say which. Unknown, duplicate, missing and
+wrong-kind UUIDs fail closed. Only UUIDs, group names and differing field
+names appear in the plan; secret values are never emitted.
 
 ```sh
-printf '%s' '{"resolutions":[{"entry_id":"UUID","keep":"remote"}]}' |
+printf '%s' '{"resolutions":[
+    {"entry_id":"UUID","keep":"remote"},
+    {"group_id":"UUID","keep":"local"}
+  ]}' |
   ferrispass-cli --vault team.kdbx --format json sync now \
     --commit --plan-token 'v1:...'
 ```
+
+A group conflict discards the losing side outright. KDBX archives entry
+versions, not group versions, so there is nothing to keep the other name in,
+which is why this is asked rather than decided.
 
 Uploads retain the provider revision guard (SharePoint ETag or iCloud content
 revision). If the remote file changes between
