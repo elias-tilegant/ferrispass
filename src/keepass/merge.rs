@@ -520,7 +520,34 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
         }
     }
 
-    false
+    custom_icon_name_is_ours(local, remote)
+}
+
+/// Whether this copy holds the newer display name for an icon both copies
+/// have.
+///
+/// The name and its modification time sit beside the image in KDBX 4.1, and
+/// nothing else here looks at them: renaming an icon changed no entry, no
+/// group and no setting, so it was never reported as something to send and
+/// the other copy's next upload put the old name back.
+///
+/// Only the name this copy can be shown to have written last counts, the same
+/// rule the merge applies to it. An image only one side has travels with the
+/// reference to it and needs no separate mention.
+fn custom_icon_name_is_ours(local: &Database, remote: &Database) -> bool {
+    local.iter_all_custom_icons().any(|ours| {
+        let Some(theirs) = remote.custom_icon(ours.id()) else {
+            return false;
+        };
+        if ours.data != theirs.data || ours.name == theirs.name {
+            return false;
+        }
+        match (ours.last_modification_time, theirs.last_modification_time) {
+            (Some(ours), Some(theirs)) => ours > theirs,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    })
 }
 
 /// Whether two objects say the same thing about expiry.
@@ -843,7 +870,11 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
             MetaField::DefaultUsername => {
                 rank(a.default_username_changed, b.default_username_changed)
             }
-            MetaField::RecycleBin => rank(a.recyclebin_changed, b.recyclebin_changed),
+            MetaField::RecycleBin => recycle_bin_winner(
+                local,
+                remote,
+                rank(a.recyclebin_changed, b.recyclebin_changed),
+            ),
             MetaField::EntryTemplatesGroup => rank(
                 a.entry_templates_group_changed,
                 b.entry_templates_group_changed,
@@ -873,6 +904,37 @@ fn custom_data_value(item: Option<&&CustomDataItem>) -> String {
         Some(CustomDataValue::Binary(bytes)) => format!("{} bytes of binary data", bytes.len()),
         None => String::new(),
     }
+}
+
+/// The bin decision, unless following it would quietly change what the user
+/// sees.
+///
+/// The clock says which copy decided last, and usually that is the end of it.
+/// But when the other copy's bin still holds entries and the deciding copy
+/// has that group as well, nothing in either file says which of two things
+/// happened: the deciding copy retired that group and has been using it as an
+/// ordinary one since, or the two bins met in some earlier merge and it
+/// simply never designated the other. Following the clock deletes a live
+/// archive in the first case and resurrects deletions in the second, both
+/// without a word, so it is asked instead.
+fn recycle_bin_winner(local: &Database, remote: &Database, ranked: Option<Side>) -> Option<Side> {
+    let (winner, loser) = match ranked? {
+        Side::Local => (local, remote),
+        Side::Remote => (remote, local),
+    };
+    let Some(displaced) = normalised_group_uuid(loser.meta.recyclebin_uuid) else {
+        return ranked;
+    };
+    let ambiguous = normalised_group_uuid(winner.meta.recyclebin_uuid) != Some(displaced)
+        && group_with_uuid(winner, displaced).is_some_and(|group| holds_entries(winner, group));
+    if ambiguous { None } else { ranked }
+}
+
+/// Whether anything sits at or below this group.
+fn holds_entries(database: &Database, group: GroupId) -> bool {
+    database.iter_all_entries().any(|entry| {
+        crate::keepass::document::group_is_within(database, entry.parent().id(), group)
+    })
 }
 
 /// Whether the merged settings hold anything of ours that the remote copy
@@ -992,10 +1054,10 @@ struct HistoryVersion {
 }
 
 fn history_versions(entry: &EntryRef<'_>) -> BTreeSet<HistoryVersion> {
-    entry
-        .history
-        .iter()
-        .flat_map(|history| history.get_entries())
+    // Through `historical`, not the raw `Entry`s, because an archived version
+    // owns attachments and an icon that only a reference can resolve.
+    (0..entry.history.iter().map(|h| h.get_entries().len()).sum())
+        .filter_map(|index| entry.historical(index))
         .map(|version| HistoryVersion {
             // The fork substitutes the epoch for a version with no timestamp
             // and unions it like any other, so skipping those here made this
@@ -1003,24 +1065,76 @@ fn history_versions(entry: &EntryRef<'_>) -> BTreeSet<HistoryVersion> {
             // added a version the report had said was not there, and a caller
             // that trusted the report wrote without it.
             at: version.times.last_modification.unwrap_or_else(Times::epoch),
-            content: history_version_digest(version),
+            content: history_version_digest(&version),
         })
         .collect()
 }
 
-/// A digest over the fields a version actually carries. Cheap, order-stable,
-/// and only ever compared against another digest, never stored or shown.
-fn history_version_digest(version: &Entry) -> [u8; 32] {
+/// A digest over everything an archived version carries, matching what
+/// `entry_content_eq` compares for a current one.
+///
+/// Cheap, order-stable, and only ever compared against another digest, never
+/// stored or shown. It covered the field map alone, so two versions written
+/// in the same second that differed only by a tag, an icon, an attachment or
+/// an expiry date collapsed into one: the fork merged both, this said neither
+/// side was ahead, and the version that existed on one machine was never sent
+/// from it.
+fn history_version_digest(version: &EntryRef<'_>) -> [u8; 32] {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
+    let mut note = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
     let mut fields: Vec<(&String, &Value<String>)> = version.fields.iter().collect();
     fields.sort_by_key(|(key, _)| *key);
     for (key, value) in fields {
-        hasher.update(key.as_bytes());
-        hasher.update([0]);
-        hasher.update(value.get().as_bytes());
-        hasher.update([u8::from(value.is_protected())]);
+        note(key.as_bytes());
+        note(value.get().as_bytes());
+        note(&[u8::from(value.is_protected())]);
     }
+    let mut tags = version.tags.clone();
+    tags.sort_unstable();
+    for tag in &tags {
+        note(tag.as_bytes());
+    }
+    let mut custom: Vec<(&String, &CustomDataItem)> = version.custom_data.iter().collect();
+    custom.sort_by_key(|(key, _)| *key);
+    for (key, item) in custom {
+        note(key.as_bytes());
+        note(format!("{:?}", item.value).as_bytes());
+    }
+    for attachment in attachment_fingerprint(version) {
+        note(attachment.name.as_bytes());
+        note(&[u8::from(attachment.protected)]);
+        note(&attachment.data);
+    }
+    note(format!("{:?}", version.icon()).as_bytes());
+    note(format!("{:?}", version.autotype).as_bytes());
+    note(format!("{:?}", version.foreground_color).as_bytes());
+    note(format!("{:?}", version.background_color).as_bytes());
+    note(
+        version
+            .override_url
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    note(format!("{:?}", version.quality_check).as_bytes());
+    // An expiry date that is not in force says nothing, the same way it says
+    // nothing for a current entry.
+    note(
+        format!(
+            "{:?}",
+            version
+                .times
+                .expires
+                .unwrap_or(false)
+                .then_some(version.times.expiry)
+                .flatten()
+        )
+        .as_bytes(),
+    );
     hasher.finalize().into()
 }
 
@@ -3829,6 +3943,94 @@ mod tests {
         );
     }
 
+    /// Renaming a custom icon changes no entry, no group and no setting, so
+    /// nothing reported it as something to send and the other copy's next
+    /// upload put the old name back.
+    #[test]
+    fn a_renamed_custom_icon_is_a_local_contribution() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let earlier = keepass::db::Times::now() - chrono::TimeDelta::minutes(10);
+        let icon_id = {
+            let mut entry = local.entry_mut(id).unwrap();
+            let mut icon = entry.set_icon_custom_new(vec![0x89, b'P', b'N', b'G', 3]);
+            icon.name = Some("Old name".into());
+            icon.last_modification_time = Some(earlier);
+            icon.id()
+        };
+        let remote = fork(&local);
+
+        assert!(
+            !diff(&local, &remote).has_local_contribution(),
+            "identical copies need nothing"
+        );
+
+        {
+            let mut icon = local.custom_icon_mut(icon_id).unwrap();
+            icon.name = Some("Bank".into());
+            icon.last_modification_time = Some(keepass::db::Times::now());
+        }
+        assert!(
+            diff(&local, &remote).structural_writeback_required,
+            "a rename here has to reach the other copy"
+        );
+
+        // And a name we cannot show is ours is not ours to send: the merge
+        // takes theirs, so this is a pull.
+        let mut theirs = fork(&remote);
+        {
+            let mut icon = theirs.custom_icon_mut(icon_id).unwrap();
+            icon.name = Some("Their name".into());
+            icon.last_modification_time =
+                Some(keepass::db::Times::now() + chrono::TimeDelta::minutes(1));
+        }
+        assert!(
+            !diff(&remote, &theirs).structural_writeback_required,
+            "adopting their name is a pull, not something to send back"
+        );
+    }
+
+    /// Two archived versions written in the same second can differ by
+    /// anything an entry carries, not just by a field value.
+    ///
+    /// The digest covered the field map alone, so a version that differed
+    /// only by a tag looked identical to one that did not have it: the fork
+    /// merged both, this reported neither side as ahead, and the version that
+    /// existed on one machine was never sent from it while the status said
+    /// everything was in sync.
+    #[test]
+    fn a_history_version_that_differs_only_by_a_tag_is_still_ours_to_send() {
+        let same_second = keepass::db::Times::now() - chrono::TimeDelta::minutes(10);
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let mut remote = fork(&local);
+
+        // The same archived version on both sides, except for one tag.
+        for (db, tags) in [
+            (&mut local, vec!["work".to_string()]),
+            (&mut remote, Vec::new()),
+        ] {
+            let mut version = db.entry(id).expect("entry").deref().clone();
+            version.times.last_modification = Some(same_second);
+            version.tags = tags;
+            version.history = None;
+            db.entry_mut(id)
+                .expect("entry")
+                .history
+                .get_or_insert_default()
+                .add_entry(version);
+        }
+
+        let report = diff(&local, &remote);
+
+        assert!(report.conflicts.is_empty(), "no current field differs");
+        assert!(
+            report.local_history_ahead,
+            "a tagged version the other side does not hold is ours to send"
+        );
+        assert!(report.has_local_contribution());
+    }
+
     /// The same shape, but the other side is nowhere near its limit, so it
     /// cannot have trimmed anything: it simply never received this version.
     /// Reading that as trimming meant the only copy stayed on one machine
@@ -4025,12 +4227,15 @@ mod tests {
         );
     }
 
-    /// A bin the other copy knows and deliberately stopped using is not an
-    /// independently created one. Moving it under the current bin would mark
-    /// everything the user has since put in it as deleted, which is the same
-    /// loss as leaving two bins, pointed the other way.
+    /// A bin the other copy knows and no longer designates is not the same
+    /// thing as an independently created one, and nothing in either file says
+    /// which it is: the other copy may have retired that group and be using
+    /// it as an ordinary archive, or the two bins may have met in an earlier
+    /// merge. Nesting it deletes a live archive, leaving it resurrects
+    /// deletions, so it is asked. Answering for the copy that retired it
+    /// leaves the archive alone.
     #[test]
-    fn a_bin_the_other_copy_retired_on_purpose_stays_where_it_is() {
+    fn a_bin_the_other_copy_no_longer_designates_is_asked_about() {
         let mut base = Database::new();
         let archived = add(&mut base, "Still needed", "secret");
         let start = keepass::db::Times::now() - chrono::TimeDelta::minutes(30);
@@ -4067,7 +4272,25 @@ mod tests {
             Some(keepass::db::Times::now());
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
+        let conflict = report
+            .metadata_conflict
+            .as_ref()
+            .expect("neither file can say whether that group is still a bin");
+        assert!(
+            conflict
+                .fields
+                .iter()
+                .any(|field| field.label == "Recycle bin" && field.local != field.remote),
+            "and the row has to name both groups: {:?}",
+            conflict.fields
+        );
+
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::new(),
+            metadata: Some(Side::Remote),
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report)
             .expect("a retired bin is not a reason to refuse the merge");
 
         assert_eq!(
@@ -4088,6 +4311,23 @@ mod tests {
             live,
             vec!["Still needed".to_string()],
             "and what they kept in it is not deleted behind their back"
+        );
+
+        // With nothing in that group there is nothing at stake either way, so
+        // the clock decides and the user is not stopped for it.
+        let mut empty_local = fork(&local);
+        let mut empty_remote = fork(&remote);
+        for db in [&mut empty_local, &mut empty_remote] {
+            let entries: Vec<EntryId> = db.iter_all_entries().map(|entry| entry.id()).collect();
+            for id in entries {
+                db.entry_mut(id).expect("entry").remove();
+            }
+        }
+        assert!(
+            diff(&empty_local, &empty_remote)
+                .metadata_conflict
+                .is_none(),
+            "an empty group is not worth a prompt"
         );
     }
 
