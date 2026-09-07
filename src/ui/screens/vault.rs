@@ -609,7 +609,7 @@ fn groups_section(
 
 fn tags_section(
     twofa_count: usize,
-    tags: &[(String, usize)],
+    tags: &[crate::domain::TagRow],
     selection: &crate::app::LibrarySelection,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
@@ -637,16 +637,19 @@ fn tags_section(
 
     // The vault's own tags, not a fixed demo pair. Colour comes from the
     // name, so a tag keeps its colour as others come and go.
-    for (tag, count) in tags {
+    for tag in tags {
         column = column.child(nav_row(
             NavRow {
-                id: format!("tag-{tag}").into(),
+                // Keyed by the lowercase spelling, not the label: the label
+                // follows the vault and would move this row's identity, and
+                // its selection, when a differently-cased spelling appears.
+                id: format!("tag-{}", tag.key).into(),
                 icon: AppIcon::Dot,
-                label: tag.clone().into(),
-                count: Some(*count),
-                selected: selected_tag.eq_ignore_ascii_case(tag),
-                icon_color: stable_accent(tag),
-                target: L::Tag(tag.clone()),
+                label: tag.label.clone().into(),
+                count: Some(tag.entry_count),
+                selected: selected_tag.eq_ignore_ascii_case(&tag.key),
+                icon_color: stable_accent(&tag.key),
+                target: L::Tag(tag.key.clone()),
             },
             state_entity.clone(),
             cx,

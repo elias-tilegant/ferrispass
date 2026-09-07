@@ -174,10 +174,16 @@ impl WindowBoundsSetting {
             && self.height.is_finite()
     }
 
-    /// True when enough of the window would land on one of `displays` for the
-    /// user to grab its title bar. The saved position outlives the display it
-    /// was saved on: undock a laptop, and the window reopens at coordinates
-    /// that are now off every screen, with no way to drag it back.
+    /// True when the window's title bar would land on one of `displays`, so
+    /// the user can grab it. The saved position outlives the display it was
+    /// saved on: undock a laptop, and the window reopens at coordinates that
+    /// are now off every screen with no way to drag it back.
+    ///
+    /// Specifically the title bar, not merely some overlap. A window whose
+    /// bottom edge clips a screen while its top is above it is as unreachable
+    /// as one that missed entirely, because the strip you drag is at the top.
+    /// So the top edge has to be on a display, with enough width beside it to
+    /// aim at.
     ///
     /// `displays` are screen rectangles in the same logical pixel space, in
     /// the same field order. An empty list means the platform could not tell
@@ -185,20 +191,23 @@ impl WindowBoundsSetting {
     pub fn is_reachable_on(&self, displays: &[Self]) -> bool {
         displays.is_empty()
             || displays.iter().any(|display| {
-                let horizontal =
+                let grabbable_width =
                     (self.x + self.width).min(display.x + display.width) - self.x.max(display.x);
-                let vertical =
-                    (self.y + self.height).min(display.y + display.height) - self.y.max(display.y);
-                horizontal >= MIN_VISIBLE_EDGE && vertical >= MIN_VISIBLE_EDGE
+                let top_edge_is_on_screen =
+                    self.y >= display.y && self.y + TITLE_BAR_HEIGHT <= display.y + display.height;
+                grabbable_width >= MIN_VISIBLE_EDGE && top_edge_is_on_screen
             })
     }
 }
 
 pub const MIN_WINDOW_WIDTH: f32 = 860.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 560.0;
-/// How much of a restored window must be on screen, in logical pixels. Sized
-/// to leave a grabbable piece of title bar, not a whole window.
+/// How much of a restored window's width must be on screen, in logical
+/// pixels. Sized to leave a grabbable piece of title bar, not a whole window.
 const MIN_VISIBLE_EDGE: f32 = 80.0;
+/// The macOS title bar. The window's top edge plus this much has to fit on
+/// the display, or there is nothing to drag it by.
+const TITLE_BAR_HEIGHT: f32 = 28.0;
 
 /// Store the window geometry, unless it is already what is on disk.
 ///
@@ -519,6 +528,48 @@ mod tests {
             height: 800.0,
         };
         assert!(mostly_off_the_right.is_reachable_on(&[screen]));
+    }
+
+    /// The strip you drag a window by is at its top. A window whose bottom
+    /// edge clips a screen while its title bar is above it is as unreachable
+    /// as one that missed entirely, and an overlap check alone accepted it.
+    #[test]
+    fn geometry_whose_title_bar_is_offscreen_is_rejected() {
+        let screen = WindowBoundsSetting {
+            x: 0.0,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+
+        // Most of this window is on screen, which an overlap check is happy
+        // with. Its title bar is not, so there is nothing to drag.
+        let title_bar_above_the_screen = WindowBoundsSetting {
+            x: 100.0,
+            y: -100.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        assert!(!title_bar_above_the_screen.is_reachable_on(&[screen]));
+
+        let title_bar_below_the_screen = WindowBoundsSetting {
+            x: 100.0,
+            y: 970.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        assert!(!title_bar_below_the_screen.is_reachable_on(&[screen]));
+
+        let hanging_off_the_bottom = WindowBoundsSetting {
+            x: 100.0,
+            y: 900.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        assert!(
+            hanging_off_the_bottom.is_reachable_on(&[screen]),
+            "a window mostly below the screen is still grabbable by its top"
+        );
     }
 
     #[test]

@@ -139,6 +139,18 @@ impl std::fmt::Debug for VaultEntry {
 /// `Protected="True"` XML attribute - KeePassXC writes secrets (e.g.
 /// alternate passwords) with this flag and we must round-trip it so
 /// nothing silently downgrades from secret to plain on save.
+/// One row of the sidebar's tag list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TagRow {
+    /// Lowercased spelling. Selection and the row's element id use this, so
+    /// neither moves when a differently-cased spelling appears or leaves.
+    pub key: String,
+    /// What to show. Follows the vault's own spelling and may change.
+    pub label: String,
+    /// How many live entries carry this tag, counted once per entry.
+    pub entry_count: usize,
+}
+
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct CustomField {
     pub key: String,
@@ -296,26 +308,40 @@ impl VaultSnapshot {
     /// Grouped case-insensitively to match `entries_with_tag`: with
     /// case-sensitive rows, "Work" and "work" appeared as two entries whose
     /// counts were each too low, and clicking either one selected both sets.
-    /// The label shown is the first spelling in alphabetical order, which is
-    /// stable for a given vault.
-    pub fn tags(&self) -> Vec<(String, usize)> {
-        let mut counts: std::collections::BTreeMap<String, (String, usize)> =
+    ///
+    /// Each row carries the lowercase key it was grouped by, which is what
+    /// selection and the row's identity use, and a label to display. The
+    /// label is the alphabetically first spelling in the vault and can
+    /// therefore change as entries come and go; the key it is shown under
+    /// cannot, so a selected tag stays selected.
+    ///
+    /// Counts are of entries, not of occurrences. An entry tagged both "Work"
+    /// and "work" is one entry, and the count has to agree with what
+    /// selecting the row lists.
+    pub fn tags(&self) -> Vec<TagRow> {
+        let mut rows: std::collections::BTreeMap<String, TagRow> =
             std::collections::BTreeMap::new();
         for entry in self.live_entries() {
+            let mut counted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for tag in &entry.tags {
                 if tag.eq_ignore_ascii_case(crate::keepass::FAVORITE_TAG) {
                     continue;
                 }
-                let row = counts
-                    .entry(tag.to_lowercase())
-                    .or_insert_with(|| (tag.clone(), 0));
-                if tag < &row.0 {
-                    row.0 = tag.clone();
+                let key = tag.to_lowercase();
+                let row = rows.entry(key.clone()).or_insert_with(|| TagRow {
+                    key,
+                    label: tag.clone(),
+                    entry_count: 0,
+                });
+                if tag < &row.label {
+                    row.label = tag.clone();
                 }
-                row.1 += 1;
+                if counted.insert(tag.to_lowercase()) {
+                    row.entry_count += 1;
+                }
             }
         }
-        counts.into_values().collect()
+        rows.into_values().collect()
     }
 
     /// Entries that have a TOTP secret configured. Drives the sidebar's
@@ -499,7 +525,7 @@ impl VaultEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{CustomField, Favicon, Strength, VaultEntry, VaultGroup, VaultSnapshot};
+    use super::{CustomField, Favicon, Strength, TagRow, VaultEntry, VaultGroup, VaultSnapshot};
 
     fn entry(id: &str, title: &str) -> VaultEntry {
         VaultEntry::new(id, title, "alice", "", true)
@@ -528,7 +554,11 @@ mod tests {
 
         assert_eq!(
             snapshot.tags(),
-            vec![("Work".to_string(), 2)],
+            vec![TagRow {
+                key: "work".into(),
+                label: "Work".into(),
+                entry_count: 2,
+            }],
             "counted, alphabetical, without the Favorite marker the star owns, \
              and without tags only a deleted entry carries"
         );
@@ -554,12 +584,79 @@ mod tests {
         };
         let snapshot = VaultSnapshot::new(root);
 
-        assert_eq!(snapshot.tags(), vec![("WoRk".to_string(), 3)]);
+        assert_eq!(
+            snapshot.tags(),
+            vec![TagRow {
+                key: "work".into(),
+                label: "WoRk".into(),
+                entry_count: 3,
+            }]
+        );
         assert_eq!(
             snapshot.entries_with_tag("WoRk").len(),
             3,
             "the row's count matches what selecting it shows"
         );
+    }
+
+    /// The count is of entries, not of tag occurrences. An entry carrying two
+    /// spellings of one tag is one entry, and selecting the row lists it once.
+    #[test]
+    fn an_entry_carrying_two_spellings_counts_once() {
+        let mut both = entry("a", "Bank");
+        both.tags = vec!["Work".into(), "work".into()];
+        let mut one = entry("b", "Payroll");
+        one.tags = vec!["WORK".into()];
+
+        let root = VaultGroup {
+            id: "root".into(),
+            name: "Root".into(),
+            entries: vec![both, one],
+            ..VaultGroup::default()
+        };
+        let snapshot = VaultSnapshot::new(root);
+
+        let rows = snapshot.tags();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entry_count, 2);
+        assert_eq!(
+            snapshot.entries_with_tag(&rows[0].key).len(),
+            rows[0].entry_count,
+            "the count has to agree with what selecting the row lists"
+        );
+    }
+
+    /// The row's identity is the lowercase key, not the label. The label
+    /// follows the vault's own spelling, so tying selection to it would move
+    /// a selected row out from under the user when an entry is added.
+    #[test]
+    fn the_row_key_survives_a_new_spelling_appearing() {
+        let mut upper = entry("a", "Bank");
+        upper.tags = vec!["Work".into()];
+        let root = VaultGroup {
+            id: "root".into(),
+            name: "Root".into(),
+            entries: vec![upper.clone()],
+            ..VaultGroup::default()
+        };
+        let before = VaultSnapshot::new(root).tags();
+
+        let mut lower = entry("b", "Payroll");
+        lower.tags = vec!["Work".into()];
+        // An alphabetically earlier spelling arrives and takes the label.
+        let mut earlier = entry("c", "Travel");
+        earlier.tags = vec!["WORK".into()];
+        let root = VaultGroup {
+            id: "root".into(),
+            name: "Root".into(),
+            entries: vec![upper, lower, earlier],
+            ..VaultGroup::default()
+        };
+        let after = VaultSnapshot::new(root).tags();
+
+        assert_eq!(before[0].key, after[0].key, "the identity does not move");
+        assert_eq!(before[0].label, "Work");
+        assert_eq!(after[0].label, "WORK", "the label follows the vault");
     }
 
     #[test]
