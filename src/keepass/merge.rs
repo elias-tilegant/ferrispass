@@ -524,16 +524,21 @@ fn holds_a_version_the_other_side_never_saw(
     theirs: &BTreeSet<HistoryVersion>,
     their_cap: Option<usize>,
 ) -> bool {
-    let their_oldest = theirs.first().map(|version| version.at);
     let they_are_full = their_cap.is_some_and(|cap| theirs.len() >= cap);
+    let trim_horizon = match (they_are_full, theirs.first()) {
+        // Full, so anything older than the oldest they kept is something they
+        // dropped.
+        (true, Some(oldest)) => Some(oldest.at),
+        // Full while holding nothing: a `HistoryMaxItems` of zero. They keep
+        // no versions at all, so every version is one they would have
+        // trimmed, and none of mine is evidence of anything.
+        (true, None) => return false,
+        // Room to spare, so they trimmed nothing and every version they lack
+        // is one they never saw.
+        (false, _) => None,
+    };
     mine.iter().any(|version| {
-        if theirs.contains(version) {
-            return false;
-        }
-        match their_oldest {
-            Some(oldest) if they_are_full => version.at > oldest,
-            _ => true,
-        }
+        !theirs.contains(version) && trim_horizon.is_none_or(|oldest| version.at > oldest)
     })
 }
 
@@ -553,15 +558,14 @@ fn history_versions(entry: &EntryRef<'_>) -> BTreeSet<HistoryVersion> {
         .history
         .iter()
         .flat_map(|history| history.get_entries())
-        .filter_map(|version| {
-            // Versions without a timestamp are skipped: the fork substitutes
-            // the epoch for those, which would compare equal across unrelated
-            // versions.
-            let at = version.times.last_modification?;
-            Some(HistoryVersion {
-                at,
-                content: history_version_digest(version),
-            })
+        .map(|version| HistoryVersion {
+            // The fork substitutes the epoch for a version with no timestamp
+            // and unions it like any other, so skipping those here made this
+            // comparison disagree with the merge that follows it: the merge
+            // added a version the report had said was not there, and a caller
+            // that trusted the report wrote without it.
+            at: version.times.last_modification.unwrap_or_else(Times::epoch),
+            content: history_version_digest(version),
         })
         .collect()
 }
@@ -3118,6 +3122,64 @@ mod tests {
             "the remote had room, so the missing version is one it never saw"
         );
         assert!(report.has_local_contribution());
+    }
+
+    /// The fork gives a version with no timestamp the epoch and unions it
+    /// like any other. Skipping those here made this report disagree with the
+    /// merge that follows it: the merge added a version the report said was
+    /// not there, and a caller that trusted the report wrote without it.
+    #[test]
+    fn a_version_without_a_timestamp_still_counts() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let mut remote = fork(&local);
+
+        // A version some other client wrote without a modification time.
+        let mut version = remote.entry(id).expect("entry").deref().clone();
+        version.set_unprotected(fields::NOTES, "no timestamp");
+        version.times.last_modification = None;
+        version.history = None;
+        remote
+            .entry_mut(id)
+            .expect("entry")
+            .history
+            .get_or_insert_default()
+            .add_entry(version);
+
+        let report = diff(&local, &remote);
+
+        assert!(
+            report.remote_history_ahead,
+            "the merge will add it, so the report has to say so"
+        );
+    }
+
+    /// A vault set to keep no history at all trimmed everything by
+    /// definition, so nothing this copy holds is evidence the other side
+    /// never saw it. Reading an empty history as "they had room" asked for an
+    /// upload on every sync.
+    #[test]
+    fn a_remote_that_keeps_no_history_is_not_behind() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        add_history_at(
+            &mut local,
+            id,
+            "kept here",
+            keepass::db::Times::now() - chrono::TimeDelta::minutes(10),
+        );
+
+        let mut remote = fork(&local);
+        remote.meta.history_max_items = Some(0);
+        remote.entry_mut(id).unwrap().history = None;
+
+        let report = diff(&local, &remote);
+
+        assert!(
+            !report.local_history_ahead,
+            "a vault that keeps nothing dropped it, so there is nothing to send"
+        );
+        assert!(!report.has_local_contribution());
     }
 
     /// Two different versions written in the same second are two versions.

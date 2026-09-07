@@ -5615,9 +5615,8 @@ impl AppState {
                     self.overlay,
                     Overlay::AddEntry | Overlay::EditEntry { .. } | Overlay::AddGroup { .. }
                 );
-                if RemoteMergePlan::of(&report, target_is_active, interactive, editing)
-                    == RemoteMergePlan::AutoMerge
-                {
+                let plan = RemoteMergePlan::of(&report, target_is_active, interactive, editing);
+                if plan == RemoteMergePlan::AutoMerge {
                     let auto_merged_count = report.remote_only.len() + report.auto_resolved.len();
                     // Whether the merge actually changes the *remote*. A pure
                     // fast-forward - we only pulled remote-only additions
@@ -5669,26 +5668,24 @@ impl AppState {
                     return;
                 }
 
-                if !target_is_active {
+                if plan == RemoteMergePlan::Defer {
+                    // Two reasons, two sentences: a parked vault needs
+                    // bringing back, everything else needs an explicit
+                    // "Sync now" once the user is free.
+                    let hint = if target_is_active {
+                        "Remote conflict - choose Sync now to resolve."
+                    } else {
+                        "Remote conflict - switch back to this vault to resolve."
+                    };
                     self.apply_sync_status_for_session(
                         target,
                         session_id,
-                        SyncStatus::Failed(
-                            "Remote conflict - switch back to this vault to resolve.".into(),
-                        ),
+                        SyncStatus::Failed(hint.into()),
                         cx,
                     );
                     return;
                 }
-                if !interactive || editing {
-                    self.apply_sync_status_for_session(
-                        target,
-                        session_id,
-                        SyncStatus::Failed("Remote conflict - choose Sync now to resolve.".into()),
-                        cx,
-                    );
-                    return;
-                }
+
                 let mut picks = crate::keepass::merge::Resolutions::default();
                 for conflict in &report.conflicts {
                     picks.entries.insert(conflict.id.clone(), Side::Local);

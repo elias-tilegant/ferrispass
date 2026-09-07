@@ -643,14 +643,13 @@ fn execute_sync(
     let merged =
         crate::keepass::merge::apply_picks(document.database(), remote.database(), &picks, &report)
             .map_err(|e| CliError::new("merge_failed", 5, e.to_string()))?;
-    let needs_local_save = !report.remote_only.is_empty()
-        || !report.auto_resolved.is_empty()
-        || !report.conflicts.is_empty()
-        || !report.group_conflicts.is_empty()
-        || report.structural_writeback_required
-        // History the remote holds and this copy does not is a real change to
-        // write: without it the merged versions were dropped on the floor.
-        || report.remote_history_ahead;
+    // Ask the merged result, not the report that predicted it. Every
+    // predicate here is a claim about what `apply_picks` will do, and a claim
+    // that falls short means writing the pre-merge bytes over a remote that
+    // held the only copy of something. The comparison is one deep equality
+    // over two in-memory databases, next to nothing beside the KDF this
+    // command has already paid for.
+    let needs_local_save = &merged != document.database();
     let upload_bytes = if needs_local_save {
         let receipt = document
             .save_payload_for_database(merged.clone())
