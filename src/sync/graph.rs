@@ -45,8 +45,14 @@ impl AsRef<[u8]> for SharedVaultBytes {
 
 #[derive(Debug, Error)]
 pub enum GraphError {
-    #[error("network error: {0}")]
-    Network(String),
+    /// The request never completed. `kind` carries reqwest's own verdict, so
+    /// the UI can distinguish "nothing answered" from "it answered too late"
+    /// without matching on the message text.
+    #[error("network error: {detail}")]
+    Network {
+        kind: crate::sync::http::NetworkErrorKind,
+        detail: String,
+    },
     #[error("graph returned HTTP {status}: {body}")]
     Status { status: u16, body: String },
     /// Graph asked us to slow down (429, or 503 with a `Retry-After`).
@@ -148,7 +154,7 @@ pub fn search_kdbx_files(token: &AccessToken) -> Result<Vec<DriveItemHit>, Graph
     let body_str = body.to_string();
     let text = send_metadata(
         http::metadata_client()
-            .map_err(|error| GraphError::Network(error.to_string()))?
+            .map_err(network_error)?
             .post(&url)
             .bearer_auth(&token.access_token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -276,7 +282,7 @@ pub fn download_content(
 ) -> Result<(Vec<u8>, String), GraphError> {
     let url = format!("{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content");
     let request = http::transfer_client()
-        .map_err(|error| GraphError::Network(error.to_string()))?
+        .map_err(network_error)?
         .get(&url)
         .bearer_auth(&token.access_token);
     http::run_transfer(async move {
@@ -292,7 +298,7 @@ pub fn download_content(
         let bytes = read_vault_response(response, declared_length, MAX_VAULT_CONTENT_BYTES).await?;
         Ok((bytes, etag))
     })
-    .map_err(|error| GraphError::Network(error.to_string()))?
+    .map_err(network_error)?
 }
 
 /// Upload bytes via the small-file PUT endpoint with optional `If-Match`.
@@ -314,7 +320,7 @@ pub fn upload_content(
     ensure_vault_size(bytes.len(), MAX_VAULT_CONTENT_BYTES)?;
     let url = format!("{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content");
     let mut request = http::transfer_client()
-        .map_err(|error| GraphError::Network(error.to_string()))?
+        .map_err(network_error)?
         .put(&url)
         .bearer_auth(&token.access_token)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream");
@@ -351,7 +357,7 @@ pub fn upload_content(
             item,
         })
     })
-    .map_err(|error| GraphError::Network(error.to_string()))?
+    .map_err(network_error)?
 }
 
 // ---------- internals ----------
@@ -377,7 +383,18 @@ async fn reqwest_success(response: reqwest::Response) -> Result<reqwest::Respons
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> GraphError {
-    GraphError::Network(error.to_string())
+    network_error(http::TransferError::transport(error))
+}
+
+/// One conversion for every transport failure, so the classification cannot
+/// be right on the download path and lost on the metadata one.
+fn network_error(error: http::TransferError) -> GraphError {
+    GraphError::Network {
+        kind: error
+            .network_kind()
+            .unwrap_or(crate::sync::http::NetworkErrorKind::Other),
+        detail: error.to_string(),
+    }
 }
 
 fn parse_reqwest_content_length(
@@ -481,7 +498,7 @@ async fn read_reqwest_text_truncated(
 fn http_get(url: &str, token: &AccessToken) -> Result<String, GraphError> {
     send_metadata(
         http::metadata_client()
-            .map_err(|error| GraphError::Network(error.to_string()))?
+            .map_err(network_error)?
             .get(url)
             .bearer_auth(&token.access_token)
             .header(reqwest::header::ACCEPT, "application/json"),
@@ -492,8 +509,7 @@ fn http_get(url: &str, token: &AccessToken) -> Result<String, GraphError> {
 /// the matching `GraphError`. Throttles are their own variant because the
 /// recovery is to wait, not to report.
 fn send_metadata(request: reqwest::RequestBuilder) -> Result<String, GraphError> {
-    let response =
-        http::send_metadata(request).map_err(|error| GraphError::Network(error.to_string()))?;
+    let response = http::send_metadata(request).map_err(network_error)?;
     if (200..300).contains(&response.status) {
         return Ok(response.body);
     }
@@ -579,7 +595,13 @@ fn read_vault_body(
         let read_capacity = chunk.len().min(remaining.saturating_add(1));
         let count = reader
             .read(&mut chunk[..read_capacity])
-            .map_err(|error| GraphError::Network(error.to_string()))?;
+            // A read that fails partway through carries no reqwest verdict to
+            // read off, so it stays the general kind rather than claiming a
+            // connect or timeout we did not observe.
+            .map_err(|error| GraphError::Network {
+                kind: crate::sync::http::NetworkErrorKind::Other,
+                detail: error.to_string(),
+            })?;
         if count == 0 {
             return Ok(bytes);
         }

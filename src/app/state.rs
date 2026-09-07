@@ -2271,16 +2271,13 @@ impl AppState {
                     .into(),
             );
         }
-        if error.is_network() {
-            // One message for every "it never got there": the user's next step
-            // is the same, and the raw transport text named a URL and a crate
-            // rather than anything they could act on. The UI used to sniff for
-            // this case by matching on the start of the error string.
-            return SyncStatus::Failed(
-                "Could not reach the cloud provider. Your vault is saved locally. \
-                 Check your network, VPN or proxy, then sync again."
-                    .into(),
-            );
+        if let Some(kind) = error.network_kind() {
+            // The raw transport text named a URL and a crate rather than
+            // anything the user could act on, and the UI used to recover this
+            // case by matching on the start of that string. The kind comes
+            // from the transport itself now, so the sentence can say which
+            // way it failed without guessing.
+            return SyncStatus::Failed(format!("{} Your vault is saved locally.", kind.hint()));
         }
         match error {
             crate::sync::service::ServiceError::Auth(

@@ -55,8 +55,13 @@ pub fn client_id() -> &'static str {
 
 #[derive(Debug, Error)]
 pub enum AuthError {
-    #[error("network error: {0}")]
-    Network(String),
+    /// Sign-in never reached the token endpoint. `kind` is reqwest's own
+    /// verdict rather than a guess made from its message text.
+    #[error("network error: {detail}")]
+    Network {
+        kind: crate::sync::http::NetworkErrorKind,
+        detail: String,
+    },
 
     #[error("response was not valid JSON: {0}")]
     Parse(String),
@@ -239,9 +244,18 @@ fn parse_refresh_response(body: &str) -> Result<AccessToken, AuthError> {
 
 // --------------- internals ---------------
 
+/// One conversion for every transport failure on the sign-in path.
+fn network_error(error: crate::sync::http::TransferError) -> AuthError {
+    AuthError::Network {
+        kind: error
+            .network_kind()
+            .unwrap_or(crate::sync::http::NetworkErrorKind::Other),
+        detail: error.to_string(),
+    }
+}
+
 fn post_form(url: &str, params: &[(&str, &str)]) -> Result<String, AuthError> {
-    let client = crate::sync::http::metadata_client()
-        .map_err(|error| AuthError::Network(error.to_string()))?;
+    let client = crate::sync::http::metadata_client().map_err(network_error)?;
     // The body is returned for every status. The device-code poll reads its
     // "authorization_pending" signal out of the JSON envelope of an HTTP 400,
     // so a non-2xx response here is data, not a failure.
@@ -251,7 +265,7 @@ fn post_form(url: &str, params: &[(&str, &str)]) -> Result<String, AuthError> {
             .header(reqwest::header::ACCEPT, "application/json")
             .form(params),
     )
-    .map_err(|error| AuthError::Network(error.to_string()))?;
+    .map_err(network_error)?;
     Ok(response.body)
 }
 

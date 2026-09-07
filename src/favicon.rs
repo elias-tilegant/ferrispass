@@ -64,6 +64,11 @@ pub fn fetch_favicon(entry_url: &str) -> Result<Vec<u8>, FaviconError> {
                 crate::sync::http::TransferError::TooLarge { max_bytes } => {
                     FaviconError::Oversized(max_bytes as usize)
                 }
+                // A 404 from the icon service means this host has no icon,
+                // which is neither a network problem nor worth retrying.
+                // Folding it into `Network` left `Status` unreachable and
+                // described an ordinary miss as a connectivity failure.
+                crate::sync::http::TransferError::Status { status } => FaviconError::Status(status),
                 other => FaviconError::Network(other.to_string()),
             }
         })?;

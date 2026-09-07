@@ -540,11 +540,19 @@ impl ServiceError {
     /// The user's action is the same for all of these (check the network, the
     /// VPN, the proxy) and quite different from an auth or a merge failure.
     pub fn is_network(&self) -> bool {
+        self.network_kind().is_some()
+    }
+
+    /// How the wire failed, when it was the wire. The variant is carried
+    /// through from the transport rather than recovered from message text,
+    /// so the message the user reads can name the actual failure.
+    pub fn network_kind(&self) -> Option<crate::sync::http::NetworkErrorKind> {
         match self {
-            ServiceError::Graph(GraphError::Network(_)) => true,
-            ServiceError::Auth(AuthError::Network(_)) => true,
-            ServiceError::ICloud(ICloudError::Coordination(_)) => false,
-            _ => false,
+            ServiceError::Graph(GraphError::Network { kind, .. })
+            | ServiceError::Auth(AuthError::Network { kind, .. }) => Some(*kind),
+            // A coordination failure is the local iCloud daemon, not a
+            // network the user can check.
+            _ => None,
         }
     }
 }
