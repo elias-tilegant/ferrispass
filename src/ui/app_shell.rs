@@ -69,6 +69,10 @@ pub struct CustomFieldDraftInputs {
     pub key_input: Entity<InputState>,
     pub value_input: Entity<InputState>,
     pub protected: bool,
+    /// Enter-to-save and dirty tracking for this row's two inputs. Held here
+    /// rather than in the shell's subscription list so it dies with the row:
+    /// rows come and go for every entry the user opens.
+    _subscriptions: [Subscription; 2],
 }
 
 /// Opaque identity of the clipboard write owned by the current clear timer.
@@ -1392,12 +1396,27 @@ impl AppShell {
         self.entry_discard_armed
     }
 
-    /// Close the entry editor, asking first if there is anything to lose.
-    /// Shared by the Cancel button and the Escape key so both behave the same.
-    pub(crate) fn request_close_entry_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The one gate in front of everything that would throw away a
+    /// half-written entry: Cancel, Escape, Cmd+O, Cmd+L, Cmd+comma, Cmd+W and
+    /// Cmd+Q all clear the editor, and none of them is covered by the
+    /// unpersisted-save veto because the draft never reached the vault.
+    ///
+    /// Returns `true` when the caller must stand down. The first attempt arms
+    /// the discard banner and consumes the gesture; repeating it goes through,
+    /// which is the same two-step the Escape key has always used.
+    pub(crate) fn entry_draft_blocks_close(&mut self, cx: &mut Context<Self>) -> bool {
         if self.entry_form_is_dirty(cx) && !self.entry_discard_armed {
             self.entry_discard_armed = true;
             cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// Close the entry editor, asking first if there is anything to lose.
+    /// Shared by the Cancel button and the Escape key so both behave the same.
+    pub(crate) fn request_close_entry_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.entry_draft_blocks_close(cx) {
             return;
         }
         self.clear_entry_form(window, cx);
@@ -1412,19 +1431,41 @@ impl AppShell {
         &self.new_entry_custom_fields
     }
 
-    /// Append a fresh empty row at the bottom of the editor. Returns
-    /// the new row's id so the click handler can focus it (future).
-    pub fn add_custom_field_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> usize {
+    /// Build one custom-field row and wire its two inputs to the same
+    /// handler the fixed fields use, so Enter saves and typing counts as a
+    /// change here too. Every construction site goes through this: rows built
+    /// by hand were invisible to both.
+    fn custom_field_row(
+        &mut self,
+        key_input: Entity<InputState>,
+        value_input: Entity<InputState>,
+        protected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> CustomFieldDraftInputs {
         let id = self.next_custom_field_id;
         self.next_custom_field_id = self.next_custom_field_id.wrapping_add(1);
-        let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Key"));
-        let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
-        self.new_entry_custom_fields.push(CustomFieldDraftInputs {
+        let subscriptions = [
+            cx.subscribe_in(&key_input, window, Self::on_entry_form_input_event),
+            cx.subscribe_in(&value_input, window, Self::on_entry_form_input_event),
+        ];
+        CustomFieldDraftInputs {
             id,
             key_input,
             value_input,
-            protected: false,
-        });
+            protected,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Append a fresh empty row at the bottom of the editor. Returns
+    /// the new row's id so the click handler can focus it (future).
+    pub fn add_custom_field_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Key"));
+        let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
+        let row = self.custom_field_row(key_input, value_input, false, window, cx);
+        let id = row.id;
+        self.new_entry_custom_fields.push(row);
         cx.notify();
         id
     }
@@ -1447,20 +1488,14 @@ impl AppShell {
             if already_present {
                 continue;
             }
-            let id = self.next_custom_field_id;
-            self.next_custom_field_id = self.next_custom_field_id.wrapping_add(1);
             let placeholder: SharedString = (*value_placeholder).into();
             let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Key"));
             let value_input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
             // Pre-fill the key so the row is functional immediately;
             // the value stays empty for the user to fill.
             key_input.update(cx, |s, cx| s.set_value(*key, window, cx));
-            self.new_entry_custom_fields.push(CustomFieldDraftInputs {
-                id,
-                key_input,
-                value_input,
-                protected: false,
-            });
+            let row = self.custom_field_row(key_input, value_input, false, window, cx);
+            self.new_entry_custom_fields.push(row);
         }
         cx.notify();
     }
@@ -1615,6 +1650,9 @@ impl AppShell {
     }
 
     fn on_action_open_vault(&mut self, _: &OpenVault, window: &mut Window, cx: &mut Context<Self>) {
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.prompt_for_vault_path(window, cx);
     }
 
@@ -1624,6 +1662,11 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Opening the switcher replaces the entry editor, so the draft has
+        // to be settled first.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         // Toggle: ⌘O while the switcher is already open closes it. Same
         // ergonomics as ⌘, on Settings.
         if matches!(self.state.read(cx).overlay(), Overlay::VaultSwitcher) {
@@ -1742,9 +1785,7 @@ impl AppShell {
         // A half-written entry, and its freshly generated password, used to
         // vanish on one Escape with no warning. The first Escape arms the
         // discard, the second one performs it.
-        if self.entry_form_is_dirty(cx) && !self.entry_discard_armed {
-            self.entry_discard_armed = true;
-            cx.notify();
+        if self.entry_draft_blocks_close(cx) {
             return;
         }
         let closed = self.state.update(cx, |state, cx| state.close_overlay(cx));
@@ -1755,6 +1796,9 @@ impl AppShell {
     }
 
     fn on_action_lock_vault(&mut self, _: &LockVault, window: &mut Window, cx: &mut Context<Self>) {
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.lock_vault(window, cx);
     }
 
@@ -2092,6 +2136,9 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         // Universally available - no vault-open gate.
         self.settings_tab = SettingsTab::General;
         self.state
@@ -2104,6 +2151,9 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         // Same Settings overlay as ⌘, but jumps directly to the Sync
         // tab. Reachable from the vault-header sync chip and ⌘⇧, so
         // users can land where they were going without a tab click.
@@ -2189,6 +2239,11 @@ impl AppShell {
             crate::app::VaultStatus::Open { .. }
         );
         if is_open {
+            // Cmd+N over an open editor resets it, so a draft in there has to
+            // be settled first.
+            if self.entry_draft_blocks_close(cx) {
+                return;
+            }
             // Reset the form before showing it - otherwise reopening the modal
             // after a previous Save/Cancel would carry the prior values.
             self.clear_entry_form(window, cx);
@@ -2572,8 +2627,6 @@ impl AppShell {
         // creates blank rows.
         self.new_entry_custom_fields.clear();
         for cf in p.custom_fields {
-            let id = self.next_custom_field_id;
-            self.next_custom_field_id = self.next_custom_field_id.wrapping_add(1);
             let key_input = cx.new(|cx| InputState::new(window, cx).placeholder("Key"));
             let value_input = cx.new(|cx| {
                 InputState::new(window, cx)
@@ -2582,12 +2635,8 @@ impl AppShell {
             });
             key_input.update(cx, |s, cx| s.set_value(&cf.key, window, cx));
             value_input.update(cx, |s, cx| s.set_value(&cf.value, window, cx));
-            self.new_entry_custom_fields.push(CustomFieldDraftInputs {
-                id,
-                key_input,
-                value_input,
-                protected: cf.protected,
-            });
+            let row = self.custom_field_row(key_input, value_input, cf.protected, window, cx);
+            self.new_entry_custom_fields.push(row);
         }
 
         // After the prefill, not before: the values just written are the

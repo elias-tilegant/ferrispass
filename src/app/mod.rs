@@ -31,6 +31,13 @@ struct SharedAppState(Entity<AppState>);
 
 impl gpui::Global for SharedAppState {}
 
+/// The one `AppShell`. Cmd+W and Cmd+Q are app-level actions with no view in
+/// hand, and both throw away an unsaved entry draft, which lives in the
+/// shell's inputs rather than in `AppState`.
+struct SharedAppShell(Entity<AppShell>);
+
+impl gpui::Global for SharedAppShell {}
+
 /// Run `f` against the one `AppState`, if the app has finished booting.
 pub(crate) fn with_shared_state<R>(
     cx: &mut App,
@@ -38,6 +45,15 @@ pub(crate) fn with_shared_state<R>(
 ) -> Option<R> {
     let state = cx.try_global::<SharedAppState>()?.0.clone();
     Some(state.update(cx, f))
+}
+
+/// Run `f` against the one `AppShell`, if the app has finished booting.
+pub(crate) fn with_shared_shell<R>(
+    cx: &mut App,
+    f: impl FnOnce(&mut AppShell, &mut Context<AppShell>) -> R,
+) -> Option<R> {
+    let shell = cx.try_global::<SharedAppShell>()?.0.clone();
+    Some(shell.update(cx, f))
 }
 
 /// Bring the window back after Cmd+W hid it. Also what a Dock click does.
@@ -103,8 +119,22 @@ fn open_main_window(
     // than the window minimum, or with a non-finite coordinate from a
     // hand-edited file, falls back to a centred default rather than opening
     // something unusable.
+    let displays: Vec<settings::WindowBoundsSetting> = cx
+        .displays()
+        .iter()
+        .map(|display| {
+            let bounds = display.bounds();
+            settings::WindowBoundsSetting {
+                x: f32::from(bounds.origin.x),
+                y: f32::from(bounds.origin.y),
+                width: f32::from(bounds.size.width),
+                height: f32::from(bounds.size.height),
+            }
+        })
+        .collect();
     let window_bounds = saved
-        .filter(crate::app::settings::WindowBoundsSetting::is_usable)
+        .filter(settings::WindowBoundsSetting::is_usable)
+        .filter(|bounds| bounds.is_reachable_on(&displays))
         .map(|bounds| {
             WindowBounds::Windowed(gpui::Bounds {
                 origin: gpui::point(px(bounds.x), px(bounds.y)),
@@ -128,6 +158,9 @@ fn open_main_window(
             window.on_window_should_close(cx, actions::request_window_close);
 
             let shell = cx.new(|cx| AppShell::new(app_state, window, cx));
+            // Reachable from the app-level Cmd+W / Cmd+Q handlers, which have
+            // to ask the editor whether it holds an unsaved draft.
+            cx.set_global(SharedAppShell(shell.clone()));
 
             cx.new(|cx: &mut Context<Root>| Root::new(shell, window, cx).bg(cx.theme().background))
         })

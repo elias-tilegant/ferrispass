@@ -149,8 +149,33 @@ fn block_lifecycle_action_while_saving(window: Option<&mut Window>, cx: &mut App
     true
 }
 
+/// The save veto only covers changes that already reached the vault. A
+/// half-written entry lives in the editor's inputs, and locking or hiding the
+/// window clears it, so quitting and closing have to ask the editor too.
+///
+/// Returns `true` when the caller must stand down. The first attempt arms the
+/// discard banner in the editor and refuses; repeating the gesture goes
+/// through, the same two-step Escape has always used.
+fn block_lifecycle_action_over_dirty_editor(window: Option<&mut Window>, cx: &mut App) -> bool {
+    if super::with_shared_shell(cx, |shell, cx| shell.entry_draft_blocks_close(cx)) != Some(true) {
+        return false;
+    }
+    let message = "This entry has unsaved changes. Save it, or repeat this to discard it.";
+    if let Some(window) = window {
+        window.push_notification(message, cx);
+    } else if let Some(window) = cx.active_window() {
+        let _ = window.update(cx, |_root, window, cx| {
+            window.push_notification(message, cx);
+        });
+    }
+    true
+}
+
 fn request_quit(cx: &mut App) {
     if block_lifecycle_action_while_saving(None, cx) {
+        return;
+    }
+    if block_lifecycle_action_over_dirty_editor(None, cx) {
         return;
     }
 
@@ -185,6 +210,9 @@ fn remember_window_geometry(window: &Window) {
 /// update stack, so notify it directly instead of resolving `active_window`.
 pub(crate) fn request_window_close(window: &mut Window, cx: &mut App) -> bool {
     if block_lifecycle_action_while_saving(Some(window), cx) {
+        return false;
+    }
+    if block_lifecycle_action_over_dirty_editor(Some(window), cx) {
         return false;
     }
     remember_window_geometry(window);
@@ -234,6 +262,9 @@ pub fn init(cx: &mut App) {
 
     cx.on_action(|_: &RestartToUpdate, cx: &mut App| {
         if block_lifecycle_action_while_saving(None, cx) {
+            return;
+        }
+        if block_lifecycle_action_over_dirty_editor(None, cx) {
             return;
         }
         crate::launch::sweeper::purge_all();
