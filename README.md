@@ -53,7 +53,7 @@ src/
   app/        application bootstrap, AppState, recents, settings, time helpers
   cli.rs      headless command tree, JSON contract and sync planning
   cli_install.rs  macOS CLI registration and removal
-  domain/     UI-safe vault snapshot types (no secrets in visible models)
+  domain/     UI-safe vault snapshot types, decrypted for display
   keepass/    keepass-rs adapter, document, password generator, three-way merge
   sync/       SharePoint device-code auth, Graph API, sync service, keychain tokens
   ui/         GPUI views, screens, widgets, palette, theme
@@ -97,7 +97,7 @@ command overview, safe password input and SharePoint sync flow.
 
 ## Auto-updates
 
-FerrisPass checks GitHub Releases on launch (rate-limited to once per day). When a newer build is published, a banner appears on the Welcome screen with an **Install** button - click it and the app downloads the new bundle, verifies its Ed25519 signature against an embedded public key, atomic-replaces itself, and prompts you to restart.
+FerrisPass checks GitHub Releases once per launch, when the setting is on. When a newer build is published, a banner appears on the Welcome screen with an **Install** button - click it and the app downloads the new bundle, verifies its Ed25519 signature against an embedded public key, atomic-replaces itself, and prompts you to restart.
 
 Independent of Apple's Developer ID + notarization (which signs the DMG), every update payload and its complete manifest carry separate [minisign](https://jedisct1.github.io/minisign/) signatures. The signed manifest binds the version, URL, payload size, and payload signature; all checks must pass before an update is applied.
 

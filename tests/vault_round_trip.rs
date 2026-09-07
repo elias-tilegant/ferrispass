@@ -1,18 +1,19 @@
-//! The release binary against a real file on disk.
+//! The CLI binary against a real file on disk.
 //!
 //! A green unit-test suite has never caught a broken parse path: the units
-//! hand each other in-memory `Database` values and never serialise. This
-//! drives the shipped CLI over a vault written by the fixture builder, which
-//! is what the release checklist asks a person to do by hand. That step was
-//! previously only described in a document, so nothing recorded whether it had
-//! ever been run.
+//! hand each other in-memory `Database` values and never serialise. This runs
+//! the CLI as a process over a vault written to disk, reads it back, mutates
+//! it and reads it again, which is the shape of the check the release
+//! checklist asks a person to do by hand.
 //!
-//! It does not replace the KeePassXC leg of the round trip, which needs a
-//! second implementation and stays manual.
+//! What it is not: it runs the test-profile binary, not the signed one in the
+//! app bundle, and both halves use the same pinned keepass library. It proves
+//! the parse and save paths, not the format. Reading the file with a second
+//! implementation is the KeePassXC leg, and that stays manual.
 
 use std::process::Command;
 
-use keepass::{Database, DatabaseKey, db::fields};
+use keepass::{Database, DatabaseKey, db::EntryId, db::fields};
 
 const PASSWORD: &str = "round-trip-password";
 
@@ -69,8 +70,17 @@ fn run(
     password_file: &std::path::Path,
     args: &[&str],
 ) -> serde_json::Value {
+    run_with_stdin(vault, password_file, args, "")
+}
+
+fn run_with_stdin(
+    vault: &std::path::Path,
+    password_file: &std::path::Path,
+    args: &[&str],
+    stdin: &str,
+) -> serde_json::Value {
     let command = format!(
-        "exec {} --vault {} --master-password-fd 3 --format json {} 3<{}",
+        "exec {} --vault {} --master-password-fd 3 --format json {} 3<{} <<'PATCH_EOF'\n{stdin}\nPATCH_EOF",
         shell_quote(cli()),
         shell_quote(&vault.to_string_lossy()),
         args.iter()
@@ -97,7 +107,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 #[test]
-fn the_release_binary_reads_a_vault_it_wrote() {
+fn the_cli_binary_round_trips_a_vault_on_disk() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("round-trip.kdbx");
     let password_file = dir.path().join("pw");
@@ -117,8 +127,8 @@ fn the_release_binary_reads_a_vault_it_wrote() {
     assert_eq!(entries[0]["has_password"], true);
 
     // The custom field the SAP launcher reads survives the write path.
-    let id = entries[0]["id"].as_str().expect("entry id");
-    let shown = run(&vault, &password_file, &["entry", "get", "--id", id]);
+    let id = entries[0]["id"].as_str().expect("entry id").to_string();
+    let shown = run(&vault, &password_file, &["entry", "get", "--id", &id]);
     let fields = shown["data"]["entry"]["custom_fields"]
         .as_array()
         .expect("custom fields");
@@ -128,4 +138,38 @@ fn the_release_binary_reads_a_vault_it_wrote() {
             .any(|field| field["key"] == "SAP_HOST" && field["value"] == "sap.example.invalid"),
         "custom fields survive: {fields:?}"
     );
+
+    // History and custom icons have no CLI surface, so check them against the
+    // file itself. They are the two things a write path drops most quietly.
+    let reopened = Database::open(
+        &mut std::fs::File::open(&vault).expect("open vault"),
+        DatabaseKey::new().with_password(PASSWORD),
+    )
+    .expect("reopen the file the CLI just read");
+    let entry_id = EntryId::from_uuid(uuid::Uuid::parse_str(&id).expect("uuid"));
+    let entry = reopened.entry(entry_id).expect("entry survives");
+    assert_eq!(
+        entry
+            .history
+            .as_ref()
+            .map(|history| history.get_entries().len()),
+        Some(1),
+        "the archived version survives the write path"
+    );
+    assert_eq!(
+        entry.custom_icon().expect("icon resolves").data,
+        vec![0x89, b'P', b'N', b'G', 1, 2, 3],
+        "and so does the custom icon"
+    );
+
+    // Mutating through the CLI and reading it back exercises the save path,
+    // which listing alone never touches.
+    run_with_stdin(
+        &vault,
+        &password_file,
+        &["entry", "update", "--id", &id, "--commit"],
+        r#"{"title":"Renamed"}"#,
+    );
+    let after = run(&vault, &password_file, &["entry", "list"]);
+    assert_eq!(after["data"]["entries"][0]["title"], "Renamed");
 }

@@ -8,7 +8,7 @@ Run before bumping the version:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked                              # every test green
 cargo audit
 # House style: plain hyphens, no em or en dashes. Both scans must be empty.
@@ -18,7 +18,9 @@ git status                                       # working tree clean
 git pull --rebase origin master                  # in sync with remote
 ```
 
-Every one of these is also a CI gate, so a failure here is a failure there.
+The format, clippy, test, audit and dash checks are CI gates too, so a failure
+in any of them here is a failure there. The last two lines are not: nothing in
+CI can tell you your working tree is dirty or your branch is behind.
 
 The dash rule covers commit messages as well as files, so it takes two scans:
 the first reads the working tree, the second reads the messages of the commits
@@ -27,30 +29,31 @@ escapes rather than a Perl pattern. The test count is deliberately not written
 down here: a number in a checklist is wrong by the next commit, and a stale
 one teaches the reader to ignore the line.
 
-`cargo test` already drives the shipped CLI over a vault written by the
-fixture builder (`tests/vault_round_trip.rs`), because a green unit suite has
-never caught a broken parse path: the units hand each other in-memory
-databases and never serialise. What that test cannot do is read the file with
-a second implementation, so do the KeePassXC leg by hand:
+`cargo test` already runs the CLI binary as a process over a vault written to
+disk (`tests/vault_round_trip.rs`), because a green unit suite has never
+caught a broken parse path: the units hand each other in-memory databases and
+never serialise. It is the test-profile binary, not the signed one in the app
+bundle, and both halves use the same pinned keepass library, so it proves the
+parse path and not the format. The two things it cannot do are below: run the
+binary you are about to ship, and read the file with a second implementation.
 
 ```sh
 cargo build --release --locked
-work=$(mktemp -d) && trap 'rm -rf "$work"' EXIT
-(umask 077 && printf 'hunter2\n' > "$work/pw")
-cargo run --example make_test_vault -- "$work/test.kdbx" 3<"$work/pw"
-./target/release/ferrispass-cli --vault "$work/test.kdbx" --master-password-fd 3 \
-    --format json entry list 3<"$work/pw"
+work=$(mktemp -d) && trap 'rm -rf "$work"' EXIT INT TERM
+cargo run --release --example make_test_vault -- "$work/test.kdbx"   # prompts
+./target/release/ferrispass-cli --vault "$work/test.kdbx" \
+    --format json entry list                                          # prompts
 ```
 
-The password goes in on a file descriptor, never as an argument: an argument
-is in the shell history and in every process listing for as long as the
-command runs. The scratch directory is private to the user and removed on
-exit, including when the check fails partway.
+Both commands prompt without echo, so the password is never in an argument,
+never in the shell history and never in a file. The scratch directory is
+private to the user and removed when the shell leaves this block, including
+on failure and on Ctrl+C.
 
 Open the same file in KeePassXC afterwards and check the entries, the group
 tree and any custom icons survived. Copy it out of `$work` first, or run the
 KeePassXC step before leaving the shell. The KDBX write path is a pinned fork,
-and that round trip is the only thing that proves it.
+and reading it with a second implementation is the only thing that proves it.
 
 ## Commit message conventions
 
@@ -167,7 +170,7 @@ Step End. The workflow lacks `contents: write` permission. Already set in `relea
 
 Symptom: a single entry created in KeePass2 (or another KeePass client) shows up two, three, or more times in FerrisPass after a sync round-trip - and the counts grow with each cycle. The duplication is real (in the .kdbx file), not a UI artefact.
 
-Root cause: pre-v0.2.1 builds had a bug in `src/keepass/merge.rs::add_entry_under` that re-randomised UUIDs on remote-only entry imports. Other clients then saw the entry as "new on the cloud" on every cycle and kept their own original copy alongside, producing exponential duplication. Fixed in commit XXX (visibility flips in the keepass-rs fork plus deep-replace logic in merge.rs).
+Root cause: pre-v0.2.1 builds had a bug in `src/keepass/merge.rs::add_entry_under` that re-randomised UUIDs on remote-only entry imports. Other clients then saw the entry as "new on the cloud" on every cycle and kept their own original copy alongside, producing exponential duplication. Fixed by making the fork expose the fields the import needs and rewriting `add_entry_under` to preserve the source UUID.
 
 Recovery for users on a corrupted vault is documented in §"v0.2.1 release: cleanup recipe for affected users" below - they need a one-time manual deduplication; the code fix only stops the bleeding.
 

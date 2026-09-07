@@ -35,7 +35,7 @@ Out of scope (will be acknowledged but won't be patched as security issues):
 
 ## Supported versions
 
-We patch the **latest minor release line only**. As of 2026-09, that's `0.9.x`. Older versions don't receive security updates - auto-update is on by default specifically so users land on the patched version within ~24 hours of release.
+We patch the **latest minor release line only**. As of 2026-09, that's `0.9.x`. Older versions don't receive security updates. Auto-update is on by default and checks once per launch, so how quickly a user lands on a patched version depends on how often they start the app.
 
 ## Cryptographic summary
 
@@ -44,7 +44,7 @@ For transparency about the trust assumptions:
 | Surface | Algorithm | Key location |
 |---|---|---|
 | Vault file encryption | AES-256-CBC + HMAC-SHA-256 (KDBX 4 standard) | derived from master password via Argon2id |
-| Master-password KDF | Argon2id | parameters from the .kdbx header (default ≥64 MiB / 2 iterations / 8 lanes) |
+| Master-password KDF | whatever the .kdbx header specifies, Argon2d or Argon2id | parameters come from the file, so they are as strong as the client that wrote it. `keepass::limits` refuses a header asking for more memory than we will allocate, but nothing raises a weak one |
 | OAuth refresh tokens | none - opaque strings stored as-is | macOS Keychain, service `ferrispass-sync` |
 | Update bundle signing | minisign Ed25519 | public key embedded in binary at compile time, private key under maintainer custody |
 | Update bundle delivery | TLS via `reqwest` (rustls) | system root CAs |

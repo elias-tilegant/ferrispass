@@ -156,15 +156,8 @@ pub fn fetch_metadata_bytes(
                 status: status.as_u16(),
             });
         }
-        let mut stream = response;
-        let mut bytes: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.chunk().await.map_err(TransferError::transport)? {
-            bytes.extend_from_slice(&chunk);
-            if bytes.len() as u64 > max_bytes {
-                return Err(TransferError::TooLarge { max_bytes });
-            }
-        }
-        Ok(bytes)
+        reject_declared_length(response.content_length(), max_bytes)?;
+        read_capped(response, max_bytes).await
     })
 }
 
@@ -185,22 +178,46 @@ pub fn send_metadata(request: reqwest::RequestBuilder) -> Result<MetadataRespons
         // and slicing afterwards let a server of any size decide how much
         // memory this process allocates, which is exactly what the cap is
         // there to prevent.
-        let mut stream = response;
-        let mut bytes: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.chunk().await.map_err(TransferError::transport)? {
-            bytes.extend_from_slice(&chunk);
-            if bytes.len() > MAX_METADATA_BODY_BYTES {
-                return Err(TransferError::TooLarge {
-                    max_bytes: MAX_METADATA_BODY_BYTES as u64,
-                });
-            }
-        }
+        let max_bytes = MAX_METADATA_BODY_BYTES as u64;
+        reject_declared_length(response.content_length(), max_bytes)?;
+        let bytes = read_capped(response, max_bytes).await?;
         Ok(MetadataResponse {
             status,
             body: String::from_utf8_lossy(&bytes).into_owned(),
             retry_after,
         })
     })
+}
+
+/// Refuse a body the server already said is too big, before a byte of it is
+/// read. A `Content-Length` can lie, which is what [`read_capped`] is for, but
+/// an honest oversized answer should cost one round trip, not a megabyte.
+fn reject_declared_length(declared: Option<u64>, max_bytes: u64) -> Result<(), TransferError> {
+    match declared {
+        Some(length) if length > max_bytes => Err(TransferError::TooLarge { max_bytes }),
+        _ => Ok(()),
+    }
+}
+
+/// Read a response body, refusing to append a chunk that would carry the
+/// buffer past `max_bytes`.
+///
+/// Checked before the copy, not after: appending first and measuring second
+/// let the buffer overshoot by a whole chunk, and the chunk size is the
+/// server's choice.
+async fn read_capped(
+    response: reqwest::Response,
+    max_bytes: u64,
+) -> Result<Vec<u8>, TransferError> {
+    let mut stream = response;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.chunk().await.map_err(TransferError::transport)? {
+        if bytes.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(TransferError::TooLarge { max_bytes });
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Shared async client for bounded large transfers. The timeout lives on the
@@ -351,6 +368,55 @@ mod tests {
             matches!(result, Err(TransferError::TooLarge { max_bytes })
                 if max_bytes == MAX_METADATA_BODY_BYTES as u64),
             "an oversized metadata body is a typed error, not a truncated string"
+        );
+        let _ = server.join();
+    }
+
+    /// A declared length over the cap is refused before the body is read at
+    /// all, so an honest oversized answer costs one round trip rather than a
+    /// megabyte of allocation.
+    #[test]
+    fn a_declared_length_over_the_cap_is_refused_before_reading() {
+        assert!(reject_declared_length(None, 1024).is_ok(), "no header");
+        assert!(reject_declared_length(Some(1024), 1024).is_ok(), "exact");
+        assert!(matches!(
+            reject_declared_length(Some(1025), 1024),
+            Err(TransferError::TooLarge { max_bytes: 1024 })
+        ));
+    }
+
+    /// The refusal has to be wired into the metadata path, not merely
+    /// available. This server announces an oversized body and then sends
+    /// none of it: a reader that starts reading first waits for bytes that
+    /// never come, a reader that checks the header first answers at once.
+    #[test]
+    fn an_oversized_declared_length_is_refused_without_reading_the_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let oversized = MAX_METADATA_BODY_BYTES + 1;
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request);
+            let _ = socket.write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {oversized}\r\n\r\n").as_bytes(),
+            );
+            // Deliberately no body. Hold the connection open so a reader that
+            // ignored the header has nothing to do but wait.
+            std::thread::sleep(Duration::from_secs(2));
+        });
+
+        let started = std::time::Instant::now();
+        let client = reqwest::Client::builder().build().unwrap();
+        let result = send_metadata(client.get(format!("http://{address}")));
+
+        assert!(
+            matches!(result, Err(TransferError::TooLarge { .. })),
+            "the declared length alone decides this"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "and it decides before waiting for a body"
         );
         let _ = server.join();
     }

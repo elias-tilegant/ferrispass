@@ -14,6 +14,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The commit-message scan needs the range, not just the tip.
+          fetch-depth: 0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -42,10 +45,30 @@ jobs:
         run: cargo test --locked --verbose
 
       # UI copy, comments and docs use plain hyphens, never em or en dashes.
+      # Examples and tests carry user-visible strings too, and the rule covers
+      # commit messages, which is where it was previously unenforced.
       - name: Reject em and en dashes
         run: |
-          if grep -rnP '\x{2014}|\x{2013}' src/ docs/ README.md SECURITY.md; then
-            echo "::error::em or en dash found; use a plain hyphen"
+          if grep -rnP '\x{2014}|\x{2013}' \
+              src/ docs/ examples/ tests/ README.md SECURITY.md; then
+            echo "::error::em or en dash found in a file; use a plain hyphen"
+            exit 1
+          fi
+
+      # On a pull request this is every commit the branch adds; on a push,
+      # the ones the push introduced. A first push to a new branch has no
+      # comparable base, and skipping is better than failing on it.
+      - name: Reject em and en dashes in commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if ! git rev-parse --quiet --verify "$BASE_SHA^{commit}" >/dev/null 2>&1; then
+            echo "no comparable base for this event; skipping"
+            exit 0
+          fi
+          if git log --format='%B' "$BASE_SHA..$HEAD_SHA" | grep -nP '\x{2014}|\x{2013}'; then
+            echo "::error::em or en dash found in a commit message; use a plain hyphen"
             exit 1
           fi
 

@@ -4,14 +4,23 @@ A reading guide for someone opening the repo for the first time. Aim: 15 minutes
 
 ## Crate layout
 
-Single-crate workspace, no FFI. Everything compiles via `cargo build`.
+Single crate, no build script, everything compiles via `cargo build`. The
+`unsafe_code` lint is `deny` rather than `forbid`, because six modules reach
+macOS APIs the safe wrappers do not cover: the Touch ID prompt, the
+session-lock notifications, iCloud file coordination, the staged-file
+permissions, the update installer and two POSIX calls in the save path. Each
+carries the allow at its own top or on the one function that needs it, so
+`grep -rn 'allow(unsafe_code)' src/` is the complete list; nothing else in the
+tree may use it.
 
 ```
 src/
 ├── app/        Bootstrap, AppState (the single source of mutable truth),
 │               settings + recents persistence, key bindings, time helpers
-├── domain/     UI-safe vault types - VaultSnapshot, VaultEntry, VaultGroup.
-│               Crucially: zero secret material. Only what the UI needs to render.
+├── domain/     Vault types the UI renders - VaultSnapshot, VaultEntry,
+│               VaultGroup. Decrypted, and not secret-free: a protected custom
+│               field's value is cleartext here, same trust zone as the
+│               entry password. Debug impls redact; the data does not.
 ├── keepass/    Adapter over the forked keepass-rs crate. Document open/save,
 │               three-way merge for conflicts, password generator, snapshot
 │               extraction (Database → VaultSnapshot).
@@ -107,7 +116,7 @@ pub fn start_some_async_thing(&mut self, cx: &mut Context<Self>) {
 }
 ```
 
-Reference implementation: `try_restore_sync_binding` in `state.rs:541`. Copy this pattern for any new async operation.
+Reference implementation: `try_restore_sync_binding` in `app/state.rs`, whose completion body is split out as `apply_sync_binding_restore` so it can be tested. Copy that shape for any new async operation. No line number here: it would be wrong by the next commit.
 
 `AppShell` (in `src/ui/app_shell.rs`) holds UI-local state (input fields, scroll positions, focus handles, debounce tasks) and subscribes to `AppState` via `cx.observe`. AppShell never mutates AppState directly - it dispatches actions or calls public methods on the `Entity<AppState>`.
 
@@ -221,7 +230,7 @@ reqwest clients: `metadata_client` for short request/response calls (sign-in,
 Graph metadata, the update manifest, favicons) and `transfer_client` for
 vault-sized bodies. They differ only in their deadline, so the system proxy and
 the native trust store cannot apply to one and not the other. Background tasks
-enter the runtime synchronously; nothing else in the app is async.
+enter the runtime synchronously. That Tokio runtime is the only one: everything else asynchronous in the app runs on GPUI's own scheduler, described above.
 
 | Call class | Connect | Total |
 |---|---|---|
