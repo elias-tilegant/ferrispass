@@ -900,7 +900,7 @@ const HISTORY_MAX_ITEMS_DEFAULT: usize = 10;
 
 /// The per-entry history cap the vault asks for: absent → KeePass default,
 /// negative → unlimited (KeePass's -1 convention).
-fn history_cap(db: &Database) -> Option<usize> {
+pub(crate) fn history_cap(db: &Database) -> Option<usize> {
     match db.meta.history_max_items {
         None => Some(HISTORY_MAX_ITEMS_DEFAULT),
         Some(n) if n < 0 => None,

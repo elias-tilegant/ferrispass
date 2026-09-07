@@ -447,17 +447,19 @@ struct HistoryDivergence {
 /// entry edited and then reverted looked identical to the remote copy and its
 /// intermediate version was never uploaded.
 fn history_divergence(local: &Database, remote: &Database) -> HistoryDivergence {
+    let local_cap = crate::keepass::document::history_cap(local);
+    let remote_cap = crate::keepass::document::history_cap(remote);
     let mut divergence = HistoryDivergence::default();
     for local_entry in local.iter_all_entries() {
         let Some(remote_entry) = remote.entry(local_entry.id()) else {
             continue;
         };
-        let local_times = history_version_times(&local_entry);
-        let remote_times = history_version_times(&remote_entry);
+        let local_versions = history_versions(&local_entry);
+        let remote_versions = history_versions(&remote_entry);
         divergence.local_ahead |=
-            holds_a_version_the_other_side_never_saw(&local_times, &remote_times);
+            holds_a_version_the_other_side_never_saw(&local_versions, &remote_versions, remote_cap);
         divergence.remote_ahead |=
-            holds_a_version_the_other_side_never_saw(&remote_times, &local_times);
+            holds_a_version_the_other_side_never_saw(&remote_versions, &local_versions, local_cap);
         if divergence.local_ahead && divergence.remote_ahead {
             break;
         }
@@ -465,31 +467,81 @@ fn history_divergence(local: &Database, remote: &Database) -> HistoryDivergence 
     divergence
 }
 
-/// True when `theirs` is missing one of `mine` that it cannot have trimmed,
-/// meaning one no older than the oldest version they still keep. An empty
-/// `theirs` never trimmed anything, so every version of `mine` counts.
+/// True when `theirs` is missing one of `mine` that they cannot have trimmed
+/// away.
+///
+/// Trimming drops the oldest versions once a history reaches the vault's
+/// `HistoryMaxItems`, so a version older than everything they still hold
+/// *might* be one they discarded. Might is not enough: a version they simply
+/// never received looks identical, and reading that as trimming meant it was
+/// never uploaded and the only copy stayed on one machine.
+///
+/// So trimming has to be established, not assumed. `their_cap` is their own
+/// limit, and only a history that has actually reached it can have dropped
+/// anything. When it has not, every version they lack is one they never saw.
+/// The cost of being wrong the other way is a redundant upload, which is the
+/// side to err on.
 fn holds_a_version_the_other_side_never_saw(
-    mine: &BTreeSet<NaiveDateTime>,
-    theirs: &BTreeSet<NaiveDateTime>,
+    mine: &BTreeSet<HistoryVersion>,
+    theirs: &BTreeSet<HistoryVersion>,
+    their_cap: Option<usize>,
 ) -> bool {
-    let trim_horizon = theirs.first();
+    let their_oldest = theirs.first().map(|version| version.at);
+    let they_are_full = their_cap.is_some_and(|cap| theirs.len() >= cap);
     mine.iter().any(|version| {
-        !theirs.contains(version) && trim_horizon.is_none_or(|oldest| version > oldest)
+        if theirs.contains(version) {
+            return false;
+        }
+        match their_oldest {
+            Some(oldest) if they_are_full => version.at > oldest,
+            _ => true,
+        }
     })
 }
 
-/// One entry's history as the set of version timestamps. `last_modification`
-/// is the key the fork's own history merge uses, so both sides agree on what
-/// counts as the same version. Versions without a timestamp are skipped: the
-/// fork substitutes the epoch for those, which would compare equal across
-/// unrelated versions.
-fn history_version_times(entry: &EntryRef<'_>) -> BTreeSet<NaiveDateTime> {
+/// One archived version, identified the way the fork's history merge treats
+/// them: by `last_modification`, plus a digest of the content so two
+/// different versions written in the same second stay two versions. Keying on
+/// the timestamp alone collapsed them into one, and neither side then looked
+/// ahead of the other.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct HistoryVersion {
+    at: NaiveDateTime,
+    content: [u8; 32],
+}
+
+fn history_versions(entry: &EntryRef<'_>) -> BTreeSet<HistoryVersion> {
     entry
         .history
         .iter()
         .flat_map(|history| history.get_entries())
-        .filter_map(|version| version.times.last_modification)
+        .filter_map(|version| {
+            // Versions without a timestamp are skipped: the fork substitutes
+            // the epoch for those, which would compare equal across unrelated
+            // versions.
+            let at = version.times.last_modification?;
+            Some(HistoryVersion {
+                at,
+                content: history_version_digest(version),
+            })
+        })
         .collect()
+}
+
+/// A digest over the fields a version actually carries. Cheap, order-stable,
+/// and only ever compared against another digest, never stored or shown.
+fn history_version_digest(version: &Entry) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    let mut fields: Vec<(&String, &Value<String>)> = version.fields.iter().collect();
+    fields.sort_by_key(|(key, _)| *key);
+    for (key, value) in fields {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.get().as_bytes());
+        hasher.update([u8::from(value.is_protected())]);
+    }
+    hasher.finalize().into()
 }
 
 /// How far ahead of our clock a `last_modification` may sit and still count
@@ -533,13 +585,22 @@ fn is_future_dated(at: NaiveDateTime) -> bool {
 /// timestamp we already refused as evidence must not become our own.
 fn resolution_time(candidates: [Option<NaiveDateTime>; 2]) -> NaiveDateTime {
     let now = Times::now();
-    candidates
+    let believable_max = candidates
         .into_iter()
         .flatten()
         .filter(|candidate| !is_future_dated(*candidate))
         .chain(std::iter::once(now))
         .max()
-        .expect("now is always a candidate")
+        .expect("now is always a candidate");
+    // Strictly later, not merely equal. A resolution that ties with the
+    // version it replaced settles nothing: a third copy still holding the
+    // other side at that same timestamp meets it as a fresh tie and asks
+    // again. One second is the smallest step KDBX can represent.
+    if believable_max >= now {
+        believable_max + chrono::TimeDelta::seconds(1)
+    } else {
+        now
+    }
 }
 
 /// Build a merged `Database` from both complete inputs and the user's entry
@@ -2656,6 +2717,45 @@ mod tests {
         );
     }
 
+    /// A resolution that ties with the version it replaced settles nothing:
+    /// a third copy still holding the other side at that timestamp meets it
+    /// as a fresh tie and asks again. Taking the maximum of the believable
+    /// candidates did exactly that when both sides were tied inside the skew
+    /// window.
+    #[test]
+    fn a_resolution_is_strictly_newer_than_the_versions_it_replaces() {
+        let tied = keepass::db::Times::now() + chrono::TimeDelta::minutes(5);
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "local-password");
+        local.entry_mut(id).unwrap().times.last_modification = Some(tied);
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_protected(fields::PASSWORD, "remote-password");
+        remote.entry_mut(id).unwrap().times.last_modification = Some(tied);
+
+        let report = diff(&local, &remote);
+        assert_eq!(report.conflicts.len(), 1, "tied timestamps ask");
+        let picks = HashMap::from([(id.to_string(), Side::Local)]);
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+
+        let resolved = merged
+            .entry(id)
+            .expect("entry survives")
+            .times
+            .last_modification
+            .expect("resolution stamps a time");
+        assert!(
+            resolved > tied,
+            "the resolution has to outrank both sides, not tie with them: {resolved} vs {tied}"
+        );
+        assert!(
+            resolved <= keepass::db::Times::now() + MAX_CLOCK_SKEW,
+            "and still stay inside the horizon: {resolved}"
+        );
+    }
+
     /// Keeping Local against a far-future remote used to stamp the local
     /// result with the remote's timestamp, because the winner took the
     /// maximum of both. The attacker then won every later comparison anyway,
@@ -2717,11 +2817,11 @@ mod tests {
         assert!(matches!(report.auto_resolved[0].winner, Side::Remote));
     }
 
-    /// Trimming diverges histories without anyone editing anything: this
-    /// vault drops the oldest versions to its own `HistoryMaxItems` while
-    /// another client keeps a different number. Reading that as a local
-    /// contribution made `has_local_contribution` always true, so a pure pull
-    /// still uploaded and minted a redundant remote version.
+    /// Trimming diverges histories without anyone editing anything: a vault
+    /// drops its oldest versions once it reaches its own `HistoryMaxItems`.
+    /// Reading that as a local contribution made `has_local_contribution`
+    /// always true, so a pure pull still uploaded and minted a redundant
+    /// remote version.
     ///
     /// This case is history-only on purpose. The test that used to carry this
     /// name also changed the remote Notes value, so the auto-resolved entry
@@ -2735,8 +2835,11 @@ mod tests {
         add_history_at(&mut local, id, "v1", oldest);
         add_history_at(&mut local, id, "v2", newer);
 
-        // The other client keeps fewer versions, so the oldest is gone there.
+        // The other client keeps one version, and is at that limit, so the
+        // older one is demonstrably something it dropped rather than
+        // something it never had.
         let mut remote = fork(&local);
+        remote.meta.history_max_items = Some(1);
         remote.entry_mut(id).unwrap().history = None;
         add_history_at(&mut remote, id, "v2", newer);
 
@@ -2745,12 +2848,60 @@ mod tests {
         assert!(report.conflicts.is_empty(), "no current field differs");
         assert!(
             !report.local_history_ahead,
-            "a version older than everything they kept reads as their trimming"
+            "a full history that lacks an older version trimmed it"
         );
         assert!(
             !report.has_local_contribution(),
             "a pure pull is a fast-forward and needs no upload"
         );
+    }
+
+    /// The same shape, but the other side is nowhere near its limit, so it
+    /// cannot have trimmed anything: it simply never received this version.
+    /// Reading that as trimming meant the only copy stayed on one machine
+    /// while the status pill said everything was in sync.
+    #[test]
+    fn an_old_version_a_roomy_remote_lacks_is_still_uploaded() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let older = keepass::db::Times::now() - chrono::TimeDelta::minutes(30);
+        let shared = keepass::db::Times::now() - chrono::TimeDelta::minutes(10);
+        add_history_at(&mut local, id, "local-only", older);
+        add_history_at(&mut local, id, "shared", shared);
+
+        let mut remote = fork(&local);
+        remote.entry_mut(id).unwrap().history = None;
+        add_history_at(&mut remote, id, "shared", shared);
+        // Default cap of ten, holding one version: nothing was trimmed here.
+
+        let report = diff(&local, &remote);
+
+        assert!(report.conflicts.is_empty(), "no current field differs");
+        assert!(
+            report.local_history_ahead,
+            "the remote had room, so the missing version is one it never saw"
+        );
+        assert!(report.has_local_contribution());
+    }
+
+    /// Two different versions written in the same second are two versions.
+    /// Identifying them by timestamp alone collapsed them into one, and then
+    /// neither side counted as ahead of the other.
+    #[test]
+    fn two_versions_sharing_a_timestamp_are_not_one_version() {
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let same_second = keepass::db::Times::now() - chrono::TimeDelta::minutes(10);
+        add_history_at(&mut local, id, "written here", same_second);
+
+        let mut remote = fork(&local);
+        remote.entry_mut(id).unwrap().history = None;
+        add_history_at(&mut remote, id, "written there", same_second);
+
+        let report = diff(&local, &remote);
+
+        assert!(report.local_history_ahead, "our version is not theirs");
+        assert!(report.remote_history_ahead, "and theirs is not ours");
     }
 
     /// Editing an entry and undoing the edit leaves the current fields exactly
