@@ -171,12 +171,16 @@ impl VaultDocument {
         Arc::clone(&self.snapshot)
     }
 
-    pub fn password_for_entry(&self, entry_id: &str) -> Option<String> {
+    /// Wiped when the caller drops it. Every caller copies the cleartext out
+    /// of the database, and the buffers they leave behind are the ones the
+    /// allocator hands to whatever asks next.
+    pub fn password_for_entry(&self, entry_id: &str) -> Option<Zeroizing<String>> {
         self.database
             .iter_all_entries()
             .find(|entry| entry.id().to_string() == entry_id)
             .and_then(|entry| entry.get_password().map(ToOwned::to_owned))
-            .filter(|password| !password.is_empty())
+            .filter(|password: &String| !password.is_empty())
+            .map(Zeroizing::new)
     }
 
     /// Run the real zxcvbn estimator against the entry's stored password.
@@ -206,27 +210,32 @@ impl VaultDocument {
     /// entry. Used by the launcher path to look up `SAP_CONN`, etc.
     /// without snapshotting all custom fields. Returns `None` when the
     /// entry doesn't exist or the field isn't set.
-    pub fn custom_field_value(&self, entry_id: &str, key: &str) -> Option<String> {
+    /// Wiped on drop: a custom field can be marked protected, and the SAP
+    /// launch profile stores a connection password in one.
+    pub fn custom_field_value(&self, entry_id: &str, key: &str) -> Option<Zeroizing<String>> {
         let entry = self
             .database
             .iter_all_entries()
             .find(|e| e.id().to_string() == entry_id)?;
         let value = entry.fields.get(key)?;
-        Some(value.get().clone())
+        Some(Zeroizing::new(value.get().clone()))
     }
 
     /// Raw `otp` field of an entry - `otpauth://...` URL or bare secret.
     /// Used to prefill the Edit modal so the user can change/remove it.
     /// Returns `None` if the entry has no OTP set.
-    pub fn otp_url_for_entry(&self, entry_id: &str) -> Option<String> {
+    /// Wiped on drop: this is the seed that generates every future code, not
+    /// one code.
+    pub fn otp_url_for_entry(&self, entry_id: &str) -> Option<Zeroizing<String>> {
         let entry = self
             .database
             .iter_all_entries()
             .find(|e| e.id().to_string() == entry_id)?;
         entry
             .get_raw_otp_value()
-            .map(|s| s.to_string())
-            .filter(|s| !s.trim().is_empty())
+            .map(|value| value.to_string())
+            .filter(|value: &String| !value.trim().is_empty())
+            .map(Zeroizing::new)
     }
 
     /// Compute the current TOTP code for an entry, if one is configured.
@@ -953,8 +962,9 @@ pub struct EntryDraft {
     /// 2FA secret. Either a raw `otpauth://...` URL (preferred - keeps
     /// algorithm/digits/period/issuer config) or just the base32 secret. Empty
     /// = no OTP. Stored as a *protected* field because the value is the seed
-    /// that generates every future code.
-    pub otp: String,
+    /// that generates every future code, and wiped on drop for the same
+    /// reason as the password beside it.
+    pub otp: Zeroizing<String>,
     /// Non-standard string fields (KeePassXC's "Additional attributes").
     /// Drives our launcher detection (`SAP_CONN`, etc.) and round-trips
     /// through other clients. Entries with empty `key` are skipped on
@@ -972,6 +982,19 @@ pub struct EntryDraft {
 const _: fn(&EntryDraft) = |draft| {
     fn wipes_on_drop(_: &Zeroizing<String>) {}
     wipes_on_drop(&draft.password);
+    // The OTP field is the seed that generates every future code, not one
+    // code, so it is the same kind of secret.
+    wipes_on_drop(&draft.otp);
+};
+
+/// The read paths that hand a secret out of the database. Each returns an
+/// owned copy, and the buffer each caller drops is one the allocator hands to
+/// whatever asks next.
+const _: fn(&VaultDocument) = |document| {
+    fn wipes_on_drop(_: Option<Zeroizing<String>>) {}
+    wipes_on_drop(document.password_for_entry(""));
+    wipes_on_drop(document.custom_field_value("", ""));
+    wipes_on_drop(document.otp_url_for_entry(""));
 };
 
 impl fmt::Debug for EntryDraft {
@@ -2046,7 +2069,7 @@ mod tests {
             url: sentinels[3].into(),
             notes: sentinels[4].into(),
             tags: vec![sentinels[5].into()],
-            otp: sentinels[6].into(),
+            otp: Zeroizing::new(sentinels[6].to_string()),
             custom_fields: vec![CustomField {
                 key: sentinels[7].into(),
                 value: sentinels[8].into(),
@@ -2129,7 +2152,7 @@ mod tests {
         let restored = reopened
             .password_for_entry(&entry_id)
             .expect("entry survives roundtrip");
-        assert_eq!(restored, "hunter2");
+        assert_eq!(restored.as_str(), "hunter2");
 
         // Idempotent save: writing twice in a row should still produce a
         // readable file (this is what auto-save does on every mutation).
@@ -2489,7 +2512,7 @@ mod tests {
             url: "github.com".to_string(),
             notes: "Personal account".to_string(),
             tags: vec!["Work".to_string(), "2FA".to_string()],
-            otp: String::new(),
+            otp: Zeroizing::new(String::new()),
             custom_fields: Vec::new(),
         };
         let new_id = doc
@@ -2511,7 +2534,7 @@ mod tests {
         let reopened =
             crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("reopen");
         let pw = reopened.password_for_entry(&new_id).expect("password back");
-        assert_eq!(pw, "S3cret!");
+        assert_eq!(pw.as_str(), "S3cret!");
     }
 
     #[test]
@@ -3194,7 +3217,10 @@ mod tests {
 
         let entry = doc.snapshot().find_entry(&id).expect("entry exists");
         assert_eq!(entry.title, "Renamed");
-        assert_eq!(doc.password_for_entry(&id).as_deref(), Some("new"));
+        assert_eq!(
+            doc.password_for_entry(&id).as_deref().map(String::as_str),
+            Some("new")
+        );
     }
 
     #[test]
@@ -3530,7 +3556,7 @@ mod tests {
         // Direct lookup helper used by the launcher path.
         assert_eq!(
             doc.custom_field_value(&id, "SAP_CONN").as_deref(),
-            Some("/H/sap.example.com/S/3200")
+            Some("/H/sap.example.com/S/3200".to_string()).as_ref()
         );
 
         // Save + reopen - the kdbx writer must serialise the protection
@@ -3683,14 +3709,17 @@ mod tests {
                 &root_id,
                 &EntryDraft {
                     title: "WithOtp".into(),
-                    otp: url.into(),
+                    otp: Zeroizing::new(url.to_string()),
                     ..Default::default()
                 },
             )
             .expect("create");
 
         // Round-trip the URL itself for the Edit-prefill path.
-        assert_eq!(doc.otp_url_for_entry(&id).as_deref(), Some(url));
+        assert_eq!(
+            doc.otp_url_for_entry(&id).as_deref().map(String::as_str),
+            Some(url)
+        );
 
         // Live code path. The pasted URL omits `digits=`, so keepass-rs
         // would have picked its non-standard default of 8; our wrapper
@@ -3719,7 +3748,7 @@ mod tests {
                 &root_id,
                 &EntryDraft {
                     title: "BareSecret".into(),
-                    otp: "JBSWY3DPEHPK3PXP".into(),
+                    otp: Zeroizing::new("JBSWY3DPEHPK3PXP".to_string()),
                     ..Default::default()
                 },
             )
@@ -3746,7 +3775,7 @@ mod tests {
                 &root_id,
                 &EntryDraft {
                     title: "BareSecret".into(),
-                    otp: "JBSWY3DPEHPK3PXP".into(),
+                    otp: Zeroizing::new("JBSWY3DPEHPK3PXP".to_string()),
                     ..Default::default()
                 },
             )
@@ -3772,7 +3801,7 @@ mod tests {
                 &root_id,
                 &EntryDraft {
                     title: "EightDigit".into(),
-                    otp: url.into(),
+                    otp: Zeroizing::new(url.to_string()),
                     ..Default::default()
                 },
             )
@@ -3798,7 +3827,7 @@ mod tests {
                 &root_id,
                 &EntryDraft {
                     title: "Pretty".into(),
-                    otp: "jbsw y3dp ehpk 3pxp".into(),
+                    otp: Zeroizing::new("jbsw y3dp ehpk 3pxp".to_string()),
                     ..Default::default()
                 },
             )
@@ -3819,7 +3848,7 @@ mod tests {
                 &root_id,
                 &EntryDraft {
                     title: "Cleared".into(),
-                    otp: "otpauth://totp/X?secret=JBSWY3DPEHPK3PXP".into(),
+                    otp: Zeroizing::new("otpauth://totp/X?secret=JBSWY3DPEHPK3PXP".to_string()),
                     ..Default::default()
                 },
             )
@@ -3830,7 +3859,7 @@ mod tests {
             &id,
             &EntryDraft {
                 title: "Cleared".into(),
-                otp: String::new(),
+                otp: Zeroizing::new(String::new()),
                 ..Default::default()
             },
         )
@@ -3875,7 +3904,10 @@ mod tests {
         let reopened =
             crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("reopen");
         assert_eq!(
-            reopened.password_for_entry(&entry_id).as_deref(),
+            reopened
+                .password_for_entry(&entry_id)
+                .as_deref()
+                .map(String::as_str),
             Some("p4ss"),
         );
     }

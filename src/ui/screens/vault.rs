@@ -5,6 +5,8 @@ use gpui::{
 };
 use gpui_component::{Sizable as _, h_flex, input::Input, menu::ContextMenuExt as _, v_flex};
 
+use zeroize::Zeroizing;
+
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, SyncTone, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{
@@ -1823,7 +1825,7 @@ fn entry_detail(
     selected: Option<VaultEntry>,
     selected_strength: Option<crate::keepass::StrengthReport>,
     pending_perma_delete: Option<String>,
-    revealed_password: Option<String>,
+    revealed_password: Option<Zeroizing<String>>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
@@ -1869,7 +1871,7 @@ fn entry_detail_body(
     entry: VaultEntry,
     selected_strength: Option<crate::keepass::StrengthReport>,
     pending_perma_delete: Option<String>,
-    revealed_password: Option<String>,
+    revealed_password: Option<Zeroizing<String>>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
@@ -1994,7 +1996,7 @@ fn entry_detail_header(entry: &VaultEntry, cx: &mut Context<AppShell>) -> impl g
 fn entry_detail_fields(
     entry: &VaultEntry,
     selected_strength: Option<crate::keepass::StrengthReport>,
-    revealed_password: Option<String>,
+    revealed_password: Option<Zeroizing<String>>,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
@@ -2121,7 +2123,7 @@ fn entry_detail_fields(
                         row = row.hover_press(palette::panel()).on_click(cx.listener(
                             move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
                                 shell.copy_with_auto_clear(
-                                    raw_for_clipboard.clone(),
+                                    Zeroizing::new(raw_for_clipboard.clone()),
                                     "TOTP",
                                     window,
                                     cx,
@@ -2496,7 +2498,7 @@ where
 /// other - we don't have to manage `stop_propagation`.
 fn password_row<F1, F2>(
     has_password: bool,
-    revealed_value: Option<String>,
+    revealed_value: Option<Zeroizing<String>>,
     on_click_copy: F1,
     on_click_reveal: F2,
 ) -> AnyElement
@@ -2517,7 +2519,12 @@ where
     }
 
     let revealed = revealed_value.is_some();
-    let display = revealed_value.unwrap_or_else(|| "••••••••••••••••".to_string());
+    // Unwrapped into the element tree, which owns it for the frame. GPUI has
+    // no zeroizing string type, so the wrapper ends here; the point of it was
+    // the long-lived copy on the way in, not this one.
+    let display = revealed_value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "••••••••••••••••".to_string());
 
     let value_box = div()
         .id("detail-row-password-value")

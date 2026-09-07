@@ -424,7 +424,7 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
             "entries in the Recycle Bin cannot be launched",
         ));
     }
-    let password = document.password_for_entry(&args.id).map(Zeroizing::new);
+    let password = document.password_for_entry(&args.id);
     let context = crate::launch::LaunchContext {
         entry: &entry,
         password: password.as_deref().map(String::as_str),
@@ -1058,7 +1058,10 @@ fn secret(doc: &VaultDocument, a: &EntrySecret) -> Result<Value, CliError> {
         return Err(not_found());
     }
     let value = if a.field == "password" {
+        // Unwrapped here on purpose: the JSON envelope below owns it from
+        // this point, and wrapping the whole envelope would buy nothing.
         doc.password_for_entry(&a.id)
+            .map(|password| password.to_string())
     } else if a.field == "totp" {
         doc.totp_for_entry(&a.id)
             .map(|v| v.code.chars().filter(|c| c.is_ascii_digit()).collect())
@@ -1076,6 +1079,7 @@ fn secret(doc: &VaultDocument, a: &EntrySecret) -> Result<Value, CliError> {
             ));
         }
         doc.custom_field_value(&a.id, key)
+            .map(|secret| secret.to_string())
     } else {
         return Err(CliError::new(
             "invalid_field",
@@ -1100,7 +1104,7 @@ impl EntryInput {
             url: self.url,
             notes: self.notes,
             tags: self.tags,
-            otp: self.otp,
+            otp: Zeroizing::new(self.otp),
             custom_fields: convert_custom(self.custom_fields)?,
         })
     }
@@ -1139,7 +1143,7 @@ fn patched_draft(
     let mut d = EntryDraft {
         title: e.title.clone(),
         username: e.username.clone(),
-        password: Zeroizing::new(doc.password_for_entry(id).unwrap_or_default()),
+        password: doc.password_for_entry(id).unwrap_or_default(),
         url: e.url.clone(),
         notes: e.notes.clone(),
         tags: e.tags.clone(),

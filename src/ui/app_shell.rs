@@ -50,8 +50,8 @@ struct EditPrefill {
     username: String,
     url: String,
     notes: String,
-    password: String,
-    otp: String,
+    password: Zeroizing<String>,
+    otp: Zeroizing<String>,
     custom_fields: Vec<crate::domain::CustomField>,
 }
 
@@ -1266,7 +1266,7 @@ impl AppShell {
             url: self.new_entry_url_input.read(cx).value().to_string(),
             notes: self.new_entry_notes_input.read(cx).value().to_string(),
             tags: Vec::new(),
-            otp: self.new_entry_otp_input.read(cx).value().to_string(),
+            otp: Zeroizing::new(self.new_entry_otp_input.read(cx).value().to_string()),
             custom_fields,
         }
     }
@@ -2667,7 +2667,7 @@ impl AppShell {
             .update(cx, |s, cx| s.set_value(&p.username, window, cx));
         self.new_entry_password_input.update(cx, |s, cx| {
             s.set_masked(true, window, cx);
-            s.set_value(&p.password, window, cx);
+            s.set_value(p.password.as_str(), window, cx);
         });
         self.new_entry_url_input
             .update(cx, |s, cx| s.set_value(&p.url, window, cx));
@@ -2675,7 +2675,7 @@ impl AppShell {
             .update(cx, |s, cx| s.set_value(&p.notes, window, cx));
         self.new_entry_otp_input.update(cx, |s, cx| {
             s.set_masked(true, window, cx);
-            s.set_value(&p.otp, window, cx);
+            s.set_value(p.otp.as_str(), window, cx);
         });
 
         // Rebuild the custom-fields editor rows from the entry. Each
@@ -3334,7 +3334,7 @@ impl AppShell {
 
         let ctx = LaunchContext {
             entry: &entry,
-            password: password.as_deref(),
+            password: password.as_deref().map(String::as_str),
             custom_fields: &entry.custom_fields,
         };
         match launch::launch(launcher, ctx) {
@@ -3414,7 +3414,7 @@ impl AppShell {
     /// timer is scheduled; the clipboard still gets wiped at lock time.
     pub fn copy_with_auto_clear(
         &mut self,
-        value: String,
+        value: Zeroizing<String>,
         label: &str,
         window: &mut Window,
         cx: &mut Context<Self>,

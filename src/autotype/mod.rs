@@ -163,7 +163,7 @@ pub struct PerformInput<'a> {
     /// Closure rather than a direct ref so the caller can resolve
     /// the cleartext password however its data model permits
     /// (typically `VaultDocument::password_for_entry`).
-    pub resolve_password: &'a dyn Fn(&str) -> Option<String>,
+    pub resolve_password: &'a dyn Fn(&str) -> Option<zeroize::Zeroizing<String>>,
     pub sequence_template: &'a str,
     /// Username override path: when the orchestrator's choice of
     /// `MatchedEntry` is forced from outside (e.g. the in-app "type
@@ -256,7 +256,13 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
     };
 
     let tokens = sequence::parse(input.sequence_template).map_err(Outcome::BadSequence)?;
-    let ops = sequence::render(&tokens, &RenderContext { username, password });
+    let ops = sequence::render(
+        &tokens,
+        &RenderContext {
+            username,
+            password: password.to_string(),
+        },
+    );
 
     if input.cancellation.is_cancelled() {
         return Err(Outcome::Cancelled);

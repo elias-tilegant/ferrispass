@@ -25,6 +25,7 @@ use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, SystemTime};
+use zeroize::Zeroizing;
 
 /// Process-wide ids prevent an async callback from ever confusing a newly
 /// opened copy of the same path with the vault session that started the work.
@@ -4229,13 +4230,13 @@ impl AppState {
         }
     }
 
-    pub fn copy_selected_value(&self, kind: CopyValueKind) -> Option<String> {
+    pub fn copy_selected_value(&self, kind: CopyValueKind) -> Option<Zeroizing<String>> {
         let model = self.vault_browser()?;
         let entry = model.selected_entry?;
 
         match kind {
-            CopyValueKind::Username => non_empty_copy(entry.username),
-            CopyValueKind::Url => non_empty_copy(entry.url),
+            CopyValueKind::Username => non_empty_copy(entry.username).map(Zeroizing::new),
+            CopyValueKind::Url => non_empty_copy(entry.url).map(Zeroizing::new),
             CopyValueKind::Password => {
                 let VaultStatus::Open { document, .. } = &self.vault else {
                     return None;
@@ -4250,7 +4251,7 @@ impl AppState {
     /// the detail-panel "Additional fields" copy buttons and the
     /// launcher path's per-key lookups. Returns `None` when no vault
     /// is open, the entry doesn't exist, or the field is unset.
-    pub fn custom_field_value(&self, entry_id: &str, key: &str) -> Option<String> {
+    pub fn custom_field_value(&self, entry_id: &str, key: &str) -> Option<Zeroizing<String>> {
         let VaultStatus::Open { document, .. } = &self.vault else {
             return None;
         };
