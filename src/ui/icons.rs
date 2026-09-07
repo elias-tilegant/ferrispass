@@ -17,6 +17,9 @@ pub enum AppIcon {
     Sync,
     Note,
     Fingerprint,
+    Star,
+    Clock,
+    Trash,
 }
 
 impl IconNamed for AppIcon {
@@ -28,6 +31,9 @@ impl IconNamed for AppIcon {
             AppIcon::Refresh => "icons/app/refresh.svg",
             AppIcon::Key => "icons/app/key.svg",
             AppIcon::Shield => "icons/app/shield.svg",
+            AppIcon::Star => "icons/app/star.svg",
+            AppIcon::Clock => "icons/app/clock.svg",
+            AppIcon::Trash => "icons/app/trash.svg",
             AppIcon::Dot => "icons/app/dot.svg",
             AppIcon::Sync => "icons/app/sync.svg",
             AppIcon::Note => "icons/app/note.svg",

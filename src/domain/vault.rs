@@ -285,6 +285,27 @@ impl VaultSnapshot {
             .collect()
     }
 
+    /// Every tag the live entries actually carry, with how many use it,
+    /// alphabetical. Excludes the `Favorite` marker, which the star and the
+    /// Favorites view already represent.
+    ///
+    /// The sidebar used to render a hard-coded "Personal" and "Work"
+    /// regardless of the vault, so clicking either in a vault that had never
+    /// heard of them produced an empty list with no explanation.
+    pub fn tags(&self) -> Vec<(String, usize)> {
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for entry in self.live_entries() {
+            for tag in &entry.tags {
+                if tag.eq_ignore_ascii_case(crate::keepass::FAVORITE_TAG) {
+                    continue;
+                }
+                *counts.entry(tag.clone()).or_default() += 1;
+            }
+        }
+        counts.into_iter().collect()
+    }
+
     /// Entries that have a TOTP secret configured. Drives the sidebar's
     /// "2FA enabled" filter - derived from the real `has_otp` bit, not
     /// from a tag, so it stays accurate regardless of how the user
@@ -470,6 +491,35 @@ mod tests {
 
     fn entry(id: &str, title: &str) -> VaultEntry {
         VaultEntry::new(id, title, "alice", "", true)
+    }
+
+    /// The sidebar rendered a hard-coded "Personal" and "Work" regardless of
+    /// what the vault held, so clicking either in a vault that had never used
+    /// them produced an empty list with no explanation.
+    #[test]
+    fn tags_come_from_the_vault_with_their_counts() {
+        let mut work = entry("a", "Bank");
+        work.tags = vec!["Work".into(), "Favorite".into()];
+        let mut also_work = entry("b", "Payroll");
+        also_work.tags = vec!["Work".into()];
+        let mut archive = entry("c", "Old");
+        archive.tags = vec!["Archive".into()];
+        archive.in_recycle_bin = true;
+
+        let root = VaultGroup {
+            id: "root".into(),
+            name: "Root".into(),
+            entries: vec![work, also_work, archive],
+            ..VaultGroup::default()
+        };
+        let snapshot = VaultSnapshot::new(root);
+
+        assert_eq!(
+            snapshot.tags(),
+            vec![("Work".to_string(), 2)],
+            "counted, alphabetical, without the Favorite marker the star owns, \
+             and without tags only a deleted entry carries"
+        );
     }
 
     #[test]

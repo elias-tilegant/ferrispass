@@ -39,26 +39,42 @@ pub fn run() {
         }
 
         gpui_component::init(cx);
-        ui_theme::init_from_system(cx);
+        // One read for both the theme and the saved window geometry: the
+        // first paint has to be in the right appearance and the right place.
+        let startup_settings = settings::load();
+        ui_theme::init_from_settings(startup_settings.theme, cx);
 
         let app_state = cx.new(|cx| {
             let mut state = AppState::with_resume();
-            // AppShell owns the live settings after bootstrap. Until then,
-            // this small synchronous read decides whether startup should
-            // schedule the first update check.
-            if settings::load().auto_update_check_enabled {
+            if startup_settings.auto_update_check_enabled {
                 state.start_update_check(cx);
             }
             state
         });
 
         actions::init(cx);
-        open_main_window(cx, app_state);
+        open_main_window(cx, app_state, startup_settings.window);
     });
 }
 
-fn open_main_window(cx: &mut App, app_state: Entity<AppState>) {
-    let window_bounds = WindowBounds::centered(size(px(1120.), px(760.)), cx);
+fn open_main_window(
+    cx: &mut App,
+    app_state: Entity<AppState>,
+    saved: Option<crate::app::settings::WindowBoundsSetting>,
+) {
+    // A saved size and position, when it still makes sense. Anything smaller
+    // than the window minimum, or with a non-finite coordinate from a
+    // hand-edited file, falls back to a centred default rather than opening
+    // something unusable.
+    let window_bounds = saved
+        .filter(crate::app::settings::WindowBoundsSetting::is_usable)
+        .map(|bounds| {
+            WindowBounds::Windowed(gpui::Bounds {
+                origin: gpui::point(px(bounds.x), px(bounds.y)),
+                size: size(px(bounds.width), px(bounds.height)),
+            })
+        })
+        .unwrap_or_else(|| WindowBounds::centered(size(px(1120.), px(760.)), cx));
 
     cx.spawn(async move |cx| {
         let window_options = WindowOptions {

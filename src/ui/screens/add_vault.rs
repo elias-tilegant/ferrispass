@@ -83,7 +83,7 @@ fn sharepoint_row(cx: &mut Context<AppShell>) -> AnyElement {
     command_row(
         "add-vault-sharepoint",
         AppIcon::Cloud,
-        "From Cloud Provider...",
+        "From Cloud Provider…",
         "Download a separate synced .kdbx vault",
         RowTone::Primary,
         Some("Connect".into()),
@@ -101,7 +101,7 @@ fn local_row(cx: &mut Context<AppShell>) -> AnyElement {
     command_row(
         "add-vault-local",
         AppIcon::Key,
-        "From this Mac...",
+        "From this Mac…",
         "Open another local .kdbx file",
         RowTone::Default,
         Some("Browse".into()),

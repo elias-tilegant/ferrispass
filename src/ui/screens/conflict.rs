@@ -11,8 +11,8 @@ use std::borrow::Cow;
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, hsla,
-    prelude::FluentBuilder as _, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
+    px,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 
@@ -317,7 +317,10 @@ fn column(
     } else {
         palette::border()
     };
-    let highlight_bg = hsla(0.072_464, 0.851_852, 0.97, 1.0);
+    // The light-mode value of `orange_soft`, inlined. In dark mode it stayed
+    // near-white while the text on it is near-white too, which made the
+    // differing fields, the entire point of this screen, unreadable.
+    let highlight_bg = palette::orange_soft();
     let modified = view
         .modified
         .map(|t| t.format("%Y-%m-%d %H:%M").to_string())

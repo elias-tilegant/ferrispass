@@ -1,11 +1,14 @@
-//! Cloud-connect overlay. Renders one of four sub-views depending on
-//! `state.connect_flow`:
+//! Cloud-connect overlay, rendering whichever sub-view `state.connect_flow`
+//! names:
 //!
-//! 1. `PickProvider` - three provider buttons (SharePoint wired)
-//! 2. `SigningIn`    - device code + verification URL + "Open in browser"
-//! 3. `Picking`      - search-as-you-type list of the user's `.kdbx` files
-//! 4. `Downloading`  - spinner while we fetch the picked file
-//! 5. `Failed`       - error + "Back" button to retry from step 1
+//! - `PickProvider`      - provider buttons; SharePoint and iCloud are wired
+//! - `ICloudActions`     - open an existing remote, or publish this vault
+//! - `Authorizing`       - waiting for a device code, on the reconnect path
+//! - `SigningIn`         - device code, verification URL, "Open in browser"
+//! - `Picking`           - search-as-you-type list of the user's `.kdbx` files
+//! - `Downloading`       - progress while the picked file is fetched
+//! - `ICloudTransferring`- progress for an iCloud download or publish
+//! - `Failed`            - error, plus "Back" to retry from the picker
 
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement as _,
@@ -118,7 +121,7 @@ fn render_pick_provider(cx: &mut Context<AppShell>) -> AnyElement {
                     Provider {
                         id: "provider-onedrive".into(),
                         name: "OneDrive",
-                        meta: "Personal Microsoft account · coming soon",
+                        meta: "Personal Microsoft account · not available yet",
                         letter: "O",
                         color: palette::blue(),
                         selected: false,
@@ -148,10 +151,14 @@ fn provider_row_button(
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     let is_sharepoint = provider.name == "SharePoint";
-    let row = div()
-        .id(provider.id.clone())
-        .pressable_dim()
-        .child(provider_row(provider));
+    // A row that cannot be chosen looks like one, rather than reacting to a
+    // click with a toast that says it does nothing.
+    let row = if enabled {
+        div().id(provider.id.clone()).pressable_dim()
+    } else {
+        div().id(provider.id.clone()).opacity(0.5)
+    }
+    .child(provider_row(provider));
     if enabled && is_sharepoint {
         row.on_click(
             cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
@@ -175,9 +182,12 @@ fn provider_row_button(
         )
         .into_any_element()
     } else {
+        // iCloud has been available since 0.8.0; only OneDrive Personal is
+        // still missing, and the copy said otherwise.
         row.on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
             window.push_notification(
-                "Only SharePoint is wired in this build. OneDrive and iCloud are coming.",
+                "OneDrive for personal Microsoft accounts is not available yet. \
+                 A OneDrive for Business file is reachable through SharePoint.",
                 cx,
             );
         }))

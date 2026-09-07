@@ -145,6 +145,8 @@ pub struct AppShell {
     /// group takes its whole subtree with it, which used to happen on one
     /// unconfirmed click from a context menu.
     pending_group_delete: Option<String>,
+    /// Set by the first click on "Disconnect", cleared by the second.
+    disconnect_armed: bool,
     /// 1 Hz tick task that drives the live TOTP countdown in the detail panel.
     /// Started after a vault opens and dropped (= cancelled) on lock. We only
     /// need this for the seconds-resolution countdown; the actual TOTP code
@@ -398,6 +400,17 @@ impl AppShell {
             )
         };
 
+        // "System" has to mean "follow the system", not "read it once at
+        // startup": macOS switches appearance at sunset for a lot of people.
+        window
+            .observe_window_appearance(|window, cx| {
+                let choice = crate::app::settings::load().theme;
+                if choice == crate::app::settings::ThemeChoice::System {
+                    crate::ui::theme::apply_choice(choice, Some(window), cx);
+                }
+            })
+            .detach();
+
         let _subscriptions = vec![
             cx.observe_in(&state, window, |shell: &mut AppShell, state, window, cx| {
                 // Re-render whenever AppState notifies AND keep the
@@ -426,6 +439,11 @@ impl AppShell {
                         ),
                     )
                 };
+                // Failures raised where no window was in hand park a message
+                // on the state; show it once, here.
+                if let Some(message) = state.update(cx, |state, _| state.take_pending_notice()) {
+                    Self::notify_error(window, message, cx);
+                }
                 let secret_context_changed = shell.secret_context_path != current_path
                     || shell.secret_context_was_open != current_is_open;
                 let editor_closed = shell.entry_editor_was_open && !editor_is_open;
@@ -511,6 +529,7 @@ impl AppShell {
             search_debounce: None,
             pending_perma_delete: None,
             pending_group_delete: None,
+            disconnect_armed: false,
             totp_tick: None,
             clipboard_clear_task: None,
             pending_clipboard_write: None,
@@ -578,6 +597,35 @@ impl AppShell {
 
     pub fn pending_group_delete(&self) -> Option<&str> {
         self.pending_group_delete.as_deref()
+    }
+
+    /// Armed state for "Disconnect". Deleting the OAuth grant and the on-disk
+    /// binding used to take one click, less friction than deleting a single
+    /// password, and it also cleared the sync activity log.
+    pub fn disconnect_armed(&self) -> bool {
+        self.disconnect_armed
+    }
+
+    pub(crate) fn arm_disconnect(&mut self, cx: &mut Context<Self>) {
+        self.disconnect_armed = true;
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_disconnect(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.disconnect_armed) {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn confirm_disconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.disconnect_armed = false;
+        self.state.clone().update(cx, |state, cx| {
+            state.disconnect_sync(cx);
+            let _ = state.close_overlay(cx);
+        });
+        // The removal itself runs in the background; a failure there arrives
+        // through the pending-notice channel the observer drains.
+        window.push_notification("Cloud sync disconnected.", cx);
     }
 
     /// Start the per-second TOTP refresh loop only when the currently-selected
@@ -1556,6 +1604,10 @@ impl AppShell {
             self.cancel_group_delete(cx);
             return;
         }
+        if self.disconnect_armed {
+            self.cancel_disconnect(cx);
+            return;
+        }
         // A half-written entry, and its freshly generated password, used to
         // vanish on one Escape with no warning. The first Escape arms the
         // discard, the second one performs it.
@@ -2030,7 +2082,14 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::ui::theme::toggle(window, cx);
+        // Rotates System, Light, Dark and remembers the choice. It used to
+        // flip the live theme and forget it on quit.
+        let next = self.settings.theme.next();
+        crate::ui::theme::apply_choice(next, Some(window), cx);
+        let mut settings = self.settings.clone();
+        settings.theme = next;
+        self.update_settings(settings, cx);
+        window.push_notification(format!("Theme: {}", next.label()), cx);
     }
 
     fn on_action_save_vault(
@@ -2205,6 +2264,21 @@ impl AppShell {
 
     /// Move the currently-selected entry to the Recycle Bin. No confirmation
     /// (it's recoverable from Trash). Toasts on success/failure.
+    /// An error the user has to read. Every `push_notification` in the app
+    /// used the default builder, which auto-hides after a few seconds, so
+    /// "Could not save entry" could disappear before the user looked up.
+    /// Successes still auto-hide; a failure waits to be dismissed.
+    pub(crate) fn notify_error(
+        window: &mut Window,
+        message: impl Into<SharedString>,
+        cx: &mut gpui::App,
+    ) {
+        window.push_notification(
+            gpui_component::notification::Notification::error(message).autohide(false),
+            cx,
+        );
+    }
+
     /// Run a vault mutation and tell the user what happened, win or lose.
     /// Every mutation goes through here: the drag-and-drop and star paths
     /// used to discard their `Result`, so a failed drop looked exactly like
@@ -2220,7 +2294,7 @@ impl AppShell {
     {
         match self.state.clone().update(cx, mutate) {
             Ok(()) => window.push_notification(success.into(), cx),
-            Err(error) => window.push_notification(errors::mutation_message(&error), cx),
+            Err(error) => Self::notify_error(window, errors::mutation_message(&error), cx),
         }
     }
 
@@ -2256,7 +2330,7 @@ impl AppShell {
             .clone()
             .update(cx, |state, cx| state.toggle_starred(entry_id, cx))
         {
-            window.push_notification(errors::mutation_message(&error), cx);
+            Self::notify_error(window, errors::mutation_message(&error), cx);
         }
     }
 
@@ -2687,7 +2761,10 @@ impl AppShell {
                 &password_for_task,
                 keyfile_for_task.as_deref(),
             )
-            .map_err(|error| error.to_string());
+            // Mapped here, not rendered raw: the unlock screen used to show
+            // the upstream crate's own wording, so a mistyped password read
+            // like a corrupt file.
+            .map_err(|error| errors::open_message(&error));
 
             (path_for_task, result)
         });
@@ -2779,7 +2856,7 @@ impl AppShell {
             match outcome {
                 Ok(password) => {
                     let result = KeePassRepository::open(&path, &password, keyfile.as_deref())
-                        .map_err(|error| error.to_string());
+                        .map_err(|error| errors::open_message(&error));
                     // `password` (Zeroizing) drops here, wiping the
                     // transient buffer.
                     BiometricUnlockOutcome::Open {
@@ -2889,6 +2966,7 @@ impl AppShell {
         self.clear_entry_form(window, cx);
         self.pending_perma_delete = None;
         self.pending_group_delete = None;
+        self.disconnect_armed = false;
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         // If Settings was sitting on the Sync tab when the user locked,

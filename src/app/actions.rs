@@ -154,12 +154,25 @@ fn request_quit(cx: &mut App) {
     cx.quit();
 }
 
+/// Store where the user left the window, so the next launch opens there
+/// instead of centring a fixed default on whatever display is primary.
+fn remember_window_geometry(window: &Window) {
+    let bounds = window.bounds();
+    super::settings::persist_window_bounds(super::settings::WindowBoundsSetting {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+    });
+}
+
 /// Native window-close callbacks run while that window is already on GPUI's
 /// update stack, so notify it directly instead of resolving `active_window`.
 /// The callback always vetoes the immediate Cocoa close: on the clean path the
 /// central quit request closes the sole application window asynchronously.
 pub(crate) fn request_window_close(window: &mut Window, cx: &mut App) -> bool {
     if !block_lifecycle_action_while_saving(Some(window), cx) {
+        remember_window_geometry(window);
         crate::launch::sweeper::purge_all();
         cx.quit();
     }
@@ -170,6 +183,9 @@ pub fn init(cx: &mut App) {
     // App-global Quit handler. Wired here (not on AppShell) so the action fires
     // independently of whatever view currently holds focus.
     cx.on_action(|_: &Quit, cx: &mut App| {
+        if let Some(handle) = cx.active_window() {
+            let _ = handle.update(cx, |_root, window, _cx| remember_window_geometry(window));
+        }
         request_quit(cx);
     });
 
@@ -245,7 +261,8 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::action("Quit FerrisPass", Quit),
         ]),
         Menu::new("File").items([
-            MenuItem::action("New Vault…", CreateVault),
+            // No "New Vault…" here: the flow is not built, and a menu item
+            // that answers with a toast is a menu that lies.
             MenuItem::action("Open Vault…", OpenVaultSwitcher),
             MenuItem::separator(),
             MenuItem::action("Save Vault", SaveVault),

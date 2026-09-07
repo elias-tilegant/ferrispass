@@ -16,7 +16,7 @@ use thiserror::Error;
 /// Tag we use to mark favourites. Compared case-insensitively on read so
 /// vaults that already use "favorite" / "FAVORITE" / etc. just work.
 /// Single canonical casing on write keeps the database tidy.
-pub(crate) const FAVORITE_TAG: &str = "Favorite";
+pub const FAVORITE_TAG: &str = "Favorite";
 
 pub struct VaultDocument {
     database: Database,

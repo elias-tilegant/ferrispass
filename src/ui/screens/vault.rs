@@ -82,6 +82,7 @@ fn sidebar(
     // Header chip text. `provider` is None when the vault is local-only;
     // `synced_at` is None in that case too. Fall back to a neutral "Local"
     // / "-" pair rather than showing stale OneDrive copy.
+    let tags = snapshot.map(VaultSnapshot::tags).unwrap_or_default();
     let provider = summary.provider.clone().unwrap_or_else(|| "Local".into());
     let synced_at = summary.synced_at.clone().unwrap_or_else(|| "-".into());
     // Header status dot + label now track the real sync health (via
@@ -227,6 +228,7 @@ fn sidebar(
                 ))
                 .child(tags_section(
                     twofa_count,
+                    &tags,
                     selection,
                     state_entity.clone(),
                     cx,
@@ -321,36 +323,42 @@ fn library_section(
         .pb_2()
         .child(div().px_3p5().pb_1().child(section_heading("Library")))
         .child(nav_row(
-            "lib-all",
-            AppIcon::Key,
-            "All items",
-            Some(entry_count),
-            selection.is_all_items(),
-            palette::blue(),
+            NavRow {
+                id: "lib-all".into(),
+                icon: AppIcon::Key,
+                label: "All items".into(),
+                count: Some(entry_count),
+                selected: selection.is_all_items(),
+                icon_color: palette::blue(),
+                target: L::AllItems,
+            },
             state_entity.clone(),
-            L::AllItems,
             cx,
         ))
         .child(nav_row(
-            "lib-favorites",
-            AppIcon::Note,
-            "Favorites",
-            Some(starred_count),
-            selection.is_favorites(),
-            palette::orange(),
+            NavRow {
+                id: "lib-favorites".into(),
+                icon: AppIcon::Star,
+                label: "Favorites".into(),
+                count: Some(starred_count),
+                selected: selection.is_favorites(),
+                icon_color: palette::orange(),
+                target: L::Favorites,
+            },
             state_entity.clone(),
-            L::Favorites,
             cx,
         ))
         .child(nav_row(
-            "lib-recent",
-            AppIcon::Cloud,
-            "Recently used",
-            None,
-            selection.is_recently_used(),
-            palette::text_muted(),
+            NavRow {
+                id: "lib-recent".into(),
+                icon: AppIcon::Clock,
+                label: "Recently used".into(),
+                count: None,
+                selected: selection.is_recently_used(),
+                icon_color: palette::text_muted(),
+                target: L::RecentlyUsed,
+            },
             state_entity.clone(),
-            L::RecentlyUsed,
             cx,
         ))
         .child({
@@ -368,14 +376,16 @@ fn library_section(
                     });
                 });
             let trash_row = nav_row(
-                "lib-trash",
-                AppIcon::Note,
-                "Trash",
-                None,
-                selection.is_trash(),
-                palette::text_muted(),
+                NavRow {
+                    id: "lib-trash".into(),
+                    icon: AppIcon::Trash,
+                    label: "Trash".into(),
+                    count: None,
+                    selected: selection.is_trash(),
+                    icon_color: palette::text_muted(),
+                    target: L::Trash,
+                },
                 state_entity,
-                L::Trash,
                 cx,
             );
             div()
@@ -437,12 +447,6 @@ fn groups_section(
         collect(root, 0, recycle_bin_id, &mut flat);
     }
 
-    let palette_colors = [
-        palette::blue(),
-        palette::orange(),
-        palette::green(),
-        palette::text_muted(),
-    ];
     let selected_group = selection.group_id().unwrap_or_default().to_string();
 
     let mut col = v_flex().gap_0p5().pb_2().child(
@@ -474,9 +478,12 @@ fn groups_section(
         ),
     );
 
-    for (i, (depth, group)) in flat.iter().enumerate() {
+    for (depth, group) in flat.iter() {
         let depth = *depth;
-        let color = palette_colors[i % palette_colors.len()];
+        // Derived from the group's identity, not from its position in the
+        // flattened list: expanding a folder inserts rows and used to
+        // re-colour every group below it.
+        let color = stable_accent(&group.id);
         let is_selected = group.id == selected_group;
         let group_id = group.id.clone();
         let count = group.entry_count();
@@ -556,7 +563,7 @@ fn groups_section(
                     gpui::SharedString::from(format!("group-{}", group.id)),
                     AppIcon::Note,
                     group.icon.as_ref(),
-                    &group.name,
+                    group.name.clone().into(),
                     Some(count),
                     is_selected,
                     color,
@@ -592,6 +599,7 @@ fn groups_section(
 
 fn tags_section(
     twofa_count: usize,
+    tags: &[(String, usize)],
     selection: &crate::app::LibrarySelection,
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
@@ -599,59 +607,88 @@ fn tags_section(
     use crate::app::LibrarySelection as L;
     let selected_tag = selection.tag().unwrap_or_default().to_string();
 
-    v_flex()
+    let mut column = v_flex()
         .gap_0p5()
         .pb_2()
         .child(div().px_3p5().pb_1().child(section_heading("Tags")))
         .child(nav_row(
-            "tag-2fa",
-            AppIcon::Dot,
-            "2FA enabled",
-            Some(twofa_count),
-            selection.is_totp_enabled(),
-            palette::blue(),
+            NavRow {
+                id: "tag-2fa".into(),
+                icon: AppIcon::Dot,
+                label: "2FA enabled".into(),
+                count: Some(twofa_count),
+                selected: selection.is_totp_enabled(),
+                icon_color: palette::blue(),
+                target: L::TotpEnabled,
+            },
             state_entity.clone(),
-            L::TotpEnabled,
             cx,
-        ))
-        .child(nav_row(
-            "tag-personal",
-            AppIcon::Dot,
-            "Personal",
-            None,
-            selected_tag.eq_ignore_ascii_case("Personal"),
-            palette::green(),
+        ));
+
+    // The vault's own tags, not a fixed demo pair. Colour comes from the
+    // name, so a tag keeps its colour as others come and go.
+    for (tag, count) in tags {
+        column = column.child(nav_row(
+            NavRow {
+                id: format!("tag-{tag}").into(),
+                icon: AppIcon::Dot,
+                label: tag.clone().into(),
+                count: Some(*count),
+                selected: selected_tag.eq_ignore_ascii_case(tag),
+                icon_color: stable_accent(tag),
+                target: L::Tag(tag.clone()),
+            },
             state_entity.clone(),
-            L::Tag("Personal".to_string()),
             cx,
-        ))
-        .child(nav_row(
-            "tag-work",
-            AppIcon::Dot,
-            "Work",
-            None,
-            selected_tag.eq_ignore_ascii_case("Work"),
-            palette::yellow(),
-            state_entity,
-            L::Tag("Work".to_string()),
-            cx,
-        ))
+        ));
+    }
+    column
 }
 
-#[allow(clippy::too_many_arguments)]
-fn nav_row(
-    id: &'static str,
+/// A colour derived from a name rather than from a position, so a tag or
+/// group keeps its colour when the list around it changes. Expanding a folder
+/// used to re-colour every group below it.
+fn stable_accent(name: &str) -> Hsla {
+    use std::hash::{Hash as _, Hasher as _};
+    let palette_colors = [
+        palette::blue(),
+        palette::green(),
+        palette::orange(),
+        palette::yellow(),
+        palette::red(),
+    ];
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.to_lowercase().hash(&mut hasher);
+    palette_colors[(hasher.finish() as usize) % palette_colors.len()]
+}
+
+/// One clickable row in the sidebar's library or tag list.
+struct NavRow {
+    id: SharedString,
     icon: AppIcon,
-    label_text: &'static str,
+    label: SharedString,
     count: Option<usize>,
     selected: bool,
     icon_color: Hsla,
-    state_entity: gpui::Entity<AppState>,
     target: crate::app::LibrarySelection,
+}
+
+fn nav_row(
+    row: NavRow,
+    state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
+    let NavRow {
+        id,
+        icon,
+        label: label_text,
+        count,
+        selected,
+        icon_color,
+        target,
+    } = row;
     nav_pill(
-        gpui::SharedString::from(id),
+        id,
         icon,
         None,
         label_text,
@@ -680,7 +717,7 @@ fn nav_pill(
     id: gpui::SharedString,
     icon: AppIcon,
     icon_image: Option<&FaviconImage>,
-    label_text: &str,
+    label_text: SharedString,
     count: Option<usize>,
     selected: bool,
     icon_color: Hsla,
@@ -701,7 +738,7 @@ fn nav_pill(
     } else {
         icon_color
     };
-    let label_owned = label_text.to_string();
+    let label_owned = label_text;
 
     h_flex()
         .id(id)
@@ -2672,17 +2709,28 @@ fn status_bar(
             h_flex()
                 .gap_1()
                 .items_center()
-                .child(dot(palette::green(), 6.0))
+                // The dot was unconditionally green, so a locked vault read
+                // as healthy. It is the only lock indicator in the bar, and
+                // it was carrying the wrong half of the information.
+                .child(dot(
+                    if summary.is_open {
+                        palette::green()
+                    } else {
+                        palette::red()
+                    },
+                    6.0,
+                ))
                 .child(if summary.is_open {
                     "Unlocked"
                 } else {
                     "Locked"
                 }),
         )
-        .child(format!(
-            "{} entries · {} groups",
-            summary.entries, summary.groups
-        ))
+        .child(div().flex_shrink_0().child(format!(
+            "{} · {}",
+            plural(summary.entries, "entry", "entries"),
+            plural(summary.groups, "group", "groups")
+        )))
         .child(div().flex_1())
         .child(save_status_pill(save_status, cx))
 }

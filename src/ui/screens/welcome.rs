@@ -6,7 +6,7 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use crate::app::RecentEntry;
-use crate::app::actions::{CreateVault, OpenAbout, OpenConnect};
+use crate::app::actions::{OpenAbout, OpenConnect};
 use crate::app::time::relative_time_label;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
@@ -103,16 +103,18 @@ fn actions_section(cx: &mut Context<AppShell>) -> AnyElement {
                 window.dispatch_action(Box::new(OpenConnect), cx);
             }),
         ))
-        .child(action_row(
+        // Not wired yet. Offering it as a live action and answering with a
+        // "coming soon" toast is worse than saying so up front, the way the
+        // unfinished Settings tabs already do.
+        .child(div().opacity(0.5).child(command_row(
             "welcome-create",
             AppIcon::Key,
             "New Vault",
-            "Start with an empty encrypted database",
-            false,
-            cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
-                window.dispatch_action(Box::new(CreateVault), cx);
-            }),
-        ))
+            "Create a vault with the command-line interface for now",
+            RowTone::Default,
+            Some("Soon".into()),
+            |_: &ClickEvent, _: &mut Window, _: &mut gpui::App| {},
+        )))
         .into_any_element()
 }
 

@@ -1065,8 +1065,21 @@ impl AppState {
         &self.overlay
     }
 
-    pub fn vault_selection_error(&self) -> Option<&str> {
-        self.vault_selection_error.as_deref()
+    /// Take the message a background path left for the user, if any.
+    ///
+    /// Some failures happen where no window is in hand: a rejected file pick
+    /// while a vault is open, or a keychain entry that would not be removed on
+    /// disconnect. They used to be dropped, so the file picker closed and
+    /// nothing happened at all. The shell drains this in its observer and
+    /// shows it once.
+    pub fn take_pending_notice(&mut self) -> Option<String> {
+        self.vault_selection_error.take()
+    }
+
+    /// Leave a message for the shell to show. Overwrites any earlier one:
+    /// the newest failure is the one the user is looking at the result of.
+    fn leave_pending_notice(&mut self, message: impl Into<String>) {
+        self.vault_selection_error = Some(message.into());
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay, cx: &mut Context<Self>) {
@@ -4248,9 +4261,12 @@ impl AppState {
             }
             VaultStatus::Error { message, path } => VaultSummary {
                 title: "Could not open vault".to_string(),
-                subtitle: path
-                    .as_ref()
-                    .map_or_else(|| message.clone(), |path| path.display().to_string()),
+                // The reason, then where. `path` is always `Some` on this
+                // path, so preferring it meant the user never saw why.
+                subtitle: match path {
+                    Some(path) => format!("{message}\n{}", path.display()),
+                    None => message.clone(),
+                },
                 status: "Error".to_string(),
                 entries: 0,
                 groups: 0,
@@ -4296,12 +4312,30 @@ impl AppState {
         self.sync_history.clear();
         cx.notify();
         let operation_gate = self.connect_operations.clone();
-        cx.background_spawn(async move {
+        let cleanup = cx.background_spawn(async move {
+            let mut failure = None;
             operation_gate.run_reserved_cleanup(|| {
-                if let Some(config) = config {
-                    let _ = crate::sync::service::disconnect(&config);
+                if let Some(config) = config
+                    && let Err(error) = crate::sync::service::disconnect(&config)
+                {
+                    failure = Some(error.to_string());
                 }
             });
+            failure
+        });
+        cx.spawn(async move |this, cx| {
+            // The local binding is gone either way. A refresh token or config
+            // file that would not go is worth saying out loud: it was
+            // swallowed, and the user had no way to know their token was
+            // still in the keychain.
+            if let Some(failure) = cleanup.await {
+                let _ = this.update(cx, |state, cx| {
+                    state.leave_pending_notice(format!(
+                        "Disconnected, but some data could not be removed: {failure}"
+                    ));
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
@@ -6508,7 +6542,7 @@ mod park_tests {
         ));
         assert_eq!(state.active_vault_session_id, Some(session_id));
         assert_eq!(
-            state.vault_selection_error(),
+            state.take_pending_notice().as_deref(),
             Some("Selected file is not a .kdbx database.")
         );
     }
@@ -7170,7 +7204,7 @@ mod park_tests {
         assert!(state.save_session_is_retained(&path, session_id));
         assert!(state.save_payload_for_session(&path, session_id).is_some());
         assert_eq!(
-            state.vault_selection_error(),
+            state.take_pending_notice().as_deref(),
             Some("Selected file is not a .kdbx database.")
         );
     }

@@ -1,6 +1,7 @@
 use gpui::{App, SharedString, Window};
 use gpui_component::theme::{Theme, ThemeMode};
 
+use crate::app::settings::ThemeChoice;
 use crate::ui::palette;
 
 /// Override gpui-component's default theme with the FerrisPass design tokens.
@@ -95,21 +96,20 @@ pub fn apply(cx: &mut App) {
     theme.radius_lg = gpui::px(10.0);
 }
 
-/// Switch to the opposite mode and re-apply our palette overrides. Triggers a
-/// window refresh so existing renders pick up the new colors immediately.
-pub fn toggle(window: &mut Window, cx: &mut App) {
-    let next = if Theme::global(cx).mode.is_dark() {
-        ThemeMode::Light
-    } else {
-        ThemeMode::Dark
-    };
-    Theme::change(next, Some(window), cx);
+/// Put the chosen appearance into effect and re-apply our palette overrides.
+/// `System` re-reads the OS setting, so it also serves as the handler for a
+/// live appearance change while the app is running.
+pub fn apply_choice(choice: ThemeChoice, window: Option<&mut Window>, cx: &mut App) {
+    match choice {
+        ThemeChoice::System => Theme::sync_system_appearance(window, cx),
+        ThemeChoice::Light => Theme::change(ThemeMode::Light, window, cx),
+        ThemeChoice::Dark => Theme::change(ThemeMode::Dark, window, cx),
+    }
     apply(cx);
 }
 
-/// Initial setup: read the OS appearance once, then apply our palette so the
-/// startup paint matches the system mode without flashing the wrong theme.
-pub fn init_from_system(cx: &mut App) {
-    Theme::sync_system_appearance(None, cx);
-    apply(cx);
+/// Startup: honour the saved choice so the first paint is already right,
+/// rather than flashing the system theme and correcting afterwards.
+pub fn init_from_settings(choice: ThemeChoice, cx: &mut App) {
+    apply_choice(choice, None, cx);
 }

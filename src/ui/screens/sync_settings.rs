@@ -16,7 +16,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
     px,
 };
-use gpui_component::{Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::{Sizable as _, h_flex, v_flex};
 
 use crate::app::actions::{OpenConnect, OpenReconnect};
 use crate::app::time::relative_time_label;
@@ -49,6 +49,7 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
             binding.as_ref().expect("connected mode requires a binding"),
             &status,
             &history,
+            shell.disconnect_armed(),
             cx,
         ),
         SyncTabMode::Restoring => render_restore(&status, cx),
@@ -84,6 +85,7 @@ fn render_connected(
     binding: &BindingSnapshot,
     status: &SyncStatus,
     history: &[SyncHistoryEntry],
+    disconnect_armed: bool,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     let provider_name = match binding.provider {
@@ -180,6 +182,9 @@ fn render_connected(
                         )
                         .child(disconnect_button(cx)),
                 )
+                .when(disconnect_armed, |this| {
+                    this.child(disconnect_confirmation(binding, provider_name, cx))
+                })
                 .child(file_card(binding))
                 // Reassures the user the sign-in is being kept alive: with
                 // auto-sync on, the grant is refreshed in the background, so
@@ -654,19 +659,95 @@ fn disconnect_button(cx: &mut Context<AppShell>) -> AnyElement {
         .justify_center()
         .child("Disconnect")
         .hover_press(palette::border())
-        .on_click(
-            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                shell.state().clone().update(cx, |state, cx| {
-                    state.disconnect_sync(cx);
-                    let _ = state.close_overlay(cx);
-                });
-                window.push_notification("Cloud sync disconnected.", cx);
-            }),
-        )
+        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            shell.arm_disconnect(cx);
+        }))
         .into_any_element()
 }
 
+/// Armed confirmation for Disconnect. It deletes the OAuth grant and the
+/// on-disk binding and clears the activity log, which was previously less
+/// friction than deleting a single password.
+fn disconnect_confirmation(
+    binding: &BindingSnapshot,
+    provider_name: &str,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    v_flex()
+        .gap_2()
+        .p_3()
+        .rounded(px(8.))
+        .bg(palette::orange_soft())
+        .border_1()
+        .border_color(palette::orange_border())
+        .child(div().text_sm().text_color(palette::text()).child(format!(
+            "Disconnect \"{}\" from {provider_name} ({})?",
+            file_name_of(&binding.local_path_display),
+            binding.account_email
+        )))
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child("The local vault file stays. The sign-in and the activity log go."),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .id("disconnect-confirm")
+                        .h(px(28.))
+                        .px_3()
+                        .rounded(px(5.))
+                        .bg(palette::red())
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(palette::panel())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .pressable_dim()
+                        .child("Disconnect")
+                        .on_click(cx.listener(
+                            |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                                shell.confirm_disconnect(window, cx);
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .id("disconnect-cancel")
+                        .h(px(28.))
+                        .px_3()
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(palette::border_strong())
+                        .text_xs()
+                        .text_color(palette::text())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover_press(palette::border())
+                        .child("Keep connected")
+                        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                            shell.cancel_disconnect(cx);
+                        })),
+                ),
+        )
+}
+
 // --------------- helpers ---------------
+
+/// Last path component, for a confirmation that has to name the file
+/// without wrapping the whole path.
+fn file_name_of(path_display: &str) -> &str {
+    path_display
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path_display)
+}
 
 /// Plain-old-data snapshot of SyncBinding for renderers - `AppState::sync`
 /// is held as `Option<SyncBinding>` and `SyncBinding` isn't `Clone` (it

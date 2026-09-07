@@ -18,7 +18,9 @@ const FILE_NAME: &str = "settings.json";
 /// never auto-clear. We keep the type explicit (rather than a magic 0)
 /// so the UI can distinguish "user picked Never" from "the file is
 /// missing this field".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Not `Eq`: the window geometry is floating point. Equality is only used to
+// skip redundant writes, and `PartialEq` is enough for that.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     pub auto_lock_secs: Option<u64>,
     pub clipboard_clear_secs: Option<u64>,
@@ -106,6 +108,90 @@ pub struct AppSettings {
     /// hand-edited file can't hammer Graph every second.
     #[serde(default = "default_auto_sync_secs")]
     pub auto_sync_secs: Option<u64>,
+    /// Light, dark, or whatever macOS is set to. Cmd+Shift+D rotated the
+    /// live theme and forgot it on quit, and "follow the system" only ever
+    /// meant "read it once at startup".
+    #[serde(default)]
+    pub theme: ThemeChoice,
+    /// Last window geometry, restored on the next launch. Every start used to
+    /// centre a fixed 1120x760 window, which is a poor fit for anyone with a
+    /// large display or a tiling habit.
+    #[serde(default)]
+    pub window: Option<WindowBoundsSetting>,
+}
+
+/// Which appearance the app uses.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    /// Follow the macOS appearance, including a change while running.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    /// Cycle order for the Cmd+Shift+D shortcut.
+    pub fn next(self) -> Self {
+        match self {
+            ThemeChoice::System => ThemeChoice::Light,
+            ThemeChoice::Light => ThemeChoice::Dark,
+            ThemeChoice::Dark => ThemeChoice::System,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeChoice::System => "System",
+            ThemeChoice::Light => "Light",
+            ThemeChoice::Dark => "Dark",
+        }
+    }
+}
+
+/// Window geometry in logical pixels. Stored flat so a hand-edited or
+/// truncated settings file degrades to "no saved geometry" rather than
+/// failing the whole load.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WindowBoundsSetting {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WindowBoundsSetting {
+    /// Reject geometry that would open a window nobody can reach or use: a
+    /// display that is gone, or a size below the app's own minimum.
+    pub fn is_usable(&self) -> bool {
+        self.width >= MIN_WINDOW_WIDTH
+            && self.height >= MIN_WINDOW_HEIGHT
+            && self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+    }
+}
+
+pub const MIN_WINDOW_WIDTH: f32 = 860.0;
+pub const MIN_WINDOW_HEIGHT: f32 = 560.0;
+
+/// Store the window geometry, unless it is already what is on disk.
+///
+/// Written once, on the way out, rather than on every resize event: a drag
+/// fires continuously and this is a preference nobody reads until the next
+/// launch.
+pub fn persist_window_bounds(bounds: WindowBoundsSetting) {
+    if !bounds.is_usable() {
+        return;
+    }
+    let mut settings = load();
+    if settings.window == Some(bounds) {
+        return;
+    }
+    settings.window = Some(bounds);
+    let _ = save(&settings);
 }
 
 fn default_true() -> bool {
@@ -176,6 +262,8 @@ impl Default for AppSettings {
             auto_type_sequence: default_auto_type_sequence(),
             biometric_allow_passcode_fallback: true,
             auto_sync_secs: default_auto_sync_secs(),
+            theme: ThemeChoice::System,
+            window: None,
         }
     }
 }
@@ -293,6 +381,60 @@ mod tests {
             launch_cleanup_secs: secs,
             ..AppSettings::default()
         }
+    }
+
+    /// Settings files written before these fields existed have to keep
+    /// loading, with the documented defaults rather than a failed parse.
+    #[test]
+    fn a_settings_file_without_theme_or_window_still_loads() {
+        let older = r#"{"auto_lock_secs":240,"clipboard_clear_secs":10}"#;
+        let parsed: AppSettings = serde_json::from_str(older).expect("older file parses");
+        assert_eq!(parsed.theme, ThemeChoice::System);
+        assert_eq!(parsed.window, None);
+    }
+
+    #[test]
+    fn the_theme_choice_cycles_back_to_system() {
+        assert_eq!(ThemeChoice::System.next(), ThemeChoice::Light);
+        assert_eq!(ThemeChoice::Light.next(), ThemeChoice::Dark);
+        assert_eq!(ThemeChoice::Dark.next(), ThemeChoice::System);
+    }
+
+    /// Geometry from a hand-edited file, or from a display that no longer
+    /// exists, must not open a window the user cannot use.
+    #[test]
+    fn unusable_window_geometry_is_rejected() {
+        let usable = WindowBoundsSetting {
+            x: 100.0,
+            y: 80.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        assert!(usable.is_usable());
+        assert!(
+            !WindowBoundsSetting {
+                width: MIN_WINDOW_WIDTH - 1.0,
+                ..usable
+            }
+            .is_usable(),
+            "below the window minimum"
+        );
+        assert!(
+            !WindowBoundsSetting {
+                height: MIN_WINDOW_HEIGHT - 1.0,
+                ..usable
+            }
+            .is_usable(),
+            "below the window minimum"
+        );
+        assert!(
+            !WindowBoundsSetting {
+                x: f32::NAN,
+                ..usable
+            }
+            .is_usable(),
+            "a non-finite coordinate is not a position"
+        );
     }
 
     #[test]
