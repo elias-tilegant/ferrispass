@@ -3085,8 +3085,9 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let mut succeeded = 0usize;
             for (idx, (entry_id, url)) in targets.into_iter().enumerate() {
-                // Each fetch off the UI thread - ureq is sync, so we'd
-                // block the renderer otherwise.
+                // Each fetch off the UI thread. The favicon path is a
+                // synchronous wrapper around the shared client, so calling it
+                // here would block the renderer for the whole round trip.
                 let url_for_task = url.clone();
                 let bytes_result = cx
                     .background_spawn(async move { crate::favicon::fetch_favicon(&url_for_task) })

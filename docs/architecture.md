@@ -112,7 +112,8 @@ Reference implementation: `try_restore_sync_binding` in `state.rs:541`. Copy thi
 ```
 ┌─────────────────────────────────────────────────────────┐
 │ Process memory (vault unlocked)                         │
-│   - VaultDocument (decrypted entries, master password)  │
+│   - VaultDocument (decrypted entries, derived key)      │
+│     The master password is consumed at unlock, not kept │
 │   - SyncBinding (in-flight access token, ~1h TTL)       │
 └─────────────────────────────────────────────────────────┘
               │ atomic write (fsync + rename)

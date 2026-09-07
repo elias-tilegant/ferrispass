@@ -2915,10 +2915,9 @@ impl AppShell {
         };
         let keyfile = self.state.read(cx).pending_unlock_keyfile();
 
-        // `Zeroizing` wipes our transient copies on drop. The opened
-        // vault still retains the master password in `VaultDocument`
-        // (same as any unlock); this only tightens the short-lived
-        // submit/enrol buffers.
+        // `Zeroizing` wipes this copy on drop. `VaultDocument` keeps only
+        // the derived key, so once the unlock consumes this buffer the
+        // password is gone unless Touch ID enrolment stored it.
         let password = Zeroizing::new(self.password_input.read(cx).value().to_string());
         if password.is_empty() && keyfile.is_none() {
             self.state.update(cx, |state, cx| {
@@ -3002,14 +3001,11 @@ impl AppShell {
     /// transition the Unlock screen can render
     /// (`BiometricAttempt::Error`).
     ///
-    /// Note on the cleartext password: it's held in a `Zeroizing`
-    /// buffer inside the background task and fed straight into
-    /// `KeePassRepository::open`. It does *not* round-trip through
-    /// `AppState` as a bare value - but the *opened* vault
-    /// (`VaultDocument`) does retain the master password in memory
-    /// for the life of the session, same as a normally-typed unlock.
-    /// "Never crosses AppState" applies to the transient buffer, not
-    /// to the opened document.
+    /// Note on the cleartext password: it is held in a `Zeroizing` buffer
+    /// inside the background task and fed straight into
+    /// `KeePassRepository::open`. It does not round-trip through `AppState`
+    /// as a bare value, and the opened `VaultDocument` keeps only the derived
+    /// key, so nothing retains the password for the life of the session.
     pub fn submit_biometric_unlock(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.start_biometric_unlock(cx);
     }

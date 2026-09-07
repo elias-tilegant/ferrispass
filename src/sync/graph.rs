@@ -2,10 +2,12 @@
 //! sync flow needs, no crate-wide HTTP framework.
 //!
 //! The public API is synchronous because callers already run it through
-//! `cx.background_spawn(...)`. Small metadata calls use `ureq`; vault
-//! transfers enter the bounded async client in `sync::http`. Rate limits,
-//! throttling, retries, and resumable uploads are out of scope; the simple
-//! content endpoint supports vaults up to 250 MB.
+//! `cx.background_spawn(...)`. Every call goes through the one client in
+//! `sync::http`, metadata and vault transfers alike, on separate timeout
+//! budgets. Throttling is handled here: a 429 or a 503 with `Retry-After`
+//! becomes `GraphError::Throttled`, and the caller backs off rather than
+//! retrying. Resumable uploads are out of scope; the simple content endpoint
+//! supports vaults up to 250 MB.
 
 use serde::Deserialize;
 #[cfg(test)]
