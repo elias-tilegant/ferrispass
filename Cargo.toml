@@ -25,7 +25,7 @@ incremental = false
 # custom-icon-aware merge this app relies on. Re-evaluate the pin if those
 # land upstream; bump it deliberately and re-run the interop round trip
 # against KeePassXC first.
-keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "c1b2ab8", features = ["save_kdbx4", "totp", "_merge"] }
+keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "39133b9", features = ["save_kdbx4", "totp", "_merge"] }
 # Deliberately without a `rev`. gpui-component's manifest references Zed
 # without one, and Cargo treats `git+url` and `git+url?rev=X` as two distinct
 # sources: adding a rev here compiles two incompatible `gpui::App` types and

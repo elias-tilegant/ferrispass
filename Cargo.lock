@@ -3371,7 +3371,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -3770,7 +3770,7 @@ dependencies = [
 [[package]]
 name = "keepass"
 version = "0.0.0-placeholder-version"
-source = "git+https://github.com/elias-tilegant/keepass-rs?rev=c1b2ab8#c1b2ab81041fac8617646eebf39e0a69e295498a"
+source = "git+https://github.com/elias-tilegant/keepass-rs?rev=39133b9#39133b980c1b319dbbea6998538465d8cef8671b"
 dependencies = [
  "aes 0.9.3",
  "base32",
@@ -7218,7 +7218,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
