@@ -689,6 +689,16 @@ fn sync_plan_token(
     hasher.update(Sha256::digest(local));
     hasher.update(remote_etag.as_bytes());
     for conflict in &report.conflicts {
+        hasher.update(b"entry\0");
+        hasher.update(conflict.id.as_bytes());
+        for field in conflict.fields.iter().filter(|field| field.differs) {
+            hasher.update(field.label.as_bytes());
+        }
+    }
+    // Groups belong in the token for the same reason entries do: the commit
+    // that quotes this token must be answering the plan the user was shown.
+    for conflict in &report.group_conflicts {
+        hasher.update(b"group\0");
         hasher.update(conflict.id.as_bytes());
         for field in conflict.fields.iter().filter(|field| field.differs) {
             hasher.update(field.label.as_bytes());
@@ -1279,6 +1289,23 @@ mod tests {
         assert_ne!(token, sync_plan_token(b"local revision", "etag-2", &report));
         assert!(token.starts_with("v1:"));
         assert_eq!(token.len(), 67);
+
+        // A group conflict has to move the token too: the commit that quotes
+        // it is answering the plan, and a plan that grew a question the user
+        // never saw must not be accepted.
+        let with_group = crate::keepass::merge::ConflictReport {
+            group_conflicts: vec![crate::keepass::merge::GroupConflict {
+                id: "g1".into(),
+                name: "Banking".into(),
+                path: Vec::new(),
+                fields: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        assert_ne!(
+            token,
+            sync_plan_token(b"local revision", "etag-1", &with_group)
+        );
     }
 
     #[test]
