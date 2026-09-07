@@ -1566,24 +1566,62 @@ fn group_conflicts(local: &Database, remote: &Database) -> Vec<GroupConflict> {
         .iter_all_groups()
         .filter_map(|local_group| {
             let remote_group = remote.group(local_group.id())?;
-            if !group_content_differs(&local_group, &remote_group) {
+            // Two independent reasons, each with its own clock. Content is
+            // ranked by `last_modification`, where the group sits by
+            // `location_changed`, and either can tie on its own.
+            let content_tied = group_content_differs(&local_group, &remote_group)
+                && timestamp_winner(
+                    local_group.times.last_modification,
+                    remote_group.times.last_modification,
+                )
+                .is_none();
+            let moved = local_group.parent().map(|parent| parent.id())
+                != remote_group.parent().map(|parent| parent.id());
+            let location_tied = moved
+                && timestamp_winner(
+                    local_group.times.location_changed,
+                    remote_group.times.location_changed,
+                )
+                .is_none();
+            if !content_tied && !location_tied {
                 return None;
             }
-            timestamp_winner(
-                local_group.times.last_modification,
-                remote_group.times.last_modification,
-            )
-            .is_none()
-            .then(|| GroupConflict {
+            let mut fields = group_field_diffs(&local_group, &remote_group);
+            if moved {
+                fields.insert(
+                    0,
+                    FieldDiff {
+                        differs: true,
+                        label: "Location".into(),
+                        local: group_location(local, local_group.id()),
+                        remote: group_location(remote, remote_group.id()),
+                    },
+                );
+            }
+            Some(GroupConflict {
                 id: local_group.id().to_string(),
                 name: local_group.name.clone(),
                 path: group_ancestry(local, local_group.id()),
-                fields: group_field_diffs(&local_group, &remote_group),
+                fields,
             })
         })
         .collect();
     conflicts.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     conflicts
+}
+
+/// Where a group sits, as a person would read it. The root group carries no
+/// name of its own, so it reads as the vault rather than as an empty step.
+fn group_location(db: &Database, id: GroupId) -> String {
+    let path: Vec<String> = group_ancestry(db, id)
+        .into_iter()
+        .filter(|name| !name.is_empty())
+        .collect();
+    if path.is_empty() {
+        "Vault root".to_string()
+    } else {
+        path.join(" > ")
+    }
 }
 
 /// Ancestor names from the root down, excluding the group itself. Two groups
@@ -1919,6 +1957,30 @@ fn force_group_winner(
         content.write_to(&mut target)?;
     }
 
+    // Where the group sits is decided on its own clock, so the choice has to
+    // reach that one too. Without this the fork ranked the move by
+    // `location_changed`, which is exactly what a tie defeats, and the losing
+    // side's placement went back on the next upload.
+    let their_parent = source
+        .group(source_id)
+        .and_then(|group| group.parent().map(|parent| parent.id()));
+    let our_parent = merged
+        .group(group_id)
+        .and_then(|group| group.parent().map(|parent| parent.id()));
+    if matches!(winner, Side::Remote)
+        && our_parent != their_parent
+        && let Some(target) = their_parent.filter(|id| merged.group(*id).is_some())
+    {
+        move_group(merged, group_id, target);
+    }
+    let moved_time = resolution_time([
+        merged
+            .group(group_id)
+            .and_then(|group| group.times.location_changed),
+        source
+            .group(source_id)
+            .and_then(|group| group.times.location_changed),
+    ]);
     let winner_time = resolution_time([
         merged
             .group(group_id)
@@ -1929,9 +1991,15 @@ fn force_group_winner(
     ]);
     if let Some(mut group) = merged.group_mut(group_id) {
         group.times.last_modification = Some(winner_time);
+        if our_parent != their_parent {
+            group.times.location_changed = Some(moved_time);
+        }
     }
     if let Some(mut group) = source.group_mut(source_id) {
         group.times.last_modification = Some(Times::epoch());
+        if our_parent != their_parent {
+            group.times.location_changed = Some(Times::epoch());
+        }
     }
     Ok(())
 }
@@ -4106,6 +4174,20 @@ mod tests {
             icon.last_modification_time = Some(tied);
         }
 
+        // An undated pair is the same ambiguity: older clients wrote no time
+        // at all, and nothing there says which name came last either.
+        let mut undated_local = fork(&local);
+        let mut undated_remote = fork(&remote);
+        for db in [&mut undated_local, &mut undated_remote] {
+            db.custom_icon_mut(icon_id).unwrap().last_modification_time = None;
+        }
+        assert!(
+            diff(&undated_local, &undated_remote)
+                .metadata_conflict
+                .is_some(),
+            "two names, no times: still the user's to settle"
+        );
+
         let report = diff(&local, &remote);
         let conflict = report
             .metadata_conflict
@@ -4288,6 +4370,72 @@ mod tests {
         assert!(
             !diff(&local, &remote).structural_writeback_required,
             "the cursor and the writer's name are not settings"
+        );
+    }
+
+    /// Where a group sits is decided on its own clock, and two moves can tie
+    /// on it. The fork then kept this copy's placement and said nothing, so
+    /// the move made on the other machine went back on the next upload.
+    #[test]
+    fn a_tied_group_move_is_asked_and_applied() {
+        let mut base = Database::new();
+        let (here, there, moved) = {
+            let mut root = base.root_mut();
+            let here = root.add_group().id();
+            let there = root.add_group().id();
+            let moved = root.add_group().id();
+            (here, there, moved)
+        };
+        base.group_mut(here).unwrap().name = "Here".into();
+        base.group_mut(there).unwrap().name = "There".into();
+        base.group_mut(moved).unwrap().name = "Banking".into();
+
+        let tied = keepass::db::Times::now();
+        let mut local = fork(&base);
+        local
+            .group_mut(moved)
+            .unwrap()
+            .track_changes()
+            .move_to(here)
+            .unwrap();
+        local.group_mut(moved).unwrap().times.location_changed = Some(tied);
+        let mut remote = fork(&base);
+        remote
+            .group_mut(moved)
+            .unwrap()
+            .track_changes()
+            .move_to(there)
+            .unwrap();
+        remote.group_mut(moved).unwrap().times.location_changed = Some(tied);
+
+        let report = diff(&local, &remote);
+        let conflict = report
+            .group_conflicts
+            .first()
+            .expect("two moves, one second: the user has to choose");
+        assert!(
+            conflict.fields.iter().any(|field| field.label == "Location"
+                && field.local == "Here"
+                && field.remote == "There"),
+            "and the row has to say where each side put it: {:?}",
+            conflict.fields
+        );
+
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::from([(moved.to_string(), Side::Remote)]),
+            metadata: None,
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(
+            merged
+                .group(moved)
+                .expect("the group")
+                .parent()
+                .expect("it has a parent")
+                .id(),
+            there,
+            "choosing theirs has to put it where they put it"
         );
     }
 
