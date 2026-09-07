@@ -1,4 +1,4 @@
-//! "About FerrisPass" modal — small dialog with brand, version and a
+//! "About FerrisPass" modal - small dialog with brand, version and a
 //! repo link. Reachable from the macOS menu bar (FerrisPass → About
 //! FerrisPass) and from the Welcome footer by clicking the version
 //! string. The `OpenAbout` action can be dispatched from anywhere so

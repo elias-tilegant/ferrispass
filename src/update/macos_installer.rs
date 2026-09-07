@@ -118,7 +118,7 @@ const STAGING_SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_sec
 
 /// Marker file that makes a staging directory unsweepable. Written durably
 /// BEFORE the first swap, because from that point on the directory may hold
-/// the only known-good old bundle — and `validate_bundle` on the target is
+/// the only known-good old bundle - and `validate_bundle` on the target is
 /// structural only, it cannot prove the new bundle actually starts. Only a
 /// fully successful install removes the directory (marker included).
 const STAGING_KEEP_MARKER: &str = ".ferrispass-keep";
@@ -126,7 +126,7 @@ const STAGING_KEEP_MARKER: &str = ".ferrispass-keep";
 /// Remove `.ferrispass-update-*` directories left behind by a crashed or
 /// killed earlier install. Only called after the installed bundle passed
 /// `validate_bundle`, so nothing in these leftovers is still needed. Best
-/// effort — a failure here must never block the actual update.
+/// effort - a failure here must never block the actual update.
 fn sweep_stale_staging(parent: &Path) {
     let Ok(entries) = fs::read_dir(parent) else {
         return;
@@ -141,7 +141,7 @@ fn sweep_stale_staging(parent: &Path) {
             continue;
         }
         // Fail closed: an unreadable marker state must protect the
-        // directory exactly like a present marker — this may be the only
+        // directory exactly like a present marker - this may be the only
         // good copy of the old app.
         if !matches!(
             entry.path().join(STAGING_KEEP_MARKER).try_exists(),

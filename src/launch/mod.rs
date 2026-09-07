@@ -52,7 +52,7 @@ impl LaunchTarget {
 /// Backend that knows how to open one entry in one external app.
 pub(crate) trait Launcher: Send + Sync {
     /// Cheap detection from the snapshot. Must not touch the password
-    /// or do I/O — that's reserved for `launch`.
+    /// or do I/O - that's reserved for `launch`.
     fn supports(&self, entry: &VaultEntry) -> bool;
     /// Compose the launch payload, hand it to the OS. Caller is
     /// responsible for keeping the returned handle alive long enough
@@ -62,11 +62,11 @@ pub(crate) trait Launcher: Send + Sync {
 }
 
 /// Everything a launcher needs to compose its payload, borrowed from
-/// AppShell-owned state. Lifetime tied to the launch call — the
+/// AppShell-owned state. Lifetime tied to the launch call - the
 /// launcher must not stash references past `launch`'s return.
 pub struct LaunchContext<'a> {
     pub entry: &'a VaultEntry,
-    /// `None` only when the entry has no password set. Cleartext —
+    /// `None` only when the entry has no password set. Cleartext -
     /// already exposed in the same trust zone as the snapshot.
     pub password: Option<&'a str>,
     /// Convenience pointer to `entry.custom_fields`. Same allocation,
@@ -98,7 +98,7 @@ pub enum LaunchError {
     UnsupportedTarget(&'static str),
 
     /// I/O during temp-file write or process spawn. Display value is
-    /// safe (no body) — only the kind + path; never log the file
+    /// safe (no body) - only the kind + path; never log the file
     /// contents themselves.
     #[error("launch i/o failed: {0}")]
     Io(#[from] std::io::Error),

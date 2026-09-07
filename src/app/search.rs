@@ -1,10 +1,10 @@
 //! Local fuzzy entry search.
 //!
 //! Matches an entry's title, URL host, full URL, username, tags, and the
-//! names of its ancestor groups (its `group_path`) — so searching a folder
+//! names of its ancestor groups (its `group_path`) - so searching a folder
 //! name like "acme" surfaces every entry filed under that group and its
 //! subgroups. Metadata-only: never reads `password`, `notes`, or
-//! `custom_fields` — those are either secret or noisy enough that searching
+//! `custom_fields` - those are either secret or noisy enough that searching
 //! them would surface results the user didn't expect. The opposite of a
 //! server-side index: in-memory, per-keystroke, no plaintext metadata ever
 //! touches disk.
@@ -13,29 +13,29 @@
 //!
 //! | needle chars | exact | prefix | substring | typo  | fuzzy |
 //! |--------------|:-----:|:------:|:---------:|:-----:|:-----:|
-//! | 1-2          |  ✓    |   ✓    |     —     |   —   |   —   |
-//! | 3            |  ✓    |   ✓    |     ✓     |   —   |   —   |
+//! | 1-2          |  ✓    |   ✓    |     -     |   -   |   -   |
+//! | 3            |  ✓    |   ✓    |     ✓     |   -   |   -   |
 //! | 4..=8        |  ✓    |   ✓    |     ✓     | 1 ed  |   ✓   |
 //! | 9+           |  ✓    |   ✓    |     ✓     | 2 ed  |   ✓   |
 //!
 //! Two complementary approximate-match passes sit between substring and
 //! fuzzy:
 //!
-//! - **Typo / edit-distance** catches *substitutions* — `tilegane` → the
+//! - **Typo / edit-distance** catches *substitutions* - `tilegane` → the
 //!   term `tilegant`, `microsotf` → `microsoft`. Runs **per term** (split
 //!   on non-alphanumeric chars): edit-distance against the whole title
 //!   `"elias tilegant"` would never fit in budget; against the single
 //!   term `"tilegant"` it does. Budget scales with needle length:
 //!   `4..=8` chars get 1 edit, `9+` chars get 2.
 //!
-//! - **Nucleo fuzzy** catches *deletions* — `gthb` → `github`, `tlgnt` →
+//! - **Nucleo fuzzy** catches *deletions* - `gthb` → `github`, `tlgnt` →
 //!   `tilegant`. fzf-style subsequence, not Levenshtein, so it can NOT
-//!   handle substitutions on its own — that's the gap the typo pass
+//!   handle substitutions on its own - that's the gap the typo pass
 //!   fills. Fuzzy additionally requires (a) a score floor relative to
-//!   the needle length and (b) a span gate — matched indices in the
+//!   the needle length and (b) a span gate - matched indices in the
 //!   haystack must lie within `needle_len * 2` positions of each other.
 //!
-//! Both approximate passes are disabled against the full URL field —
+//! Both approximate passes are disabled against the full URL field -
 //! URLs are too long/structured to be useful approximate haystacks.
 //!
 //! No multi-token "fallback" with permitted misses: if any token fails to
@@ -54,14 +54,14 @@ const SCORE_SUBSTRING: u32 = 400;
 /// outranks a stretchy fzf subsequence on the same field.
 const SCORE_TYPO_BASE: u32 = 380;
 /// Each extra edit costs this much off `SCORE_TYPO_BASE`. With base 380
-/// and decrement 30, distance 2 lands at 350 — still above `FUZZY_MAX`.
+/// and decrement 30, distance 2 lands at 350 - still above `FUZZY_MAX`.
 const SCORE_TYPO_PER_EDIT: u32 = 30;
 /// Hard ceiling on the fuzzy contribution after capping. Stays below
 /// `SCORE_TYPO_BASE` so a fuzzy hit can never outrank a typo hit on the
 /// same field.
 const FUZZY_MAX: u32 = 300;
 /// Minimum needle length for any approximate matching (typo or fuzzy).
-/// Below this, both degenerate to "matches anything" — useless noise.
+/// Below this, both degenerate to "matches anything" - useless noise.
 const APPROX_MIN_NEEDLE: usize = 4;
 /// Maximum needle length that's treated as "too short for substring".
 /// 1-2 char needles only match via exact/prefix; their substring hits
@@ -85,7 +85,7 @@ impl Field {
             Field::UrlHost => 0.85,
             Field::UrlFull => 0.65,
             Field::Username => 0.55,
-            // Folder/group names: a deliberate categorisation signal —
+            // Folder/group names: a deliberate categorisation signal -
             // slightly above a free-form tag, still below any direct
             // field hit so an entry literally named for the query wins.
             Field::Group => 0.45,
@@ -135,7 +135,7 @@ struct Haystacks {
     username: String,
     tags: Vec<String>,
     /// Lowercased ancestor group names (the entry's `group_path`). Each
-    /// segment is matched independently — like tags — so an entry in
+    /// segment is matched independently - like tags - so an entry in
     /// `Customers/Globex/Web` is found by "customers", "globex" *or* "web".
     group_segments: Vec<String>,
 }
@@ -160,8 +160,8 @@ fn build_haystacks(entry: &VaultEntry) -> Haystacks {
 }
 
 /// Pulls the host portion out of an entry URL. KeePass stores URLs in
-/// many shapes — `https://github.com/foo`, `github.com/foo`,
-/// `mailto:user@x` — and the user expects "github" to match both of the
+/// many shapes - `https://github.com/foo`, `github.com/foo`,
+/// `mailto:user@x` - and the user expects "github" to match both of the
 /// first two. `Url::parse` rejects schemeless inputs, so we retry with a
 /// synthetic `https://` prefix.
 fn extract_host(url: &str) -> Option<String> {
@@ -340,7 +340,7 @@ fn levenshtein_within(a: &str, b: &str, max: usize) -> Option<usize> {
 /// Nucleo's `fuzzy_indices` returns both the score and the positions where
 /// each needle char matched. We use the positions to enforce a span gate:
 /// the matched indices must lie within `needle_len * 2` of each other.
-/// That's the robust filter against scattered-subsequence noise — it
+/// That's the robust filter against scattered-subsequence noise - it
 /// argues geometrically about the match's compactness instead of relying
 /// on score thresholds that drift between nucleo versions.
 fn fuzzy_score(token: &str, haystack: &str, matcher: &mut Matcher, needle_len: usize) -> u32 {
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn schemeless_url_still_extracts_host() {
         // Vaults often store bare `github.com/foo` without a scheme. The
-        // host extraction must handle that — otherwise "github" against
+        // host extraction must handle that - otherwise "github" against
         // such an entry only scores the lower-weight `UrlFull` match.
         let mut with_scheme = entry("a", "");
         with_scheme.url = "https://github.com/repo".to_string();
@@ -442,7 +442,7 @@ mod tests {
         let s = snapshot(vec![with_scheme, without_scheme]);
 
         let result = ranked_entries(&s, "github");
-        // Both entries must show up, with comparable rank — the
+        // Both entries must show up, with comparable rank - the
         // schemeless one mustn't be silently demoted.
         let result_ids = ids(&result);
         assert!(result_ids.contains(&"a".to_string()));
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn typo_runs_against_host_labels() {
-        // Host labels `[login, example, com]` — `exampla` matches
+        // Host labels `[login, example, com]` - `exampla` matches
         // `example` at distance 1.
         let mut e = entry("a", "Work");
         e.url = "https://login.example.com/path".to_string();
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn two_edit_typo_rejected_on_short_needle() {
         // 8-char needle has budget 1. `bilegane` differs from
-        // `tilegant` at 2 positions (b/t at start, e/t at end) — must
+        // `tilegant` at 2 positions (b/t at start, e/t at end) - must
         // not match.
         let s = snapshot(vec![entry("a", "tilegant")]);
         assert!(ranked_entries(&s, "bilegane").is_empty());
@@ -566,7 +566,7 @@ mod tests {
         // Even on a fuzzy-eligible field (title), a needle whose matched
         // chars sprawl too wide must be rejected by the span gate.
         // Title "alpha-beta-charlie-delta" has `a-b-c-d-e` as a scattered
-        // subsequence — match positions ~[0, 6, 11, 19, 22], span 23 vs
+        // subsequence - match positions ~[0, 6, 11, 19, 22], span 23 vs
         // needle_len*2 = 10. Span gate kicks in.
         let s = snapshot(vec![entry("a", "alpha-beta-charlie-delta")]);
         assert!(ranked_entries(&s, "abcde").is_empty());
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn short_query_disables_fuzzy() {
         // 3-char needle: no fuzzy, only substring and below. `gth` is a
-        // valid fzf subsequence of `growth` but should NOT match — only
+        // valid fzf subsequence of `growth` but should NOT match - only
         // 4+ char needles get fuzzy.
         let s = snapshot(vec![entry("a", "growth")]);
         assert!(ranked_entries(&s, "gth").is_empty());
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn group_name_matches_subgroup_entries() {
-        // A mid-path ancestor must match, not just the immediate parent —
+        // A mid-path ancestor must match, not just the immediate parent -
         // an entry in `Customers/Globex/Web` is "a Globex entry".
         let mut e = entry("a", "Router admin");
         e.group_path = vec!["Customers".into(), "Globex".into(), "Web".into()];

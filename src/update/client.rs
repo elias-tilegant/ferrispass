@@ -189,7 +189,7 @@ impl VerifiedRelease {
 fn fetch_verified_manifest() -> Result<VerifiedRelease, UpdateError> {
     // The manifest and its .minisig are two separate requests against
     // `/releases/latest/download/…`. A release publishing between them
-    // pairs the old manifest with the new signature — a benign transient
+    // pairs the old manifest with the new signature - a benign transient
     // race that would otherwise surface as an alarming signature failure.
     // Re-fetch the pair once before reporting the error for real.
     let mut attempt = 0;

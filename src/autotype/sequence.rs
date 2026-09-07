@@ -3,17 +3,17 @@
 //! A sequence is a single string template that mixes literal text with
 //! `{TOKEN}` placeholders. The default template
 //! `{USERNAME}{TAB}{PASSWORD}{ENTER}` covers ~90% of login forms. v1
-//! recognises a strict subset of KeePass's vocabulary — extending later
+//! recognises a strict subset of KeePass's vocabulary - extending later
 //! is purely additive (just add a `Token` variant and a `parse_token`
 //! arm).
 //!
 //! Two phases on purpose:
 //! 1. `parse` turns the template into `Vec<Token>` once, so the
 //!    Settings UI can surface a parse error the moment the user types
-//!    a bad sequence — without ever touching enigo / the OS.
+//!    a bad sequence - without ever touching enigo / the OS.
 //! 2. `render` substitutes the entry's username/password into the
 //!    tokens and emits `TypeOp`s. The renderer is the *only* place
-//!    that holds the cleartext password as a String — and it returns
+//!    that holds the cleartext password as a String - and it returns
 //!    `Vec<TypeOp>` rather than executing, so the typer (the only code
 //!    that depends on enigo) is fully unit-testable in isolation.
 //!
@@ -83,20 +83,20 @@ impl fmt::Debug for TypeOp {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ParseError {
-    /// `{` without a matching `}`. Almost always a typo — we surface it
+    /// `{` without a matching `}`. Almost always a typo - we surface it
     /// rather than silently typing the brace literally, because the
     /// alternative (KeePass behavior: emit the brace as text) hides the
     /// user's mistake from them.
-    #[error("unbalanced '{{' — every '{{' must be closed by '}}'")]
+    #[error("unbalanced '{{' - every '{{' must be closed by '}}'")]
     UnbalancedBrace,
-    /// `{NOPE}` — token name not in our vocabulary.
+    /// `{NOPE}` - token name not in our vocabulary.
     #[error("unknown placeholder: {{{0}}}")]
     UnknownToken(String),
-    /// `{DELAY abc}` — the parameter after a space-separated token name
+    /// `{DELAY abc}` - the parameter after a space-separated token name
     /// failed to parse as a u64.
     #[error("invalid delay value: {0} (expected milliseconds as an integer)")]
     InvalidDelay(String),
-    /// `{DELAY <too-large>}` — caps the parameter so a typo or a
+    /// `{DELAY <too-large>}` - caps the parameter so a typo or a
     /// tampered `settings.json` can't park an auto-type task asleep
     /// for hours. Any wait beyond `MAX_DELAY_MS` is almost certainly
     /// unintended.
@@ -127,7 +127,7 @@ pub struct RenderContext {
 /// Parse a template into tokens. Empty literal runs are skipped so the
 /// renderer doesn't emit zero-length `Text` ops. Brace handling is
 /// strict: `{{` is the documented escape for a literal `{`, but
-/// production templates almost never need it — we'd rather surface a
+/// production templates almost never need it - we'd rather surface a
 /// real typo than swallow it.
 pub fn parse(template: &str) -> Result<Vec<Token>, ParseError> {
     let mut out = Vec::new();
@@ -165,7 +165,7 @@ pub fn parse(template: &str) -> Result<Vec<Token>, ParseError> {
             '}' => {
                 // Match the `{{` escape with a `}}` escape so
                 // round-tripping is symmetric. A bare `}` is treated as
-                // literal — KeePass tolerates this and most users don't
+                // literal - KeePass tolerates this and most users don't
                 // know about the escape.
                 if matches!(chars.peek(), Some('}')) {
                     chars.next();
@@ -184,7 +184,7 @@ pub fn parse(template: &str) -> Result<Vec<Token>, ParseError> {
 fn parse_token(body: &str) -> Result<Token, ParseError> {
     // KeePass placeholders are case-insensitive (`{username}` and
     // `{USERNAME}` mean the same thing), so we normalise for matching.
-    // Trim too — `{ USERNAME }` is the kind of small slip that should
+    // Trim too - `{ USERNAME }` is the kind of small slip that should
     // just work. Errors quote the original casing so the user sees
     // exactly what they typed.
     let trimmed = body.trim();
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn placeholder_names_are_case_insensitive() {
-        // KeePass is case-insensitive for placeholder names — mirror
+        // KeePass is case-insensitive for placeholder names - mirror
         // that so users hand-editing sequences don't get tripped up.
         let tokens = parse("{username}{Tab}{Password}{enter}").unwrap();
         assert_eq!(
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn whitespace_inside_token_tolerated() {
-        // `{ USERNAME }` is a common slip — accept rather than rejecting.
+        // `{ USERNAME }` is a common slip - accept rather than rejecting.
         assert_eq!(parse("{ USERNAME }").unwrap(), vec![Token::Username]);
     }
 
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn unbalanced_brace_is_rejected() {
         // Lenient parsing here (typing the `{` as literal) would silently
-        // mask user typos — strict surfaces the mistake.
+        // mask user typos - strict surfaces the mistake.
         assert_eq!(
             parse("oops {USERNAME").unwrap_err(),
             ParseError::UnbalancedBrace
@@ -341,7 +341,7 @@ mod tests {
     fn invalid_delay_value_is_rejected() {
         let err = parse("{DELAY abc}").unwrap_err();
         assert_eq!(err, ParseError::InvalidDelay("abc".into()));
-        // Empty delay is also rejected — `{DELAY}` with no number is
+        // Empty delay is also rejected - `{DELAY}` with no number is
         // almost certainly a typo, not "delay zero ms".
         assert!(matches!(parse("{DELAY}"), Err(ParseError::InvalidDelay(_))));
     }

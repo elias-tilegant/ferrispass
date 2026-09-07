@@ -4,7 +4,7 @@
 //!
 //! Functions here are blocking and `Send`. The caller (`AppState`) drives
 //! them from `cx.background_spawn(...)` and bridges the result back to the
-//! UI via `Entity::update` — same pattern `save_async` already uses.
+//! UI via `Entity::update` - same pattern `save_async` already uses.
 //!
 //! No GPUI types in this module by design. Keeps the orchestration
 //! testable in isolation and makes the dependency direction one-way:
@@ -48,7 +48,7 @@ pub enum ServiceError {
     },
     /// Reconnect signed in as a different Microsoft account than the one
     /// this vault is bound to. We refuse to rebind because the stored
-    /// drive/item ids belong to `expected`'s tenant — a `got` token can't
+    /// drive/item ids belong to `expected`'s tenant - a `got` token can't
     /// address them. Reversible: the user can sign in with the original
     /// account, or Disconnect and Connect afresh.
     #[error(
@@ -127,7 +127,7 @@ fn sort_kdbx_files(hits: &mut [DriveItemHit]) {
 /// publishes the result only after verifying that the operation is current.
 ///
 /// Uses the etag from the download response (not from the search hit) so
-/// our `last_etag` is exactly the version that produced these bytes —
+/// our `last_etag` is exactly the version that produced these bytes -
 /// race-free with the next upload.
 pub fn prepare_connect_picked(
     hit: &DriveItemHit,
@@ -248,7 +248,7 @@ pub fn persist_connect_picked(result: &ConnectResult) -> Result<(), ServiceError
 /// Prepare re-authentication for a vault whose refresh token expired. Takes
 /// the existing `SyncConfig` and a fresh interactive token, then:
 ///   1. verifies the re-authed account matches `config.account_email`
-///      (case-insensitive) — refuses with `AccountMismatch` otherwise, so
+///      (case-insensitive) - refuses with `AccountMismatch` otherwise, so
 ///      we never store a token that can't reach the bound drive item;
 ///   2. re-stamps `authenticated_at` in memory.
 ///
@@ -489,7 +489,7 @@ pub fn upload_after_save(
     }
     if config.last_etag.trim().is_empty() {
         // Legacy configs (pre-etag-hardening) can carry an empty revision.
-        // Failing hard here would wedge every future push with no self-heal —
+        // Failing hard here would wedge every future push with no self-heal -
         // the Failed-recovery tick only retries the push, never pulls. Route
         // through the conflict path instead: the caller's merge machinery
         // re-downloads the remote and persists a fresh, non-empty etag.
@@ -523,7 +523,7 @@ pub fn upload_after_save(
     }
 }
 
-/// Force-push local bytes ignoring the etag — used by Conflict-resolve
+/// Force-push local bytes ignoring the etag - used by Conflict-resolve
 /// "Keep local" path, and by manual override flows. Returns the new etag
 /// so the caller can update SyncConfig.
 pub fn force_upload(
@@ -598,7 +598,7 @@ pub fn refresh_check(
 
 /// Download the current remote bytes plus the ETag that produced them.
 /// Used by the auto-sync *pull* path after `refresh_check` reports the
-/// server moved ahead — we fetch the body and hand it to the same merge
+/// server moved ahead - we fetch the body and hand it to the same merge
 /// machinery the 412-conflict path uses. Falls back to a metadata
 /// round-trip for the ETag on the rare occasion the content response
 /// omits the header (mirrors `upload_after_save`'s conflict branch).
@@ -655,7 +655,7 @@ fn stable_fallback_etag(before: &str, after: &str) -> bool {
 }
 
 /// Refresh the access token using the keychain-stored refresh token.
-/// On `InvalidGrant` the refresh token is gone forever — caller should
+/// On `InvalidGrant` the refresh token is gone forever - caller should
 /// transition the UI to "reconnect required".
 pub fn refresh_access_token(account_email: &str) -> Result<AccessToken, ServiceError> {
     let refresh = tokens::load(account_email)?.ok_or_else(|| {

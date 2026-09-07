@@ -1,4 +1,4 @@
-//! "What's New" modal — shown once after a successful update restart and
+//! "What's New" modal - shown once after a successful update restart and
 //! re-openable from Settings. Renders the release notes through a tiny
 //! Markdown-lite pass so GitHub-style bullets, headings and links survive.
 
@@ -564,10 +564,10 @@ mod tests {
 
     #[test]
     fn multibyte_text_is_not_corrupted() {
-        let segs = parse_inline("Behoben: Größe geändert – ä ö ü ß");
+        let segs = parse_inline("Behoben: Größe geändert · ä ö ü ß");
         assert_eq!(segs.len(), 1);
         assert!(
-            matches!(&segs[0], InlineSegment::Text(t) if t == "Behoben: Größe geändert – ä ö ü ß")
+            matches!(&segs[0], InlineSegment::Text(t) if t == "Behoben: Größe geändert · ä ö ü ß")
         );
     }
 }

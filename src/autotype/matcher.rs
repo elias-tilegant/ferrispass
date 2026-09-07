@@ -4,7 +4,7 @@
 //!
 //! 1. An explicit KeePass `AutoType/Association/Window` pattern matching the
 //!    foreground window title. The user wrote the pattern themselves (in any
-//!    KeePass client), which makes it a deliberate trust decision — it
+//!    KeePass client), which makes it a deliberate trust decision - it
 //!    therefore also applies in browsers, exactly like KeePass 2.x/XC.
 //! 2. Exact equality between the app name and the entry URL's full hostname.
 //!    We do not shorten hosts to an assumed registrable domain and do not use
@@ -39,7 +39,7 @@ const SCORE_EXPLICIT_ASSOCIATION: u32 = 300;
 pub const MIN_AUTOMATIC_SCORE: u32 = SCORE_EXACT_APP_HOST;
 
 /// Rank every entry in the snapshot against the foreground window.
-/// Entries in the Recycle Bin are skipped — surfacing a trashed
+/// Entries in the Recycle Bin are skipped - surfacing a trashed
 /// credential as a credible match would be confusing.
 pub fn rank(snapshot: &VaultSnapshot, foreground: &ForegroundInfo) -> Vec<MatchedEntry> {
     let mut matches: Vec<MatchedEntry> = snapshot
@@ -114,7 +114,7 @@ fn score_entry(entry: &VaultEntry, foreground: &ForegroundInfo) -> u32 {
 /// run of characters, `?` matches exactly one. The whole title must match
 /// (KeePass anchors patterns; users write `*Sign in*` when they want
 /// substring behavior). A blank pattern never matches.
-// ponytail: KeePass's `//regex//` association syntax is not supported —
+// ponytail: KeePass's `//regex//` association syntax is not supported -
 // add it if a vault with regex associations ever shows up.
 fn window_pattern_matches(pattern: &str, title: &str) -> bool {
     let pattern: Vec<char> = pattern.trim().to_lowercase().chars().collect();
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn extracts_host_from_schemeless_url() {
-        // Common in KeePass vaults — users type `github.com`, not
+        // Common in KeePass vaults - users type `github.com`, not
         // `https://github.com`. Url::parse rejects it, so the fallback
         // splitter has to handle it.
         assert_eq!(host_of("github.com").as_deref(), Some("github.com"));
@@ -259,25 +259,25 @@ mod tests {
     #[test]
     fn explicit_association_matches_by_window_title() {
         let snap = snapshot_with(vec![entry_with_association("sap", "", &["SAP Logon ?60*"])]);
-        let ranked = rank(&snap, &fg("SAP Logon", "SAP Logon 760 — PRD"));
+        let ranked = rank(&snap, &fg("SAP Logon", "SAP Logon 760 - PRD"));
         assert_eq!(ranked.len(), 1);
         assert_eq!(
             select_automatic(&ranked).map(|m| m.id.as_str()),
             Some("sap")
         );
-        assert!(rank(&snap, &fg("SAP Logon", "SAP Logon — PRD")).is_empty());
+        assert!(rank(&snap, &fg("SAP Logon", "SAP Logon - PRD")).is_empty());
     }
 
     #[test]
     fn explicit_association_applies_in_browsers() {
-        // The pattern is user-authored — a deliberate KeePass-standard trust
-        // decision — so the browser gate does not apply to it.
+        // The pattern is user-authored - a deliberate KeePass-standard trust
+        // decision - so the browser gate does not apply to it.
         let snap = snapshot_with(vec![entry_with_association(
             "g",
             "https://github.com",
             &["*· github.com*"],
         )]);
-        let ranked = rank(&snap, &fg("Safari", "Sign in · github.com — Safari"));
+        let ranked = rank(&snap, &fg("Safari", "Sign in · github.com - Safari"));
         assert_eq!(select_automatic(&ranked).map(|m| m.id.as_str()), Some("g"));
     }
 
@@ -299,7 +299,7 @@ mod tests {
         let mut e = entry_with_association("s", "https://slack.com", &["*Slack*"]);
         e.auto_type_enabled = false;
         let snap = snapshot_with(vec![e]);
-        assert!(rank(&snap, &fg("slack.com", "Slack — #general")).is_empty());
+        assert!(rank(&snap, &fg("slack.com", "Slack - #general")).is_empty());
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn generic_title_only_entry_is_never_matched() {
         // Regression: a vault row called `Login` / `Mail` / `Admin`
-        // (very common — users name catch-all secrets that way) used
+        // (very common - users name catch-all secrets that way) used
         // to score against any window containing that word, typing
         // credentials into the wrong site.
         let snap = snapshot_with(vec![
@@ -346,9 +346,9 @@ mod tests {
         ]);
         for window_title in &[
             "Sign in to GitHub",
-            "Login — Acme Corp",
+            "Login - Acme Corp",
             "Inbox · Mail",
-            "Admin Panel — Stripe",
+            "Admin Panel - Stripe",
         ] {
             let ranked = rank(&snap, &fg("Safari", window_title));
             assert!(
@@ -385,7 +385,7 @@ mod tests {
     fn hostname_substrings_do_not_qualify() {
         let snap = snapshot_with(vec![entry("g", "GitHub", "u", "https://github.com")]);
         for app_name in ["notgithub.com", "github.com.evil", "foo-github.com"] {
-            let ranked = rank(&snap, &fg(app_name, "github.com — Sign in"));
+            let ranked = rank(&snap, &fg(app_name, "github.com - Sign in"));
             assert!(ranked.is_empty(), "'{app_name}' must not match github.com");
         }
     }
@@ -400,7 +400,7 @@ mod tests {
         )]);
         let ranked = rank(
             &snap,
-            &fg("tesco.co.uk", "Amazon UK — www.amazon.co.uk — Sign in"),
+            &fg("tesco.co.uk", "Amazon UK - www.amazon.co.uk - Sign in"),
         );
         assert!(
             ranked.is_empty(),
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn recycle_bin_entries_are_skipped() {
-        // Surfacing a trashed credential as a match would be confusing —
+        // Surfacing a trashed credential as a match would be confusing -
         // and a security footgun if the user thinks they deleted a
         // credential but auto-type still offers it.
         let mut trashed = entry("a", "Old", "u", "https://github.com");

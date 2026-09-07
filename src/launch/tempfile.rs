@@ -2,7 +2,7 @@
 //!
 //! The file lives in `$TMPDIR/ferrispass-launch-<uid>/` (one shared
 //! subdir for the whole app). On Unix the subdir is `0700` and each
-//! file is `0600` — strictly per-user, no symlink races (we use
+//! file is `0600` - strictly per-user, no symlink races (we use
 //! `O_CREAT | O_EXCL` via `OpenOptions::create_new`).
 //!
 //! Cleanup has three layers, by intent:
@@ -34,7 +34,7 @@ pub struct TempLaunchFile {
 impl TempLaunchFile {
     /// Create a fresh launch file under our managed launch tempdir.
     /// `extension` is appended (no dot), e.g. `"sapc"`. Returns `Err`
-    /// on any I/O failure — the caller surfaces this as a toast and
+    /// on any I/O failure - the caller surfaces this as a toast and
     /// aborts the launch.
     pub fn create(extension: &str, contents: &[u8]) -> io::Result<Self> {
         let dir = launch_dir()?;
@@ -70,7 +70,7 @@ impl Drop for TempLaunchFile {
     fn drop(&mut self) {
         // Best-effort. The scheduled-cleanup task is the primary path;
         // this is the safety net for early-drop (lock / quit / error
-        // recovery). Errors are intentionally swallowed — there's
+        // recovery). Errors are intentionally swallowed - there's
         // nothing the user can do about a failing unlink at this
         // point, and logging the path or content here would defeat
         // the whole "no body in logs" rule.
@@ -80,7 +80,7 @@ impl Drop for TempLaunchFile {
 
 /// Resolve (and lazily create) the per-user launch tempdir. All launch
 /// payloads land here, and `sweeper::purge_all()` wipes the whole
-/// thing on lock/quit. Idempotent — safe to call from `AppShell::new`
+/// thing on lock/quit. Idempotent - safe to call from `AppShell::new`
 /// before we know if we'll ever launch anything.
 pub fn launch_dir() -> io::Result<PathBuf> {
     let mut path = launch_base_dir();
@@ -88,7 +88,7 @@ pub fn launch_dir() -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
-        // Create atomically with 0700 — no chmod-after-create window in
+        // Create atomically with 0700 - no chmod-after-create window in
         // which the directory is briefly listable by other users.
         match std::fs::DirBuilder::new().mode(0o700).create(&path) {
             Ok(()) => {}
@@ -106,7 +106,7 @@ pub fn launch_dir() -> io::Result<PathBuf> {
 
 /// A pre-existing launch dir cannot be trusted: it lives under a sometimes
 /// world-writable parent (the `/tmp` fallback) with a predictable name, so
-/// another local user may have planted a symlink or pre-created it — as the
+/// another local user may have planted a symlink or pre-created it - as the
 /// directory's owner they could swap or unlink payloads between our write
 /// and the target app's open, regardless of the payload files' 0600 mode.
 /// Require a real directory owned by this uid; tighten loose permissions.
@@ -217,7 +217,7 @@ fn instance_tag() -> String {
 }
 
 /// Strip anything that would be questionable in a directory name.
-/// Conservative — alphanumeric only, lowercased.
+/// Conservative - alphanumeric only, lowercased.
 fn sanitize(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
@@ -256,7 +256,7 @@ mod tests {
         );
     }
 
-    /// Two creates in the same directory don't collide — UUID-suffixed
+    /// Two creates in the same directory don't collide - UUID-suffixed
     /// names are unique. This is also what defends against multiple
     /// rapid launches stomping each other's files.
     #[test]

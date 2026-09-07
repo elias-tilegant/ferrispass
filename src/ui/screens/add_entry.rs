@@ -34,8 +34,8 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             // and the form body inside scrolls. The 16 px padding around the
             // edges prevents the chrome from kissing the window border.
             //
-            // `occlude()` blocks every mouse interaction — clicks, hover, AND
-            // scroll-wheel — from reaching the underlay vault view sitting
+            // `occlude()` blocks every mouse interaction - clicks, hover, AND
+            // scroll-wheel - from reaching the underlay vault view sitting
             // behind us. Without it, scrolling on the dimmed background (or
             // past a modal scroll boundary) would bubble through to the
             // sidebar / entry list and shift the user's place under them.
@@ -92,7 +92,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     // Snapshot the root group so the inline picker can render the full
     // tree without re-borrowing AppState across the closure boundary
     // when each row's click listener fires. `None` while the vault is
-    // closing/locked — the modal won't render in those states anyway,
+    // closing/locked - the modal won't render in those states anyway,
     // but we still gate the picker on it.
     let root_group: Option<VaultGroup> = shell
         .state()
@@ -300,7 +300,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         })
         .child(
             // Form body claims the remaining vertical space and scrolls
-            // internally — header (above) and footer (below) stay pinned so
+            // internally - header (above) and footer (below) stay pinned so
             // Cancel/Save are always reachable, even on a short window.
             v_flex()
                 .id("add-entry-form-scroll")
@@ -412,7 +412,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 /// and a trash button to delete the row.
 ///
 /// KeePass clients (KeePassXC's "Additional attributes") show these
-/// 1:1 — the user can pick the same key conventions there.
+/// 1:1 - the user can pick the same key conventions there.
 fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let rows = shell.new_entry_custom_fields();
 
@@ -451,7 +451,7 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
                 .child(
                     // Lock toggle: clicking flips the `protected` flag.
                     // When set, the value is stored via `set_protected`
-                    // on save — KeePassXC renders such fields with a
+                    // on save - KeePassXC renders such fields with a
                     // `Protected="True"` attribute and masks them.
                     div()
                         .id(row_id_lock)
@@ -525,7 +525,7 @@ fn custom_fields_editor(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElem
 
     // Trailing actions row: generic "+ Add field" plus the SAP
     // quick-add. Both are styled like the existing buttons in the
-    // modal (small chip, sidebar-tone bg) — the SAP one gets the
+    // modal (small chip, sidebar-tone bg) - the SAP one gets the
     // accent border to nudge users towards the structured path
     // when they want to wire up an SAP connection.
     col.child(
@@ -738,7 +738,7 @@ fn group_picker_panel(
         }
         out.push((depth, group));
         // Picker always shows the *whole* tree regardless of the
-        // sidebar's collapse state — the user has to be able to pick
+        // sidebar's collapse state - the user has to be able to pick
         // any group, even one they happen to have folded shut.
         for child in &group.groups {
             collect(child, depth + 1, recycle_bin_id, out);

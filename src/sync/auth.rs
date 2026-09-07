@@ -1,5 +1,5 @@
 //! OAuth 2.0 device-code flow against Microsoft identity platform, plus
-//! refresh-token exchange. No tokens are persisted here — this module is
+//! refresh-token exchange. No tokens are persisted here - this module is
 //! pure HTTP + parsing; persistence is `tokens.rs`'s job (Keychain).
 //!
 //! Why device code (vs. loopback PKCE)? No local web server, works behind
@@ -35,7 +35,7 @@ const AUTHORITY: &str = "https://login.microsoftonline.com/common/oauth2/v2.0";
 pub const SCOPE: &str = "Files.ReadWrite.All offline_access";
 
 /// Public Azure AD app registration owned by this project. Public client
-/// IDs are *not* secrets — they appear in every sign-in URL the user sees;
+/// IDs are *not* secrets - they appear in every sign-in URL the user sees;
 /// committing this to a public repo is intended and standard for Azure AD
 /// public clients (no client secret involved). Forks can override this at
 /// build time without touching source:
@@ -45,7 +45,7 @@ pub const SCOPE: &str = "Files.ReadWrite.All offline_access";
 /// ```
 pub const DEFAULT_CLIENT_ID: &str = "39481acc-7592-42c8-a8ae-3481cb76bb27";
 
-/// Resolves to the active Azure AD client ID — env override at build time
+/// Resolves to the active Azure AD client ID - env override at build time
 /// wins over the default const so forks don't have to patch source.
 pub fn client_id() -> &'static str {
     match option_env!("FERRISPASS_CLIENT_ID") {
@@ -71,7 +71,7 @@ pub enum AuthError {
     #[error("device code expired before sign-in completed")]
     Expired,
 
-    /// Refresh failed terminally — the user must re-run Connect. The
+    /// Refresh failed terminally - the user must re-run Connect. The
     /// optional payload carries the Azure `error_description` (e.g. the
     /// `AADSTS700082: …` line) so the UI and our diagnostics can tell
     /// *why* the grant died: short inactivity window vs. a tenant
@@ -202,7 +202,7 @@ pub fn poll_token(challenge: &DeviceCodeChallenge) -> PollOutcome {
 }
 
 /// Refresh an access token. Returns a fresh `AccessToken` (with a possibly
-/// rotated refresh token — Microsoft sometimes does, sometimes doesn't,
+/// rotated refresh token - Microsoft sometimes does, sometimes doesn't,
 /// callers should always persist whatever comes back).
 pub fn refresh(refresh_token: &str) -> Result<AccessToken, AuthError> {
     let url = format!("{AUTHORITY}/token");
@@ -223,7 +223,7 @@ fn parse_refresh_response(body: &str) -> Result<AccessToken, AuthError> {
     match parse_token_response(body) {
         Ok(token) => Ok(token),
         Err(AuthError::Server(message)) => {
-            // Distinguish `invalid_grant` (terminal — user must reconnect)
+            // Distinguish `invalid_grant` (terminal - user must reconnect)
             // from generic server errors so the caller can render a clear
             // "sign-in expired" message.
             if serde_json::from_str::<ErrorResponse>(body)

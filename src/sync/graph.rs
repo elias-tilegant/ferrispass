@@ -1,4 +1,4 @@
-//! Tiny Microsoft Graph v1.0 client — exactly the endpoints the SharePoint
+//! Tiny Microsoft Graph v1.0 client - exactly the endpoints the SharePoint
 //! sync flow needs, no crate-wide HTTP framework.
 //!
 //! The public API is synchronous because callers already run it through
@@ -82,7 +82,7 @@ pub struct DriveItem {
     /// verbatim as the `If-Match` value on upload.
     pub etag: String,
     pub name: String,
-    /// RFC3339 string from the server. We don't parse to chrono here — UI
+    /// RFC3339 string from the server. We don't parse to chrono here - UI
     /// layer can do that on demand.
     pub last_modified: String,
 }
@@ -97,7 +97,7 @@ pub struct DriveItemHit {
     pub drive_id: String,
     pub name: String,
     pub web_url: String,
-    /// e.g. `/drives/b!xxx/root:/Folder/Sub` — used to render a friendly
+    /// e.g. `/drives/b!xxx/root:/Folder/Sub` - used to render a friendly
     /// path under the filename in the picker.
     pub path: String,
     pub last_modified: String,
@@ -107,7 +107,7 @@ pub struct DriveItemHit {
 pub enum UploadOutcome {
     /// Upload succeeded; carry the freshly-issued etag for the next save.
     Ok { new_etag: String, item: DriveItem },
-    /// Server etag doesn't match `If-Match` — conflict. Caller should
+    /// Server etag doesn't match `If-Match` - conflict. Caller should
     /// download the remote and surface the Conflict overlay.
     Conflict,
 }
@@ -122,7 +122,7 @@ pub struct User {
 /// `POST /search/query` filtered to `driveItem`s with extension `.kdbx`.
 /// One call returns up to 50 results across every site / drive the user
 /// has access to (personal OneDrive too, if any). Empty list when there
-/// are no `.kdbx` files anywhere — caller renders an empty-state UI.
+/// are no `.kdbx` files anywhere - caller renders an empty-state UI.
 ///
 /// Uses Microsoft Search KQL: `filetype:kdbx` is the canonical way to
 /// filter by extension. Defends against unrelated hits by post-filtering
@@ -153,7 +153,7 @@ pub fn search_kdbx_files(token: &AccessToken) -> Result<Vec<DriveItemHit>, Graph
     Ok(parsed.flatten_hits())
 }
 
-/// `GET /me` — used after sign-in to learn the user's email for the
+/// `GET /me` - used after sign-in to learn the user's email for the
 /// keychain key + sync-config display.
 pub fn me(token: &AccessToken) -> Result<User, GraphError> {
     let url = format!("{GRAPH_BASE}/me?$select=mail,userPrincipalName");
@@ -206,7 +206,7 @@ pub fn list_drives(site_id: &str, token: &AccessToken) -> Result<Vec<Drive>, Gra
 }
 
 /// Find the drive that matches `library_name`. Tries exact-case match first
-/// (the common case — `library_name` came straight from the SharePoint URL,
+/// (the common case - `library_name` came straight from the SharePoint URL,
 /// which uses the canonical drive name), then case-insensitive as a fallback.
 pub fn find_drive(
     site_id: &str,
@@ -335,7 +335,7 @@ pub fn upload_content(
         // PUT and that GET a concurrent client may have uploaded, and
         // adopting *its* eTag would let our next push overwrite that
         // change without ever seeing a conflict. Failing keeps the
-        // caller's previous eTag — the retry then gets a 412 and heals
+        // caller's previous eTag - the retry then gets a 412 and heals
         // through the normal conflict/merge path.
         if item.etag.trim().is_empty() {
             return Err(GraphError::MissingField("eTag"));
@@ -631,7 +631,7 @@ fn encode_path_segments(path: &str) -> String {
 }
 
 /// Minimal segment percent-encoder. Encodes everything that isn't an
-/// unreserved URL char. Lazy — Graph accepts more than this strictly
+/// unreserved URL char. Lazy - Graph accepts more than this strictly
 /// requires, but encoding extra is harmless.
 fn percent_encode_segment(seg: &str) -> String {
     let mut out = String::with_capacity(seg.len());

@@ -14,7 +14,7 @@ git status                                       # working tree clean
 git pull --rebase origin master                  # in sync with remote
 ```
 
-If any of these fail, fix before tagging — the CI will refuse the release otherwise.
+If any of these fail, fix before tagging - the CI will refuse the release otherwise.
 
 ## Commit message conventions
 
@@ -31,7 +31,7 @@ The Release-page body is auto-generated from commit messages by [git-cliff](http
 | (no prefix or unknown) | Other Changes | `add Author section to README` |
 | `chore:` / `ci:` / `test:` / `style:` / `release:` | **skipped** | not surfaced in release notes |
 
-Optional scope in parentheses (`fix(merge):`, `feat(ui):`) — purely documentary; doesn't affect rendering, but useful for `git log --grep`.
+Optional scope in parentheses (`fix(merge):`, `feat(ui):`) - purely documentary; doesn't affect rendering, but useful for `git log --grep`.
 
 **Preview before tagging:**
 ```sh
@@ -63,7 +63,7 @@ git push origin master
 git push origin v0.x.y
 ```
 
-The `v` prefix matters — `release.yml` matches `tags: ['v*']`. Tagging without push to master means CI runs against a commit nobody else can see; not catastrophic but messy.
+The `v` prefix matters - `release.yml` matches `tags: ['v*']`. Tagging without push to master means CI runs against a commit nobody else can see; not catastrophic but messy.
 
 ## What the pipeline does
 
@@ -78,12 +78,12 @@ Stages, with rough timing:
 |---|---|---|---|
 | 1 | `cargo build --release --target aarch64-apple-darwin` | 3-7 min | code errors (caught by CI before tagging if you ran `cargo test` first) |
 | 2 | Generate `.icns` from `bundle/icon.png` | <5 s | icon missing → script exits early with clear error |
-| 3 | Assemble `.app` bundle, render `Info.plist` | <1 s | — |
+| 3 | Assemble `.app` bundle, render `Info.plist` | <1 s | - |
 | 4 | Codesign with Developer ID + Hardened Runtime | <5 s | cert not in Keychain (CI: `APPLE_CERT_BASE64` invalid) |
-| 5 | Build DMG via `create-dmg` | 10-30 s | — |
+| 5 | Build DMG via `create-dmg` | 10-30 s | - |
 | 6 | Codesign the DMG | <5 s | same as step 4 |
 | 7 | Notarize via `xcrun notarytool submit --wait` | 1-5 min | Apple's queue. Rejection = read the notarization log carefully |
-| 8 | Staple notarization ticket | <5 s | — |
+| 8 | Staple notarization ticket | <5 s | - |
 | 9 | Generate `.app.tar.gz` + unsigned `update.json` with exact payload size | <10 s | `jq` missing or archive creation fails |
 | Sign | Inject notes, sign payload, then sign the complete manifest | <10 s | minisign key missing, malformed, or payload size mismatch |
 | End | `softprops/action-gh-release@v2` uploads to a GitHub Release | <30 s | `permissions: contents: write` not granted |
@@ -129,21 +129,21 @@ Step End. The workflow lacks `contents: write` permission. Already set in `relea
 
 ### Users report duplicate entries after sync
 
-Symptom: a single entry created in KeePass2 (or another KeePass client) shows up two, three, or more times in FerrisPass after a sync round-trip — and the counts grow with each cycle. The duplication is real (in the .kdbx file), not a UI artefact.
+Symptom: a single entry created in KeePass2 (or another KeePass client) shows up two, three, or more times in FerrisPass after a sync round-trip - and the counts grow with each cycle. The duplication is real (in the .kdbx file), not a UI artefact.
 
 Root cause: pre-v0.2.1 builds had a bug in `src/keepass/merge.rs::add_entry_under` that re-randomised UUIDs on remote-only entry imports. Other clients then saw the entry as "new on the cloud" on every cycle and kept their own original copy alongside, producing exponential duplication. Fixed in commit XXX (visibility flips in the keepass-rs fork plus deep-replace logic in merge.rs).
 
-Recovery for users on a corrupted vault is documented in §"v0.2.1 release: cleanup recipe for affected users" below — they need a one-time manual deduplication; the code fix only stops the bleeding.
+Recovery for users on a corrupted vault is documented in §"v0.2.1 release: cleanup recipe for affected users" below - they need a one-time manual deduplication; the code fix only stops the bleeding.
 
 ## Recovery: re-tagging a botched release
 
-If the pipeline failed before creating the GitHub Release, no cleanup needed — just fix the issue, re-run the failed job. The tag stays put.
+If the pipeline failed before creating the GitHub Release, no cleanup needed - just fix the issue, re-run the failed job. The tag stays put.
 
 If the pipeline succeeded but the build was bad (e.g., regression slipped through), don't move the tag in place. Push a patch:
 
 ```sh
 # Edit Cargo.toml: 0.x.y → 0.x.(y+1)
-git commit -am "release: v0.x.(y+1) — fix <thing>"
+git commit -am "release: v0.x.(y+1) - fix <thing>"
 git tag -a v0.x.(y+1) -m "FerrisPass 0.x.(y+1)"
 git push origin master --tags
 ```
@@ -159,14 +159,14 @@ git tag -a v0.x.y -m "FerrisPass 0.x.y"
 git push origin v0.x.y
 ```
 
-Don't do this once any user has installed `v0.x.y` — re-tagging the same name on a different commit makes future bisects miserable.
+Don't do this once any user has installed `v0.x.y` - re-tagging the same name on a different commit makes future bisects miserable.
 
 ## Minisign-key backup strategy
 
 The minisign private key at `~/.ferrispass/minisign.key` is **irreplaceable**. If you lose it:
 
 - Every installed FerrisPass refuses to apply updates from a new key (the public key is embedded at compile time; old installs only trust the old key)
-- The fix is "reinstall from scratch" for every user — which, for an auto-updating app, defeats the purpose
+- The fix is "reinstall from scratch" for every user - which, for an auto-updating app, defeats the purpose
 
 Store at least two copies, in different physical locations, encrypted at rest:
 
@@ -194,7 +194,7 @@ artefacts. Unsigned manifests are rejected by the application.
 
 ## v0.2.1 release: cleanup recipe for affected users
 
-The duplicate-entries sync bug (see §Common failure modes) was fixed in v0.2.1, but already-corrupted vaults won't auto-heal — the duplicates are real bytes in the .kdbx file, the fix only stops new ones from appearing. Paste the following into the GitHub Release body for v0.2.1 so users running the affected v0.2.0 know what to do:
+The duplicate-entries sync bug (see §Common failure modes) was fixed in v0.2.1, but already-corrupted vaults won't auto-heal - the duplicates are real bytes in the .kdbx file, the fix only stops new ones from appearing. Paste the following into the GitHub Release body for v0.2.1 so users running the affected v0.2.0 know what to do:
 
 > **⚠️ One-time cleanup needed if you hit duplicate entries**
 >
@@ -211,7 +211,7 @@ The duplicate-entries sync bug (see §Common failure modes) was fixed in v0.2.1,
 
 ## See also
 
-- [`SECURITY.md`](../SECURITY.md) — threat model, vulnerability reporting
-- [`docs/architecture.md`](./architecture.md) — module layout, data flow, state pattern
-- [`scripts/build-mac.sh`](../scripts/build-mac.sh) — the actual pipeline implementation
-- [`.github/workflows/release.yml`](../.github/workflows/release.yml) — CI orchestration
+- [`SECURITY.md`](../SECURITY.md) - threat model, vulnerability reporting
+- [`docs/architecture.md`](./architecture.md) - module layout, data flow, state pattern
+- [`scripts/build-mac.sh`](../scripts/build-mac.sh) - the actual pipeline implementation
+- [`.github/workflows/release.yml`](../.github/workflows/release.yml) - CI orchestration

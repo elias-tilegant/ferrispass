@@ -1,4 +1,4 @@
-# git-cliff configuration — drives the GitHub Release notes that the
+# git-cliff configuration - drives the GitHub Release notes that the
 # release.yml workflow attaches to each tag.
 #
 # Recognises Conventional Commit prefixes (feat:, fix:, docs:, etc.) and
@@ -35,7 +35,7 @@ footer = ""
 
 [git]
 conventional_commits = true
-# We don't want to *drop* unconventional commits — they go into "Other
+# We don't want to *drop* unconventional commits - they go into "Other
 # Changes" instead. That keeps history honest even when prefixes were
 # forgotten or didn't fit (rebrand commits, release: vX.Y.Z, etc.).
 filter_unconventional = false

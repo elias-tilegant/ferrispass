@@ -6,7 +6,7 @@
 //! On macOS:   `~/Library/Application Support/ferrispass/sync/<hash>.json`
 //! On Linux:   `$XDG_CONFIG_HOME/ferrispass/sync/<hash>.json` (or
 //!             `~/.config/ferrispass/sync/<hash>.json` if XDG not set)
-//! Windows is unsupported in this MVP — see plan §Risks.
+//! Windows is unsupported in this MVP - see plan §Risks.
 //!
 //! What's *not* in this file: the OAuth refresh token. Tokens live in the
 //! macOS Keychain (see `tokens.rs`). The config holds the durable identifiers
@@ -51,7 +51,7 @@ pub struct SyncConfig {
     /// rebuild Graph addresses (those use site_id + drive_id + item_id).
     pub remote_url: String,
     /// Unix seconds of the last *interactive* sign-in (initial Connect or a
-    /// user-driven Reconnect). Display-only — drives the "Connected since …"
+    /// user-driven Reconnect). Display-only - drives the "Connected since …"
     /// line in Settings → Sync so the user has a reference point for how
     /// long the current grant has been alive. `#[serde(default)]` so configs
     /// written before this field existed deserialise cleanly as `None`
@@ -159,7 +159,7 @@ pub fn config_path_for(local_path: &Path) -> Result<PathBuf, ConfigError> {
 }
 
 /// Read the sync config for the given vault path. Returns `Ok(None)` when
-/// no config exists (new / unsynced vault) — that's the common case on
+/// no config exists (new / unsynced vault) - that's the common case on
 /// first launch and not worth error-typing.
 pub fn load(local_path: &Path) -> Result<Option<SyncConfig>, ConfigError> {
     load_in(&sync_dir()?, local_path)
@@ -173,7 +173,7 @@ pub fn save(config: &SyncConfig) -> Result<(), ConfigError> {
 }
 
 /// Remove the sync config for a vault path (used by Disconnect). No-op when
-/// the file already doesn't exist — disconnect should be idempotent so a
+/// the file already doesn't exist - disconnect should be idempotent so a
 /// retry after a partial failure can finish the cleanup.
 pub fn delete(local_path: &Path) -> Result<(), ConfigError> {
     delete_in(&sync_dir()?, local_path)
@@ -395,7 +395,7 @@ mod tests {
         save_in(dir.path(), &cfg).unwrap();
         delete_in(dir.path(), &cfg.local_path).unwrap();
         assert_eq!(load_in(dir.path(), &cfg.local_path).unwrap(), None);
-        // Second delete must succeed (idempotent — disconnect retries are common).
+        // Second delete must succeed (idempotent - disconnect retries are common).
         delete_in(dir.path(), &cfg.local_path).unwrap();
     }
 
@@ -406,7 +406,7 @@ mod tests {
         let b = fixture("/tmp/personal.kdbx");
         save_in(dir.path(), &a).unwrap();
         save_in(dir.path(), &b).unwrap();
-        // Both still readable after writing the other — would fail if hashes
+        // Both still readable after writing the other - would fail if hashes
         // collided or paths weren't part of the key.
         assert_eq!(
             load_in(dir.path(), &a.local_path).unwrap().as_ref(),

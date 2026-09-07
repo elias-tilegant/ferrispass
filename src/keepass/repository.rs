@@ -10,7 +10,7 @@ use keepass::{
 };
 
 /// The six KeePass-standard string fields. Anything stored on `Entry.fields`
-/// outside this set is surfaced as a custom field — that's the same line
+/// outside this set is surfaced as a custom field - that's the same line
 /// KeePassXC draws between "main attributes" and "Additional attributes".
 pub(crate) const STANDARD_FIELDS: &[&str] = &[
     fields::TITLE,
@@ -73,7 +73,7 @@ impl KeePassRepository {
 
     /// Decrypt a kdbx blob held entirely in memory. Used by the sync flow
     /// when we get conflict bytes from SharePoint and need to diff them
-    /// against the in-memory local database — no temp file required.
+    /// against the in-memory local database - no temp file required.
     pub fn open_bytes(
         bytes: &[u8],
         password: &str,
@@ -186,7 +186,7 @@ fn group_from_ref(
     let in_bin = recycle_bin_id.is_some_and(|bin| bin == group_id_str);
 
     // KeePass group `EnableAutoType` is tri-state: unset inherits the
-    // parent's effective value, an explicit value overrides it — so a
+    // parent's effective value, an explicit value overrides it - so a
     // child group's explicit `true` re-enables auto-type under a parent
     // that disabled it, exactly like KeePass 2.x.
     let auto_type = group.enable_autotype.unwrap_or(inherited_auto_type);
@@ -272,7 +272,7 @@ fn entry_from_ref(
 
     // KeePass semantics: absent AutoType settings mean "enabled, no
     // associations", and the inherited group flag combines with the
-    // entry-level one — an explicit `false` on either side disables. The
+    // entry-level one - an explicit `false` on either side disables. The
     // association window patterns are user-authored and feed the
     // trustworthy hotkey match signal in `autotype::matcher`.
     let (entry_auto_type, auto_type_windows) = match &entry.autotype {
@@ -315,7 +315,7 @@ fn entry_from_ref(
 }
 
 /// Snapshot all non-standard string fields off the entry, sorted by key
-/// for stable rendering — KeePass's XML doesn't pin field order, so we
+/// for stable rendering - KeePass's XML doesn't pin field order, so we
 /// can't trust whatever order the parser hands us.
 pub(crate) fn collect_custom_fields(entry: &EntryRef<'_>) -> Vec<CustomField> {
     let mut fields_out: Vec<CustomField> = entry
@@ -349,7 +349,7 @@ fn synthesize_favicon(title: &str, url: &str, hash: u64) -> Favicon {
 
 /// Sniff a custom-icon blob's format from its leading magic bytes and decode
 /// it eagerly into a renderable `gpui::Image`. KeePass stores the bytes
-/// verbatim — clients put PNG, JPEG, ICO, etc. in there with no metadata —
+/// verbatim - clients put PNG, JPEG, ICO, etc. in there with no metadata -
 /// so we sniff once at DB-load time and cache the `Arc<Image>`; later
 /// renders just bump the refcount. Returns `None` when the buffer is empty
 /// or the format can't be identified (the renderer falls back to the

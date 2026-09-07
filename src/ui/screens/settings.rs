@@ -33,7 +33,7 @@ const LAUNCH_CLEANUP_PRESETS: &[u32] = &[10, 30, 60];
 const AUTO_SYNC_PRESETS: &[Option<u64>] = &[Some(300), Some(900), Some(1800), None];
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
-    // Cloud sync only makes sense once a vault is decrypted — we don't
+    // Cloud sync only makes sense once a vault is decrypted - we don't
     // have document state to sync against otherwise, and exposing the
     // OneDrive picker before unlock would invite users to authorise an
     // account they then can't actually attach to anything. Sidebar
@@ -65,7 +65,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         SettingsTab::AutoType => (
             "Auto-Type",
             "Press a global hotkey to type the matching entry's username and password into \
-             the previously-focused window — works in any app or browser.",
+             the previously-focused window - works in any app or browser.",
             auto_type_tab_body(shell, cx).into_any_element(),
         ),
     };
@@ -83,7 +83,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 fn sidebar(active: SettingsTab, vault_unlocked: bool, cx: &mut Context<AppShell>) -> AnyElement {
     // (icon, label, this-tab, enabled). Disabled stubs preserve the
     // visual roadmap from the original mock; they're not clickable.
-    // Sync is gated on `vault_unlocked` — see `render` for the rationale.
+    // Sync is gated on `vault_unlocked` - see `render` for the rationale.
     let items: &[(AppIcon, &str, Option<SettingsTab>, bool)] = &[
         (AppIcon::Key, "General", Some(SettingsTab::General), true),
         (AppIcon::Shield, "Security", None, false),
@@ -439,8 +439,8 @@ fn touch_id_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl 
         "Touch ID unlock is opt-in per vault from the unlock screen. \
          With the fallback off, the prompt only accepts Touch ID. \
          With it on, the prompt also accepts your macOS account \
-         password — the same surface macOS itself uses for \
-         system-level Touch ID dialogs — which is what lets you \
+         password - the same surface macOS itself uses for \
+         system-level Touch ID dialogs - which is what lets you \
          unlock in clamshell mode where the sensor is unreachable.",
         toggle_row,
     )
@@ -504,7 +504,7 @@ fn auto_sync_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl
     section_card(
         "Auto-sync with cloud",
         "Check the remote this often and pull in changes from your other \
-         devices. This also keeps your Microsoft sign-in alive — leave it on \
+         devices. This also keeps your Microsoft sign-in alive - leave it on \
          to avoid the periodic reconnect.",
         option_group(items),
     )
@@ -543,7 +543,7 @@ fn clipboard_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl
 }
 
 /// "Auto-clean launch payloads after N seconds" picker. Mirrors the
-/// shape of the clipboard picker — three preset chips, the selected
+/// shape of the clipboard picker - three preset chips, the selected
 /// one highlighted. Range is clamped on read in `AppSettings` so a
 /// hand-edited settings file can't push the timer outside 10..=60 s.
 fn launch_cleanup_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
@@ -587,7 +587,7 @@ fn favicon_section(
     let running = status.is_running();
     // Click is gated on (vault open + not currently running). When the
     // gate fails we still render the same chrome but skip wiring the
-    // listener — the chip styles below mute the colours so the user can
+    // listener - the chip styles below mute the colours so the user can
     // see why it isn't actionable.
     let enabled = vault_open && !running;
 
@@ -615,7 +615,7 @@ fn favicon_section(
     ));
 
     let hint = match (vault_open, status) {
-        (false, _) => "Open a vault first — favicons are stored inside the database.",
+        (false, _) => "Open a vault first - favicons are stored inside the database.",
         (true, FaviconDownloadStatus::Running { .. }) => {
             "Fetching one site at a time so we don't hammer the icon service."
         }
@@ -640,7 +640,7 @@ fn favicon_section(
 
 /// Three hotkey presets shipped with the v1 UI. Custom combos beyond
 /// these require editing `settings.json` directly until we ship a
-/// proper "press the keys" capture input — adding the InputState
+/// proper "press the keys" capture input - adding the InputState
 /// plumbing for an interactive combo picker is more work than this
 /// scope warrants. The presets all avoid macOS's reserved combos
 /// (Spotlight ⌘Space, Mission Control ⌃↑, Dock toggle ⌘⌥D).
@@ -652,7 +652,7 @@ const AUTO_TYPE_HOTKEY_PRESETS: &[(&str, &str)] = &[
 
 /// One-click templates for the sequence editor. Each is a working
 /// example the user can either accept verbatim or use as a starting
-/// point for free-form edits in the input below. Order matters —
+/// point for free-form edits in the input below. Order matters -
 /// `Default` first because that's what 90% of users want.
 const AUTO_TYPE_SEQUENCE_PRESETS: &[(&str, &str)] = &[
     ("Default", "{USERNAME}{TAB}{PASSWORD}{ENTER}"),
@@ -755,7 +755,7 @@ fn auto_type_hotkey_section(
     section_card(
         "Trigger hotkey",
         "Pressed from any app or browser to launch Auto-Type. ⌃⌥⌘V is the KeePassXC \
-         default — choose another preset if it conflicts with something else on your Mac.",
+         default - choose another preset if it conflicts with something else on your Mac.",
         body,
     )
 }
@@ -789,11 +789,11 @@ fn auto_type_sequence_section(
         .collect();
     let presets_row = option_group(preset_items);
 
-    // Free-form input — same widget pattern the rest of FerrisPass uses
+    // Free-form input - same widget pattern the rest of FerrisPass uses
     // (Input + InputState). The on-change subscription set up in
     // AppShell::new pipes edits straight into settings via update_settings,
     // which in turn re-parses the template and refreshes the error cache
-    // (`auto_type_sequence_error`) — so the inline red label below this
+    // (`auto_type_sequence_error`) - so the inline red label below this
     // input updates in real time as the user types.
     let editor = div()
         .w_full()
@@ -810,7 +810,7 @@ fn auto_type_sequence_section(
     section_card(
         "Type sequence",
         "Placeholders: {USERNAME}, {PASSWORD}, {TAB}, {ENTER}, {DELAY N} (max 30000 ms). \
-         Pick a preset to start, or edit the template below — changes save automatically.",
+         Pick a preset to start, or edit the template below - changes save automatically.",
         body,
     )
 }
@@ -818,13 +818,13 @@ fn auto_type_sequence_section(
 fn auto_type_permission_section(trusted: bool, cx: &mut Context<AppShell>) -> impl IntoElement {
     let (status_label, status_color) = if trusted {
         (
-            SharedString::from("Granted — Auto-Type is ready to use."),
+            SharedString::from("Granted - Auto-Type is ready to use."),
             palette::text(),
         )
     } else {
         (
             SharedString::from(
-                "Not granted — Auto-Type cannot type into other apps until you allow access.",
+                "Not granted - Auto-Type cannot type into other apps until you allow access.",
             ),
             palette::text_muted(),
         )
@@ -844,7 +844,7 @@ fn auto_type_permission_section(trusted: bool, cx: &mut Context<AppShell>) -> im
                     // system prompt closes. macOS only refreshes the
                     // process trust bit on next launch, so the label
                     // typically still says "Not granted" until the user
-                    // restarts — that's why the help text below mentions
+                    // restarts - that's why the help text below mentions
                     // restarting.
                     cx.notify();
                 }),
@@ -868,7 +868,7 @@ fn updates_section(
 ) -> impl IntoElement {
     let auto_check = settings.auto_update_check_enabled;
 
-    // Status line — concise plain text below the chips. Cycles through
+    // Status line - concise plain text below the chips. Cycles through
     // checking → available → idle/failed depending on what `start_update_check`
     // last produced.
     let status_label: SharedString = match update_status {
@@ -882,7 +882,7 @@ fn updates_section(
         UpdateStatus::Failed(msg) => SharedString::from(format!("Update check failed: {msg}")),
     };
 
-    // Real toggle switch — same affordance as Auto-Type On/Off.
+    // Real toggle switch - same affordance as Auto-Type On/Off.
     let baseline = settings.clone();
     let toggle = setting_switch(
         "auto-update-toggle",

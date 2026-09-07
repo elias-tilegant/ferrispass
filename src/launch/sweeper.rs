@@ -1,13 +1,13 @@
 //! Tempdir hygiene for the launch subsystem.
 //!
 //! Two entry points, all best-effort:
-//! - `sweep_stale(max_age)` — deletes any payload from a previous run
+//! - `sweep_stale(max_age)` - deletes any payload from a previous run
 //!   that crashed before its TTL timer fired. Anything younger than
 //!   `max_age` is left alone in case another instance is mid-launch.
 //!   Called from `AppShell::new` (immediately and again after a 120 s
 //!   timer, for orphans the immediate pass was too early to age out)
 //!   and from `AppState::finish_open_attempt` on every unlock.
-//! - `purge_all()` — called from lock/quit hooks. Removes the whole
+//! - `purge_all()` - called from lock/quit hooks. Removes the whole
 //!   subdir; `launch_dir()` will recreate it lazily on next launch.
 
 use std::path::Path;
@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use super::tempfile::launch_dir;
 
-/// Delete launch payloads older than `max_age`. Errors are swallowed —
+/// Delete launch payloads older than `max_age`. Errors are swallowed -
 /// a failed sweep doesn't justify aborting startup, and there's
 /// nothing the user can do about it from the UI.
 pub fn sweep_stale(max_age: Duration) {
@@ -77,7 +77,7 @@ mod tests {
         assert!(new.exists(), "fresh file must survive");
     }
 
-    /// `read_dir`-walked but non-file entries are ignored — sweep
+    /// `read_dir`-walked but non-file entries are ignored - sweep
     /// must never blast a subdir even if one accidentally exists.
     #[test]
     fn sweep_leaves_subdirectories_alone() {

@@ -1,4 +1,4 @@
-//! Friendly metadata for an available update — what the UI needs to display
+//! Friendly metadata for an available update - what the UI needs to display
 //! the "FerrisPass 0.2.1 available" banner and the release-notes modal.
 //!
 //! Distinct from `cargo_packager_updater::Update` because that type owns
@@ -37,7 +37,7 @@ pub enum UpdateError {
     Parse(String),
 
     /// Public key embedded in the binary doesn't match the signature on
-    /// the downloaded bundle. Hard fail — never apply unverified updates.
+    /// the downloaded bundle. Hard fail - never apply unverified updates.
     #[error("update signature did not verify against the embedded public key")]
     SignatureInvalid,
 
@@ -56,7 +56,7 @@ pub enum UpdateError {
     Install(String),
 
     /// Embedded public key is the zeroed placeholder. Means the maintainer
-    /// hasn't run `scripts/setup-minisign.sh` yet — signed updates aren't
+    /// hasn't run `scripts/setup-minisign.sh` yet - signed updates aren't
     /// possible until they do.
     #[error("update signing isn't configured for this build (placeholder public key)")]
     PlaceholderKey,

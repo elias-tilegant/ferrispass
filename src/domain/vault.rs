@@ -26,7 +26,7 @@ pub struct VaultGroup {
     pub name: String,
     pub groups: Vec<VaultGroup>,
     pub entries: Vec<VaultEntry>,
-    /// Mirrors the KeePass `IsExpanded` flag — round-trips through every
+    /// Mirrors the KeePass `IsExpanded` flag - round-trips through every
     /// other client (KeePassXC, KeePass2) so the user's collapse state
     /// in our sidebar follows them across machines via sync. Defaults to
     /// `true` for groups we synthesize ourselves (test fixtures, fresh
@@ -34,7 +34,7 @@ pub struct VaultGroup {
     pub is_expanded: bool,
     /// Custom-icon bytes pulled from the KeePass `custom_icons` table
     /// when the group has `Icon::Custom(_)`. Same shape as
-    /// `VaultEntry::favicon.image` — we reuse the `FaviconImage` newtype
+    /// `VaultEntry::favicon.image` - we reuse the `FaviconImage` newtype
     /// because it's just decoded image bytes ready for `gpui::img()`,
     /// regardless of whether the source is an entry or a group.
     /// `None` for groups using a built-in icon or no icon at all.
@@ -88,7 +88,7 @@ pub struct VaultEntry {
     /// swap the action footer (Restore + Delete forever) without having to
     /// re-walk the group tree per render.
     pub in_recycle_bin: bool,
-    /// KeePass `AutoType/Enabled` — `false` excludes the entry from hotkey
+    /// KeePass `AutoType/Enabled` - `false` excludes the entry from hotkey
     /// matching entirely (KeePass semantics; explicit in-app typing of a
     /// selected entry is unaffected).
     pub auto_type_enabled: bool,
@@ -99,8 +99,8 @@ pub struct VaultEntry {
     /// Arbitrary key-value pairs stored on the KeePass entry beyond the
     /// six standard fields (Title/UserName/Password/URL/Notes/otp). Used
     /// by KeePassXC's "Additional attributes" UI and by our launcher
-    /// detection (`SAP_CONN`, etc.). Cleartext in the snapshot — same
-    /// trust zone as the cleartext password — but the `protected` flag
+    /// detection (`SAP_CONN`, etc.). Cleartext in the snapshot - same
+    /// trust zone as the cleartext password - but the `protected` flag
     /// is preserved so we can re-write via `set_protected` on save and
     /// mask the value in any read-only display.
     pub custom_fields: Vec<CustomField>,
@@ -129,7 +129,7 @@ impl std::fmt::Debug for VaultEntry {
 }
 
 /// One non-standard attribute on a KeePass entry. `protected` mirrors the
-/// `Protected="True"` XML attribute — KeePassXC writes secrets (e.g.
+/// `Protected="True"` XML attribute - KeePassXC writes secrets (e.g.
 /// alternate passwords) with this flag and we must round-trip it so
 /// nothing silently downgrades from secret to plain on save.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -163,7 +163,7 @@ pub struct Favicon {
 /// Decoded, format-tagged custom icon ready to hand to GPUI's `img()`.
 /// Wrapped in `Arc` so cloning a `VaultEntry` (visible-list cache, drag
 /// previews, render snapshots) is a refcount bump, and so the GPUI image
-/// cache — keyed off the inner `Image::id` (hash of bytes) — can dedupe
+/// cache - keyed off the inner `Image::id` (hash of bytes) - can dedupe
 /// across re-renders without us rebuilding the wrapper each frame.
 #[derive(Clone, Debug)]
 pub struct FaviconImage(pub std::sync::Arc<gpui::Image>);
@@ -257,7 +257,7 @@ impl VaultSnapshot {
     }
 
     /// Entries that have a TOTP secret configured. Drives the sidebar's
-    /// "2FA enabled" filter — derived from the real `has_otp` bit, not
+    /// "2FA enabled" filter - derived from the real `has_otp` bit, not
     /// from a tag, so it stays accurate regardless of how the user
     /// (or another KeePass client) labels their entries.
     pub fn entries_with_otp(&self) -> Vec<&VaultEntry> {

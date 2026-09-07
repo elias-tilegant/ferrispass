@@ -15,13 +15,13 @@
 //! - The trait is `Send + Sync + 'static` so it can sit inside
 //!   `Arc<dyn BiometricStore>` and be shared between the foreground UI
 //!   thread and the background task that calls `retrieve`. The macOS
-//!   keychain call blocks for as long as the OS prompt is open —
+//!   keychain call blocks for as long as the OS prompt is open -
 //!   always invoke it from `cx.background_spawn`.
 //!
 //! ## Security boundary (read before changing the macOS backend)
 //!
 //! The macOS backend stores the master password as a *plain* generic
-//! password in the legacy file-based keychain — it has **no biometric
+//! password in the legacy file-based keychain - it has **no biometric
 //! ACL** (`kSecAttrAccessControl`). The biometric gate is enforced by
 //! us calling `LAContext.evaluatePolicy` before reading the item, not
 //! by the OS refusing the read. Two consequences flow from that and
@@ -38,7 +38,7 @@
 //!    added/removed; here any *current* Touch ID identity (or the
 //!    macOS password, when the fallback setting is on) passes the LA
 //!    precheck. [`BiometricError::Invalidated`] therefore never
-//!    originates from the macOS backend today — it's reserved for a
+//!    originates from the macOS backend today - it's reserved for a
 //!    future hardening pass that compares `LAContext`'s
 //!    `evaluatedPolicyDomainState` across unlocks and forces
 //!    re-enrolment when the biometric set changes.
@@ -91,7 +91,7 @@ impl fmt::Display for EnrollmentId {
 }
 
 /// Failure modes the unlock-screen UI must distinguish. `Backend` is
-/// the catch-all for OS errors we don't model individually — render it
+/// the catch-all for OS errors we don't model individually - render it
 /// as a generic "Touch ID failed" with the message as a tooltip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BiometricError {
@@ -107,13 +107,13 @@ pub enum BiometricError {
     /// added/removed a fingerprint). Caller must drop the enrollment
     /// and ask the user to re-enroll.
     ///
-    /// NOTE: the current macOS backend never produces this — its
+    /// NOTE: the current macOS backend never produces this - its
     /// legacy-keychain items carry no ACL, so a biometric-set change
     /// can't invalidate them. Kept for the data-protection-keychain
     /// path and a future domain-state comparison (see the module
     /// header's "Security boundary" note).
     Invalidated,
-    /// No keychain item exists for this id. Treat as "not enrolled" —
+    /// No keychain item exists for this id. Treat as "not enrolled" -
     /// the registry probably has a stale entry that should be cleaned.
     NotFound,
     /// Any other OS-level error. Message is for logs/tooltips, never
@@ -130,7 +130,7 @@ impl fmt::Display for BiometricError {
             BiometricError::Invalidated => {
                 write!(
                     f,
-                    "Touch ID enrolment is no longer valid — re-enrol required"
+                    "Touch ID enrolment is no longer valid - re-enrol required"
                 )
             }
             BiometricError::NotFound => write!(f, "No Touch ID enrolment found for this vault"),
@@ -153,7 +153,7 @@ pub struct RetrieveOptions {
     /// When `true`, the OS prompt accepts the user's device
     /// passcode (macOS account password on Mac) as a successful
     /// authentication in addition to biometrics. Maps to
-    /// `LAPolicy::DeviceOwnerAuthentication` on macOS — the same
+    /// `LAPolicy::DeviceOwnerAuthentication` on macOS - the same
     /// policy macOS uses for its own "Unlock with Touch ID or
     /// password" sheets.
     ///
@@ -172,13 +172,13 @@ pub struct RetrieveOptions {
 
 /// Cross-platform contract for "store + read a password protected by
 /// the OS biometric prompt". Implementations:
-/// - [`macos::MacOsBiometricStore`] — `cfg(target_os = "macos")`
-/// - [`noop::NoopBiometricStore`] — every other target + CI
-/// - [`memory::InMemoryBiometricStore`] — tests
+/// - [`macos::MacOsBiometricStore`] - `cfg(target_os = "macos")`
+/// - [`noop::NoopBiometricStore`] - every other target + CI
+/// - [`memory::InMemoryBiometricStore`] - tests
 pub trait BiometricStore: fmt::Debug + Send + Sync + 'static {
     /// Quick capability probe for the UI: should we show the
     /// "Unlock with Touch ID" button at all? Implementations must not
-    /// trigger an OS prompt here — this is called on every render.
+    /// trigger an OS prompt here - this is called on every render.
     ///
     /// "Available" is the strong claim: the sensor is *reachable
     /// right now*. On macOS, this returns `false` while a MacBook is
@@ -192,7 +192,7 @@ pub trait BiometricStore: fmt::Debug + Send + Sync + 'static {
     /// returns `true` when the host *has* biometric hardware at all,
     /// even if it isn't reachable in the current physical setup. The
     /// UI uses this to decide whether to render the "Enable Touch
-    /// ID" enrolment checkbox — enrolment itself only writes to the
+    /// ID" enrolment checkbox - enrolment itself only writes to the
     /// keychain and doesn't need a live sensor, so a user in
     /// clamshell mode can still opt in for the next time they open
     /// the lid. Default implementation returns whatever

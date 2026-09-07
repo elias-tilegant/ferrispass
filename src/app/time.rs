@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Local};
 
-/// "just now" / "N seconds ago" / "N minutes ago" / "N hours ago" — same
+/// "just now" / "N seconds ago" / "N minutes ago" / "N hours ago" - same
 /// granularity as KeePass2's last-sync indicator. Past-only; future
 /// timestamps clip to "just now".
 pub fn relative_time_label(when: DateTime<Local>, now: DateTime<Local>) -> String {

@@ -36,7 +36,7 @@ const SCREENSAVER_STOPPED_NOTIFICATION: &str = "com.apple.screensaver.didstop";
 /// (sleep imminent, screen locked, fast user switch, screensaver started)
 /// and must always lock the vault. `PostWake` events are trailing
 /// fail-safes (DidWake, screen unlocked, …) delivered after the user is
-/// already back — the consumer may apply a short grace window to those, but
+/// already back - the consumer may apply a short grace window to those, but
 /// never to `Lock`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionLockEvent {
@@ -56,7 +56,7 @@ type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
 
 /// Channel sender plus a latch that survives a full channel. The bounded
 /// queue is only a wakeup mechanism; the latch is the authoritative "a
-/// genuine lock event happened" bit — `try_send` may drop an event when
+/// genuine lock event happened" bit - `try_send` may drop an event when
 /// the queue is full, but the latch cannot be lost.
 #[derive(Clone)]
 struct EventSink {
@@ -191,7 +191,7 @@ impl SessionLockMonitor {
     }
 
     /// Authoritative "a genuine lock event happened since the last check"
-    /// bit. Consumers must call this after draining `events()` — a Lock
+    /// bit. Consumers must call this after draining `events()` - a Lock
     /// dropped by a full channel is still recorded here.
     pub fn lock_latch(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         std::sync::Arc::clone(&self.lock_latch)
@@ -353,7 +353,7 @@ mod tests {
             center.postNotificationName_object(&lock_name, None);
         }
         assert_eq!(receiver.try_recv(), Ok(SessionLockEvent::PostWake));
-        assert!(receiver.try_recv().is_err(), "queue was full — dropped");
+        assert!(receiver.try_recv().is_err(), "queue was full - dropped");
         assert!(
             sink.lock_latch
                 .swap(false, std::sync::atomic::Ordering::AcqRel),

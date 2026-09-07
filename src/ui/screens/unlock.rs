@@ -35,7 +35,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     // `available` = sensor reachable right now (Touch ID works this
     // instant).
     // `supported` = biometric hardware exists at all (drives the
-    // enrolment checkbox — enrolment writes to the keychain
+    // enrolment checkbox - enrolment writes to the keychain
     // without touching the sensor, so a user in clamshell mode
     // can still opt in for next time the lid opens).
     let store = state.biometric_store();
@@ -45,7 +45,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     // The passcode-fallback setting decides whether the OS prompt
     // can also accept the macOS account password. When it's on, the
     // unlock button is useful even with the sensor unreachable
-    // (clamshell mode) — the prompt falls back to the password
+    // (clamshell mode) - the prompt falls back to the password
     // field. So the button shows when biometry is reachable *or*
     // the passcode fallback can carry the attempt.
     let allow_passcode_fallback = shell.settings().biometric_allow_passcode_fallback;
@@ -136,7 +136,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 )
                 // Conditional Touch-ID enrolment checkbox: shown
                 // for any vault that's not yet enrolled, as long
-                // as the device *has* Touch ID hardware — even if
+                // as the device *has* Touch ID hardware - even if
                 // the sensor isn't reachable in the current
                 // physical setup (clamshell mode etc.). Enrolment
                 // writes to the keychain without a prompt, so the
@@ -241,7 +241,7 @@ fn touch_id_unlock_button(
     // with Touch ID, so "Unlock with Touch ID" is accurate. When it
     // isn't (clamshell mode, or a Mac with no Touch ID hardware) the
     // button is only shown because the passcode-fallback setting is
-    // on — the prompt will present the macOS account password — so we
+    // on - the prompt will present the macOS account password - so we
     // say that instead of mislabeling a password unlock as biometric.
     let label_text = if in_flight {
         "Waiting…"
@@ -269,12 +269,12 @@ fn touch_id_unlock_button(
 }
 
 /// Bottom-left status: hint text describing the current biometric
-/// state. Doubles as a "Forget" affordance when enrolled — keeps the
+/// state. Doubles as a "Forget" affordance when enrolled - keeps the
 /// footer compact (still one row) while exposing the un-enrol path
 /// without needing the Settings page (which lands in a later phase).
 ///
 /// Note: `supported` is used (not `available`) so an enrolled user
-/// in clamshell mode still sees and can click "Forget Touch ID" —
+/// in clamshell mode still sees and can click "Forget Touch ID" -
 /// dropping an enrolment doesn't need the sensor to be reachable.
 fn footer_left(
     supported: bool,

@@ -25,7 +25,7 @@ pub enum TyperError {
     /// The vault context authorizing the operation was locked or replaced.
     #[error("auto-type was cancelled")]
     Cancelled,
-    /// enigo couldn't initialise its CGEvent source — by far the most
+    /// enigo couldn't initialise its CGEvent source - by far the most
     /// common cause is missing Accessibility permission. We surface it
     /// distinctly so the UI can route to "grant access" rather than
     /// "something is broken".
@@ -37,7 +37,7 @@ pub enum TyperError {
     #[error("failed to dispatch keystroke: {0}")]
     Dispatch(String),
     /// The focus guard reported that the foreground app is no longer the
-    /// one the plan was prepared for — typing was aborted before the
+    /// one the plan was prepared for - typing was aborted before the
     /// cleartext reached the wrong window. Carries the title of whatever
     /// holds focus now (may be empty when the foreground was unreadable).
     #[error("focus moved to another window before keystrokes were dispatched")]
@@ -53,7 +53,7 @@ const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Walk the op stream, dispatching each event through enigo. Sleeps
 /// between every op (not just inside `TypeOp::Sleep`) so the receiving
-/// app has time to process — typing a 16-char password in 16 ms is
+/// app has time to process - typing a 16-char password in 16 ms is
 /// faster than the keyboard buffer of most browsers.
 ///
 /// `focus_guard` is probed after the inter-op pause and immediately before

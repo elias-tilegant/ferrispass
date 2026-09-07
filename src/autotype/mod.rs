@@ -4,16 +4,16 @@
 //!
 //! The seven submodules each own one concern:
 //!
-//! - `sequence` — parse and render the user's template
+//! - `sequence` - parse and render the user's template
 //!   (`{USERNAME}{TAB}{PASSWORD}{ENTER}`) into a `Vec<TypeOp>`.
 //!   Pure, no IO, fully unit-tested.
-//! - `matcher` — select entries from trustworthy foreground identity
+//! - `matcher` - select entries from trustworthy foreground identity
 //!   signals. Pure, no IO, fully unit-tested.
-//! - `window` — read the foreground app/window via active-win-pos-rs.
-//! - `permissions` — probe / request the macOS Accessibility TCC bit.
-//! - `hotkey` — register the global hotkey and poll the event channel.
-//! - `typer` — drive enigo to execute the rendered `TypeOp` stream.
-//! - `mod.rs` (this file) — the `AutoTypeService` orchestrator that
+//! - `window` - read the foreground app/window via active-win-pos-rs.
+//! - `permissions` - probe / request the macOS Accessibility TCC bit.
+//! - `hotkey` - register the global hotkey and poll the event channel.
+//! - `typer` - drive enigo to execute the rendered `TypeOp` stream.
+//! - `mod.rs` (this file) - the `AutoTypeService` orchestrator that
 //!   AppShell instantiates, and the `Outcome` enum that the UI uses
 //!   to decide which notification to surface.
 //!
@@ -102,7 +102,7 @@ impl fmt::Debug for CancellationToken {
 
 /// What happened on an auto-type attempt. Each variant maps to one
 /// user-visible outcome (toast, notification, or silent action). The
-/// caller (AppShell) picks the wording — we keep this enum free of
+/// caller (AppShell) picks the wording - we keep this enum free of
 /// UI strings so it's easy to translate or restyle later.
 #[derive(Debug)]
 pub enum Outcome {
@@ -120,13 +120,13 @@ pub enum Outcome {
     NoForeground,
     /// The user pressed the hotkey while FerrisPass itself was the
     /// foreground app. Auto-typing into our own UI would type the
-    /// password into the password input — bad both UX-wise and
+    /// password into the password input - bad both UX-wise and
     /// security-wise.
     SelfForeground,
     /// macOS hasn't granted Accessibility permission. The caller
     /// should explain how to grant it.
     NotTrusted,
-    /// No vault is open right now — there's no credential to type.
+    /// No vault is open right now - there's no credential to type.
     VaultLocked,
     /// We read the foreground but could not identify exactly one safe
     /// automatic match. Names the foreground title so the user knows what
@@ -134,7 +134,7 @@ pub enum Outcome {
     NoMatch { window_title: String },
     /// The matched entry doesn't have a password set.
     NoPassword,
-    /// The entry's KeePass `AutoType/Enabled` flag is off — the user (in
+    /// The entry's KeePass `AutoType/Enabled` flag is off - the user (in
     /// any KeePass client) explicitly excluded it from auto-typing, which
     /// binds the forced in-app route too.
     AutoTypeDisabled { entry_title: String },
@@ -178,7 +178,7 @@ pub struct PerformInput<'a> {
 pub const DEFAULT_INTER_OP: Duration = Duration::from_millis(typer::DEFAULT_INTER_OP_MS);
 
 /// Ready-to-type bundle returned by `prepare`. Owned (`Vec<TypeOp>`,
-/// `String`) so it can cross a thread boundary — important because the
+/// `String`) so it can cross a thread boundary - important because the
 /// UI runs the actual keystroke dispatch on a background task while
 /// keeping the foreground responsive. Carries the cleartext password
 /// inside one of the `TypeOp::SecretText` ops; callers should drop the
@@ -191,7 +191,7 @@ pub struct TypePlan {
     pub ops: Vec<sequence::TypeOp>,
     /// The foreground window the plan was prepared against. `execute`
     /// re-reads the foreground right before dispatch (and after every
-    /// `{DELAY}`) and aborts when focus has moved to a different app —
+    /// `{DELAY}`) and aborts when focus has moved to a different app -
     /// the checks `prepare` ran are stale by the time the background
     /// task actually types.
     pub expected_foreground: ForegroundInfo,
@@ -201,8 +201,8 @@ pub struct TypePlan {
 /// foreground sanity, entry selection (matcher or `force_entry_id`),
 /// password resolution, sequence parse + render. Splitting this off
 /// from `execute` lets the UI propagate accurate `Outcome` notifications
-/// — including `TypingFailed` — instead of fire-and-forget the typer
-/// and unconditionally claim success.
+/// (including `TypingFailed`) instead of fire-and-forget the typer and
+/// unconditionally claim success.
 pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
     if input.cancellation.is_cancelled() {
         return Err(Outcome::Cancelled);
@@ -216,7 +216,7 @@ pub fn prepare(input: PerformInput<'_>) -> Result<TypePlan, Outcome> {
 
     // Pick the entry: forced (in-app action) or top-ranked (hotkey
     // route). When forced, we still want to confirm the id exists in
-    // the snapshot — otherwise a deleted-but-still-cached id from the
+    // the snapshot - otherwise a deleted-but-still-cached id from the
     // UI's last-known-good state could try to type stale credentials.
     let (entry_id, entry_title) = if let Some(forced) = input.force_entry_id.as_deref() {
         match input.snapshot.find_entry(forced) {
@@ -299,7 +299,7 @@ pub fn execute(plan: TypePlan) -> Outcome {
     let guard = move || match window::foreground() {
         Some(now) if now.same_app(&expected) => Ok(()),
         Some(now) => Err(now.window_title),
-        // Foreground became unreadable mid-run — we can no longer prove
+        // Foreground became unreadable mid-run - we can no longer prove
         // the target is still focused, so abort rather than type blind.
         None => Err(String::new()),
     };
@@ -321,7 +321,7 @@ pub fn execute(plan: TypePlan) -> Outcome {
 }
 
 /// Run the full auto-type pipeline once. Returns an `Outcome` that
-/// the caller surfaces in the UI. Never panics — every failure mode
+/// the caller surfaces in the UI. Never panics - every failure mode
 /// resolves to a specific `Outcome` variant.
 ///
 /// Synchronous all the way through. The UI uses `prepare` + `execute`

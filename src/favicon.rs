@@ -1,11 +1,11 @@
-//! Favicon fetcher — pulls a small icon from DuckDuckGo's free icon
+//! Favicon fetcher - pulls a small icon from DuckDuckGo's free icon
 //! service for a given entry URL. The bytes are then written into the
 //! KeePass database as a `Custom Icon` (see `VaultDocument::
 //! set_entry_custom_icon`), so subsequent renders of the entry pick up
 //! the real site icon instead of the synthesized colored letter.
 //!
 //! Why DuckDuckGo and not the site's own `/favicon.ico`:
-//! - One CDN, one TLS handshake — much faster for a batch
+//! - One CDN, one TLS handshake - much faster for a batch
 //! - DDG normalises sizes / formats and serves a sensible default
 //! - No `<link rel="icon">` HTML scraping required
 //!
@@ -44,7 +44,7 @@ pub enum FaviconError {
 }
 
 /// Fetch a favicon for the given entry URL via DuckDuckGo's icon service.
-/// Returns the raw image bytes — the caller is responsible for validating
+/// Returns the raw image bytes - the caller is responsible for validating
 /// the format (our existing magic-byte sniffer in
 /// `keepass::repository::favicon_image_from_bytes` does this when the icon
 /// is later read back from the DB).
@@ -53,7 +53,7 @@ pub fn fetch_favicon(entry_url: &str) -> Result<Vec<u8>, FaviconError> {
     let target = format!("https://icons.duckduckgo.com/ip3/{host}.ico");
 
     // Per-call agent so the timeout sticks even if a future caller wraps
-    // this in a long-running task — the global ureq default is "no
+    // this in a long-running task - the global ureq default is "no
     // timeout", which is wrong for an icon fetcher.
     let agent = ureq::AgentBuilder::new()
         .timeout(TIMEOUT)
@@ -81,7 +81,7 @@ pub fn fetch_favicon(entry_url: &str) -> Result<Vec<u8>, FaviconError> {
 }
 
 /// Extract a hostname from an entry URL. Accepts URLs with or without a
-/// scheme — many KeePass DBs store bare `github.com` style URLs that
+/// scheme - many KeePass DBs store bare `github.com` style URLs that
 /// `url::Url::parse` would otherwise reject. Returns the lowercased host
 /// so `Github.COM` and `github.com` hit the same DDG cache key.
 fn host_from_url(input: &str) -> Option<String> {

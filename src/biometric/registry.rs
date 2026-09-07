@@ -1,7 +1,7 @@
 //! Persistent index of "which vault paths have a biometric
 //! enrolment". Lives next to `settings.json` and `recent.json` under
 //! the platform's app-support directory. **Contents are deliberately
-//! minimal** — only the vault path, a UUID, the keyfile path that
+//! minimal** - only the vault path, a UUID, the keyfile path that
 //! applied at enrolment time, and a timestamp. **Never** a password
 //! or any vault contents; passwords live in the OS keychain under the
 //! UUID.
@@ -96,7 +96,7 @@ impl BiometricRegistry {
 
 /// Read the registry from the platform's app-support dir. Same
 /// "treat missing/corrupt as empty" policy as `recents::load` and
-/// `settings::load` — startup must never block on a stray file.
+/// `settings::load` - startup must never block on a stray file.
 pub fn load() -> Result<BiometricRegistry, RegistryError> {
     let dir = crate::sync::config::app_support_dir()
         .map_err(|e| RegistryError::NoSupportDir(e.to_string()))?;
@@ -214,8 +214,8 @@ mod tests {
     /// Security invariant: the on-disk JSON must only ever carry the
     /// allowlisted, non-secret fields. An allowlist (rather than a
     /// "doesn't contain the word password" substring check) is the
-    /// robust form: it fails the moment *any* new field appears —
-    /// including one named `master`, `credential`, `token`, etc. —
+    /// robust form: it fails the moment *any* new field appears -
+    /// including one named `master`, `credential`, `token`, etc. -
     /// forcing a deliberate review of whether it's safe to persist.
     #[test]
     fn serialised_json_has_only_allowlisted_fields() {
@@ -248,7 +248,7 @@ mod tests {
             assert_eq!(
                 keys,
                 vec!["enrolled_at", "id", "keyfile"],
-                "biometric.json enrolment carries a non-allowlisted field — \
+                "biometric.json enrolment carries a non-allowlisted field - \
                  review whether it leaks anything secret before adding it. Got: {keys:?}"
             );
         }

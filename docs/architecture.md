@@ -10,7 +10,7 @@ Single-crate workspace, no FFI. Everything compiles via `cargo build`.
 src/
 ├── app/        Bootstrap, AppState (the single source of mutable truth),
 │               settings + recents persistence, key bindings, time helpers
-├── domain/     UI-safe vault types — VaultSnapshot, VaultEntry, VaultGroup.
+├── domain/     UI-safe vault types - VaultSnapshot, VaultEntry, VaultGroup.
 │               Crucially: zero secret material. Only what the UI needs to render.
 ├── keepass/    Adapter over the forked keepass-rs crate. Document open/save,
 │               three-way merge for conflicts, password generator, snapshot
@@ -28,7 +28,7 @@ src/
 ├── cli_install.rs  macOS registration of the bundled CLI in /usr/local/bin.
 ├── favicon.rs  DuckDuckGo favicon fetcher (per-entry icon enrichment).
 ├── lib.rs      Module root.
-└── main.rs     Entry point — calls `ferrispass::app::run()`.
+└── main.rs     Entry point - calls `ferrispass::app::run()`.
 
 src/bin/
 └── ferrispass-cli.rs  Thin CLI entry point that delegates to `cli::run()`.
@@ -76,12 +76,12 @@ User submits password (Unlock screen)
 
 `AppState` (in `src/app/state.rs`) holds *all* mutable application state in a single `gpui::Entity`. Status is encoded in enums per concern:
 
-- `VaultStatus` — Welcome, AwaitingPassword, Open, Error
-- `SaveStatus` — Idle, Saving, Saved, Failed
-- `SyncStatus` — Disconnected, Idle, Connecting, Synced, Conflict, Failed, Reconnect
-- `UpdateStatus` — Idle, Checking, Available, Downloading, ReadyToRestart, Failed
-- `FaviconDownloadStatus` — Idle, Running, Finished
-- `Overlay` — None, Connect, Settings, AddEntry, EditEntry, Conflict, VaultSwitcher
+- `VaultStatus` - Welcome, AwaitingPassword, Open, Error
+- `SaveStatus` - Idle, Saving, Saved, Failed
+- `SyncStatus` - Disconnected, Idle, Connecting, Synced, Conflict, Failed, Reconnect
+- `UpdateStatus` - Idle, Checking, Available, Downloading, ReadyToRestart, Failed
+- `FaviconDownloadStatus` - Idle, Running, Finished
+- `Overlay` - None, Connect, Settings, AddEntry, EditEntry, Conflict, VaultSwitcher
 
 Mutations always flow through `AppState` methods. The pattern is:
 
@@ -105,7 +105,7 @@ pub fn start_some_async_thing(&mut self, cx: &mut Context<Self>) {
 
 Reference implementation: `try_restore_sync_binding` in `state.rs:541`. Copy this pattern for any new async operation.
 
-`AppShell` (in `src/ui/app_shell.rs`) holds UI-local state (input fields, scroll positions, focus handles, debounce tasks) and subscribes to `AppState` via `cx.observe`. AppShell never mutates AppState directly — it dispatches actions or calls public methods on the `Entity<AppState>`.
+`AppShell` (in `src/ui/app_shell.rs`) holds UI-local state (input fields, scroll positions, focus handles, debounce tasks) and subscribes to `AppState` via `cx.observe`. AppShell never mutates AppState directly - it dispatches actions or calls public methods on the `Entity<AppState>`.
 
 ## Trust boundaries
 
@@ -180,10 +180,10 @@ Continue exercising round trips through FerrisPass, KeePassXC, and KeePass2 with
 
 GPUI provides its own task scheduler. Two flavors:
 
-- `cx.background_spawn(fut)` — runs on a thread pool. Use for blocking I/O (network, disk, Argon2 KDF). Future is cancelled on drop unless `.detach()`-ed.
-- `cx.spawn(fut)` — runs on the foreground render loop. Use to update `Entity` state after a background task completes. Inside the future, call `this.update(cx, |state, cx| ...)` to mutate state safely.
+- `cx.background_spawn(fut)` - runs on a thread pool. Use for blocking I/O (network, disk, Argon2 KDF). Future is cancelled on drop unless `.detach()`-ed.
+- `cx.spawn(fut)` - runs on the foreground render loop. Use to update `Entity` state after a background task completes. Inside the future, call `this.update(cx, |state, cx| ...)` to mutate state safely.
 
-We do NOT pull in `tokio` directly — but `cargo-packager-updater` uses `reqwest` which transitively brings tokio in. Tokio code runs only inside the updater's downloader; everything else stays sync + GPUI-scheduled.
+We do NOT pull in `tokio` directly - but `cargo-packager-updater` uses `reqwest` which transitively brings tokio in. Tokio code runs only inside the updater's downloader; everything else stays sync + GPUI-scheduled.
 
 ## UI rendering
 

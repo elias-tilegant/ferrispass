@@ -1,4 +1,4 @@
-//! "Recently opened vaults" persistence — drives the auto-resume on
+//! "Recently opened vaults" persistence - drives the auto-resume on
 //! startup and the Recents list on the Welcome screen.
 //!
 //! Stored as a single JSON file under the platform's app-support directory,
@@ -7,7 +7,7 @@
 //! On macOS:   `~/Library/Application Support/ferrispass/recent.json`
 //! On Linux:   `$XDG_CONFIG_HOME/ferrispass/recent.json`
 //!
-//! Contents are intentionally minimal — paths + last-opened timestamps,
+//! Contents are intentionally minimal - paths + last-opened timestamps,
 //! nothing else. **No master passwords, no OAuth tokens.** Refresh tokens
 //! continue to live in the OS keychain (`sync::tokens`).
 //!
@@ -58,7 +58,7 @@ pub enum RecentsError {
 }
 
 /// Read the recents file. `Ok(empty)` when the file doesn't exist yet
-/// (cold first launch), `Ok(empty)` also when the file is malformed —
+/// (cold first launch), `Ok(empty)` also when the file is malformed -
 /// startup must never block on a corrupt list. Real I/O errors still
 /// surface so unrelated problems aren't swallowed.
 pub fn load() -> Result<RecentVaults, RecentsError> {
@@ -81,7 +81,7 @@ pub fn save(recents: &RecentVaults) -> Result<(), RecentsError> {
 
 /// Convenience for startup: load the list, drop entries whose file no
 /// longer exists, and persist the pruned list back to disk if anything
-/// changed. Errors are intentionally swallowed — auto-resume is a
+/// changed. Errors are intentionally swallowed - auto-resume is a
 /// best-effort feature and shouldn't block the app from starting.
 pub fn load_pruned() -> RecentVaults {
     let mut recents = load().unwrap_or_default();
@@ -94,7 +94,7 @@ pub fn load_pruned() -> RecentVaults {
 }
 
 /// Move `path` to the front of `entries`, dedup any older copies, and
-/// truncate to `max`. Pure — no I/O. Updates `last_opened_at` to `now`.
+/// truncate to `max`. Pure - no I/O. Updates `last_opened_at` to `now`.
 /// Operates on `Vec<RecentEntry>` directly so AppState can hold a flat
 /// field without wrapping in `RecentVaults`.
 pub fn push_front_in(entries: &mut Vec<RecentEntry>, path: PathBuf, max: usize) {
@@ -199,7 +199,7 @@ mod tests {
     fn load_corrupt_returns_empty_not_error() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(FILE_NAME), "{ this is not json").unwrap();
-        // Must not block startup — corrupt list is treated as empty.
+        // Must not block startup - corrupt list is treated as empty.
         let loaded = load_in(dir.path()).unwrap();
         assert!(loaded.entries.is_empty());
     }

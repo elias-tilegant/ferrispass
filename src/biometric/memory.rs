@@ -3,7 +3,7 @@
 //! and supports forcing the next `retrieve`/`enroll` call to fail with
 //! a specific [`BiometricError`] variant.
 //!
-//! Not gated behind `#[cfg(test)]` only — also reachable from
+//! Not gated behind `#[cfg(test)]` only - also reachable from
 //! `app::state` tests in another file. We keep the impl inside the
 //! same crate so it never ships to release binaries (the module is
 //! gated at `src/biometric/mod.rs:32`).
@@ -185,7 +185,7 @@ mod tests {
                 .unwrap_err(),
             BiometricError::UserCancelled
         );
-        // Next call succeeds — the injected error was a one-shot.
+        // Next call succeeds - the injected error was a one-shot.
         assert_eq!(
             &*store
                 .retrieve(&id, "prompt", RetrieveOptions::default())
@@ -254,7 +254,7 @@ mod tests {
     }
 
     /// Pins the contract that `RetrieveOptions` is recorded on the
-    /// store — production wiring reads `AppSettings::biometric_allow_passcode_fallback`
+    /// store - production wiring reads `AppSettings::biometric_allow_passcode_fallback`
     /// and forwards it via this struct, so a regression that loses
     /// the options would silently re-strict the OS prompt.
     #[test]

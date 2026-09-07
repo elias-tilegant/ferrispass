@@ -32,7 +32,7 @@ pub struct VaultDocument {
     /// Monotonic mutation counter. Every mutator funnels through
     /// `refresh_snapshot`, which bumps it. The sync merge flow snapshots
     /// this alongside the database clone it diffs against and compares it
-    /// again when the merged result is ready to install — a mismatch means
+    /// again when the merged result is ready to install - a mismatch means
     /// the user edited the document mid-merge, and installing the merged
     /// copy would silently discard that edit.
     generation: u64,
@@ -139,7 +139,7 @@ impl VaultDocument {
         }
     }
 
-    /// Current mutation generation — see the field docs. Compare two reads
+    /// Current mutation generation - see the field docs. Compare two reads
     /// for equality only; the absolute value carries no meaning.
     pub fn generation(&self) -> u64 {
         self.generation
@@ -150,7 +150,7 @@ impl VaultDocument {
     }
 
     /// The master password used to unlock this vault. Required by the sync
-    /// flow when a 412 conflict happens — we need to decrypt the remote
+    /// flow when a 412 conflict happens - we need to decrypt the remote
     /// bytes against the same key, then re-encrypt the merged result.
     /// Lifetime-bound to `&self` so callers don't accidentally store it
     /// outside the document's scope.
@@ -158,7 +158,7 @@ impl VaultDocument {
         &self.password
     }
 
-    /// Optional keyfile path — same reason as `password()`. `None` for
+    /// Optional keyfile path - same reason as `password()`. `None` for
     /// password-only vaults.
     pub fn keyfile_path(&self) -> Option<&Path> {
         self.keyfile_path.as_deref()
@@ -174,7 +174,7 @@ impl VaultDocument {
         &self.database
     }
 
-    /// Cheap O(1) clone of the snapshot — used by hot render paths to avoid the
+    /// Cheap O(1) clone of the snapshot - used by hot render paths to avoid the
     /// expensive deep-clone of the group tree + every entry. `Arc` (not `Rc`) so
     /// the document can be built on a background thread before being handed to UI.
     pub fn snapshot_rc(&self) -> Arc<VaultSnapshot> {
@@ -191,7 +191,7 @@ impl VaultDocument {
 
     /// Run the real zxcvbn estimator against the entry's stored password.
     /// Returns `None` when the entry has no password (or doesn't exist).
-    /// Computed lazily — typically ~1-5 ms for a 12-24 char password — so we only
+    /// Computed lazily - typically ~1-5 ms for a 12-24 char password - so we only
     /// call it for the currently-selected entry rather than during snapshot build.
     pub fn strength_for_entry(&self, entry_id: &str) -> Option<StrengthReport> {
         let password = self.password_for_entry(entry_id)?;
@@ -225,7 +225,7 @@ impl VaultDocument {
         Some(value.get().clone())
     }
 
-    /// Raw `otp` field of an entry — `otpauth://...` URL or bare secret.
+    /// Raw `otp` field of an entry - `otpauth://...` URL or bare secret.
     /// Used to prefill the Edit modal so the user can change/remove it.
     /// Returns `None` if the entry has no OTP set.
     pub fn otp_url_for_entry(&self, entry_id: &str) -> Option<String> {
@@ -312,7 +312,7 @@ impl VaultDocument {
 
     /// [`Self::read_current_bytes`] as a `Send` closure. An in-flight save
     /// holds the storage mutex across the whole KDF + fsync, so the read
-    /// must happen on a background thread — calling the closure on the UI
+    /// must happen on a background thread - calling the closure on the UI
     /// thread can freeze the app for the full save duration.
     pub fn current_bytes_reader(
         &self,
@@ -347,7 +347,7 @@ impl VaultDocument {
             .ok_or(MutationError::GroupNotFound)?;
         let mut entry = group.add_entry();
         apply_draft_to_entry(&mut entry, draft);
-        // Tags are an *initial* set on create — `apply_draft_to_entry`
+        // Tags are an *initial* set on create - `apply_draft_to_entry`
         // intentionally leaves them alone so updates don't wipe out
         // tags the user entered in another KeePass client. Custom
         // fields go through `apply_draft_to_entry` directly because
@@ -360,7 +360,7 @@ impl VaultDocument {
 
     /// Add or remove the favorite-marker tag on an entry. The convention
     /// is a single tag named `Favorite` (case-insensitive on read), which
-    /// KeePassXC users already commonly use to flag favourites — this
+    /// KeePassXC users already commonly use to flag favourites - this
     /// keeps our "Favorites" view in sync with what the user sees in
     /// other clients. Returns the new starred state. Caller is expected
     /// to schedule a background save.
@@ -442,7 +442,7 @@ impl VaultDocument {
     /// across sessions and across other clients (KeePassXC and KeePass2
     /// honour the same flag, so dipping in from another app doesn't
     /// scramble what's open here). Returns `Ok` even when no flip is
-    /// needed — idempotent.
+    /// needed - idempotent.
     pub fn set_group_expanded(
         &mut self,
         group_id_str: &str,
@@ -466,7 +466,7 @@ impl VaultDocument {
     }
 
     /// Replace the entry's icon with a custom-icon blob. `bytes` is the raw
-    /// PNG/JPEG/ICO/etc — keepass-rs stores it verbatim and our
+    /// PNG/JPEG/ICO/etc - keepass-rs stores it verbatim and our
     /// repository-side magic-byte sniffer figures out the format on the
     /// next read. Used by the favicon downloader; safe to call repeatedly
     /// (each call replaces any previous icon, including a previously-
@@ -493,7 +493,7 @@ impl VaultDocument {
         let mut entry = entry.track_changes();
         // `set_icon_custom_new` drops any previous icon (built-in or
         // custom) and registers a fresh `CustomIconId`. We don't try to
-        // dedupe identical blobs across entries — the typical vault has
+        // dedupe identical blobs across entries - the typical vault has
         // distinct icons per site, and the dedup bookkeeping isn't worth
         // it for an explicit user action.
         let mut current = entry.as_mut();
@@ -546,7 +546,7 @@ impl VaultDocument {
     }
 
     /// Move an entry to the database's Recycle Bin (creating one if missing).
-    /// We deliberately don't expose hard-delete from this API yet — that lives
+    /// We deliberately don't expose hard-delete from this API yet - that lives
     /// behind the future "Empty trash" affordance in the Trash sidebar view.
     pub fn delete_entry(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
         let entry_id =
@@ -583,7 +583,7 @@ impl VaultDocument {
     }
 
     /// Permanently remove an entry from the database. Bypasses the Recycle
-    /// Bin — call this only after explicit user confirmation; the data is
+    /// Bin - call this only after explicit user confirmation; the data is
     /// unrecoverable once `save_async` flushes the result to disk.
     pub fn delete_entry_permanent(&mut self, entry_id_str: &str) -> Result<(), MutationError> {
         let entry_id =
@@ -768,7 +768,7 @@ impl VaultDocument {
     }
 
     /// Soft-delete a group: move the entire subtree to the Recycle Bin.
-    /// Mirrors `delete_entry`'s contract — reversible via the Trash view.
+    /// Mirrors `delete_entry`'s contract - reversible via the Trash view.
     /// Refuses to delete the root, the Recycle Bin itself, or any group
     /// whose subtree contains the Recycle Bin (the latter only happens
     /// when another client moved RB under a sub-group; `move_to` would
@@ -903,7 +903,7 @@ fn history_cap(db: &Database) -> Option<usize> {
 /// Trim every entry's history to the vault's `HistoryMaxItems`. The pinned
 /// fork appends a full pre-mutation snapshot per tracked change (even a
 /// favorite-star toggle) but never trims, so a frequently-edited entry would
-/// grow the vault without bound — until the 250 MB save limit refuses to
+/// grow the vault without bound - until the 250 MB save limit refuses to
 /// write it at all. Runs after every mutation (cheap length check per entry)
 /// and after merges.
 // ponytail: HistoryMaxSize (byte cap) is not enforced, only the item count;
@@ -939,7 +939,7 @@ pub struct EntryDraft {
     pub url: String,
     pub notes: String,
     pub tags: Vec<String>,
-    /// 2FA secret. Either a raw `otpauth://...` URL (preferred — keeps
+    /// 2FA secret. Either a raw `otpauth://...` URL (preferred - keeps
     /// algorithm/digits/period/issuer config) or just the base32 secret. Empty
     /// = no OTP. Stored as a *protected* field because the value is the seed
     /// that generates every future code.
@@ -993,7 +993,7 @@ where
     if draft.otp.trim().is_empty() {
         entry.set_protected(fields::OTP, "");
     } else {
-        // Store as protected — the value contains the TOTP seed.
+        // Store as protected - the value contains the TOTP seed.
         entry.set_protected(fields::OTP, draft.otp.trim().to_string());
     }
     // Tags deliberately not assigned here. The edit form doesn't expose a
@@ -1002,7 +1002,7 @@ where
     // entry. `create_entry` initialises tags explicitly; updates leave
     // them untouched.
     //
-    // Custom fields, by contrast, *are* under the editor's control —
+    // Custom fields, by contrast, *are* under the editor's control -
     // the AddEntry/EditEntry modal populates `draft.custom_fields`
     // from its row state on every save (including blank rows, which
     // `apply_custom_fields` filters out). Removing a row in the
@@ -1017,7 +1017,7 @@ where
 /// (so removing a row in the editor actually removes it from the DB),
 /// then re-write the draft. Standard fields untouched.
 ///
-/// Empty keys are skipped — the editor leaves blank rows around for the
+/// Empty keys are skipped - the editor leaves blank rows around for the
 /// "+" button to fill, and we don't want those polluting the save.
 fn apply_custom_fields<E>(entry: &mut E, draft_fields: &[CustomField])
 where
@@ -1155,7 +1155,7 @@ impl fmt::Debug for OtpDisplay {
 ///
 /// Also force `digits=6` when the URL doesn't pin a value: keepass-rs's
 /// missing-param default is 8, which contradicts RFC 6238 and every
-/// mainstream authenticator (Google, Authy, Microsoft) — leaving it on
+/// mainstream authenticator (Google, Authy, Microsoft) - leaving it on
 /// 8 produced codes that just don't match the server's expectation.
 fn parse_otp_value(raw: &str) -> Option<keepass::db::TOTP> {
     let trimmed = raw.trim();
@@ -1182,7 +1182,7 @@ fn parse_otp_value(raw: &str) -> Option<keepass::db::TOTP> {
 }
 
 /// Cheap "is `key=` set in this URL's query string?" check. Avoids
-/// pulling in a full URL parser just to inspect one parameter — we
+/// pulling in a full URL parser just to inspect one parameter - we
 /// already trust the input to be either an `otpauth://` URL or a base32
 /// secret we just wrapped, so the query split is unambiguous.
 fn query_has_param(url: &str, key: &str) -> bool {
@@ -1270,7 +1270,7 @@ impl SavePayload {
 
     /// Like [`Self::save_to`], but arbitrates against "Discard changes and
     /// lock" through `abort`'s atomic state machine: immediately before
-    /// publication the worker claims the `Publishing` state — exactly one
+    /// publication the worker claims the `Publishing` state - exactly one
     /// of {publish, abort} can ever win, so a discard that succeeded means
     /// these bytes never reach the disk, and a worker that reached
     /// `Publishing` makes the discard report failure instead of lying.
@@ -1377,7 +1377,7 @@ impl SavePayload {
         }
 
         // Last exit before publication: atomically claim the Publishing
-        // state. Losing means a discard already won — these bytes must
+        // state. Losing means a discard already won - these bytes must
         // never reach the target. Winning means a concurrent discard from
         // here on reports failure instead of pretending the (now
         // published) changes were dropped.
@@ -1460,7 +1460,7 @@ const SAVE_ABORTED: u8 = 3;
 
 /// Atomic `Writing → (Publishing → Published) | Aborted` state machine
 /// shared between one save task and "Discard changes and lock". The worker
-/// claims publication, the discard claims abortion — the CAS guarantees
+/// claims publication, the discard claims abortion - the CAS guarantees
 /// exactly one side wins: a successful discard means the bytes never reach
 /// the target, and a worker that reached `Publishing` makes any later
 /// discard attempt report failure instead of claiming the changes were
@@ -1528,7 +1528,7 @@ impl SaveAbortHandle {
 /// How long lock acquisition waits for another holder (a second FerrisPass
 /// instance, another KeePass client, a stuck network share) before giving up.
 /// Quit is vetoed while a save is unfinished, so blocking indefinitely here
-/// would make the app unquittable — a bounded wait surfaces a Failed status
+/// would make the app unquittable - a bounded wait surfaces a Failed status
 /// the user can act on instead.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -1616,7 +1616,7 @@ fn read_bounded_file(path: &Path) -> Result<Vec<u8>, SaveError> {
 /// appeared after the caller's exists check. On macOS `renamex_np` with
 /// `RENAME_EXCL` provides that natively even on filesystems without hard
 /// links (FAT32/ExFAT). Where the syscall itself is unsupported, fall back
-/// to a fresh exists check + rename — a small residual window, held under
+/// to a fresh exists check + rename - a small residual window, held under
 /// the sidecar lock that already fences out other FerrisPass instances.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
@@ -1776,8 +1776,8 @@ fn sync_parent_directory(target: &Path) -> Result<(), io::Error> {
 fn temp_path_for(target: &Path) -> PathBuf {
     // Keep the temp file next to the destination so the rename is on the
     // same filesystem (atomic on POSIX/macOS). The name embeds the pid plus
-    // a process-wide counter so two concurrent saves — a second one of ours
-    // that slipped past serialization, or another app instance's — can never
+    // a process-wide counter so two concurrent saves - a second one of ours
+    // that slipped past serialization, or another app instance's - can never
     // truncate each other's temp file and publish interleaved bytes via the
     // final rename.
     static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -2072,7 +2072,7 @@ mod tests {
         let doc = VaultDocument::new(db, snapshot, "vault-pw".to_string(), None);
 
         // Use the public payload API exactly the way `save_async` does on the
-        // real path — so this test catches regressions in the same code path.
+        // real path - so this test catches regressions in the same code path.
         let receipt = doc
             .save_payload()
             .save_to(&path)
@@ -2803,7 +2803,7 @@ mod tests {
             )
             .expect("create");
 
-        // Recycle-bin should not exist yet — delete must lazily create one.
+        // Recycle-bin should not exist yet - delete must lazily create one.
         assert!(
             doc.database.recycle_bin().is_none(),
             "no recycle bin initially"
@@ -3089,7 +3089,7 @@ mod tests {
             )
             .expect("create");
 
-        // Update with an empty draft.tags — what the edit form sends today.
+        // Update with an empty draft.tags - what the edit form sends today.
         doc.update_entry(
             &id,
             &EntryDraft {
@@ -3279,7 +3279,7 @@ mod tests {
     /// survive an in-memory save+reopen, surface back via the snapshot's
     /// `VaultEntry.custom_fields`, and are individually retrievable via
     /// `custom_field_value`. This is the round-trip the SAP launcher
-    /// relies on — a regression here would silently break "open SAP GUI".
+    /// relies on - a regression here would silently break "open SAP GUI".
     #[test]
     fn custom_fields_round_trip() {
         let tmp = TempDir::new().expect("tempdir");
@@ -3306,7 +3306,7 @@ mod tests {
                 },
                 CustomField {
                     key: "API_TOKEN".into(),
-                    // Stored as protected — represents a secret-like field
+                    // Stored as protected - represents a secret-like field
                     // the user might keep alongside the password.
                     value: "sk-ze9y-zhg0-x".into(),
                     protected: true,
@@ -3331,7 +3331,7 @@ mod tests {
             Some("/H/sap.example.com/S/3200")
         );
 
-        // Save + reopen — the kdbx writer must serialise the protection
+        // Save + reopen - the kdbx writer must serialise the protection
         // bits and the parser must restore them. (This is what would have
         // broken if we'd written `set_unprotected` for the protected
         // value, since kdbx stores them in different XML positions.)
@@ -3352,7 +3352,7 @@ mod tests {
     }
 
     /// `update_entry` must apply the draft's `custom_fields`
-    /// authoritatively — adding a row, editing an existing one, and
+    /// authoritatively - adding a row, editing an existing one, and
     /// dropping one all flow through the editor → draft → save pipe.
     /// Regression test for the T10 wire-up: pre-T10 we only wrote
     /// custom fields on `create_entry`, so any edit silently lost
@@ -3500,11 +3500,11 @@ mod tests {
         assert!(otp.remaining_secs <= otp.period_secs);
     }
 
-    /// A user pasting just the base32 secret (e.g. "JBSWY3DPEHPK3PXP")
-    /// — what most authenticator apps and many setup pages hand out —
-    /// must produce a working live code. Before the bare-secret
+    /// A user pasting just the base32 secret (e.g. "JBSWY3DPEHPK3PXP"),
+    /// which most authenticator apps and many setup pages hand out, must
+    /// produce a working live code. Before the bare-secret
     /// fallback was added, the keepass crate's URL-only `from_str`
-    /// rejected this input and the UI was stuck rendering "—".
+    /// rejected this input and the UI was stuck rendering "-".
     #[test]
     fn bare_secret_yields_live_code() {
         let db = Database::new();
@@ -3555,7 +3555,7 @@ mod tests {
         assert_eq!(digits.len(), 6, "expected 6 digits, got: {}", otp.code);
     }
 
-    /// An explicit `digits=8` in the pasted URL must win — we only
+    /// An explicit `digits=8` in the pasted URL must win - we only
     /// inject the default when the URL is silent on the matter.
     #[test]
     fn explicit_eight_digits_is_respected() {
@@ -3638,7 +3638,7 @@ mod tests {
         assert!(doc.totp_for_entry(&id).is_none(), "no live code");
     }
 
-    /// AES-KDF round-trip — proves the patched `keepass-rs` actually emits
+    /// AES-KDF round-trip - proves the patched `keepass-rs` actually emits
     /// a UUID readable by other clients, *and* that our own re-open path
     /// accepts what we just wrote. Combined with the unit test inside
     /// `keepass-rs::config::kdf_dump_tests`, this is end-to-end coverage of
@@ -3668,7 +3668,7 @@ mod tests {
         let doc = VaultDocument::new(db, snapshot, "vault-pw".into(), None);
         doc.save_payload().save_to(&path).expect("save");
 
-        // Re-open via our own repository — uses the same parse path the UI
+        // Re-open via our own repository - uses the same parse path the UI
         // path takes, so success here means a real user could re-open too.
         let reopened =
             crate::keepass::KeePassRepository::open(&path, "vault-pw", None).expect("reopen");

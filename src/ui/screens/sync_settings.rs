@@ -1,4 +1,4 @@
-//! Sync settings overlay — data-driven from `AppState::sync` +
+//! Sync settings overlay - data-driven from `AppState::sync` +
 //! `AppState::sync_status`.
 //!
 //! Three top-level shapes:
@@ -8,7 +8,7 @@
 //!   user back through the Connect overlay).
 //!
 //! The activity log + behavior-toggles sections from the original mockup
-//! were removed because they were 100% static demo data — re-introducing
+//! were removed because they were 100% static demo data - re-introducing
 //! them as live data is a future job (would need a sync-event log).
 
 use gpui::{
@@ -27,7 +27,7 @@ use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip};
 use crate::ui::widgets::interaction::Interaction as _;
 
-/// Render the Sync tab body — content only, no chrome. The unified
+/// Render the Sync tab body - content only, no chrome. The unified
 /// Settings overlay (`screens::settings`) wraps this with the sidebar
 /// and header. The three Connected / Reconnect / Disconnected shapes
 /// are picked from `AppState::sync_binding` + `sync_status`.
@@ -106,7 +106,7 @@ fn render_connected(
                 // Counts both fresh remote-only entries AND existing entries
                 // where remote had a strictly newer last_modification (the
                 // merge module auto-resolves those). "merged" covers both
-                // cases — "pulled in N new entries" was misleading after
+                // cases - "pulled in N new entries" was misleading after
                 // last-write-wins landed.
                 let noun = if *auto_merged == 1 {
                     "entry"
@@ -126,7 +126,7 @@ fn render_connected(
         SyncStatus::Syncing => "Syncing now…".into(),
         SyncStatus::Connecting => "Connecting…".into(),
         SyncStatus::Conflict(_) => "Awaiting conflict resolution".into(),
-        _ => "—".into(),
+        _ => "-".into(),
     };
 
     v_flex()
@@ -229,7 +229,7 @@ fn is_graph_transfer_error(message: &str) -> bool {
 
 /// "Connected since 12 May 2026" from the stored interactive-sign-in
 /// timestamp. `None` when the config predates the field (pre-feature
-/// connect) or the timestamp is unrepresentable — the line is simply
+/// connect) or the timestamp is unrepresentable - the line is simply
 /// omitted in that case rather than showing a placeholder date.
 fn connected_since_label(authenticated_at: Option<u64>) -> Option<SharedString> {
     let secs = authenticated_at?;
@@ -243,7 +243,7 @@ fn connected_since_label(authenticated_at: Option<u64>) -> Option<SharedString> 
 fn history_section(history: &[SyncHistoryEntry], cx: &mut Context<AppShell>) -> AnyElement {
     let total = history.len();
     let now = chrono::Local::now();
-    // Most recent first — visually matches the "latest at the top" reading
+    // Most recent first - visually matches the "latest at the top" reading
     // order users expect from activity logs.
     let rows: Vec<AnyElement> = history
         .iter()
@@ -310,7 +310,7 @@ fn history_row(
     };
     let elapsed: SharedString = relative_time_label(entry.at, now).into();
     // GPUI tracks hover state only on *stateful* (id'd) interactive
-    // elements — without the id the row repaints only when something
+    // elements - without the id the row repaints only when something
     // else nudges the tree (e.g. a click), which surfaces as
     // "hover only shows up after I click and is laggy".
     let id: SharedString = format!("sync-history-row-{idx}").into();
@@ -445,7 +445,7 @@ fn render_disconnected(cx: &mut Context<AppShell>) -> AnyElement {
                     div()
                         .text_sm()
                         .text_color(palette::text())
-                        .child("This vault is local-only — no cloud sync configured."),
+                        .child("This vault is local-only - no cloud sync configured."),
                 ),
         )
         .child(
@@ -491,7 +491,7 @@ fn render_restore(status: &SyncStatus, cx: &mut Context<AppShell>) -> AnyElement
     };
 
     // A failed restore has no binding, so "Sync now" never appears and
-    // nothing retries on its own — without this button the only way out
+    // nothing retries on its own - without this button the only way out
     // of a transient network blip at unlock is relocking the vault.
     let retry_button = matches!(status, SyncStatus::Failed(_)).then(|| {
         div()
@@ -572,10 +572,10 @@ fn render_reconnect(detail: Option<&str>, cx: &mut Context<AppShell>) -> AnyElem
                     div()
                         .text_sm()
                         .text_color(palette::text())
-                        .child("Your Microsoft sign-in has expired — reconnect to keep syncing."),
+                        .child("Your Microsoft sign-in has expired - reconnect to keep syncing."),
                 )
                 // Surface the exact Azure reason (e.g. the `AADSTS700082`
-                // inactivity line) when we have it — it's the only reliable
+                // inactivity line) when we have it - it's the only reliable
                 // signal of *why* the grant died, and lets the user (or us)
                 // tell a short inactivity window apart from a tenant policy.
                 .when_some(detail, |this, detail| {
@@ -677,7 +677,7 @@ fn disconnect_button(cx: &mut Context<AppShell>) -> AnyElement {
 
 // --------------- helpers ---------------
 
-/// Plain-old-data snapshot of SyncBinding for renderers — `AppState::sync`
+/// Plain-old-data snapshot of SyncBinding for renderers - `AppState::sync`
 /// is held as `Option<SyncBinding>` and `SyncBinding` isn't `Clone` (it
 /// owns an `AccessToken` which we deliberately keep non-Clone). This
 /// snapshot only carries the bits the UI displays.

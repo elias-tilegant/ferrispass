@@ -55,7 +55,7 @@ where
     };
 
     // The `id`, hover and press feedback all live on this single styled row so
-    // GPUI tracks the interactive state reliably — splitting `id`/`on_click`
+    // GPUI tracks the interactive state reliably - splitting `id`/`on_click`
     // onto an outer wrapper (the previous shape) left the hover on a non-stateful
     // child, which only repainted when something else nudged the tree.
     h_flex()

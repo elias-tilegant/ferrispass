@@ -5,7 +5,7 @@
 //! 2. **Install**: require the confirmed version, bind the installer candidate
 //!    to that signed manifest, then verify and install the signed bundle.
 //!
-//! Both steps are blocking I/O — call from `cx.background_spawn(...)`, never
+//! Both steps are blocking I/O - call from `cx.background_spawn(...)`, never
 //! from the main thread.
 //!
 //! ## Why cargo-packager-updater (not Sparkle)
@@ -46,7 +46,7 @@ pub use status::UpdateStatus;
 
 /// URL of the JSON manifest the updater fetches. The `/latest/download/...`
 /// path on GitHub Releases is a server-side redirect to the most recent
-/// release's assets — stable across versions, no separate hosting needed.
+/// release's assets - stable across versions, no separate hosting needed.
 pub(crate) const UPDATE_ENDPOINT: &str =
     "https://github.com/elias-tilegant/ferrispass/releases/latest/download/update.json";
 
@@ -58,6 +58,6 @@ pub(crate) const UPDATE_SIGNATURE_ENDPOINT: &str =
 /// Minisign Ed25519 public key, embedded at compile time. Used to verify both
 /// the release manifest and every downloaded update bundle before applying it.
 ///
-/// The placeholder shipped in fresh checkouts is a zeroed key — it can verify
+/// The placeholder shipped in fresh checkouts is a zeroed key - it can verify
 /// nothing. Run `scripts/setup-minisign.sh` once to generate a real keypair.
 pub(crate) const MINISIGN_PUBLIC_KEY: &str = include_str!("../../bundle/minisign-pub.txt");

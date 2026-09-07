@@ -3,9 +3,9 @@
 //! (granted only to App-Store apps via provisioning profiles, not to
 //! Developer-ID builds like ours):
 //!
-//! 1. **Storage** — the master password lives in the legacy file-based
+//! 1. **Storage** - the master password lives in the legacy file-based
 //!    keychain (`SecKeychainAddGenericPassword`), with no biometric ACL.
-//! 2. **Gate** — `LAContext.evaluatePolicy` runs *before* the read; we
+//! 2. **Gate** - `LAContext.evaluatePolicy` runs *before* the read; we
 //!    only touch the keychain after the OS confirms Touch ID.
 //!
 //! The security boundary this draws (and what it deliberately does not
@@ -77,7 +77,7 @@ impl MacOsBiometricStore {
         Self
     }
 
-    /// Legacy keychain helper — same default behaviour as
+    /// Legacy keychain helper - same default behaviour as
     /// `security`-cli's `find-generic-password -s … -a …` and what
     /// the `keyring` crate's `apple-native` backend already uses for
     /// sync tokens. Returns `None` for the canonical "not enrolled"
@@ -96,7 +96,7 @@ impl MacOsBiometricStore {
 
 impl BiometricStore for MacOsBiometricStore {
     fn is_available(&self) -> bool {
-        // "Is the sensor reachable right now?" — drives the dedicated
+        // "Is the sensor reachable right now?" - drives the dedicated
         // Touch ID button. `false` in clamshell mode; the unlock
         // screen separately keeps the button when passcode fallback
         // can carry that case.
@@ -105,14 +105,14 @@ impl BiometricStore for MacOsBiometricStore {
     }
 
     fn is_supported(&self) -> bool {
-        // "Does this Mac have biometric hardware at all?" — drives the
+        // "Does this Mac have biometric hardware at all?" - drives the
         // enrolment gate, which must survive a temporarily unreachable
         // sensor (clamshell). `PasscodeNotSet` is the only LAError that
         // rules biometry out at the OS level (no Mac password = no
         // trust anchor); every other code is recoverable or merely
         // transient, so we accept it. `BiometryNotAvailable` is
         // ambiguous (also "no hardware"), but accepting it only costs a
-        // hardware-less Mac a button that never fires — far cheaper
+        // hardware-less Mac a button that never fires - far cheaper
         // than locking MacBook users out of enrolment with the lid shut.
         let ctx = unsafe { LAContext::new() };
         match unsafe { ctx.canEvaluatePolicy_error(STRICT_POLICY) } {
@@ -139,7 +139,7 @@ impl BiometricStore for MacOsBiometricStore {
         prompt: &str,
         options: RetrieveOptions,
     ) -> BiometricResult<Zeroizing<String>> {
-        // Step 1 — drive the OS biometric prompt *before* touching
+        // Step 1 - drive the OS biometric prompt *before* touching
         // the keychain. The cleartext master password must not enter
         // our process until biometry actually succeeds; reading it up
         // front (even just to fail-fast on a missing item) would leave
@@ -186,7 +186,7 @@ impl BiometricStore for MacOsBiometricStore {
 
         match rx.recv_timeout(RESPONSE_TIMEOUT) {
             Ok(Ok(())) => {
-                // Step 2 — biometry confirmed. *Now* read the keychain
+                // Step 2 - biometry confirmed. *Now* read the keychain
                 // item. A NotFound here means the registry pointed at
                 // an enrolment whose keychain item is gone (manually
                 // deleted, OS reset); surface it so the caller can
@@ -217,7 +217,7 @@ impl BiometricStore for MacOsBiometricStore {
         match find_generic_password(None, KEYCHAIN_SERVICE, &account) {
             Ok((_password, item)) => {
                 // The legacy `SecKeychainItem::delete` wrapper returns
-                // `()` — it swallows the OSStatus. To give the caller
+                // `()` - it swallows the OSStatus. To give the caller
                 // a trustworthy result (it gates registry cleanup on
                 // it) we confirm the deletion with a read-back: a
                 // follow-up lookup that misses means the item is
@@ -313,7 +313,7 @@ mod tests {
     fn user_fallback_maps_to_cancelled() {
         // We don't enable the fallback button, but if some future
         // localisation re-enables it, treat the click as a cancel
-        // rather than an auth failure — semantically the user opted
+        // rather than an auth failure - semantically the user opted
         // out, not failed to authenticate.
         assert_eq!(
             map_la_error(LAError::UserFallback.0 as i64),

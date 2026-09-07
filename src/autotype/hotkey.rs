@@ -25,7 +25,7 @@ use thiserror::Error;
 pub enum HotkeyError {
     /// User-typed combo isn't a valid hotkey string. We surface this in
     /// the Settings UI when the user types something `global-hotkey`
-    /// can't parse — better than silently registering nothing and
+    /// can't parse - better than silently registering nothing and
     /// having the feature appear broken.
     #[error("invalid hotkey combo \"{combo}\": {source}")]
     Parse {
@@ -39,7 +39,7 @@ pub enum HotkeyError {
     #[error("OS rejected hotkey registration: {0}")]
     Register(String),
     /// The hotkey manager itself failed to initialise. Shouldn't
-    /// happen in practice — the only documented cause is calling
+    /// happen in practice - the only documented cause is calling
     /// from a thread without a CF event loop, which we control for.
     #[error("could not create hotkey manager: {0}")]
     Init(String),
@@ -63,7 +63,7 @@ pub struct HotkeyListener {
 
 impl HotkeyListener {
     /// Register `combo` with the OS. Must run on the main thread (see
-    /// module docs); enforced by the caller — we don't try to thread-
+    /// module docs); enforced by the caller - we don't try to thread-
     /// check here because GPUI's only realistic call site is
     /// `AppShell::new`, which is itself main-threaded.
     pub fn register(combo: &str) -> Result<Self, HotkeyError> {
@@ -105,7 +105,7 @@ pub fn parse_combo(combo: &str) -> Result<HotKey, HotkeyError> {
 
 /// Drain pending hotkey events, returning `true` if our hotkey fired
 /// in the `Pressed` direction. Designed to be called from a GPUI
-/// background-timer loop — non-blocking, drains all queued events
+/// background-timer loop - non-blocking, drains all queued events
 /// so a backlog can't accumulate, and ignores Released events
 /// (we only act on the press to avoid double-firing).
 pub fn poll_pressed(expected_id: u32) -> bool {
@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn rejects_invalid_combo() {
         assert!(parse_combo("not a real hotkey").is_err());
-        // Empty string — would silently fail on register, surface
+        // Empty string - would silently fail on register, surface
         // the error at parse time instead.
         assert!(parse_combo("").is_err());
     }

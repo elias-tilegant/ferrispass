@@ -3,7 +3,7 @@
 //! Wraps `active_win_pos_rs::get_active_window` to a smaller shape
 //! that the rest of the auto-type pipeline cares about (title +
 //! app name + process path). Returns `None` rather than `Result`
-//! because there's nothing the caller can do about the error case —
+//! because there's nothing the caller can do about the error case -
 //! "we couldn't tell what window is focused" is operationally the
 //! same as "no foreground", and the only sensible response is to
 //! abort the auto-type with a notification.
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 /// Distilled foreground-window descriptor. `app_name` is the
 /// human-readable application name on macOS (e.g. `Safari`,
-/// `Firefox`, `Chromium`) — derived by `active-win-pos-rs` from the
+/// `Firefox`, `Chromium`) - derived by `active-win-pos-rs` from the
 /// `LocalizedName` of the frontmost app. `window_title` is the
 /// frontmost window's title for that app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,7 +26,7 @@ impl ForegroundInfo {
     /// `true` when the foreground belongs to the FerrisPass app itself.
     /// We use this as a guard so the global hotkey doesn't try to
     /// auto-type into our own vault list (which would also be a
-    /// security footgun — typing the user's password back into the
+    /// security footgun - typing the user's password back into the
     /// password input).
     ///
     /// Matched on `app_name` rather than process path, because the
@@ -56,8 +56,8 @@ impl ForegroundInfo {
     /// `self`. The typer's focus guard uses this to confirm focus hasn't
     /// moved to a *different app* between the hotkey press and keystroke
     /// dispatch (or across a `{DELAY}` pause). Window titles legitimately
-    /// change mid-sequence — multi-step logins navigate from a username
-    /// page to a password page — so the title is deliberately excluded;
+    /// change mid-sequence - multi-step logins navigate from a username
+    /// page to a password page - so the title is deliberately excluded;
     /// the process path is the strongest stable signal we have. Falls
     /// back to the app name when either side lacks a path (some AX
     /// queries yield an empty one).
@@ -104,7 +104,7 @@ fn is_known_browser_name(raw: &str) -> bool {
 
 /// Read the current foreground window, or `None` if the OS query
 /// failed. The crate panics under unusual conditions on some
-/// platforms — we don't reach for `catch_unwind` here because
+/// platforms - we don't reach for `catch_unwind` here because
 /// `active-win-pos-rs`'s macOS path uses CFRetained references that
 /// won't unwind safely. Instead we rely on the crate's `Result` for
 /// the documented failure modes.
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn is_self_is_case_insensitive() {
         // The bundled .app reports "FerrisPass", but the dev build
-        // running via `cargo run` reports "ferrispass" — both must
+        // running via `cargo run` reports "ferrispass" - both must
         // resolve to the same self-detection branch or we'd accept a
         // self-target on dev builds.
         let info = ForegroundInfo {

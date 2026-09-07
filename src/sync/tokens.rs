@@ -5,9 +5,9 @@
 //! Storage shape: one keychain entry per (provider × account email).
 //! - service = `"ferrispass-sync"` (constant)
 //! - account = the user's account email (e.g. `alice@contoso.onmicrosoft.com`)
-//! - secret  = the OAuth refresh token (opaque string, ~1–4 KB)
+//! - secret  = the OAuth refresh token (opaque string, ~1-4 KB)
 //!
-//! Multiple accounts can coexist — each lookup is by email. Disconnect
+//! Multiple accounts can coexist - each lookup is by email. Disconnect
 //! removes the entry. Access tokens are *not* stored here; they live in
 //! memory inside `SyncBinding` and are short-lived (~1 h) anyway.
 
@@ -32,7 +32,7 @@ pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError>
 }
 
 /// Read the refresh token for the given account. Returns `Ok(None)` when
-/// no entry exists — common case before first connect or after disconnect,
+/// no entry exists - common case before first connect or after disconnect,
 /// not worth typing as an error.
 pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
     let entry = Entry::new(SERVICE, account_email)?;
@@ -70,7 +70,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "touches real macOS Keychain — run explicitly with --ignored"]
+    #[ignore = "touches real macOS Keychain - run explicitly with --ignored"]
     fn round_trip_store_load_delete() {
         let account = format!("test-{}@ferrispass.invalid", std::process::id());
         let token = "abc123-refresh-token";
@@ -89,7 +89,7 @@ mod tests {
         delete(&account).unwrap();
         assert_eq!(load(&account).unwrap(), None);
 
-        // Second delete must be a no-op (idempotent — Disconnect retries).
+        // Second delete must be a no-op (idempotent - Disconnect retries).
         delete(&account).unwrap();
     }
 }

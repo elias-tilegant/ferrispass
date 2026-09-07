@@ -29,7 +29,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     // was opened for: clicking "Apply resolution" flips the status to
     // `Syncing` while the merged file is being uploaded (~500 ms KDF +
     // network), and a non-412 upload error parks it in `Failed(_)`. We
-    // need a real screen for each of those — rendering an empty
+    // need a real screen for each of those - rendering an empty
     // background was the source of the "white screen after Apply" bug.
     match shell.state().read(cx).sync_status() {
         SyncStatus::Conflict(state) => {
@@ -75,7 +75,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
 /// Centred status card used while the merged file is being uploaded
 /// (`SyncStatus::Syncing`) or after a non-412 failure
 /// (`SyncStatus::Failed`). When `close_label` is `Some`, renders a
-/// button that closes the overlay back to the vault — the only
+/// button that closes the overlay back to the vault - the only
 /// guaranteed way out of a Failed state.
 fn transitional_screen(
     title: &str,
@@ -321,7 +321,7 @@ fn column(
     let modified = view
         .modified
         .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "—".into());
+        .unwrap_or_else(|| "-".into());
     let entry_id_for_click = entry_id;
 
     let pick_chip = if selected {
@@ -571,7 +571,7 @@ fn cancel_button(cx: &mut Context<AppShell>) -> AnyElement {
                     let _ = state.close_overlay(cx);
                 });
                 window.push_notification(
-                    "Conflict left pending — click Sync now in Sync settings to retry.",
+                    "Conflict left pending - click Sync now in Sync settings to retry.",
                     cx,
                 );
             }),
@@ -579,7 +579,7 @@ fn cancel_button(cx: &mut Context<AppShell>) -> AnyElement {
         .into_any_element()
 }
 
-/// Cheap clone of the conflict shape — separates the borrow lifetime from
+/// Cheap clone of the conflict shape - separates the borrow lifetime from
 /// the `Context<AppShell>` we hand to button listeners.
 struct ConflictSnapshot {
     conflicts: Vec<EntryConflict>,

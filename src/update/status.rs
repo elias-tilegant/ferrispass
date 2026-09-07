@@ -2,8 +2,8 @@
 //! these; the welcome banner and the Settings → Updates row both read it.
 //!
 //! Lives at the AppState layer (not inside an `Overlay` variant) because
-//! the same status drives multiple surfaces in parallel — banner + settings
-//! row + future menu-bar indicator — and they all need to stay in sync
+//! the same status drives multiple surfaces in parallel - banner + settings
+//! row + future menu-bar indicator - and they all need to stay in sync
 //! across `cx.notify()`.
 
 use super::info::UpdateInfo;

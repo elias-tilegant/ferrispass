@@ -1,11 +1,11 @@
 //! Cloud-connect overlay. Renders one of four sub-views depending on
 //! `state.connect_flow`:
 //!
-//! 1. `PickProvider` — three provider buttons (SharePoint wired)
-//! 2. `SigningIn`    — device code + verification URL + "Open in browser"
-//! 3. `Picking`      — search-as-you-type list of the user's `.kdbx` files
-//! 4. `Downloading`  — spinner while we fetch the picked file
-//! 5. `Failed`       — error + "Back" button to retry from step 1
+//! 1. `PickProvider` - three provider buttons (SharePoint wired)
+//! 2. `SigningIn`    - device code + verification URL + "Open in browser"
+//! 3. `Picking`      - search-as-you-type list of the user's `.kdbx` files
+//! 4. `Downloading`  - spinner while we fetch the picked file
+//! 5. `Failed`       - error + "Back" button to retry from step 1
 
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement as _,
@@ -301,7 +301,7 @@ fn render_authorizing() -> AnyElement {
         .child(heading(
             "Reconnecting your vault…",
             "Asking Microsoft for a fresh sign-in code. This keeps your \
-             existing vault and file — we're only renewing the connection.",
+             existing vault and file - we're only renewing the connection.",
         ))
         .child(
             div()
@@ -332,7 +332,7 @@ fn render_signing_in(challenge: &DeviceCodeChallenge, cx: &mut Context<AppShell>
         .child(heading(
             "Sign in with your Microsoft account",
             "Open the link below, sign in, and enter the one-time code. \
-             We'll catch the result automatically — no need to come back \
+             We'll catch the result automatically - no need to come back \
              and click anything.",
         ))
         .child(
@@ -556,7 +556,7 @@ fn picker_row(hit: DriveItemHit, last: bool, cx: &mut Context<AppShell>) -> AnyE
     use gpui::prelude::FluentBuilder as _;
     let display_path = friendly_path(&hit.path);
     let modified = friendly_modified(&hit.last_modified);
-    // Stable id per row — item_id is a Graph identifier that's unique per
+    // Stable id per row - item_id is a Graph identifier that's unique per
     // file, so we use it directly. (gpui interns the SharedString.)
     let row_id = gpui::ElementId::Name(hit.item_id.clone().into());
     let hit_for_click = hit.clone();

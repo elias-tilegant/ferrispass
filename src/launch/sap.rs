@@ -5,26 +5,26 @@
 //! for Mac registers itself as the handler for that extension, picks
 //! up the params, and lands the user in a logged-in session.
 //!
-//! ## Field model — decomposed
+//! ## Field model - decomposed
 //!
 //! Connection metadata lives across separate custom-field keys
 //! instead of one opaque connection string. Mirrors how SAP GUI
 //! presents these in its own logon dialog and lets the user fill
 //! them out without thinking in `/H/host/S/instance` terms:
 //!
-//! - `SAP_HOST`     — application server (e.g. `sap.example.com`)
-//! - `SAP_INSTANCE` — 2-digit system number (e.g. `00`). The launcher
+//! - `SAP_HOST`     - application server (e.g. `sap.example.com`)
+//! - `SAP_INSTANCE` - 2-digit system number (e.g. `00`). The launcher
 //!   prefixes `32` to get the dispatcher port (`3200`). 4-digit values
 //!   (e.g. `3200`) and non-numeric values pass through unchanged for
 //!   non-standard setups.
-//! - `SAP_LANG`     — logon language (e.g. `DE`)
-//! - `SAP_CLIENT`   — SAP client / mandant (e.g. `100`)
-//! - `SAP_USER`     — *optional* username override; falls back to
+//! - `SAP_LANG`     - logon language (e.g. `DE`)
+//! - `SAP_CLIENT`   - SAP client / mandant (e.g. `100`)
+//! - `SAP_USER`     - *optional* username override; falls back to
 //!   the entry's standard Username field. Only useful when the
 //!   primary identity on the entry differs from the SAP user (e.g.
 //!   email-based sign-in elsewhere, technical SAP service account
 //!   here).
-//! - `SAP_EXPERT`   — *optional* opt-out for `expert=true`; absent
+//! - `SAP_EXPERT`   - *optional* opt-out for `expert=true`; absent
 //!   or any non-falsy value leaves it on.
 //!
 //! The launcher composes `/H/SAP_HOST/S/SAP_INSTANCE` itself, so the
@@ -32,9 +32,9 @@
 //!
 //! ## Wire format
 //!
-//! `.sapc` body is **literal** `&`-separated key=value pairs — SAP
+//! `.sapc` body is **literal** `&`-separated key=value pairs - SAP
 //! GUI does NOT URL-decode. Encoding `/` to `%2F` was the bug behind
-//! "No valid host specification for connection" — SAP GUI couldn't
+//! "No valid host specification for connection" - SAP GUI couldn't
 //! parse the conn string and fell back to picking text from the
 //! file path. We now write characters as-is. Passwords containing
 //! `&` or `=` aren't representable in this format; that's a SAP GUI
@@ -52,7 +52,7 @@ use crate::domain::{CustomField, VaultEntry};
 
 use super::{LaunchContext, LaunchError, LaunchHandle, Launcher, TempLaunchFile};
 
-/// Reserved custom-field keys. Conventional naming, no namespacing —
+/// Reserved custom-field keys. Conventional naming, no namespacing -
 /// KeePassXC's "Additional attributes" UI shows them verbatim, so the
 /// user can pick the same convention there.
 pub const KEY_HOST: &str = "SAP_HOST";
@@ -60,14 +60,14 @@ pub const KEY_INSTANCE: &str = "SAP_INSTANCE";
 pub const KEY_USER: &str = "SAP_USER";
 pub const KEY_LANG: &str = "SAP_LANG";
 pub const KEY_CLIENT: &str = "SAP_CLIENT";
-/// Optional flag — accepts "false" / "0" / "no" (case-insensitive) to
+/// Optional flag - accepts "false" / "0" / "no" (case-insensitive) to
 /// turn off `expert=true` in the .sapc body. Default is on, matching
 /// the behaviour the user requested in the example payload.
 pub const KEY_EXPERT: &str = "SAP_EXPERT";
 
 /// Keys that the "Add SAP connection" quick-add button materialises
 /// in the editor, in display order. The Username override is
-/// intentionally absent here — every entry already has the standard
+/// intentionally absent here - every entry already has the standard
 /// Username field, and the launcher uses it by default. Power users
 /// who need a different SAP user can still add SAP_USER manually.
 pub const QUICK_ADD_KEYS: &[(&str, &str)] = &[
@@ -87,7 +87,7 @@ pub struct SapGuiMacLauncher;
 impl Launcher for SapGuiMacLauncher {
     fn supports(&self, entry: &VaultEntry) -> bool {
         // Both HOST and INSTANCE are needed to compose a working
-        // conn string. Either alone is meaningless — surface the
+        // conn string. Either alone is meaningless - surface the
         // launcher only when both are present and non-empty.
         let host = lookup(&entry.custom_fields, KEY_HOST)
             .filter(|v| !v.trim().is_empty())
@@ -122,7 +122,7 @@ impl Launcher for SapGuiMacLauncher {
         let body = render_sapc_body(&host, &instance, &user, &lang, &client, password, expert);
         let temp_file = TempLaunchFile::create("sapc", body.as_bytes())?;
 
-        // We don't `.wait()` — `open` returns as soon as Launch Services
+        // We don't `.wait()` - `open` returns as soon as Launch Services
         // hands the file to SAP GUI, which then spends a couple of
         // seconds parsing it and connecting. The cleanup-TTL timer
         // (`AppShell::schedule_launch_cleanup`) holds the file alive
@@ -137,7 +137,7 @@ impl Launcher for SapGuiMacLauncher {
 }
 
 /// First-match lookup. Custom-field keys are unique per entry on
-/// disk, but the snapshot is just a `Vec` — `find` is O(n) on a
+/// disk, but the snapshot is just a `Vec` - `find` is O(n) on a
 /// list that's tiny in practice (typical entry has <10 custom fields).
 fn lookup(fields: &[CustomField], key: &str) -> Option<String> {
     fields
@@ -151,7 +151,7 @@ fn lookup(fields: &[CustomField], key: &str) -> Option<String> {
 ///
 /// SAP's standard convention: dispatcher port = `32 + <2-digit system
 /// number>`. So for system 00 the port is 3200, for 01 it's 3201, etc.
-/// The user shouldn't have to type the constant `32` every time —
+/// The user shouldn't have to type the constant `32` every time -
 /// they think in terms of the system number their SAP admin gave them.
 ///
 /// Heuristic, in order:
@@ -186,7 +186,7 @@ fn expert_flag(fields: &[CustomField]) -> bool {
     )
 }
 
-/// Render the `.sapc` body. **No URL-encoding** — see module docs for
+/// Render the `.sapc` body. **No URL-encoding** - see module docs for
 /// the bug that taught us this. SAP GUI parses literal `&`-separated
 /// `key=value` pairs and would otherwise read `%2F` as a literal
 /// percent-2-F instead of `/`, breaking the host parser entirely.
@@ -232,12 +232,12 @@ mod tests {
         }
     }
 
-    /// The body must be **literal** — SAP GUI doesn't URL-decode, so
+    /// The body must be **literal** - SAP GUI doesn't URL-decode, so
     /// any percent-encoding leaks straight into the connection
     /// string. Pre-fix this test asserted percent-encoded slashes;
     /// that's exactly what broke "Open in SAP GUI" in the field
     /// ("Connection failed: No valid host specification for
-    /// connection: tmp" — SAP GUI couldn't parse and fell back to
+    /// connection: tmp" - SAP GUI couldn't parse and fell back to
     /// reading text from the file path).
     #[test]
     fn render_sapc_body_writes_literal_chars() {
@@ -251,7 +251,7 @@ mod tests {
             true,
         );
 
-        // Slashes must be literal — the parser keys off /H/ and /S/.
+        // Slashes must be literal - the parser keys off /H/ and /S/.
         assert!(
             body.starts_with("conn=/H/sap.example.com/S/3200"),
             "conn segment must be literal, got: {body}"
@@ -266,7 +266,7 @@ mod tests {
         assert!(!body.contains('%'), "no percent escapes allowed: {body}");
     }
 
-    /// Special characters in passwords must pass through verbatim —
+    /// Special characters in passwords must pass through verbatim -
     /// the user's reference payload contained `^$%*` in the password
     /// and worked because SAP GUI takes it literally.
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         assert!(body.contains("&expert=true"));
     }
 
-    /// Without an explicit `SAP_EXPERT=false`, `expert=true` is on —
+    /// Without an explicit `SAP_EXPERT=false`, `expert=true` is on -
     /// matches the user's reference payload.
     #[test]
     fn expert_defaults_on_when_field_absent() {
@@ -317,13 +317,13 @@ mod tests {
         assert!(!expert_flag(&[cf(KEY_EXPERT, "No")]));
         assert!(expert_flag(&[cf(KEY_EXPERT, "yes")]));
         // Junk value falls through to default-on rather than silently
-        // disabling — better to surface "looks fine to me" than to
+        // disabling - better to surface "looks fine to me" than to
         // turn off a flag the user had a reason to set.
         assert!(expert_flag(&[cf(KEY_EXPERT, "maybe")]));
     }
 
     /// Detection: both SAP_HOST AND SAP_INSTANCE must be present
-    /// (and non-empty). Either alone is unactionable — we can't
+    /// (and non-empty). Either alone is unactionable - we can't
     /// compose `/H/host/S/instance` without both halves.
     #[test]
     fn supports_requires_host_and_instance() {
@@ -340,7 +340,7 @@ mod tests {
         assert!(SAP_GUI_MAC.supports(&entry), "host + instance → supported");
     }
 
-    /// Whitespace-only fields don't count as set — the editor leaves
+    /// Whitespace-only fields don't count as set - the editor leaves
     /// blank rows around for the "+" button to fill, and we don't
     /// want those tripping the launcher detection.
     #[test]
@@ -358,7 +358,7 @@ mod tests {
     /// keep a "service account" username separate from the entry's
     /// primary identity (e.g. shared SAP technical user vs. the
     /// employee's email used elsewhere). The Quick-Add template
-    /// doesn't include this row — most users want the standard
+    /// doesn't include this row - most users want the standard
     /// Username, this is power-user territory only.
     #[test]
     fn user_override_via_sap_user_custom_field() {
@@ -421,7 +421,7 @@ mod tests {
     fn quick_add_keys_match_constants() {
         let keys: Vec<&str> = QUICK_ADD_KEYS.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![KEY_HOST, KEY_INSTANCE, KEY_LANG, KEY_CLIENT]);
-        // SAP_USER intentionally NOT in the quick-add list — the
+        // SAP_USER intentionally NOT in the quick-add list - the
         // standard Username field on the entry covers the typical case.
         assert!(!keys.contains(&KEY_USER));
     }

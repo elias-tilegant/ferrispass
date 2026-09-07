@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn keepassxc_scale_argon2_settings_are_accepted() {
-        // A KeePassXC vault configured with 1 GiB memory must open here —
+        // A KeePassXC vault configured with 1 GiB memory must open here -
         // rejecting it used to surface as a bogus "different master
         // password" on the sync-merge path.
         let dictionary = kdf_dictionary(

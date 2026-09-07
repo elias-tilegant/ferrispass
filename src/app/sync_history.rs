@@ -1,12 +1,12 @@
 //! Session-scoped log of entries that changed locally as a result of a
 //! sync operation. Surfaced in Settings → Sync as a "Recent activity"
 //! section so the user can see, after the fact, what flowed in from
-//! remote — useful both for debugging unexpected merges and for the
+//! remote - useful both for debugging unexpected merges and for the
 //! ordinary "what did the sync just do?" sanity check.
 //!
 //! ## Why in-memory only
 //!
-//! Entry titles are sensitive — they're part of the encrypted vault
+//! Entry titles are sensitive - they're part of the encrypted vault
 //! payload on disk. Persisting them in plaintext to `app-support/`
 //! would be a Privacy regression even with a small cap, so we
 //! intentionally keep this log session-scoped: it clears on lock,
@@ -20,7 +20,7 @@ use chrono::{DateTime, Local};
 
 use crate::keepass::merge::{ConflictReport, Side};
 
-/// Cap on retained entries. Older ones are dropped when this is exceeded —
+/// Cap on retained entries. Older ones are dropped when this is exceeded -
 /// per-vault sessions don't realistically accumulate more than this
 /// in normal use, so the cap is a defence against pathological cases.
 pub const MAX_SYNC_HISTORY: usize = 50;
@@ -33,7 +33,7 @@ pub enum SyncChangeKind {
     /// strictly newer, so the merge replaced the local copy silently.
     UpdatedFromRemote,
     /// User saw the Conflict overlay and clicked "Keep remote" for this
-    /// entry — local copy was overwritten with remote.
+    /// entry - local copy was overwritten with remote.
     ResolvedKeptRemote,
     /// User saw the Conflict overlay and clicked "Keep local". The local
     /// DB didn't actually change, but the divergence itself is worth
@@ -46,7 +46,7 @@ pub struct SyncHistoryEntry {
     pub at: DateTime<Local>,
     pub kind: SyncChangeKind,
     /// Snapshot of the entry's title at sync time. Future edits to the
-    /// entry won't rewrite the log line — that's intentional, the log
+    /// entry won't rewrite the log line - that's intentional, the log
     /// records what happened, not what the entry looks like now.
     pub entry_title: String,
 }
@@ -64,7 +64,7 @@ impl std::fmt::Debug for SyncHistoryEntry {
 
 /// Turn a merge report (plus the resolution picks, empty for the silent
 /// auto-merge path) into the set of history entries that should be
-/// appended. Pure function — no `AppState`, fully unit-testable.
+/// appended. Pure function - no `AppState`, fully unit-testable.
 pub fn entries_from_report(
     report: &ConflictReport,
     picks: &HashMap<String, Side>,
@@ -81,7 +81,7 @@ pub fn entries_from_report(
     }
 
     for resolved in &report.auto_resolved {
-        // Local-wins auto-resolves don't change the local DB — skip them
+        // Local-wins auto-resolves don't change the local DB - skip them
         // to keep the log focused on entries the user might want to
         // verify. (A future "show all divergences" toggle could surface
         // local-wins for completeness; deferred.)
@@ -96,7 +96,7 @@ pub fn entries_from_report(
 
     for conflict in &report.conflicts {
         // Default-to-Local mirrors the picks-map initialisation in
-        // `handle_remote_conflict_for` — a missing key means the user
+        // `handle_remote_conflict_for` - a missing key means the user
         // didn't move the toggle off the default, which is `Local`.
         // Title comes from the *chosen* side: if the user kept remote
         // and remote had a different title, the log line should show
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn conflicts_branch_on_pick() {
         // Use deliberately divergent titles so a regression that picks
-        // the wrong side surfaces — the previous version of this test
+        // the wrong side surfaces - the previous version of this test
         // had local==remote and silently passed even when the title
         // was sourced from the wrong column.
         let report = ConflictReport {

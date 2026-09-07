@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Overall deadline for metadata-sized requests (auth, item lookup, search).
-/// These bodies are a few KB — 30 s only ever elapses on a dead connection.
+/// These bodies are a few KB - 30 s only ever elapses on a dead connection.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum time a transfer may make no read progress. The total deadline also

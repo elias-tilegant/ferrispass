@@ -1,7 +1,7 @@
 //! App-wide preferences (auto-lock / clipboard-clear timeouts) persisted
 //! at `~/Library/Application Support/ferrispass/settings.json`.
 //!
-//! Only stores plain numbers — no secrets — so JSON is fine. Same atomic
+//! Only stores plain numbers - no secrets - so JSON is fine. Same atomic
 //! write pattern as `sync/config.rs` and `app/recents.rs` (temp file +
 //! fsync + rename).
 
@@ -14,7 +14,7 @@ use thiserror::Error;
 
 const FILE_NAME: &str = "settings.json";
 
-/// `None` on a timeout field means "disabled" — i.e. never auto-lock /
+/// `None` on a timeout field means "disabled" - i.e. never auto-lock /
 /// never auto-clear. We keep the type explicit (rather than a magic 0)
 /// so the UI can distinguish "user picked Never" from "the file is
 /// missing this field".
@@ -26,7 +26,7 @@ pub struct AppSettings {
     /// (rate-limited to ~1×/24h) and surfaces a banner if a newer build
     /// is available. Off-by-default would be more privacy-conservative,
     /// but the security upside of fast patch propagation in a password
-    /// manager is significant — net better default is on.
+    /// manager is significant - net better default is on.
     ///
     /// `#[serde(default = "default_true")]` so settings.json files written
     /// by older builds (which lack this field) deserialize cleanly with
@@ -43,7 +43,7 @@ pub struct AppSettings {
     pub launch_cleanup_secs: u32,
     /// Master switch for KeePass-style auto-type. Off by default
     /// because the feature pops a system permission prompt on first
-    /// use — surfacing that to users who didn't ask for it would be
+    /// use - surfacing that to users who didn't ask for it would be
     /// surprising. `#[serde(default)]` so pre-feature settings.json
     /// files deserialize cleanly (= `false`, matching the cold-start
     /// behaviour).
@@ -51,12 +51,12 @@ pub struct AppSettings {
     pub auto_type_enabled: bool,
     /// User-tunable global hotkey combo, in `global-hotkey` parse
     /// format (e.g. `ctrl+alt+super+KeyV`). The default matches
-    /// KeePassXC's macOS default. Validated at registration time —
+    /// KeePassXC's macOS default. Validated at registration time -
     /// a bad combo leaves the feature off with a Settings-tab error.
     #[serde(default = "default_auto_type_hotkey")]
     pub auto_type_hotkey: String,
     /// Auto-type sequence template (KeePass placeholder grammar). The
-    /// default mirrors `{USERNAME}{TAB}{PASSWORD}{ENTER}` — the
+    /// default mirrors `{USERNAME}{TAB}{PASSWORD}{ENTER}` - the
     /// canonical login-form sequence used by ~every browser-form on
     /// the web. Per-entry overrides are not in v1; this is the global
     /// template.
@@ -65,7 +65,7 @@ pub struct AppSettings {
     /// When `true`, the Touch ID unlock prompt also accepts the
     /// user's macOS account password as a fallback (LAPolicy
     /// `DeviceOwnerAuthentication`). Lets the user unlock the vault
-    /// in clamshell mode — the built-in Touch ID sensor is
+    /// in clamshell mode - the built-in Touch ID sensor is
     /// unreachable when the MacBook lid is closed, and many users
     /// have no Apple Watch fallback configured.
     ///
@@ -76,7 +76,7 @@ pub struct AppSettings {
     /// alternative (strict biometry-only) blocks every clamshell
     /// unlock attempt and forces the master vault password.
     ///
-    /// Default `true` — the product call here is "convenience over
+    /// Default `true` - the product call here is "convenience over
     /// strict isolation": the user has already proven themselves
     /// to macOS, and the threat of "someone with my Mac password
     /// but not my fingerprint" is small versus the daily friction
@@ -97,7 +97,7 @@ pub struct AppSettings {
     /// refresh token's sliding-inactivity window. Without it, a synced
     /// vault left open but untouched for longer than the tenant's
     /// inactivity window silently loses its refresh token and forces a
-    /// full reconnect — the exact pain this setting exists to prevent.
+    /// full reconnect - the exact pain this setting exists to prevent.
     ///
     /// `#[serde(default)]` so settings.json written by pre-auto-sync
     /// builds deserialises cleanly with the documented default (on,
@@ -153,7 +153,7 @@ impl AppSettings {
     }
 
     /// Auto-sync interval with the 60 s floor applied. `None` is passed
-    /// through unchanged — it means the feature is off, not "every 0 s".
+    /// through unchanged - it means the feature is off, not "every 0 s".
     /// Single choke-point so the timer task and any UI both agree on the
     /// effective cadence even if the on-disk value was hand-edited below
     /// the floor.
@@ -193,7 +193,7 @@ pub enum SettingsError {
 }
 
 /// Read settings from disk. Falls back to `AppSettings::default()` on:
-/// missing file (cold first run), parse failure (corrupt file — better
+/// missing file (cold first run), parse failure (corrupt file - better
 /// to recover than to brick the app on start), or path resolution
 /// failure. Real I/O errors still propagate so genuinely broken disks
 /// surface.
@@ -269,7 +269,7 @@ mod tests {
     }
 
     /// Old settings files (written before launch_cleanup_secs existed)
-    /// must deserialize cleanly with the documented default applied —
+    /// must deserialize cleanly with the documented default applied -
     /// otherwise upgrading the app would brick the settings file.
     #[test]
     fn missing_launch_cleanup_uses_default() {
@@ -314,7 +314,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(FILE_NAME), "{ bogus json").unwrap();
         let loaded = load_in(dir.path()).unwrap();
-        // Must recover gracefully — don't brick the app on a stray file.
+        // Must recover gracefully - don't brick the app on a stray file.
         assert_eq!(loaded, AppSettings::default());
     }
 
@@ -340,7 +340,7 @@ mod tests {
     /// settings.json written before the Touch ID feature shipped
     /// must deserialise cleanly with the documented default applied.
     /// A regression here would silently flip every upgrading user
-    /// to "biometry-only" — breaking the clamshell-mode unlock
+    /// to "biometry-only" - breaking the clamshell-mode unlock
     /// flow they may rely on without ever opening Settings.
     #[test]
     fn missing_biometric_fallback_uses_default_true() {
@@ -355,7 +355,7 @@ mod tests {
     }
 
     /// settings.json written before auto-sync shipped must deserialise
-    /// with the feature ON at the 15-min default — a regression here
+    /// with the feature ON at the 15-min default - a regression here
     /// would silently leave upgrading users with no keep-alive, which
     /// is the precise failure mode the feature was added to fix.
     #[test]

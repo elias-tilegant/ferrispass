@@ -14,7 +14,7 @@ pub fn apply(cx: &mut App) {
 
     // Foreground for high-saturation surfaces (primary blue, danger red, etc.).
     // Light mode: pure white reads well over saturated colors. Dark mode: our
-    // saturated colors are slightly lighter, so a near-white still works — and
+    // saturated colors are slightly lighter, so a near-white still works - and
     // `panel` (= near-black in dark mode) would be invisible.
     let on_accent = if is_dark { p.text } else { p.panel };
 
