@@ -117,6 +117,13 @@ struct EntrySnapshot {
     attachments: Vec<AttachmentFingerprint>,
     icon: Option<Icon>,
     quality_check: Option<bool>,
+    /// Where the entry sits, and when it was put there. Neither is in the
+    /// field map, and both are decided on their own clock.
+    parent: GroupId,
+    location: String,
+    location_changed: Option<NaiveDateTime>,
+    /// Only a date in force. One that is not says nothing, here as everywhere.
+    expiry: Option<NaiveDateTime>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -273,6 +280,8 @@ impl ConflictReport {
     #[cfg(test)]
     pub fn is_clean(&self) -> bool {
         self.conflicts.is_empty()
+            && self.group_conflicts.is_empty()
+            && self.metadata_conflict.is_none()
             && self.remote_only.is_empty()
             && self.auto_resolved.is_empty()
             && !self.structural_writeback_required
@@ -363,8 +372,10 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
     for id in local_ids.intersection(&remote_ids) {
         let l = &local_map[*id];
         let r = &remote_map[*id];
-        let fields = field_diffs(l, r);
-        if !fields.iter().any(|f| f.differs) {
+        let mut fields = field_diffs(l, r);
+        let content_differs = fields.iter().any(|f| f.differs);
+        let moved = l.parent != r.parent;
+        if !content_differs && !moved {
             continue;
         }
         // KeePass-style last-write-wins: when one side's `last_modification`
@@ -373,28 +384,50 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         // missing) - pre-v0.4 every field-level divergence forced a prompt
         // even when the user had clearly saved one side later than the
         // other, which made benign sync round-trips noisy.
-        match timestamp_winner(l.view.modified, r.view.modified) {
-            Some(winner) => auto_resolved.push(AutoResolved {
-                id: (*id).clone(),
-                winner,
-                remote: r.view.clone(),
-            }),
-            None => {
-                if [l.view.modified, r.view.modified]
-                    .into_iter()
-                    .flatten()
-                    .any(is_future_dated)
-                {
-                    future_dated.push((*id).clone());
-                }
-                conflicts.push(EntryConflict {
+        // Two clocks, each deciding its own thing, exactly as for a group.
+        // Content is ranked by `last_modification`, the placement by
+        // `location_changed`, and a tie on either is the user's to settle:
+        // the fork refuses to rank a tied move and refuses the whole merge
+        // when a tied entry diverges, so falling through to the automatic
+        // path meant "Merge blocked" with nothing to answer.
+        let content_winner = timestamp_winner(l.view.modified, r.view.modified);
+        let content_tied = content_differs && content_winner.is_none();
+        let location_tied =
+            moved && timestamp_winner(l.location_changed, r.location_changed).is_none();
+        if !content_tied && !location_tied {
+            if let Some(winner) = content_winner.filter(|_| content_differs) {
+                auto_resolved.push(AutoResolved {
                     id: (*id).clone(),
-                    local: l.view.clone(),
+                    winner,
                     remote: r.view.clone(),
-                    fields,
                 });
             }
+            continue;
         }
+        if [l.view.modified, r.view.modified]
+            .into_iter()
+            .flatten()
+            .any(is_future_dated)
+        {
+            future_dated.push((*id).clone());
+        }
+        if moved {
+            fields.insert(
+                0,
+                FieldDiff {
+                    label: "Location".into(),
+                    local: l.location.clone(),
+                    remote: r.location.clone(),
+                    differs: true,
+                },
+            );
+        }
+        conflicts.push(EntryConflict {
+            id: (*id).clone(),
+            local: l.view.clone(),
+            remote: r.view.clone(),
+            fields,
+        });
     }
 
     let group_conflicts = group_conflicts(local, remote);
@@ -1610,6 +1643,28 @@ fn group_conflicts(local: &Database, remote: &Database) -> Vec<GroupConflict> {
     conflicts
 }
 
+/// Where an object sits when that object is inside `id`, as a person reads
+/// it: the group's own path, then the group itself.
+fn group_location_of(db: &Database, id: GroupId) -> String {
+    let Some(group) = db.group(id) else {
+        return "Vault root".to_string();
+    };
+    if group.parent().is_none() {
+        return "Vault root".to_string();
+    }
+    // A group can carry no name, and two of them then read the same. The row
+    // exists so a person can tell one place from another, so an id stands in.
+    let name = if group.name.is_empty() {
+        format!("Unnamed group ({})", &id.uuid().to_string()[..8])
+    } else {
+        group.name.clone()
+    };
+    match group_location(db, id) {
+        path if path == "Vault root" => name,
+        path => format!("{path} > {name}"),
+    }
+}
+
 /// Where a group sits, as a person would read it. The root group carries no
 /// name of its own, so it reads as the vault rather than as an empty step.
 fn group_location(db: &Database, id: GroupId) -> String {
@@ -1721,6 +1776,15 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             tri_state(local.enable_searching),
             tri_state(remote.enable_searching),
         ),
+        // Plugin data counts as content, so a difference here can be the only
+        // reason a group is asked about. Without a row the screen showed an
+        // empty list and the answer discarded the other side's keys for good:
+        // a group keeps no history to recover them from.
+        row(
+            "Plugin data",
+            custom_data_summary(&local.custom_data),
+            custom_data_summary(&remote.custom_data),
+        ),
     ]
     .into_iter()
     .filter(|diff| diff.differs)
@@ -1743,6 +1807,24 @@ fn image_fingerprint(data: &[u8]) -> String {
         .take(4)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Plugin data as one line, sorted so two sides that hold the same keys read
+/// the same. Values are described rather than dumped: they are opaque to this
+/// application, and the row exists to tell two sets apart.
+fn custom_data_summary(items: &std::collections::HashMap<String, CustomDataItem>) -> String {
+    let mut keys: Vec<&String> = items.keys().collect();
+    keys.sort_unstable();
+    keys.into_iter()
+        .map(|key| {
+            let value = items.get(key).map(|item| custom_data_value(Some(&item)));
+            match value.as_deref() {
+                Some("") | None => key.clone(),
+                Some(value) => format!("{key} = {value}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Content the user authored, as opposed to view state a client may rewrite
@@ -2308,6 +2390,28 @@ fn force_manual_winner(
         local_entry.times.last_modification,
         remote_entry.times.last_modification,
     ]);
+    // Where the entry sits is decided on its own clock, so the choice has to
+    // reach that one too, in opposite directions: the fork performs the move
+    // itself, and the target group can be one only the other copy has.
+    let moved = local_entry.times.location_changed != remote_entry.times.location_changed
+        || local.entry(entry_id).map(|entry| entry.parent().id())
+            != remote.entry(entry_id).map(|entry| entry.parent().id());
+    let moved_time = resolution_time([
+        local_entry.times.location_changed,
+        remote_entry.times.location_changed,
+    ]);
+    if moved {
+        let (ours, theirs) = match winner {
+            Side::Local => (moved_time, Times::epoch()),
+            Side::Remote => (Times::epoch(), moved_time),
+        };
+        if let Some(mut entry) = local.entry_mut(entry_id) {
+            entry.times.location_changed = Some(ours);
+        }
+        if let Some(mut entry) = remote.entry_mut(entry_id) {
+            entry.times.location_changed = Some(theirs);
+        }
+    }
 
     match winner {
         Side::Local => {
@@ -2394,13 +2498,13 @@ fn live_entries(db: &Database) -> HashMap<String, EntrySnapshot> {
                 .is_none_or(|bin| !super::document::group_is_within(db, e.parent().id(), bin))
         })
         .map(|e| {
-            let snapshot = entry_to_snapshot(&e);
+            let snapshot = entry_to_snapshot(db, &e);
             (snapshot.view.id.clone(), snapshot)
         })
         .collect()
 }
 
-fn entry_to_snapshot(e: &EntryRef<'_>) -> EntrySnapshot {
+fn entry_to_snapshot(db: &Database, e: &EntryRef<'_>) -> EntrySnapshot {
     EntrySnapshot {
         view: EntryView {
             id: e.id().to_string(),
@@ -2422,6 +2526,15 @@ fn entry_to_snapshot(e: &EntryRef<'_>) -> EntrySnapshot {
         attachments: attachment_fingerprint(e),
         icon: e.icon().cloned(),
         quality_check: e.quality_check,
+        parent: e.parent().id(),
+        location: group_location_of(db, e.parent().id()),
+        location_changed: e.times.location_changed,
+        expiry: e
+            .times
+            .expires
+            .unwrap_or(false)
+            .then_some(e.times.expiry)
+            .flatten(),
     }
 }
 
@@ -2465,6 +2578,21 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
             local: local_protected.join(", "),
             remote: remote_protected.join(", "),
             differs: local_protected != remote_protected,
+        });
+    }
+
+    if local.expiry != remote.expiry {
+        fn expiry_row(at: Option<NaiveDateTime>) -> String {
+            at.map_or_else(
+                || "Never".to_string(),
+                |at| at.format("%Y-%m-%d %H:%M").to_string(),
+            )
+        }
+        diffs.push(FieldDiff {
+            label: "Expires".into(),
+            local: expiry_row(local.expiry),
+            remote: expiry_row(remote.expiry),
+            differs: true,
         });
     }
 
@@ -3762,8 +3890,12 @@ mod tests {
         assert_eq!(entry.history.as_ref().unwrap().get_entries().len(), 1);
     }
 
+    /// An unorderable move used to be fail-closed: nothing surfaced it, so
+    /// the merge refused and the user had no way to answer. It is a conflict
+    /// now, with a row saying where each side put the entry, and the answer
+    /// decides the placement.
     #[test]
-    fn missing_entry_timestamp_with_ambiguous_move_remains_fatal() {
+    fn an_unorderable_entry_move_is_asked_rather_than_refused() {
         let timestamp = Times::epoch() + chrono::Duration::seconds(1);
         let mut local = Database::new();
         let origin_id = {
@@ -3800,18 +3932,31 @@ mod tests {
             entry: entry_id,
         }));
 
-        let error = apply_picks(
-            &local,
-            &remote,
-            &Resolutions::default(),
-            &diff(&local, &remote),
-        )
-        .expect_err("an unorderable move must remain fail-closed");
-        assert!(matches!(
-            error,
-            ApplyError::DatabaseMergeWarnings(message)
-                if message.contains(&entry_id.to_string())
-        ));
+        let report = diff(&local, &remote);
+        let conflict = report
+            .conflicts
+            .first()
+            .expect("nothing can rank the move, so it has to be asked");
+        assert!(
+            conflict
+                .fields
+                .iter()
+                .any(|field| field.label == "Location" && field.local != field.remote),
+            "and the row has to say where each side put it: {:?}",
+            conflict.fields
+        );
+
+        let picks = Resolutions {
+            entries: HashMap::from([(entry_id.to_string(), Side::Remote)]),
+            groups: HashMap::new(),
+            metadata: None,
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(
+            merged.entry(entry_id).expect("the entry").parent().id(),
+            target_id,
+            "choosing theirs has to put it where they put it"
+        );
     }
 
     #[test]
@@ -4376,6 +4521,139 @@ mod tests {
         assert!(
             !diff(&local, &remote).structural_writeback_required,
             "the cursor and the writer's name are not settings"
+        );
+    }
+
+    /// An entry whose expiry alone diverges in the same second was never a
+    /// conflict: expiry is not in the field map, so nothing differed, and the
+    /// fork then refused the whole merge with nothing for the user to answer.
+    #[test]
+    fn a_tied_entry_expiry_is_a_conflict_with_a_row() {
+        let tied = keepass::db::Times::now();
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        local.entry_mut(id).unwrap().times.last_modification = Some(tied);
+
+        let mut remote = fork(&local);
+        {
+            let mut entry = remote.entry_mut(id).unwrap();
+            entry.times.expires = Some(true);
+            entry.times.expiry = Some(tied + chrono::TimeDelta::days(30));
+            entry.times.last_modification = Some(tied);
+        }
+
+        let report = diff(&local, &remote);
+        let conflict = report
+            .conflicts
+            .first()
+            .expect("one second, two answers about when it expires");
+        assert!(
+            conflict
+                .fields
+                .iter()
+                .any(|field| field.label == "Expires" && field.local == "Never"),
+            "and the row has to say what each side holds: {:?}",
+            conflict.fields
+        );
+
+        let picks = Resolutions {
+            entries: HashMap::from([(id.to_string(), Side::Remote)]),
+            groups: HashMap::new(),
+            metadata: None,
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(
+            merged.entry(id).expect("the entry").times.expires,
+            Some(true),
+            "choosing theirs has to apply theirs"
+        );
+    }
+
+    /// A move the clock can rank is not a question. Adding the location to the
+    /// comparison must not turn every ordinary move into a prompt.
+    #[test]
+    fn a_ranked_entry_move_is_not_asked_about() {
+        let earlier = keepass::db::Times::now() - chrono::TimeDelta::minutes(10);
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        let target = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Archive".into();
+            group.id()
+        };
+        local.entry_mut(id).unwrap().times.location_changed = Some(earlier);
+
+        let mut remote = fork(&local);
+        {
+            let mut entry = remote.entry_mut(id).unwrap();
+            entry.move_to(target).unwrap();
+            entry.times.location_changed = Some(keepass::db::Times::now());
+        }
+
+        let report = diff(&local, &remote);
+
+        assert!(
+            report.conflicts.is_empty(),
+            "the clock ranks this move: {:?}",
+            report.conflicts
+        );
+        let merged =
+            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
+        assert_eq!(
+            merged.entry(id).expect("the entry").parent().id(),
+            target,
+            "and the merge performs it"
+        );
+    }
+
+    /// Plugin data counts as group content, so it can be the only reason a
+    /// group is asked about. Without a row the screen showed an empty list
+    /// and the answer discarded the other side's keys for good.
+    #[test]
+    fn a_group_plugin_data_conflict_says_what_differs() {
+        use keepass::db::{CustomDataItem, CustomDataValue};
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        let tied = keepass::db::Times::now();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        local.group_mut(group_id).unwrap().custom_data.insert(
+            "Plugin".into(),
+            CustomDataItem {
+                value: Some(CustomDataValue::String("ours".into())),
+                last_modification_time: None,
+            },
+        );
+
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().custom_data.insert(
+            "Plugin".into(),
+            CustomDataItem {
+                value: Some(CustomDataValue::String("theirs".into())),
+                last_modification_time: None,
+            },
+        );
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let report = diff(&local, &remote);
+        let conflict = report
+            .group_conflicts
+            .first()
+            .expect("a tied plugin value is still a tie");
+        assert!(
+            conflict
+                .fields
+                .iter()
+                .any(|field| field.label == "Plugin data"
+                    && field.local == "Plugin = ours"
+                    && field.remote == "Plugin = theirs"),
+            "the user has to see what they are choosing between: {:?}",
+            conflict.fields
         );
     }
 
