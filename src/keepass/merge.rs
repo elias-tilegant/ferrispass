@@ -441,8 +441,7 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
                 remote_group.previous_parent_group,
             )
             || local_group.tags != remote_group.tags
-            || local_group.times.expiry != remote_group.times.expiry
-            || local_group.times.expires != remote_group.times.expires
+            || !expiry_equivalent(&local_group.times, &remote_group.times)
         {
             return true;
         }
@@ -462,14 +461,32 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
         // bit made `has_local_contribution` unconditionally true, because
         // trimming alone diverges them.
         if local_entry.parent().id() != remote_entry.parent().id()
-            || local_entry.times.expiry != remote_entry.times.expiry
-            || local_entry.times.expires != remote_entry.times.expires
+            || !expiry_equivalent(&local_entry.times, &remote_entry.times)
         {
             return true;
         }
     }
 
     false
+}
+
+/// Whether two objects say the same thing about expiry.
+///
+/// An object that does not expire has no expiry date, whatever value happens
+/// to sit in the field. KeePassXC writes an explicit far-future date on
+/// objects it marks as never expiring, and does so without touching their
+/// modification time, so comparing the raw pair made every sync after a
+/// KeePassXC save look like a local change, forever. Only a date that is in
+/// force counts, and an absent `expires` means the same as `false`.
+fn expiry_equivalent(local: &Times, remote: &Times) -> bool {
+    fn in_force(times: &Times) -> Option<NaiveDateTime> {
+        times
+            .expires
+            .unwrap_or(false)
+            .then_some(times.expiry)
+            .flatten()
+    }
+    in_force(local) == in_force(remote)
 }
 
 /// Database-level settings a person set, as opposed to the ones a client
@@ -718,21 +735,17 @@ pub fn apply_picks(
     let mut merged = local.clone();
     let mut source = remote.clone();
 
-    // The outer configuration travels with the file, not with an object, and
-    // nothing merges it. FerrisPass offers no way to change the cipher, the
-    // KDF parameters or the compression, so a difference here is always a
-    // change the other side made, and starting from our clone would have
-    // reverted it on the next upload. Someone hardening the KDF in KeePassXC
-    // would have watched it come back.
+    // The outer configuration is deliberately not merged, and this is the
+    // least-bad of three bad options.
     //
-    // The format version is the exception, and stays ours: this crate writes
-    // KDBX 4 only, so adopting a KDBX 3 remote would leave a merged database
-    // that cannot be saved at all. The parameters inside are safe to take
-    // because the remote file was just parsed with them, which is where
-    // `keepass::limits` refuses anything we are unwilling to open.
-    let version = merged.config.version.clone();
-    merged.config = source.config.clone();
-    merged.config.version = version;
+    // It travels with the file rather than with any object, and KDBX gives it
+    // no change time, so there is no evidence for whose version is newer.
+    // Adopting the remote's was tried and is worse: a sync would then
+    // silently re-encrypt the vault with whatever parameters the other file
+    // carries, which can be weaker than the ones the user chose here.
+    // Keeping ours means a cipher, KDF or compression change made elsewhere
+    // is reverted by our next upload, which is visible in that client and
+    // costs nobody an entry.
 
     // Only genuinely ambiguous entries appear here. Timestamp-resolved rows
     // and one-sided additions are handled natively by Database::merge.
@@ -3257,10 +3270,52 @@ mod tests {
 
         let mut local = fork(&remote);
         local.group_mut(group_id).unwrap().times.expires = Some(true);
+        local.group_mut(group_id).unwrap().times.expiry =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::days(30));
         assert!(
             diff(&local, &remote).has_local_contribution(),
             "and so does one set on a group"
         );
+    }
+
+    /// KeePassXC writes an explicit far-future date on objects it marks as
+    /// never expiring, without touching their modification time, while this
+    /// app leaves the field empty. Comparing the raw pair made every sync
+    /// after a KeePassXC save look like a local change, forever. A date that
+    /// is not in force says nothing.
+    #[test]
+    fn a_date_on_something_that_never_expires_is_not_a_change() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Live".into();
+            group.id()
+        };
+        let mut remote = fork(&local);
+
+        // What the other client leaves behind on a non-expiring object.
+        let far_future = keepass::db::Times::now() + chrono::TimeDelta::days(36_500);
+        {
+            let mut entry = remote.entry_mut(id).unwrap();
+            entry.times.expiry = Some(far_future);
+            entry.times.expires = Some(false);
+        }
+        {
+            let mut group = remote.group_mut(group_id).unwrap();
+            group.times.expiry = Some(far_future);
+            group.times.expires = Some(false);
+        }
+
+        assert!(
+            !diff(&local, &remote).has_local_contribution(),
+            "a date that is not in force is not somebody's edit"
+        );
+
+        // A date that is in force still is.
+        remote.entry_mut(id).unwrap().times.expires = Some(true);
+        assert!(diff(&local, &remote).structural_writeback_required);
     }
 
     /// KeePassXC rewrites two custom data keys on every save and treats both
@@ -3306,16 +3361,17 @@ mod tests {
         assert!(diff(&local, &remote).structural_writeback_required);
     }
 
-    /// The outer configuration travels with the file and nothing merged it,
-    /// so someone hardening the KDF in another client watched it come back on
-    /// our next upload. FerrisPass cannot change these, so a difference is
-    /// always theirs.
+    /// The outer configuration has no change time, so there is no evidence
+    /// for whose version is newer. Adopting the other copy's was tried and
+    /// silently re-encrypted the vault with whatever parameters that file
+    /// carried, which can be weaker than the ones chosen here. Ours stays.
     #[test]
-    fn the_other_copys_kdf_settings_are_not_reverted() {
+    fn our_own_file_settings_survive_a_merge() {
         let mut local = Database::new();
         let id = add(&mut local, "Bank", "secret");
+        local.config.compression_config = keepass::config::CompressionConfig::None;
         let mut remote = fork(&local);
-        remote.config.compression_config = keepass::config::CompressionConfig::None;
+        remote.config.compression_config = keepass::config::CompressionConfig::GZip;
         remote
             .entry_mut(id)
             .unwrap()
@@ -3330,38 +3386,16 @@ mod tests {
         assert_eq!(
             merged.config.compression_config,
             keepass::config::CompressionConfig::None,
-            "their file-level setting survives our merge"
+            "a sync must not re-encrypt this vault with someone else's parameters"
         );
-    }
-
-    /// This crate writes KDBX 4 only. Adopting an older remote's format would
-    /// leave a merged database that cannot be saved at all, which is worse
-    /// than the setting it was trying to preserve.
-    #[test]
-    fn an_older_remote_format_is_not_adopted() {
-        use keepass::config::DatabaseVersion;
-        let mut local = Database::new();
-        let id = add(&mut local, "Bank", "secret");
-        let ours = local.config.version.clone();
-        assert!(matches!(ours, DatabaseVersion::KDB4(_)), "{ours:?}");
-
-        let mut remote = fork(&local);
-        remote.config.version = DatabaseVersion::KDB3(1);
-        remote
-            .entry_mut(id)
-            .unwrap()
-            .set_unprotected(fields::NOTES, "edited remotely");
-        remote.entry_mut(id).unwrap().times.last_modification =
-            Some(keepass::db::Times::now() + chrono::TimeDelta::minutes(1));
-
-        let report = diff(&local, &remote);
-        let merged =
-            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
-
-        assert_eq!(merged.config.version, ours);
+        assert_eq!(
+            merged.entry(id).unwrap().get(fields::NOTES),
+            Some("edited remotely"),
+            "while their entry edit still lands"
+        );
         merged
             .save(&mut std::io::Cursor::new(Vec::new()), test_key())
-            .expect("the merged result has to be writable");
+            .expect("and the result is writable");
     }
 
     fn test_key() -> keepass::DatabaseKey {

@@ -173,7 +173,29 @@ pub fn publish(
         return Err(ICloudError::Conflict);
     }
     platform::coordinated_replace(&before.path, expected_revision, bytes)?;
-    read(&before.refreshed_bookmark)
+
+    // The replace is coordinated; the read after it is a second, separate
+    // coordination. Another client can write between the two, and returning
+    // what that read found would record their file as the revision we just
+    // published: the caller stores it as synced, never downloads it, and
+    // overwrites it on the next save. What we wrote is the only revision this
+    // call can honestly report, and anything else is a conflict.
+    published_or_conflict(bytes, read(&before.refreshed_bookmark)?)
+}
+
+/// What a publish may report.
+///
+/// The revision we wrote is the only one this call can honestly claim.
+/// Anything else means somebody wrote between the coordinated replace and the
+/// separate coordination that reads it back, and reporting their file as ours
+/// would have the caller store it as synced, never download it, and overwrite
+/// it on the next save.
+fn published_or_conflict(written: &[u8], after: ICloudRead) -> Result<ICloudRead, ICloudError> {
+    if after.revision == revision(written) {
+        Ok(after)
+    } else {
+        Err(ICloudError::Conflict)
+    }
 }
 
 /// Publish a new remote without ever replacing a file that appeared after
@@ -464,6 +486,30 @@ mod tests {
         assert!(matches!(
             validate_kdbx_path(Path::new("vault.txt")),
             Err(ICloudError::NotKdbx)
+        ));
+    }
+
+    /// The replace and the read after it are two separate coordinations.
+    /// Another client writing between them used to be reported as the
+    /// revision we published: stored as synced, never downloaded, and
+    /// overwritten on the next save.
+    #[test]
+    fn a_publish_reports_only_what_it_wrote() {
+        let ours = b"what we published";
+        let theirs = b"what landed a moment later";
+        let read_back = |bytes: &[u8]| ICloudRead {
+            path: PathBuf::from("/tmp/vault.kdbx"),
+            bytes: bytes.to_vec(),
+            revision: revision(bytes),
+            refreshed_bookmark: "bookmark".into(),
+        };
+
+        let ok = published_or_conflict(ours, read_back(ours)).expect("our own write");
+        assert_eq!(ok.revision, revision(ours));
+
+        assert!(matches!(
+            published_or_conflict(ours, read_back(theirs)),
+            Err(ICloudError::Conflict)
         ));
     }
 
