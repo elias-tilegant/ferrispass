@@ -1870,16 +1870,30 @@ fn entry_detail_body(
     state_entity: gpui::Entity<AppState>,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
+    v_flex()
+        .h_full()
+        .min_h(px(0.))
+        .min_w(px(0.))
+        .overflow_hidden()
+        .child(entry_detail_header(&entry, cx))
+        .child(entry_detail_fields(
+            &entry,
+            selected_strength,
+            revealed_password,
+            state_entity.clone(),
+            cx,
+        ))
+        .child(entry_detail_footer(
+            &entry,
+            pending_perma_delete,
+            state_entity,
+            cx,
+        ))
+}
+
+/// Identity: icon, title, group, timestamp, tags, favourite toggle.
+fn entry_detail_header(entry: &VaultEntry, cx: &mut Context<AppShell>) -> impl gpui::IntoElement {
     let title = entry.title.clone();
-    let username = entry.username.clone();
-    let url = entry.url.clone();
-    let notes = entry.notes.clone();
-    // Prefer the real zxcvbn report; fall back to the synthesized snapshot value
-    // (length-based) when the entry has no decryptable password.
-    let (strength, length, bits) = match selected_strength {
-        Some(report) => (report.strength, report.length, Some(report.bits)),
-        None => (entry.strength, entry.password_length, None),
-    };
     let group = entry
         .group_path
         .last()
@@ -1889,8 +1903,6 @@ fn entry_detail_body(
     let starred = entry.starred;
     let entry_id_for_star = entry.id.clone();
     let fav = entry.favicon.clone();
-    let has_password = entry.has_password;
-    let has_otp = entry.has_otp;
     let tags = entry.tags.clone();
 
     let mut chips_row = h_flex().gap_1().flex_wrap();
@@ -1898,7 +1910,7 @@ fn entry_detail_body(
         chips_row = chips_row.child(chip(tag.clone(), stable_chip_tone(tag)));
     }
 
-    let header = div()
+    div()
         .flex_shrink_0()
         .p_5()
         .border_b_1()
@@ -1971,8 +1983,29 @@ fn entry_detail_body(
                             }),
                         ),
                 ),
-        );
+        )
+}
 
+/// The field rows: username, password, URL, TOTP, notes, custom fields.
+/// Everything here is click-to-copy and reads from the snapshot.
+fn entry_detail_fields(
+    entry: &VaultEntry,
+    selected_strength: Option<crate::keepass::StrengthReport>,
+    revealed_password: Option<String>,
+    state_entity: gpui::Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    let username = entry.username.clone();
+    let url = entry.url.clone();
+    let notes = entry.notes.clone();
+    let has_password = entry.has_password;
+    let has_otp = entry.has_otp;
+    // Prefer the real zxcvbn report; fall back to the synthesized snapshot
+    // value (length-based) when the entry has no decryptable password.
+    let (strength, length, bits) = match selected_strength {
+        Some(report) => (report.strength, report.length, Some(report.bits)),
+        None => (entry.strength, entry.password_length, None),
+    };
     let username_for_row = username.clone();
     let url_for_row = url.clone();
     let entry_id_for_password = entry.id.clone();
@@ -2127,7 +2160,7 @@ fn entry_detail_body(
             ),
         )
         .when(!entry.custom_fields.is_empty(), |this| {
-            this.child(custom_fields_section(&entry, cx))
+            this.child(custom_fields_section(entry, cx))
         })
         .child(
             v_flex()
@@ -2148,7 +2181,18 @@ fn entry_detail_body(
                         .into_any_element()
                 }),
         );
+    body_col
+}
 
+/// The action bar, which is three different bars: the armed permanent
+/// delete, the recycle-bin actions, and the ordinary ones.
+fn entry_detail_footer(
+    entry: &VaultEntry,
+    pending_perma_delete: Option<String>,
+    state_entity: gpui::Entity<AppState>,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    let has_password = entry.has_password;
     let username_present = !entry.username.is_empty();
     let url_present = !entry.url.is_empty();
 
@@ -2247,7 +2291,7 @@ fn entry_detail_body(
         // own row above the action row - putting it inline with the
         // five other buttons overflows narrow detail panels and clipped
         // the trailing Delete button.
-        let launcher = crate::launch::primary_launcher_for(&entry);
+        let launcher = crate::launch::primary_launcher_for(entry);
 
         let action_row = h_flex()
             .flex_shrink_0()
@@ -2304,15 +2348,7 @@ fn entry_detail_body(
             .child(action_row)
             .into_any_element()
     };
-
-    v_flex()
-        .h_full()
-        .min_h(px(0.))
-        .min_w(px(0.))
-        .overflow_hidden()
-        .child(header)
-        .child(body_col)
-        .child(footer)
+    footer
 }
 
 /// "Additional fields" section in the detail panel - read-only list
