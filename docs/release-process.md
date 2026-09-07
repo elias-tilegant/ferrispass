@@ -9,31 +9,45 @@ Run before bumping the version:
 ```sh
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --locked                              # all 476+ green
+cargo test --locked                              # every test green
 cargo audit
-grep -rnP '\x{2014}|\x{2013}' src/ docs/ README.md SECURITY.md   # must be empty
+# House style: plain hyphens, no em or en dashes. Both scans must be empty.
+grep -rn $'\u2014\|\u2013' src/ docs/ README.md SECURITY.md
+git log --format='%B' origin/master..HEAD | grep -n $'\u2014\|\u2013'
 git status                                       # working tree clean
 git pull --rebase origin master                  # in sync with remote
 ```
 
 Every one of these is also a CI gate, so a failure here is a failure there.
-The dash grep is the house style rule: plain hyphens everywhere, including in
-commit messages.
+
+The dash rule covers commit messages as well as files, so it takes two scans:
+the first reads the working tree, the second reads the messages of the commits
+this release adds. macOS ships BSD grep, which has no `-P`, hence the `$'...'`
+escapes rather than a Perl pattern. The test count is deliberately not written
+down here: a number in a checklist is wrong by the next commit, and a stale
+one teaches the reader to ignore the line.
 
 Then exercise the release binary against a real file, because a green test
 suite has never caught a broken parse path:
 
 ```sh
 cargo build --release --locked
-cargo run --example make_test_vault -- /tmp/test.kdbx hunter2
-printf 'hunter2\n' > /tmp/pw
-./target/release/ferrispass-cli --vault /tmp/test.kdbx --master-password-fd 3 \
-    --format json entry list 3</tmp/pw
+work=$(mktemp -d) && trap 'rm -rf "$work"' EXIT
+(umask 077 && printf 'hunter2\n' > "$work/pw")
+cargo run --example make_test_vault -- "$work/test.kdbx" 3<"$work/pw"
+./target/release/ferrispass-cli --vault "$work/test.kdbx" --master-password-fd 3 \
+    --format json entry list 3<"$work/pw"
 ```
 
+The password goes in on a file descriptor, never as an argument: an argument
+is in the shell history and in every process listing for as long as the
+command runs. The scratch directory is private to the user and removed on
+exit, including when the check fails partway.
+
 Open the same file in KeePassXC afterwards and check the entries, the group
-tree and any custom icons survived. The KDBX write path is a pinned fork, and
-that round trip is the only thing that proves it.
+tree and any custom icons survived. Copy it out of `$work` first, or run the
+KeePassXC step before leaving the shell. The KDBX write path is a pinned fork,
+and that round trip is the only thing that proves it.
 
 ## Commit message conventions
 
