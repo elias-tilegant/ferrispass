@@ -1,5 +1,5 @@
 //! Pure-data diff and three-way merge over keepass `Database`s, used by the
-//! sync conflict resolution flow. No GPUI dependencies — fully unit-testable.
+//! sync conflict resolution flow. No GPUI dependencies - fully unit-testable.
 //!
 //! Fidelity policy:
 //! - Diffing compares every entry field as a `Value<String>`, so field
@@ -15,7 +15,7 @@
 //!   stores. `apply_picks` rejects *divergent* stores explicitly instead of
 //!   returning a database with dangling references or lost bytes; identical
 //!   stores on both sides are retained safely.
-//! - Passwords are compared in cleartext (necessarily — both sides are
+//! - Passwords are compared in cleartext (necessarily - both sides are
 //!   already decrypted) but the displayed `FieldDiff.local`/`.remote` for
 //!   the Password row is redacted to `"••• (N chars)"` so the conflict
 //!   screen is screen-sharing-safe.
@@ -37,13 +37,13 @@ use crate::keepass::repository::{
     STANDARD_FIELDS, collect_custom_fields, find_entry_id, find_group_id,
 };
 
-/// Value snapshot of an entry at the moment of diffing — owned, no borrows
+/// Value snapshot of an entry at the moment of diffing - owned, no borrows
 /// of the source `Database`. Safe to keep around in UI state for as long as
 /// the user is reviewing the conflict.
 ///
 /// Carries the full set of entry fields the merge round-trips, not just the
 /// five visible-in-UI ones. When the user picks "Remote" for a conflict, all
-/// these fields get transplanted onto the local entry — partial transplants
+/// these fields get transplanted onto the local entry - partial transplants
 /// were the source of a silent-data-loss bug pre-v0.2.1.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EntryView {
@@ -115,7 +115,7 @@ struct AttachmentFingerprint {
 }
 
 /// One field's local-vs-remote comparison. `local` and `remote` are the
-/// strings the UI should render directly — for the Password row those are
+/// strings the UI should render directly - for the Password row those are
 /// pre-redacted; for the rest they're the cleartext field values.
 #[derive(Clone, PartialEq, Eq)]
 pub struct FieldDiff {
@@ -148,7 +148,7 @@ pub struct EntryConflict {
 }
 
 /// One entry that diverged but was auto-resolved by `last_modification`
-/// timestamp — the side with the strictly newer timestamp wins, no UI
+/// timestamp - the side with the strictly newer timestamp wins, no UI
 /// prompt. `apply_picks` replays these alongside the user's manual picks
 /// so the merged DB picks up the winner regardless of whether any other
 /// entries forced the overlay.
@@ -170,7 +170,7 @@ pub struct ConflictReport {
     pub local_only: Vec<EntryView>,
     pub remote_only: Vec<EntryView>,
     /// Entries that diverged on at least one visible field but where one
-    /// side's `last_modification` is strictly newer — last-write-wins,
+    /// side's `last_modification` is strictly newer - last-write-wins,
     /// applied silently.
     pub auto_resolved: Vec<AutoResolved>,
     /// Group topology/metadata, tombstones, recycle-bin metadata, or entry
@@ -181,9 +181,12 @@ pub struct ConflictReport {
 }
 
 impl ConflictReport {
-    /// True when no user decisions are required — diff was clean. Caller
-    /// can skip the Conflict overlay entirely and just upload `apply_picks`
-    /// with an empty pick map.
+    /// True when the diff produced nothing at all: no decision, no remote
+    /// pull, no writeback. Production splits this into the two finer checks
+    /// it actually needs (`conflicts.is_empty()` gates the overlay,
+    /// [`Self::has_local_contribution`] gates the upload), so this stays a
+    /// test predicate rather than a third, subtly different rule.
+    #[cfg(test)]
     pub fn is_clean(&self) -> bool {
         self.conflicts.is_empty()
             && self.remote_only.is_empty()
@@ -193,14 +196,14 @@ impl ConflictReport {
         // the local DB we'll start the merge from.
     }
 
-    /// True when applying this report changes the *remote* — i.e. the local
+    /// True when applying this report changes the *remote* - i.e. the local
     /// side contributes something the server doesn't already have. That's
     /// either entries only we hold (`local_only`) or a field divergence our
     /// side won (`auto_resolved` with `winner == Local`).
     ///
     /// When this is false the merge is a pure fast-forward (we only pulled
     /// remote-side changes), so the post-merge DB already matches the server
-    /// and the caller can skip the upload — avoiding a redundant remote
+    /// and the caller can skip the upload - avoiding a redundant remote
     /// version for what is really just someone else's change landing here.
     pub fn has_local_contribution(&self) -> bool {
         self.structural_writeback_required
@@ -258,7 +261,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         // KeePass-style last-write-wins: when one side's `last_modification`
         // is strictly newer, take that side automatically. The overlay is
         // reserved for the genuinely ambiguous cases (timestamps tied or
-        // missing) — pre-v0.4 every field-level divergence forced a prompt
+        // missing) - pre-v0.4 every field-level divergence forced a prompt
         // even when the user had clearly saved one side later than the
         // other, which made benign sync round-trips noisy.
         match timestamp_winner(l.view.modified, r.view.modified) {
@@ -357,7 +360,7 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
 }
 
 /// Returns the strictly-newer side, or `None` when timestamps are tied
-/// or either side is missing a `last_modification` (treat as ambiguous —
+/// or either side is missing a `last_modification` (treat as ambiguous -
 /// surface to the user). Equal-second timestamps are ambiguous because
 /// KeePass file format is second-precision and a true race on the same
 /// second is the case where we *want* to prompt.
@@ -419,7 +422,7 @@ pub fn apply_picks(
     }
 
     // The merged database is saved directly (no document mutation runs in
-    // between), and `merge_history` unions both sides' histories — trim here
+    // between), and `merge_history` unions both sides' histories - trim here
     // or repeated conflicts grow entries past the vault's HistoryMaxItems.
     crate::keepass::document::enforce_history_limits(&mut merged);
 
@@ -451,7 +454,7 @@ fn warning_is_policy_resolved(warning: &str) -> bool {
 /// missing-timestamp warnings on *current* entries/groups: the fork emits
 /// those before ever comparing the object, so a legacy entry that is
 /// byte-identical on both sides would otherwise make every merge attempt
-/// fatal forever — while a genuinely divergent one must stay fatal (the
+/// fatal forever - while a genuinely divergent one must stay fatal (the
 /// epoch substitute would silently pick a winner). The comparison mirrors
 /// the pinned fork's own divergence checks: timestamps and history never
 /// define current-entry content, while group membership and parent location
@@ -516,7 +519,7 @@ fn icons_equivalent(local: Option<&Icon>, remote: Option<&Icon>, default_index: 
 /// `previous_parent_group` is excluded from conflict detection entirely:
 /// it is invisible restore-location metadata that KeePass2's own merge
 /// resolves silently, and vaults saved by FerrisPass before the fork
-/// round-tripped the field (pre-0.7) have it stripped on every entry —
+/// round-tripped the field (pre-0.7) have it stripped on every entry -
 /// comparing it would re-conflict a whole foreign-written vault forever.
 fn previous_groups_equivalent(local: Option<GroupId>, remote: Option<GroupId>) -> bool {
     previous_group_uuids_equivalent(local.map(|id| id.uuid()), remote.map(|id| id.uuid()))
@@ -655,13 +658,13 @@ fn custom_icon_store(db: &Database) -> HashMap<uuid::Uuid, CustomIconSnapshot> {
 
 /// The pinned fork's `Database::merge` fails closed when two entries or
 /// groups share a last-modification timestamp but differ on *any* field.
-/// Divergences FerrisPass deliberately does not surface as conflicts —
-/// default-icon spelling and previous-parent restore metadata — would
+/// Divergences FerrisPass deliberately does not surface as conflicts -
+/// default-icon spelling and previous-parent restore metadata - would
 /// therefore wedge the merge with "have the same modification time but
 /// have diverged". Align them on both sides before merging. Direction:
 /// a real previous-parent UUID wins over an absent one (healing vaults
 /// whose pre-0.7 saves stripped the field), otherwise the local (merged)
-/// representation wins. Pairs whose timestamps differ are left alone —
+/// representation wins. Pairs whose timestamps differ are left alone -
 /// the fork resolves those wholesale by the newer side.
 fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
     fn canonical_previous_parent(
@@ -766,7 +769,7 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
         // is written without bumping the modification time; pre-0.7 saves
         // stripped optional fields) has no user-facing resolution path and
         // would trip the fork's fail-closed check. Break the tie in local's
-        // favor — mirroring force_manual_winner and KeePass2's keep-target
+        // favor - mirroring force_manual_winner and KeePass2's keep-target
         // tie policy. The bumped timestamp also carries fork-private view
         // state (LastTopVisibleEntry) past the divergence check.
         let still_diverged = match (merged.group(id), source.group(id)) {
@@ -1163,7 +1166,7 @@ mod tests {
     #[test]
     fn explicit_default_icon_vs_absent_icon_is_not_a_conflict() {
         // KeePassXC writes <IconID>0</IconID> on every entry; our fork omits
-        // the element when unset. Both mean "default icon" — a vault
+        // the element when unset. Both mean "default icon" - a vault
         // round-tripped through both clients must not conflict on it.
         let mut local = Database::new();
         let id = add(&mut local, "GitHub", "secret");
@@ -1201,7 +1204,7 @@ mod tests {
     fn entry_previous_parent_metadata_never_conflicts() {
         // FerrisPass saves before the 0.7 fork bump stripped
         // PreviousParentGroup from every entry, so a foreign-written remote
-        // carries a real group UUID where local has None — with tied
+        // carries a real group UUID where local has None - with tied
         // timestamps. Restore-location metadata must not surface as a
         // per-entry conflict (KeePass2's merge never prompts for it either).
         let mut local = Database::new();
@@ -1226,7 +1229,7 @@ mod tests {
         // Unsurfaced divergence + tied timestamps used to trip the fork's
         // fail-closed "same modification time but have diverged" check and
         // wedge sync with "Merge blocked". The merge must reconcile before
-        // Database::merge runs — and heal: the real remote UUID survives
+        // Database::merge runs - and heal: the real remote UUID survives
         // into the merged result instead of local's stripped None.
         let mut local = Database::new();
         let id = add(&mut local, "GitHub", "secret");
@@ -1272,7 +1275,7 @@ mod tests {
         // modification time, so both sides tie while the fork's fail-closed
         // check sees a divergence ("Groups with UUID … have the same
         // modification time but have diverged"). Groups have no conflict
-        // UI — the merge must break the tie itself, keeping local.
+        // UI - the merge must break the tie itself, keeping local.
         let mut local = Database::new();
         let group_id = {
             let mut root = local.root_mut();
@@ -1369,14 +1372,14 @@ mod tests {
         assert_eq!(report.local_only.len(), 1);
         assert_eq!(report.local_only[0].title, "OnlyHere");
         assert!(report.remote_only.is_empty());
-        // Local-only doesn't require user decision — clean.
+        // Local-only doesn't require user decision - clean.
         assert!(report.is_clean());
     }
 
     #[test]
     fn remote_only_pull_is_a_pure_fast_forward() {
         // Remote gained an entry, local has nothing the server lacks. The
-        // merge should be flagged as needing no upload — otherwise auto-sync
+        // merge should be flagged as needing no upload - otherwise auto-sync
         // mints a redundant remote version just for pulling someone else's
         // change.
         let local = Database::new();
@@ -1393,7 +1396,7 @@ mod tests {
 
     #[test]
     fn local_only_entry_requires_upload() {
-        // We hold an entry the server doesn't — the merge must be pushed so
+        // We hold an entry the server doesn't - the merge must be pushed so
         // the other devices get it.
         let mut local = Database::new();
         let remote = fork(&local);
@@ -1417,7 +1420,7 @@ mod tests {
         assert!(report.conflicts.is_empty());
         assert!(report.local_only.is_empty());
         assert_eq!(report.remote_only.len(), 1);
-        // Remote-only adds to the merged result, so it's NOT clean — the
+        // Remote-only adds to the merged result, so it's NOT clean - the
         // caller still needs to run apply_picks.
         assert!(!report.is_clean());
     }
@@ -1433,7 +1436,7 @@ mod tests {
             .entry_mut(id)
             .unwrap()
             .set_protected(fields::PASSWORD, "rotated-locally-24chars");
-        // Remote rotates differently — id is preserved across `fork` (which
+        // Remote rotates differently - id is preserved across `fork` (which
         // is just `Database::clone`), so the same EntryId is valid in both.
         remote
             .entry_mut(id)
@@ -1483,7 +1486,7 @@ mod tests {
         let report = diff(&local, &remote);
         assert!(
             report.conflicts.is_empty(),
-            "newer remote should auto-resolve, not prompt — got {} conflicts",
+            "newer remote should auto-resolve, not prompt - got {} conflicts",
             report.conflicts.len()
         );
         assert_eq!(report.auto_resolved.len(), 1);
@@ -1714,7 +1717,7 @@ mod tests {
     /// Regression for the launch-feature precondition: pre-fix,
     /// `populate_from_view` only replayed the six standard fields, so
     /// any non-standard field on the local entry survived "pick remote"
-    /// even when the remote side had explicitly removed it — and any
+    /// even when the remote side had explicitly removed it - and any
     /// remote-only custom field was silently lost. Either failure mode
     /// would have evaporated SAP_CONN-style configs on the next sync.
     #[test]
@@ -2064,7 +2067,7 @@ mod tests {
     #[test]
     fn policy_resolved_merge_warnings_are_not_fatal() {
         // Exact strings the pinned fork emits for outcomes it already
-        // resolved without loss — and the one that genuinely drops data.
+        // resolved without loss - and the one that genuinely drops data.
         for benign in [
             "History entries for 1234 have the same modification timestamp 2026-01-01 but have diverged.",
             "Cannot move root group 1234",
@@ -2335,7 +2338,7 @@ mod tests {
         // KP2 syncs against cloud_after_fp. KP2's local already had the
         // entry with its original UUID (because KP2 created it). With
         // UUID preservation, cloud_after_fp's entry has the *same* UUID,
-        // so KP2's diff should be clean — no new entries to import,
+        // so KP2's diff should be clean - no new entries to import,
         // no conflicts to resolve.
         let kp2_view = diff(&kp2_local_after_round1, &cloud_after_fp);
         assert!(
@@ -2401,7 +2404,7 @@ mod tests {
         // newer local location without adding another entry.
         let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
             .expect("recycle-bin collision should merge without resurrection");
-        // Entry still exists exactly once — in the recycle bin.
+        // Entry still exists exactly once - in the recycle bin.
         let live_count = merged
             .iter_all_entries()
             .filter(|e| e.parent().id() != bin_id)

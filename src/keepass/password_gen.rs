@@ -4,11 +4,10 @@
 //! cryptographically suitable for credentials. Each character is picked
 //! uniformly from the union of the enabled character classes, then we
 //! post-check that at least one character from every enabled class is present
-//! and resample until that holds — this guarantees the user's class choices
+//! and resample until that holds - this guarantees the user's class choices
 //! are reflected even at short lengths.
 
 use rand::Rng;
-use rand::seq::IndexedRandom;
 
 use crate::domain::Strength;
 
@@ -86,12 +85,6 @@ pub fn generate(length: usize, classes: CharClasses) -> String {
     }
 }
 
-/// Pick one random char from a class. Convenience for unit tests.
-#[allow(dead_code)]
-fn pick_one(class: &[u8]) -> u8 {
-    *class.choose(&mut rand::rng()).expect("non-empty class")
-}
-
 /// Size of the alphabet drawn from when sampling with `classes`. Mirrors
 /// `generate`'s union-of-classes rule, including the lowercase-fallback when
 /// every class is disabled. Used by the entropy estimate.
@@ -129,7 +122,7 @@ pub fn estimate_bits(length: usize, classes: CharClasses) -> u32 {
 /// Bucket entropy bits into the same three-band Strength enum used elsewhere
 /// in the UI (so the generator card and the entry-detail health bar use one
 /// vocabulary). Thresholds chosen to match common guidance: <40 bits is
-/// brute-forceable, 40–60 bits is online-attack-resistant, ≥60 bits is
+/// brute-forceable, 40-60 bits is online-attack-resistant, ≥60 bits is
 /// offline-attack-resistant.
 pub fn strength_from_bits(bits: u32) -> Strength {
     if bits < 40 {
@@ -165,7 +158,7 @@ mod tests {
 
     #[test]
     fn always_includes_each_required_class() {
-        // 100 trials × 4 classes — a single failure means the resample loop
+        // 100 trials × 4 classes - a single failure means the resample loop
         // is broken (or astronomically unlucky).
         for _ in 0..100 {
             let pw = generate(8, CharClasses::default());
@@ -180,7 +173,7 @@ mod tests {
     #[test]
     fn alphabet_sizes_match_class_lengths() {
         // Sanity-check that the byte-string constants above are still 26/26/10/21
-        // — the entropy estimate hard-depends on these magnitudes.
+        // - the entropy estimate hard-depends on these magnitudes.
         assert_eq!(UPPER.len(), 26);
         assert_eq!(LOWER.len(), 26);
         assert_eq!(DIGITS.len(), 10);

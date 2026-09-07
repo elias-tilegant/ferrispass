@@ -8,8 +8,7 @@ pub mod password;
 pub mod provider_row;
 pub mod secret_input;
 pub mod settings_form;
-pub mod sync_row;
-pub mod toggle_row;
+pub mod switch;
 pub mod update_chip;
 
 pub use atoms::*;
@@ -22,6 +21,4 @@ pub use password::*;
 pub use provider_row::*;
 pub use secret_input::*;
 pub use settings_form::*;
-pub use sync_row::*;
-pub use toggle_row::*;
 pub use update_chip::*;

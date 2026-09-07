@@ -6,11 +6,10 @@ use crate::{
         actions::{
             APP_CONTEXT, AddSharePointVault, CancelUnlock, CopyPassword, CopyUrl, CopyUsername,
             CreateVault, DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch,
-            InstallUpdate, LaunchEntry, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAbout,
-            OpenAddVault, OpenConflictDemo, OpenConnect, OpenReconnect, OpenSettings,
-            OpenSyncSettings, OpenVault, OpenVaultSwitcher, OpenWhatsNew, PerformAutoType,
-            PerformAutoTypeForSelected, RenameGroupOp, SaveVault, SubmitPassword, SyncNow,
-            ToggleTheme,
+            InstallUpdate, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAbout, OpenAddVault,
+            OpenConnect, OpenReconnect, OpenSettings, OpenSyncSettings, OpenVault,
+            OpenVaultSwitcher, OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected,
+            RenameGroupOp, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
         },
     },
     autotype,
@@ -19,7 +18,7 @@ use crate::{
 };
 
 /// Which section of the unified Settings overlay is currently active.
-/// Lives in AppShell because it's UI-local state — not worth persisting,
+/// Lives in AppShell because it's UI-local state - not worth persisting,
 /// reset to General whenever the overlay closes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -57,11 +56,11 @@ struct EditPrefill {
 /// One row in the AddEntry / EditEntry modal's "Additional fields"
 /// section. Each row owns its own pair of `InputState` entities so
 /// the gpui input stack can track focus / cursor position
-/// independently — sharing them across rows would have selection
+/// independently - sharing them across rows would have selection
 /// jumping when the user reorders or deletes a row.
 pub struct CustomFieldDraftInputs {
     /// Stable id used as the gpui element key. Monotonic counter via
-    /// `AppShell::next_custom_field_id` — never reused, so deleting
+    /// `AppShell::next_custom_field_id` - never reused, so deleting
     /// row 3 and adding a new one doesn't accidentally restore
     /// stale gpui state for the old row.
     pub id: usize,
@@ -124,11 +123,11 @@ pub struct AppShell {
     /// inside the generator and surprise them).
     gen_classes: crate::keepass::password_gen::CharClasses,
     /// Persistent scroll position for the entry virtual list. Must outlive a single
-    /// render — without it the list resets to the top on every re-render and
+    /// render - without it the list resets to the top on every re-render and
     /// mouse-wheel events appear to do nothing.
     entry_list_scroll: VirtualListScrollHandle,
     /// The shell's own focus handle. We `track_focus` it on the root div so the
-    /// app always has a focused element in the dispatch path — without this,
+    /// app always has a focused element in the dispatch path - without this,
     /// GPUI has nothing to walk and `cmd-f`-style key bindings never fire when
     /// the user hasn't clicked into a specific input yet.
     focus_handle: FocusHandle,
@@ -149,7 +148,7 @@ pub struct AppShell {
     totp_tick: Option<Task<()>>,
     /// Background timer that wipes the clipboard `CLIPBOARD_CLEAR_SECS` after
     /// a copy. Holding the `Task` here means a new copy replaces (= cancels)
-    /// the previous timer — only the latest copy's clear fires.
+    /// the previous timer - only the latest copy's clear fires.
     clipboard_clear_task: Option<Task<()>>,
     /// Opaque identity of our latest clipboard write. On macOS this is the
     /// NSPasteboard change count, which lets the timer compare-and-clear
@@ -182,7 +181,7 @@ pub struct AppShell {
     entry_editor_was_open: bool,
     /// Wall-clock timestamp of the last user input event (mouse-move,
     /// click, key-down). Updated cheaply on every event without
-    /// triggering a re-render — only the auto-lock checker reads it.
+    /// triggering a re-render - only the auto-lock checker reads it.
     last_activity: Instant,
     /// Periodic checker that locks the vault after the configured
     /// auto-lock timeout. Only running while a vault is open AND a
@@ -246,7 +245,7 @@ pub struct AppShell {
     auto_type_listener: Option<autotype::HotkeyListener>,
     /// Background task that polls the global-hotkey event channel at
     /// ~30 Hz and dispatches `PerformAutoType` when our combo fires.
-    /// Dropped together with the listener — leaving it running with no
+    /// Dropped together with the listener - leaving it running with no
     /// listener would still be safe (the poll would find no matching
     /// events) but would burn cycles for no reason.
     auto_type_poll_task: Option<Task<()>>,
@@ -267,7 +266,7 @@ pub struct AppShell {
     automatic_biometric_attempted_for: Option<PathBuf>,
     /// Handle to the window that hosts this shell. Captured at
     /// construction so the global-hotkey poll task can dispatch
-    /// `perform_auto_type` directly into this window's context — bypassing
+    /// `perform_auto_type` directly into this window's context - bypassing
     /// `App::dispatch_action`, which routes through `active_window()` and
     /// no-ops when FerrisPass isn't the OS-focused app (exactly the
     /// case a global hotkey is for).
@@ -281,7 +280,7 @@ pub struct AppShell {
 /// threshold.
 const AUTO_LOCK_TICK_SECS: u64 = 5;
 
-/// Polling interval for the global-hotkey event channel. ~30 Hz —
+/// Polling interval for the global-hotkey event channel. ~30 Hz -
 /// fast enough that the user can't perceive any lag between the
 /// hotkey press and the auto-type firing, slow enough that the
 /// idle-app cost is negligible (the loop is two channel `try_recv`
@@ -328,8 +327,8 @@ impl AppShell {
         let picker_query_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name or folder…"));
         let vault_switcher_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Switch vault — type to filter…"));
-        // Seed the sequence input with whatever's currently persisted —
+            cx.new(|cx| InputState::new(window, cx).placeholder("Switch vault - type to filter…"));
+        // Seed the sequence input with whatever's currently persisted -
         // settings::load runs above in the field initializer below.
         // We re-read here so the input's display value matches the
         // canonical settings value from disk.
@@ -445,7 +444,7 @@ impl AppShell {
         ];
 
         // Sweep launch payloads orphaned by a previous crash. We only
-        // touch files older than 60 s — short enough that a near-miss
+        // touch files older than 60 s - short enough that a near-miss
         // (us starting the moment a previous instance dropped a
         // payload) doesn't kill it, long enough that anything from a
         // previous session that didn't shut down cleanly is gone.
@@ -453,7 +452,7 @@ impl AppShell {
         // …and once more after the grace window has fully elapsed. A
         // crash followed by an immediate relaunch (the typical user
         // reaction) leaves the orphaned payload younger than 60 s, so
-        // the startup sweep above spares it — and without this second
+        // the startup sweep above spares it - and without this second
         // pass nothing would ever delete the cleartext file for the
         // rest of the session. At +120 s (2× the maximum launch TTL)
         // every survivor from a previous run is unambiguously stale,
@@ -531,7 +530,7 @@ impl AppShell {
         // than starting the task during the struct literal) so the
         // weak handle that `cx.spawn` captures resolves to the
         // already-constructed entity. Idempotent if Auto-Type is off
-        // — `sync_auto_type_listener` is the only entry point and it
+        // - `sync_auto_type_listener` is the only entry point and it
         // no-ops cleanly when both desired-state and current-state are
         // "no listener".
         shell.sync_auto_type_listener(cx);
@@ -557,9 +556,9 @@ impl AppShell {
 
     /// Start the per-second TOTP refresh loop only when the currently-selected
     /// entry has an OTP field; cancel it otherwise. Called from the state
-    /// observer so it follows both open/lock transitions and selection changes
-    /// — moving away from a TOTP entry stops the tick, moving onto one starts
-    /// it. Saves the wasted 1 Hz re-renders for the (common) case where the
+    /// observer so it follows both open/lock transitions and selection
+    /// changes: moving away from a TOTP entry stops the tick, moving onto one
+    /// starts it. Saves the wasted 1 Hz re-renders for the (common) case where the
     /// user isn't looking at a TOTP entry.
     fn sync_totp_tick(&mut self, cx: &mut Context<Self>) {
         let needs_tick = self
@@ -589,7 +588,7 @@ impl AppShell {
                 }));
             }
             (false, true) => {
-                // Drop the task — GPUI cancels it.
+                // Drop the task - GPUI cancels it.
                 self.totp_tick = None;
             }
             _ => {}
@@ -604,7 +603,7 @@ impl AppShell {
     /// Reads the threshold inside the loop so settings changes apply
     /// at the next tick without restarting the task.
     fn sync_auto_lock_task(&mut self, cx: &mut Context<Self>) {
-        // "Any vault in memory" — keeps the timer ticking when the active
+        // "Any vault in memory" - keeps the timer ticking when the active
         // slot is on the unlock screen but parked sessions are still
         // decrypted. Global auto-lock semantics: a single idle timeout
         // sweeps active + parked together via `AppState::lock_vault`.
@@ -628,7 +627,7 @@ impl AppShell {
                             // Re-read on each tick so toggling the
                             // setting takes effect within ~5 s.
                             let Some(threshold) = shell.settings.auto_lock_secs else {
-                                return None; // settings disabled — exit.
+                                return None; // settings disabled - exit.
                             };
                             if shell.last_activity.elapsed() >= Duration::from_secs(threshold) {
                                 Some(true)
@@ -665,7 +664,7 @@ impl AppShell {
         self._session_lock_task = Some(cx.spawn(async move |this, cx| {
             while events.recv().await.is_ok() {
                 // Sleep/lock transitions commonly emit several events in a
-                // burst. Drain the queue, then consult the latch — it is
+                // burst. Drain the queue, then consult the latch - it is
                 // the authoritative Lock record and survives even events
                 // dropped by a full channel.
                 while events.try_recv().is_ok() {}
@@ -724,7 +723,7 @@ impl AppShell {
                             .update(cx, |shell, _| shell.settings.auto_sync_secs_clamped())
                         {
                             Ok(Some(secs)) => Duration::from_secs(secs),
-                            // Setting turned off, or the entity went away —
+                            // Setting turned off, or the entity went away -
                             // stop ticking.
                             _ => break,
                         };
@@ -759,7 +758,7 @@ impl AppShell {
     ///
     /// Failure modes are user-actionable, so we cache the error in
     /// `auto_type_hotkey_error` for the Settings UI to display instead
-    /// of silently leaving the feature off — that's exactly the
+    /// of silently leaving the feature off - that's exactly the
     /// "looks broken" state we want to avoid.
     pub fn sync_auto_type_listener(&mut self, cx: &mut Context<Self>) {
         // Validate the sequence regardless of `enabled` so the Settings
@@ -820,7 +819,7 @@ impl AppShell {
                             continue;
                         }
                         // Hotkey fired. We dispatch into the window
-                        // directly — `App::dispatch_action` would route
+                        // directly - `App::dispatch_action` would route
                         // through `active_window()`, which is `None`
                         // while another app holds OS focus, and would
                         // then fall back to `dispatch_global_action`
@@ -866,7 +865,7 @@ impl AppShell {
 
     /// Trigger the system prompt that opens the Privacy → Accessibility
     /// pane. Called from the "Grant access" button in Settings. The
-    /// return value isn't actionable here — even on grant, the macOS
+    /// return value isn't actionable here - even on grant, the macOS
     /// trust bit only refreshes for new processes, so the user must
     /// restart FerrisPass after granting.
     pub fn auto_type_request_trust(&self) {
@@ -881,7 +880,7 @@ impl AppShell {
         self.clipboard_clear_task = None;
         self.clipboard_clear_deadline = None;
         self.clipboard_pill_tick = None;
-        // Drop any pending launch payloads — each handle's Drop unlinks
+        // Drop any pending launch payloads - each handle's Drop unlinks
         // its file. Cancel the cleanup timers since we just did the
         // cleanup ourselves. Then purge the launch tempdir for good
         // measure: covers anything raced in between by another instance
@@ -1098,7 +1097,7 @@ impl AppShell {
     }
 
     /// Open a URL in the user's default browser. Used by the device-code
-    /// step's "Open in browser" button — opens https://microsoft.com/devicelogin
+    /// step's "Open in browser" button - opens https://microsoft.com/devicelogin
     /// (or whatever the server gave us) so the user doesn't have to copy/paste.
     pub fn open_browser(url: &str) {
         // macOS only for now (matches the rest of the MVP scope). On other
@@ -1124,7 +1123,7 @@ impl AppShell {
                 protected: row.protected,
             })
             // Empty-key rows are treated as "row the user added but
-            // never filled" — silently dropped on save rather than
+            // never filled" - silently dropped on save rather than
             // polluting the database with `""`-keyed attributes.
             .filter(|f| !f.key.trim().is_empty())
             .collect();
@@ -1167,7 +1166,7 @@ impl AppShell {
     /// click. Keys are pre-filled (`SAP_HOST`, `SAP_INSTANCE`, …) and
     /// each value input gets a placeholder hint so the user knows
     /// what to type. Skips any row whose key already exists in the
-    /// editor — clicking the button twice is idempotent rather than
+    /// editor - clicking the button twice is idempotent rather than
     /// producing duplicate rows.
     pub fn add_sap_connection_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for (key, value_placeholder) in crate::launch::sap::QUICK_ADD_KEYS {
@@ -1264,7 +1263,7 @@ impl AppShell {
         self.new_entry_picker_open = false;
         // Drop all custom-field rows. Their `Entity<InputState>`s are
         // released on Vec drop; gpui will GC them once no view still
-        // references them. Don't reset `next_custom_field_id` — keeping
+        // references them. Don't reset `next_custom_field_id` - keeping
         // it monotonic across opens guarantees stable element keys
         // even when the user rapidly opens/closes the modal.
         self.new_entry_custom_fields.clear();
@@ -1313,7 +1312,7 @@ impl AppShell {
 
     /// Toggle one of the four character classes by index (0=upper, 1=lower,
     /// 2=digits, 3=symbols). Refuses the toggle if it would leave zero classes
-    /// enabled — without this the generator silently falls back to lowercase
+    /// enabled - without this the generator silently falls back to lowercase
     /// and the user's "all unchecked" state would produce passwords that
     /// disagree with the disabled chips.
     pub fn toggle_gen_class(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -1437,13 +1436,13 @@ impl AppShell {
             .state
             .update(cx, |state, cx| state.forget_biometric(&path, cx));
         if !removed {
-            // Keychain delete couldn't be confirmed — the registry
+            // Keychain delete couldn't be confirmed - the registry
             // pointer is kept on purpose so the password isn't
             // orphaned. Tell the user rather than silently pretending
             // it worked.
             window.push_notification(
                 "Couldn't remove the Touch ID entry from the keychain. \
-                 The vault still has Touch ID enabled — try again.",
+                 The vault still has Touch ID enabled - try again.",
                 cx,
             );
         }
@@ -1504,19 +1503,10 @@ impl AppShell {
         self.copy_selected_value(CopyValueKind::Password, window, cx);
     }
 
-    fn on_action_launch_entry(
-        &mut self,
-        _: &LaunchEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.launch_selected_entry(window, cx);
-    }
-
     /// Global-hotkey route. Reads the foreground window the user just
     /// left, finds the best-matching entry by URL hostname, and types
     /// the configured sequence into it. All preconditions surface as
-    /// a toast notification — silent failure here would have the
+    /// a toast notification - silent failure here would have the
     /// feature looking broken (the user pressed the hotkey, nothing
     /// happened, no clue why).
     fn on_action_perform_auto_type(
@@ -1532,7 +1522,7 @@ impl AppShell {
     /// In-app ⌘⇧T route: types the *currently-selected* entry after a
     /// short countdown. The countdown is what lets the user press the
     /// shortcut from inside FerrisPass and still aim the keystrokes
-    /// at a different window — the global hotkey is the better
+    /// at a different window - the global hotkey is the better
     /// ergonomic, but this is the discoverable in-app entry point.
     fn on_action_perform_auto_type_for_selected(
         &mut self,
@@ -1564,7 +1554,7 @@ impl AppShell {
         }
         window.push_notification(
             format!(
-                "Auto-Type starting in {AUTO_TYPE_COUNTDOWN_SECS} s — switch to the target window."
+                "Auto-Type starting in {AUTO_TYPE_COUNTDOWN_SECS} s - switch to the target window."
             ),
             cx,
         );
@@ -1593,9 +1583,9 @@ impl AppShell {
     /// foreground (cheap, must hold the AppState borrow to read the
     /// cleartext password); `execute` runs the blocking typer on a
     /// background task. The completion result is mapped back through
-    /// the same `Outcome` enum the orchestrator uses everywhere else
-    /// — so `TypingFailed` actually reaches the user instead of being
-    /// silently swallowed by a fire-and-forget spawn.
+    /// the same `Outcome` enum the orchestrator uses everywhere else, so
+    /// `TypingFailed` actually reaches the user instead of being silently
+    /// swallowed by a fire-and-forget spawn.
     fn perform_auto_type(
         &mut self,
         force_entry_id: Option<String>,
@@ -1617,7 +1607,7 @@ impl AppShell {
 
         // Build the orchestrator input under a single AppState read.
         // The closure captures `&VaultDocument` for the password
-        // resolver — that borrow is alive only while `prepare` runs,
+        // resolver - that borrow is alive only while `prepare` runs,
         // which is synchronous.
         let template = self.settings.auto_type_sequence.clone();
         let prepared: Result<autotype::TypePlan, autotype::Outcome> = {
@@ -1646,7 +1636,7 @@ impl AppShell {
             }
         };
 
-        // Mark recently-used now — the typing succeeds asynchronously,
+        // Mark recently-used now - the typing succeeds asynchronously,
         // but from the user's perspective they've authenticated with
         // this entry the moment they pressed the hotkey. (Background
         // task failure still surfaces via the notification.)
@@ -1654,8 +1644,8 @@ impl AppShell {
             .update(cx, |state, _| state.mark_entry_used(&plan.entry_id));
 
         // Spawn the (blocking) typer on a background task. The plan
-        // — and the cleartext password it carries inside its TypeOps
-        // — is moved into the task and dropped when the task ends.
+        // - and the cleartext password it carries inside its TypeOps
+        // - is moved into the task and dropped when the task ends.
         let completion_cancellation = plan.cancellation.clone();
         let task = cx.background_spawn(async move { autotype::execute(plan) });
         let foreground_for_callback = foreground;
@@ -1755,9 +1745,9 @@ impl AppShell {
             }
             Outcome::FocusChanged { window_title } => {
                 let message = if window_title.is_empty() {
-                    "Auto-Type cancelled — the target window lost focus.".to_string()
+                    "Auto-Type cancelled - the target window lost focus.".to_string()
                 } else {
-                    format!("Auto-Type cancelled — focus moved to \"{window_title}\".")
+                    format!("Auto-Type cancelled - focus moved to \"{window_title}\".")
                 };
                 window.push_notification(message, cx);
             }
@@ -1787,7 +1777,7 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Token-only re-auth of the active synced vault — NOT the full
+        // Token-only re-auth of the active synced vault - NOT the full
         // picker-driven connect flow (which would download a duplicate
         // local copy). `start_sharepoint_reconnect` reuses the existing
         // on-disk SyncConfig and opens straight onto the device-code step.
@@ -1816,7 +1806,7 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Universally available — no vault-open gate.
+        // Universally available - no vault-open gate.
         self.settings_tab = SettingsTab::General;
         self.state
             .update(cx, |state, cx| state.open_overlay(Overlay::Settings, cx));
@@ -1832,7 +1822,7 @@ impl AppShell {
         // tab. Reachable from the vault-header sync chip and ⌘⇧, so
         // users can land where they were going without a tab click.
         //
-        // Gate: Sync makes no sense without a decrypted vault — fall
+        // Gate: Sync makes no sense without a decrypted vault - fall
         // back to General so the keybinding still opens *something*
         // useful from the locked perspective rather than dropping the
         // user onto a tab they can't act on.
@@ -1881,12 +1871,12 @@ impl AppShell {
 
         let status = self.state.read(cx).sync_status().clone();
         match status {
-            // Nothing to sync against — fall back to the Sync settings tab
+            // Nothing to sync against - fall back to the Sync settings tab
             // so the user can connect or re-authenticate.
             SyncStatus::Disconnected | SyncStatus::Reconnect { .. } => {
                 window.dispatch_action(Box::new(OpenSyncSettings), cx);
             }
-            // Already in flight or awaiting user input — do nothing.
+            // Already in flight or awaiting user input - do nothing.
             SyncStatus::Syncing
             | SyncStatus::Connecting
             | SyncStatus::Restoring
@@ -1913,27 +1903,11 @@ impl AppShell {
             crate::app::VaultStatus::Open { .. }
         );
         if is_open {
-            // Reset the form before showing it — otherwise reopening the modal
+            // Reset the form before showing it - otherwise reopening the modal
             // after a previous Save/Cancel would carry the prior values.
             self.clear_entry_form(window, cx);
             self.state
                 .update(cx, |state, cx| state.open_overlay(Overlay::AddEntry, cx));
-        }
-    }
-
-    fn on_action_open_conflict_demo(
-        &mut self,
-        _: &OpenConflictDemo,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let is_open = matches!(
-            self.state.read(cx).vault_status(),
-            crate::app::VaultStatus::Open { .. }
-        );
-        if is_open {
-            self.state
-                .update(cx, |state, cx| state.open_overlay(Overlay::Conflict, cx));
         }
     }
 
@@ -2237,7 +2211,7 @@ impl AppShell {
 
         // Rebuild the custom-fields editor rows from the entry. Each
         // row gets a fresh Entity<InputState> with the current value
-        // pre-filled — necessary because `add_custom_field_row` only
+        // pre-filled - necessary because `add_custom_field_row` only
         // creates blank rows.
         self.new_entry_custom_fields.clear();
         for cf in p.custom_fields {
@@ -2305,7 +2279,7 @@ impl AppShell {
     ) {
         if matches!(event, InputEvent::Change) {
             // Filter is purely client-side over the already-fetched list, so
-            // no debounce — every keystroke updates instantly without an
+            // no debounce - every keystroke updates instantly without an
             // API call.
             let q = input.read(cx).value().to_string();
             self.state
@@ -2338,7 +2312,7 @@ impl AppShell {
         self.update_settings(new_settings, cx);
     }
 
-    /// Programmatic setter for the Auto-Type sequence — used by the
+    /// Programmatic setter for the Auto-Type sequence - used by the
     /// preset chips in Settings. Updates both the input widget and the
     /// persisted settings so the chip click feels instantaneous.
     pub fn set_auto_type_sequence(
@@ -2377,7 +2351,7 @@ impl AppShell {
         let active = state.current_vault_path();
 
         // Prefer a parked-but-already-unlocked vault if the filter
-        // matches one — Enter then performs an instant switch instead
+        // matches one - Enter then performs an instant switch instead
         // of a cold password prompt.
         let unlocked_top = unlocked
             .iter()
@@ -2398,7 +2372,7 @@ impl AppShell {
 
         // No switchable target. If the only thing the filter found was
         // the currently-active vault (e.g. the user typed its name),
-        // pressing Enter is a no-op — just close the switcher. The file
+        // pressing Enter is a no-op - just close the switcher. The file
         // dialog only opens when nothing in the visible list matched at
         // all.
         let active_matches = active
@@ -2421,7 +2395,7 @@ impl AppShell {
             return;
         }
         let query = search_input.read(cx).value().to_string();
-        // Empty query — apply immediately so closing search feels instant.
+        // Empty query - apply immediately so closing search feels instant.
         if query.is_empty() {
             self.search_debounce = None;
             self.state
@@ -2472,7 +2446,7 @@ impl AppShell {
     }
 
     /// Open a vault from the Welcome screen's Recents list. Same effect
-    /// as picking it through the file dialog — clears the unlock inputs
+    /// as picking it through the file dialog - clears the unlock inputs
     /// and lands the user on the password prompt for `path`. The path
     /// has already been validated as a .kdbx by virtue of having been
     /// successfully opened before, so we go straight through
@@ -2546,7 +2520,7 @@ impl AppShell {
         }
 
         // Snapshot the "Enable Touch ID" checkbox state *before* we
-        // clear the password input — by the time the open task
+        // clear the password input - by the time the open task
         // completes the input has been wiped, and the password we
         // need to enrol with is gone. Move it into the spawn closure
         // alongside the path.
@@ -2575,7 +2549,7 @@ impl AppShell {
         cx.spawn(async move |this, cx| {
             let (path, result) = open_task.await;
             // Gate enrolment on whether the vault *actually* opened for
-            // this path — not merely on a successful KDF. The user may
+            // this path - not merely on a successful KDF. The user may
             // have cancelled or switched vaults between the KDF
             // finishing and this update landing, in which case
             // `finish_open_attempt` no-ops and we must not write this
@@ -2618,7 +2592,7 @@ impl AppShell {
     /// Note on the cleartext password: it's held in a `Zeroizing`
     /// buffer inside the background task and fed straight into
     /// `KeePassRepository::open`. It does *not* round-trip through
-    /// `AppState` as a bare value — but the *opened* vault
+    /// `AppState` as a bare value - but the *opened* vault
     /// (`VaultDocument`) does retain the master password in memory
     /// for the life of the session, same as a normally-typed unlock.
     /// "Never crosses AppState" applies to the transient buffer, not
@@ -2648,7 +2622,7 @@ impl AppShell {
         let generation = launch.generation;
         let prompt = format!("Unlock {}", file_name_for_prompt(&path));
         // Read the per-app preference once, here on the foreground.
-        // The background task gets a plain bool — no AppSettings
+        // The background task gets a plain bool - no AppSettings
         // reference travels into the spawn closure.
         let options = crate::biometric::RetrieveOptions {
             allow_device_passcode: self.settings.biometric_allow_passcode_fallback,
@@ -2770,7 +2744,7 @@ impl AppShell {
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         // If Settings was sitting on the Sync tab when the user locked,
-        // bounce them back to General — the sidebar will mark Sync
+        // bounce them back to General - the sidebar will mark Sync
         // disabled while locked, but the active-tab state should
         // already match what's allowed.
         if matches!(self.settings_tab, SettingsTab::Sync) {
@@ -2802,7 +2776,7 @@ impl AppShell {
     ) {
         if let Some(value) = self.state.read(cx).copy_selected_value(kind) {
             // Password and username copies count as "actually used"
-            // for the Recently-Used filter. URL copies don't — the
+            // for the Recently-Used filter. URL copies don't - the
             // user might just be sharing a link, not authenticating.
             if matches!(kind, CopyValueKind::Password | CopyValueKind::Username) {
                 self.state.update(cx, |state, _| state.mark_selected_used());
@@ -2830,7 +2804,7 @@ impl AppShell {
             window.push_notification(format!("No value for {key}."), cx);
             return;
         };
-        // Mark the entry as recently-used too — copying a custom
+        // Mark the entry as recently-used too - copying a custom
         // field counts as authenticating with the entry, same rule
         // as for password / username copies.
         self.state.update(cx, |state, _| state.mark_selected_used());
@@ -2842,7 +2816,7 @@ impl AppShell {
     /// password out of state, hands them to the matching `Launcher`,
     /// parks the returned handle in `pending_launches`, and schedules a
     /// cleanup task that drops the head of the queue after the
-    /// user-configured TTL — that drop unlinks the temp payload file.
+    /// user-configured TTL - that drop unlinks the temp payload file.
     ///
     /// All failure paths surface a toast and leave no temp file on
     /// disk. The launcher itself is responsible for never leaving
@@ -2861,7 +2835,7 @@ impl AppShell {
             window.push_notification("No launcher available for this entry.", cx);
             return;
         };
-        // Read the password — copy_selected_value returns the cleartext
+        // Read the password - copy_selected_value returns the cleartext
         // *without* writing to the clipboard when called via &self. The
         // launcher needs it to compose the .sapc body; we don't want it
         // accidentally landing on the clipboard for this flow.
@@ -2881,7 +2855,7 @@ impl AppShell {
                 self.pending_launches.push(handle);
                 self.schedule_launch_cleanup(cx);
                 // Treat a launch the same as a copy for the recently-
-                // used filter — the user just authenticated with this
+                // used filter - the user just authenticated with this
                 // entry, even if no clipboard touch happened.
                 self.state.update(cx, |state, _| state.mark_selected_used());
             }
@@ -2913,7 +2887,7 @@ impl AppShell {
             cx.background_executor().timer(ttl).await;
             let _ = this.update(cx, |this, _| {
                 if !this.pending_launches.is_empty() {
-                    // FIFO — the oldest pending launch is the one that
+                    // FIFO - the oldest pending launch is the one that
                     // matches our timer. Drop drops the TempLaunchFile,
                     // which unlinks the file.
                     this.pending_launches.remove(0);
@@ -2921,7 +2895,7 @@ impl AppShell {
                 if !this.launch_cleanup_tasks.is_empty() {
                     // The Task we drop here is *this* timer (the one
                     // that just woke us up). Letting it drop cancels
-                    // its slot — `remove(0)` returns the Task by
+                    // its slot - `remove(0)` returns the Task by
                     // value, which is then dropped immediately.
                     drop(this.launch_cleanup_tasks.remove(0));
                 }
@@ -2934,7 +2908,7 @@ impl AppShell {
     /// user, schedule a clear". Used by the saved-fields copy path
     /// (`copy_selected_value`) and the live-TOTP copy in the detail
     /// panel. Replaces any in-flight clear so the latest copy always
-    /// wins — older timers would otherwise wipe the new value early.
+    /// wins - older timers would otherwise wipe the new value early.
     /// When `clipboard_clear_secs` is `None` (user picked "Never"), no
     /// timer is scheduled; the clipboard still gets wiped at lock time.
     pub fn copy_with_auto_clear(
@@ -3028,14 +3002,14 @@ impl AppShell {
     }
 
     /// True iff `entry_id`'s password is currently revealed in the
-    /// detail panel. Driven by `revealed_entry_id` — see the state
+    /// detail panel. Driven by `revealed_entry_id` - see the state
     /// observer for the auto-mask-on-switch logic.
     pub fn is_password_revealed(&self, entry_id: &str) -> bool {
         self.revealed_entry_id.as_deref() == Some(entry_id)
     }
 
     /// Toggle the masked password into / out of view for `entry_id`.
-    /// Idempotent — clicking twice ends up where you started.
+    /// Idempotent - clicking twice ends up where you started.
     pub fn toggle_password_reveal(&mut self, entry_id: String, cx: &mut Context<Self>) {
         if self.revealed_entry_id.as_deref() == Some(&entry_id) {
             self.revealed_entry_id = None;
@@ -3050,7 +3024,7 @@ impl AppShell {
     }
 
     /// Persist a new `AppSettings`. Background-saves to disk
-    /// (fire-and-forget — failures are non-fatal, the in-memory
+    /// (fire-and-forget - failures are non-fatal, the in-memory
     /// settings still apply for this session) and re-runs
     /// `sync_auto_lock_task` so a freshly-disabled timer is cancelled
     /// or a freshly-enabled one starts immediately.
@@ -3102,7 +3076,7 @@ impl AppShell {
         let vault_status = self.state.read(cx).vault_status();
         let overlay = self.state.read(cx).overlay();
 
-        // Settings is a global overlay — accessible regardless of
+        // Settings is a global overlay - accessible regardless of
         // whether a vault is open (matches the Mac ⌘, convention of
         // Preferences always being reachable).
         if matches!(overlay, Overlay::Settings) {
@@ -3197,7 +3171,7 @@ impl Render for AppShell {
         self.schedule_automatic_biometric_unlock(window, cx);
         let body = AppShell::render_body(self, cx);
         // Without this layer the `Root::notification` `NotificationList`
-        // never gets painted — `window.push_notification(...)` queues
+        // never gets painted - `window.push_notification(...)` queues
         // toasts into a list that nothing renders, so the user sees
         // nothing despite the call site looking correct. Mirrors the
         // gpui-component story-shell pattern.
@@ -3210,7 +3184,7 @@ impl Render for AppShell {
             .track_focus(&self.focus_handle)
             // Reset the idle clock on any user input. Setting an
             // `Instant` is cheap and we deliberately don't `cx.notify`
-            // here — only the auto-lock checker reads the field, and
+            // here - only the auto-lock checker reads the field, and
             // it does so on its own schedule.
             .on_mouse_move(cx.listener(|shell: &mut AppShell, _, _, _| {
                 shell.last_activity = Instant::now();
@@ -3231,7 +3205,6 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_copy_username))
             .on_action(cx.listener(Self::on_action_copy_url))
             .on_action(cx.listener(Self::on_action_copy_password))
-            .on_action(cx.listener(Self::on_action_launch_entry))
             .on_action(cx.listener(Self::on_action_open_connect))
             .on_action(cx.listener(Self::on_action_open_reconnect))
             .on_action(cx.listener(Self::on_action_add_sharepoint_vault))
@@ -3243,7 +3216,6 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_sync_now))
             .on_action(cx.listener(Self::on_action_download_favicons))
             .on_action(cx.listener(Self::on_action_new_entry))
-            .on_action(cx.listener(Self::on_action_open_conflict_demo))
             .on_action(cx.listener(Self::on_action_create_vault))
             .on_action(cx.listener(Self::on_action_toggle_theme))
             .on_action(cx.listener(Self::on_action_save_vault))
@@ -3296,7 +3268,7 @@ enum BiometricUnlockOutcome {
 
 /// UI-friendly file name for the Touch ID prompt header. Strips the
 /// `.kdbx` suffix so the prompt reads "Unlock my-vault" rather than
-/// "Unlock my-vault.kdbx". Used only for human-facing strings — never
+/// "Unlock my-vault.kdbx". Used only for human-facing strings - never
 /// as a keychain account or any other security-relevant identifier.
 fn file_name_for_prompt(path: &std::path::Path) -> String {
     path.file_stem()
@@ -3334,6 +3306,3 @@ fn copy_value_label(kind: CopyValueKind) -> &'static str {
         CopyValueKind::Password => "Password",
     }
 }
-
-#[allow(dead_code)]
-fn _root_marker(_: &Root) {}

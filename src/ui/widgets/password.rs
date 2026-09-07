@@ -60,12 +60,3 @@ pub fn strength_card(strength: Strength, length: usize, bits: Option<u32>) -> An
         })
         .into_any_element()
 }
-
-/// Used in the welcome footer: "AES-256 · Argon2id" line.
-pub fn footer_chip(text: impl Into<String>, _cx: &gpui::App) -> AnyElement {
-    div()
-        .text_xs()
-        .text_color(palette::text_faint())
-        .child(text.into())
-        .into_any_element()
-}

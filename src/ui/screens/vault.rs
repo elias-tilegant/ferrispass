@@ -21,7 +21,7 @@ use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, section_heading, status_badge};
+use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, section_heading};
 use crate::ui::widgets::brand::brand;
 use crate::ui::widgets::entry_chrome::favicon;
 use crate::ui::widgets::interaction::{Interaction as _, darken};
@@ -38,7 +38,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     let is_open = matches!(vault_status, VaultStatus::Open { .. });
     let is_lock_pending = matches!(vault_status, VaultStatus::LockedPendingSave);
 
-    // O(1) snapshot share — keeps render off the deep-clone path.
+    // O(1) snapshot share - keeps render off the deep-clone path.
     let snapshot = match vault_status {
         VaultStatus::Open { document, .. } => Some(document.snapshot_rc()),
         _ => None,
@@ -86,12 +86,12 @@ fn sidebar(
 ) -> impl gpui::IntoElement {
     // Header chip text. `provider` is None when the vault is local-only;
     // `synced_at` is None in that case too. Fall back to a neutral "Local"
-    // / "—" pair rather than showing stale OneDrive copy.
+    // / "-" pair rather than showing stale OneDrive copy.
     let provider = summary.provider.clone().unwrap_or_else(|| "Local".into());
-    let synced_at = summary.synced_at.clone().unwrap_or_else(|| "—".into());
+    let synced_at = summary.synced_at.clone().unwrap_or_else(|| "-".into());
     // Header status dot + label now track the real sync health (via
     // summary.sync_tone) instead of always showing a green "Synced" the
-    // moment a vault is open — so the header agrees with the bottom chip
+    // moment a vault is open - so the header agrees with the bottom chip
     // and the Settings → Sync card. For Attention we reuse the live status
     // text ("Sign-in expired" / "Sync failed" / "Conflict") from synced_at.
     let (header_dot, header_label): (Hsla, SharedString) = match summary.sync_tone {
@@ -126,7 +126,7 @@ fn sidebar(
     let starred_count = counts.starred;
     let twofa_count = counts.with_otp;
 
-    // Borrow root + recycle-bin-id directly off the snapshot — `snapshot`
+    // Borrow root + recycle-bin-id directly off the snapshot - `snapshot`
     // is held alive by the caller's `Arc<VaultSnapshot>`, so there's no
     // need to deep-clone the entire group tree (3 500 entries × ~200 B
     // per `VaultEntry` adds up fast on every frame).
@@ -361,7 +361,7 @@ fn library_section(
         .child({
             // Trash gets the same drop wiring as group rows, but the
             // drop calls `delete_entry` (which lazily creates the
-            // recycle bin if missing) — same semantics as the
+            // recycle bin if missing) - same semantics as the
             // explicit Delete button. Build the drop listener BEFORE
             // calling nav_row so the two cx borrows don't overlap (in
             // edition 2024 the `impl IntoElement` return captures cx).
@@ -404,7 +404,7 @@ fn groups_section(
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     // Flatten the tree to a depth-tagged preorder list once, starting at
-    // the database root so the root group is visible — KeePassXC does
+    // the database root so the root group is visible - KeePassXC does
     // the same, and entries that live directly at root would otherwise
     // be unreachable via the group nav (only via "All items"). Drops on
     // the root row move an entry back to top level. We deliberately
@@ -413,7 +413,7 @@ fn groups_section(
     // collapsibility is a later polish.
     //
     // The recycle-bin group is dropped from the tree because it has its
-    // own dedicated "Trash" affordance under the Library section —
+    // own dedicated "Trash" affordance under the Library section -
     // surfacing it as a regular group here would just confuse the user
     // about where deleted entries live.
     let mut flat: Vec<(usize, &VaultGroup)> = Vec::new();
@@ -494,7 +494,7 @@ fn groups_section(
         let state_for_toggle = state_entity.clone();
 
         // Layout per row: [chevron column | nav_pill (flex_1)]. The
-        // chevron and the pill are *siblings*, not nested — clicks on
+        // chevron and the pill are *siblings*, not nested - clicks on
         // the chevron toggle expansion without bubbling into the row's
         // select handler, matching the codebase pattern noted in
         // `password_row` (see "we don't have to manage stop_propagation").
@@ -506,7 +506,7 @@ fn groups_section(
         // Depth-based left padding gives the tree shape. 12 px per
         // level lines up with the icon column and produces a readable
         // indent without eating the 220 px sidebar width even for
-        // moderately deep trees (4–5 levels still fit).
+        // moderately deep trees (4-5 levels still fit).
         let group_id_for_menu = group.id.clone();
         let chevron_id = gpui::SharedString::from(format!("group-chev-{}", group.id));
         let chevron = if has_children {
@@ -678,7 +678,7 @@ fn nav_row(
 /// (which would either swallow the inner background or create a click-vs-hover
 /// region mismatch).
 // `icon_image`, when Some, replaces the `AppIcon` glyph with a custom-icon
-// image — used by group rows so KeePass `Icon::Custom(_)` shows the user's
+// image - used by group rows so KeePass `Icon::Custom(_)` shows the user's
 // own bitmap instead of the generic note icon. Tinting doesn't apply to
 // images (mirrors KeePassXC).
 #[allow(clippy::too_many_arguments)]
@@ -750,7 +750,7 @@ fn nav_pill(
 /// Render the leading 13×13 icon slot for a nav pill. Custom-icon image
 /// (when present) takes priority over the `AppIcon` fallback. The image
 /// gets `with_fallback` so a corrupt blob falls back to the glyph
-/// instead of an empty slot — same defensive treatment as the entry
+/// instead of an empty slot - same defensive treatment as the entry
 /// favicon path in `entry_chrome::favicon`.
 fn nav_pill_icon(icon: AppIcon, icon_image: Option<&FaviconImage>, icon_color: Hsla) -> AnyElement {
     if let Some(image) = icon_image {
@@ -975,8 +975,8 @@ enum FooterStyle {
     Danger,
 }
 
-/// Compact footer button (Edit / Delete / Restore / Confirm forever / Cancel)
-/// — same dimensions as `action_button`'s default style but with an
+/// Compact footer button (Edit / Delete / Restore / Confirm forever /
+/// Cancel). Same dimensions as `action_button`'s default style but with an
 /// `on_click` handler injected directly so the call site can control what
 /// happens (no copy-to-clipboard wiring like `action_button`).
 fn footer_button(
@@ -1022,7 +1022,7 @@ fn footer_button(
 /// Same visual chrome as `action_button`, but the click routes to
 /// `AppShell::launch_selected_entry` instead of a clipboard copy.
 /// Lives next to `action_button` so the button row stays visually
-/// consistent — the user shouldn't be able to tell at a glance that
+/// consistent - the user shouldn't be able to tell at a glance that
 /// "Open in SAP GUI" is structurally different from the Copy buttons.
 fn launch_action_button(
     label: &'static str,
@@ -1090,7 +1090,7 @@ fn action_button(
     let _ = state_entity;
 
     // Feedback sits on the coloured element itself (it owns the `bg`), so the
-    // hover genuinely recolours the painted surface — a transparent wrapper
+    // hover genuinely recolours the painted surface - a transparent wrapper
     // would let the child paint over the hover fill, leaving no visible hover.
     // The `flex` primary ("Copy password") fills the row so it reads as the
     // emphasised action.
@@ -1185,7 +1185,7 @@ fn vault_split(
         ))
 }
 
-/// One row in the virtual entry list — either a section heading or an index
+/// One row in the virtual entry list - either a section heading or an index
 /// into the shared `Rc<Vec<VaultEntry>>` (avoids cloning entries per frame).
 #[derive(Clone, Copy)]
 enum ListRow {
@@ -1212,12 +1212,12 @@ fn entry_list(
     let total = entries.len();
 
     // Build the flat virtual-row list once per render. We store INDEX into the shared
-    // Rc<Vec<VaultEntry>> rather than cloning each entry — keeps per-frame allocation
+    // Rc<Vec<VaultEntry>> rather than cloning each entry - keeps per-frame allocation
     // proportional to the number of rows, not the size of each entry's strings.
     let mut rows: Vec<ListRow> = Vec::with_capacity(total + 2);
 
     if showing_search {
-        // During search the list is already sorted by relevance — splitting
+        // During search the list is already sorted by relevance - splitting
         // out pinned entries first would scramble that order and bury the
         // best match below an unrelated starred entry.
         if total > 0 {
@@ -1514,11 +1514,7 @@ fn entry_row(
                         .text_color(palette::text_muted())
                         .font_family("JetBrains Mono")
                         .child(if username.is_empty() {
-                            if url.is_empty() {
-                                "—".to_string()
-                            } else {
-                                url
-                            }
+                            if url.is_empty() { "-".to_string() } else { url }
                         } else {
                             username
                         }),
@@ -1755,7 +1751,7 @@ fn entry_detail_body(
         ));
 
     if has_otp {
-        // Pull the live code each render — the AppShell tick fires `cx.notify`
+        // Pull the live code each render - the AppShell tick fires `cx.notify`
         // on AppState every second, which causes this re-render with a fresh
         // value + countdown. Read once to avoid borrowing state twice.
         let otp = state_entity.read(cx).totp_for_selected_entry();
@@ -1766,7 +1762,7 @@ fn entry_detail_body(
         let display = otp
             .as_ref()
             .map(|o| o.code.clone())
-            .unwrap_or_else(|| "—".to_string());
+            .unwrap_or_else(|| "-".to_string());
 
         // Warn the user when the code is about to rotate. The thresholds
         // mirror KeePassXC: <=5s = orange (about to expire), then back to
@@ -1883,7 +1879,7 @@ fn entry_detail_body(
     let perma_armed = pending_perma_delete.as_deref() == Some(entry.id.as_str());
 
     // When the user has armed "Delete forever", we replace the entire footer
-    // with a destructive confirmation strip — same height as the normal
+    // with a destructive confirmation strip - same height as the normal
     // footer, but only Cancel + the destructive primary remain. Hiding the
     // copy/restore actions has two benefits:
     //   1. Removes any chance of accidentally clicking the wrong button mid-
@@ -1970,7 +1966,7 @@ fn entry_detail_body(
         // The Launch button is conditional on a registered launcher
         // matching the entry (currently: SAP GUI for entries with a
         // `SAP_CONN` custom field). When present we promote it to its
-        // own row above the action row — putting it inline with the
+        // own row above the action row - putting it inline with the
         // five other buttons overflows narrow detail panels and clipped
         // the trailing Delete button.
         let launcher = crate::launch::primary_launcher_for(&entry);
@@ -2041,7 +2037,7 @@ fn entry_detail_body(
         .child(footer)
 }
 
-/// "Additional fields" section in the detail panel — read-only list
+/// "Additional fields" section in the detail panel - read-only list
 /// of `entry.custom_fields` with click-to-copy on every row. Protected
 /// values render as `••••` until copy; clicking a protected row puts
 /// the cleartext on the clipboard and triggers the standard auto-clear
@@ -2056,7 +2052,7 @@ fn custom_fields_section(entry: &VaultEntry, cx: &mut Context<AppShell>) -> impl
         let display: SharedString = if cf.protected {
             "••••".into()
         } else if cf.value.is_empty() {
-            "—".into()
+            "-".into()
         } else {
             cf.value.clone().into()
         };
@@ -2112,7 +2108,7 @@ fn custom_fields_section(entry: &VaultEntry, cx: &mut Context<AppShell>) -> impl
 /// browser). Visual shape matches the old `detail_row` widget so swapping
 /// between row kinds in `entry_detail_body` doesn't shift the layout.
 /// `enabled = false` paints the row in a muted style and skips the
-/// click handler — used when the field is empty (`"—"`).
+/// click handler - used when the field is empty (`"-"`).
 fn clickable_field_row<F>(
     id: &'static str,
     label_text: &'static str,
@@ -2127,7 +2123,7 @@ where
     // The clickable value box owns its own `bg(sidebar())` on the *stateful*
     // element so `hover_press` recolours the surface that's actually painted
     // (the box sits on the same sidebar-coloured detail panel, so it only
-    // reads as interactive once it lightens to `panel()` on hover — matching
+    // reads as interactive once it lightens to `panel()` on hover - matching
     // the adjacent password value box).
     let mut row = div().id(id).child(label_widget(label_text));
     if enabled {
@@ -2177,7 +2173,7 @@ where
 /// Password detail row: masked or revealed value with a click-to-copy
 /// area on the left and an eye-icon reveal toggle on the right. Click
 /// targets are siblings (not nested), so neither bubbles into the
-/// other — we don't have to manage `stop_propagation`.
+/// other - we don't have to manage `stop_propagation`.
 fn password_row<F1, F2>(
     has_password: bool,
     revealed_value: Option<String>,
@@ -2189,7 +2185,7 @@ where
     F2: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 {
     if !has_password {
-        // Mirror the old "Not set" presentation — non-clickable, faint.
+        // Mirror the old "Not set" presentation - non-clickable, faint.
         return clickable_field_row(
             "detail-row-password",
             "Password",
@@ -2278,7 +2274,7 @@ fn label_widget(text: &'static str) -> AnyElement {
 /// Prepend `https://` to bare URLs so `cx.open_url` doesn't fail on
 /// `github.com`-style entries. Schemes already present (`http://`,
 /// `https://`) are left untouched. Other schemes (`mailto:`, `ftp:`,
-/// …) get rewritten — KeePass URL fields almost always hold web URLs,
+/// …) get rewritten - KeePass URL fields almost always hold web URLs,
 /// and the user can always add the scheme explicitly if needed.
 fn ensure_scheme(url: &str) -> String {
     let trimmed = url.trim();
@@ -2291,7 +2287,7 @@ fn ensure_scheme(url: &str) -> String {
 
 fn value_or_dash(value: &str) -> String {
     if value.is_empty() {
-        "—".to_string()
+        "-".to_string()
     } else {
         value.to_string()
     }
@@ -2381,7 +2377,7 @@ fn locked_pending_panel(
             ))
         })
         // Escape hatch: when every remaining save has failed for good
-        // (volume unmounted, disk full), retry alone would wedge the app —
+        // (volume unmounted, disk full), retry alone would wedge the app -
         // unlock is refused and quit is vetoed while saves are pending.
         .when(can_discard, |this| {
             if discard_armed {
@@ -2561,12 +2557,6 @@ fn save_status_pill(status: &SaveStatus, cx: &mut Context<AppShell>) -> impl gpu
                 .into_any_element()
         }
     }
-}
-
-#[allow(dead_code)]
-fn _status_badge_unused(text: &'static str) {
-    let _ = status_badge(text, ChipTone::Green);
-    let _ = label("noop");
 }
 
 // ============================================================

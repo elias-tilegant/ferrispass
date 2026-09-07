@@ -1,5 +1,4 @@
-use gpui::{AnyElement, App, Hsla, IntoElement as _, ParentElement as _, Styled as _, div, px};
-use gpui_component::{ActiveTheme as _, h_flex};
+use gpui::{AnyElement, Hsla, IntoElement as _, ParentElement as _, Styled as _, div, px};
 
 use crate::ui::palette;
 
@@ -80,41 +79,5 @@ pub fn dot(color: Hsla, size: f32) -> AnyElement {
         .size(px(size))
         .rounded_full()
         .bg(color)
-        .into_any_element()
-}
-
-/// Vertical 1px divider with theme border color.
-pub fn vrule(cx: &App) -> AnyElement {
-    div()
-        .w(px(1.))
-        .h(px(18.))
-        .bg(cx.theme().border)
-        .into_any_element()
-}
-
-/// Status badge in title row (e.g. "Synced", "Locked", "Open").
-pub fn status_badge(text: impl Into<String>, tone: ChipTone) -> AnyElement {
-    let (bg, fg, bd) = tone.colors();
-    h_flex()
-        .gap_1()
-        .h(px(20.))
-        .px(px(8.))
-        .rounded_full()
-        .bg(bg)
-        .border_1()
-        .border_color(bd)
-        .text_xs()
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(fg)
-        .child(text.into())
-        .into_any_element()
-}
-
-/// Right-aligned tabular number text.
-pub fn count(value: usize, color: Hsla) -> AnyElement {
-    div()
-        .text_xs()
-        .text_color(color)
-        .child(value.to_string())
         .into_any_element()
 }

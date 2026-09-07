@@ -35,7 +35,7 @@ actions!(
         /// expired. Unlike `OpenConnect` (which runs the full provider →
         /// device-code → file-picker flow and writes a brand-new local
         /// copy), this reuses the active vault's on-disk `SyncConfig` and
-        /// only swaps in a fresh access/refresh token — no new file, no
+        /// only swaps in a fresh access/refresh token - no new file, no
         /// duplicate binding. Dispatched by the "Reconnect" button on the
         /// Sync settings card and the sidebar's expired-sign-in affordance.
         OpenReconnect,
@@ -48,7 +48,6 @@ actions!(
         SyncNow,
         DownloadFavicons,
         NewEntry,
-        OpenConflictDemo,
         CreateVault,
         ToggleTheme,
         CloseWindow,
@@ -56,13 +55,6 @@ actions!(
         SaveVault,
         EditEntry,
         DeleteEntry,
-        /// Open the currently-selected entry in its native external app
-        /// (e.g. SAP GUI for entries with a `SAP_CONN` custom field).
-        /// No default keybinding in v0.3 — the detail-panel button is
-        /// the only entry point until we know which shortcut won't
-        /// collide with future "Open in browser" / "Open in terminal"
-        /// flavours.
-        LaunchEntry,
         /// Auto-type credentials into the foreground window. Dispatched
         /// by the global hotkey listener when the user presses the
         /// configured combo from any app. The handler matches the
@@ -72,7 +64,7 @@ actions!(
         PerformAutoType,
         /// Auto-type credentials for the *currently-selected* entry,
         /// after a short countdown that lets the user switch to the
-        /// target window. Bound to ⌘⇧T inside FerrisPass — distinct
+        /// target window. Bound to ⌘⇧T inside FerrisPass - distinct
         /// from `PerformAutoType` (which runs from a global hotkey
         /// and infers the entry from the foreground).
         PerformAutoTypeForSelected,
@@ -198,10 +190,10 @@ pub fn init(cx: &mut App) {
         // entry with a 3-second countdown so the user has time to
         // switch to the target window. The global hotkey (configured
         // in Settings, default ⌃⌥⌘V) is the more common entry point
-        // and works from any app — `PerformAutoType` is dispatched by
+        // and works from any app - `PerformAutoType` is dispatched by
         // `AutoTypeService` directly, no KeyBinding here.
         KeyBinding::new("cmd-shift-t", PerformAutoTypeForSelected, Some(APP_CONTEXT)),
-        // No context filter — cmd-q should always quit, even if focus is in
+        // No context filter - cmd-q should always quit, even if focus is in
         // some weird state (e.g. inside a modal or before the shell is wired).
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
@@ -214,7 +206,7 @@ pub fn init(cx: &mut App) {
 /// standard `FerrisPass` menu shown next to the Apple logo (About,
 /// Preferences, Quit, …). On Linux and Windows the GPUI platform layer
 /// treats `set_menus` as a no-op, so calling it unconditionally is safe
-/// and the same action dispatches still work — the items are simply not
+/// and the same action dispatches still work - the items are simply not
 /// rendered in a system menu bar.
 fn install_app_menus(cx: &mut App) {
     cx.set_menus([

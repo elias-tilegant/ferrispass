@@ -14,7 +14,7 @@ use gpui_component::{h_flex, v_flex};
 
 use crate::ui::palette;
 use crate::ui::widgets::interaction::{Interaction as _, mix};
-use crate::ui::widgets::toggle_row::switch_visual;
+use crate::ui::widgets::switch::switch_visual;
 
 /// Baseline height for interactive controls in the Settings overlay.
 /// Buttons, segmented-control segments and sidebar items all align to it.
@@ -50,14 +50,14 @@ where
     }
 }
 
-/// Segmented control — one of N options is highlighted. Replaces the
+/// Segmented control - one of N options is highlighted. Replaces the
 /// 4-loose-chips pattern used for time presets, hotkey presets, sequence
 /// presets etc. Renders as a single rounded container with shared
 /// borders so it reads as an interconnected control, not a stack of
 /// independent buttons.
 pub fn option_group(items: Vec<SegmentItem>) -> AnyElement {
     let count = items.len();
-    // `self_start()` opts the row out of its parent's `items: stretch` —
+    // `self_start()` opts the row out of its parent's `items: stretch` -
     // without it, sitting inside a `v_flex` body the bordered container
     // expands to the full card width and the segments cluster on the
     // left with a wide empty bar to their right.
@@ -107,7 +107,7 @@ pub fn option_group(items: Vec<SegmentItem>) -> AnyElement {
             .on_click(on_click)
             .child(label);
         if !is_last {
-            // 1-px divider between segments — only on the right side so the
+            // 1-px divider between segments - only on the right side so the
             // outer container's border owns the outside edges.
             seg = seg.border_r_1().border_color(palette::border_strong());
         }
@@ -152,7 +152,7 @@ pub fn section_card(
         .into_any_element()
 }
 
-/// Real switch control — visual slider rather than the prior two-chip
+/// Real switch control - visual slider rather than the prior two-chip
 /// "On / Off" hack. Reuses `toggle_row::switch_visual` so the switch
 /// look-and-feel is identical to the one in entry-detail toggles.
 pub fn setting_switch<F>(id: impl Into<ElementId>, on: bool, on_click: F) -> AnyElement
@@ -183,7 +183,7 @@ pub enum ActionKind {
 /// (and the action-shaped `preset_chip` calls).
 ///
 /// `enabled = false` mutes the colours and skips wiring the click
-/// handler — callers can render a disabled state without an `Option`
+/// handler - callers can render a disabled state without an `Option`
 /// dance.
 pub fn action_button<F>(
     id: impl Into<ElementId>,
@@ -247,7 +247,7 @@ where
         };
         button = button.hover_press(hover_bg).on_click(on_click);
     } else {
-        // Make sure the listener gets dropped — important when callers
+        // Make sure the listener gets dropped - important when callers
         // wrap a heavy closure (settings state etc.). Discarding it here
         // is the simplest way to signal "no, really, don't fire".
         let _ = on_click;

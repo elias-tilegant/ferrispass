@@ -147,7 +147,7 @@ pub struct AppState {
     /// merges + user-resolved conflicts). Surfaced as the "Recent
     /// activity" list in Settings → Sync. Cleared on lock and on sync
     /// disconnect; capped at `sync_history::MAX_SYNC_HISTORY`. Not
-    /// persisted — entry titles are sensitive, see the module-level
+    /// persisted - entry titles are sensitive, see the module-level
     /// note on `app::sync_history` for the reasoning.
     sync_history: Vec<SyncHistoryEntry>,
     /// Active during the multi-step Connect overlay (provider pick → URL →
@@ -163,7 +163,7 @@ pub struct AppState {
     pending_sync: Option<PendingSync>,
     /// Set while a user-driven *reconnect* is running its device-code
     /// re-auth. Holds the existing on-disk `SyncConfig` of the vault being
-    /// reconnected — captured up front so the token poll loop can rebind it
+    /// reconnected - captured up front so the token poll loop can rebind it
     /// (via `finish_reconnect`), reusing its drive/item ids, instead of
     /// dropping into the file-picker connect flow. `None` for a normal
     /// first-time Connect. Cleared on overlay teardown (`unwind_connect_flow`)
@@ -194,7 +194,7 @@ pub struct AppState {
     /// timer sweeps every session at once.
     parked: HashMap<PathBuf, ParkedSession>,
     /// Order in which paths landed in `parked`, oldest first. We pop the
-    /// tail to find "the vault the user was just looking at" — that's the
+    /// tail to find "the vault the user was just looking at" - that's the
     /// right target for Esc-on-unlock and for picking a fallback when
     /// the active vault is closed.
     parked_order: Vec<PathBuf>,
@@ -214,7 +214,7 @@ pub struct AppState {
     discard_deferred_armed: bool,
     /// When the deferred lock started waiting for its saves. After a grace
     /// period the discard escape opens even while a save is nominally still
-    /// in flight — blocking file I/O on a dead network volume never
+    /// in flight - blocking file I/O on a dead network volume never
     /// completes, and only the flock acquisition itself has a deadline.
     deferred_lock_since: Option<std::time::Instant>,
     /// When the most recent unlock completed. The session-lock monitor uses
@@ -235,7 +235,7 @@ pub struct AppState {
     /// Loaded once in `with_resume`; written through `enroll_biometric`
     /// / `forget_biometric`. Contents are deliberately metadata-only:
     /// vault path, UUID, keyfile path. Passwords live in the OS
-    /// keychain under the UUID — never in this struct.
+    /// keychain under the UUID - never in this struct.
     biometric_registry: BiometricRegistry,
     /// Set by the Unlock screen's "Enable Touch ID" checkbox before
     /// the user submits the password. Consumed by `finish_open_attempt`
@@ -250,22 +250,22 @@ pub struct AppState {
     /// async retrieve carries its generation back; we only honour a
     /// resolution whose generation still matches the current attempt.
     /// Guards the race where the user cancels an attempt and starts a
-    /// new one for the *same* vault path — path equality alone can't
+    /// new one for the *same* vault path - path equality alone can't
     /// tell the two attempts apart, so a stale prompt resolving late
     /// could otherwise drive the newer screen.
     biometric_generation: u64,
     /// Vault paths with a background auto-sync request currently in
     /// flight. Without this a Graph call that stalls past the timer
     /// interval would let the next tick spawn a *second* request for the
-    /// same vault — competing token refreshes, duplicate downloads, and
+    /// same vault - competing token refreshes, duplicate downloads, and
     /// racy status writes. We insert before spawning and remove on
     /// completion; the auto-sync tick skips any path already present.
     auto_sync_in_flight: HashSet<PathBuf>,
     /// Disk-save serialization per vault path. A key being present means a
     /// background `save_to` is running for that path; the value records
     /// whether another save was requested in the meantime. Only one writer
-    /// may run per path: concurrent saves would race on temp files and —
-    /// worse — an *older* payload could rename over a newer one, silently
+    /// may run per path: concurrent saves would race on temp files and -
+    /// worse - an *older* payload could rename over a newer one, silently
     /// reverting the freshest state on disk. The completion callback runs
     /// one coalesced trailing save when the flag is set, so a burst of
     /// edits collapses into "current save + one save of the latest state".
@@ -273,7 +273,7 @@ pub struct AppState {
     /// Push serialization per vault path, mirroring `saves_in_flight`.
     /// Every successful save chains a sync, so a burst of edits would
     /// otherwise launch concurrent uploads all carrying the same
-    /// `last_etag` — the first rotates the server etag and the rest
+    /// `last_etag` - the first rotates the server etag and the rest
     /// collect spurious 412s, dragging the user through conflict cycles
     /// against their own writes. While a push is in flight, further
     /// requests only mark the queue flag; the completion callback runs
@@ -281,7 +281,7 @@ pub struct AppState {
     syncs_in_flight: HashMap<PathBuf, QueuedSync>,
 }
 
-/// Bookkeeping value for `AppState::saves_in_flight` — see the field docs.
+/// Bookkeeping value for `AppState::saves_in_flight` - see the field docs.
 #[derive(Clone, Debug)]
 struct QueuedSave {
     /// Session whose immutable payload is currently being written.
@@ -296,7 +296,7 @@ struct QueuedSave {
     /// Shared with the background save task. "Discard changes and lock"
     /// races the worker through this atomic state machine: the worker
     /// claims publication immediately before the rename, the discard
-    /// claims abortion — exactly one side wins, so a discarded save can
+    /// claims abortion - exactly one side wins, so a discarded save can
     /// never publish later and a published save can never be reported as
     /// discarded.
     abort: crate::keepass::SaveAbortHandle,
@@ -313,7 +313,7 @@ impl QueuedSave {
     }
 }
 
-/// Bookkeeping value for `AppState::syncs_in_flight` — see the field docs.
+/// Bookkeeping value for `AppState::syncs_in_flight` - see the field docs.
 #[derive(Clone, Debug)]
 struct QueuedSync {
     /// Exact unlocked session whose request currently owns the network task.
@@ -336,7 +336,7 @@ struct QueuedSyncRequest {
 const DEFERRED_LOCK_STUCK_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Vault bytes for a push: either already published by the save that
-/// triggered it, or read from disk inside the background task — the read
+/// triggered it, or read from disk inside the background task - the read
 /// takes the same locks a save holds across KDF + fsync and must never
 /// run on the UI thread.
 enum BytesSource {
@@ -369,7 +369,7 @@ impl QueuedSync {
 }
 
 /// Lifecycle of a single Touch ID unlock attempt. Drives the Unlock
-/// screen's Touch ID button — `Idle` shows the button armed, `InFlight`
+/// screen's Touch ID button - `Idle` shows the button armed, `InFlight`
 /// shows it disabled with a "Waiting for Touch ID…" hint, `Error`
 /// renders the message and keeps the password input available so the
 /// user can fall back.
@@ -379,7 +379,7 @@ pub enum BiometricAttempt {
     Idle,
     InFlight {
         path: PathBuf,
-        /// Generation that produced this attempt — see
+        /// Generation that produced this attempt - see
         /// `AppState::biometric_generation`.
         generation: u64,
     },
@@ -465,7 +465,7 @@ impl Drop for AppState {
 /// but isn't currently looking at. Holds the full decrypted document plus
 /// every piece of per-vault UI state that would otherwise be lost on
 /// switch (selection, search, save lifecycle, sync binding). On switch-back
-/// it's drained into `VaultStatus::Open` byte-for-byte — no second KDF.
+/// it's drained into `VaultStatus::Open` byte-for-byte - no second KDF.
 #[derive(Debug)]
 pub struct ParkedSession {
     session_id: VaultSessionId,
@@ -532,7 +532,7 @@ pub enum SyncStatus {
     Disconnected,
     /// Synced, idle. Equivalent to "everything's good".
     Idle,
-    /// Initial connect in progress (multi-step — see `ConnectFlow` for which step).
+    /// Initial connect in progress (multi-step - see `ConnectFlow` for which step).
     Connecting,
     /// Restoring an existing sync binding from `sync/<hash>.json` + the
     /// keychain refresh token. Distinct from `Connecting` (which is the
@@ -543,18 +543,18 @@ pub enum SyncStatus {
     /// Last operation succeeded at the given time. `chrono::Local` for the
     /// "Synced 2 minutes ago" UI string. `auto_merged` is the number of
     /// remote-only entries that got pulled in during a git-style silent
-    /// merge — non-zero only when `handle_remote_conflict` short-circuited
+    /// merge - non-zero only when `handle_remote_conflict` short-circuited
     /// past the overlay; zero for normal saves and manual conflict resolution.
     Synced {
         at: chrono::DateTime<chrono::Local>,
         auto_merged: usize,
     },
-    /// Server returned 412 — local + remote diverged. UI opens the Conflict
+    /// Server returned 412 - local + remote diverged. UI opens the Conflict
     /// overlay; resolution clears this back to Synced.
     Conflict(Box<ConflictState>),
     /// Last operation failed. Caller (UI) decides whether to retry.
     Failed(String),
-    /// Refresh token is gone or revoked — user must re-run Connect. The
+    /// Refresh token is gone or revoked - user must re-run Connect. The
     /// optional `detail` carries the Azure `AADSTS…` reason (from
     /// `AuthError::InvalidGrant`) so the reconnect screen can tell the
     /// user *why* their sign-in expired instead of a generic message.
@@ -593,7 +593,7 @@ impl FaviconDownloadStatus {
 ///
 /// Clone-ability is required because `SyncStatus` is `Clone` (the renderer
 /// snapshots it). The two `Database` clones inside aren't free but they're
-/// the same memcpy `save_payload` already does on every save — acceptable.
+/// the same memcpy `save_payload` already does on every save - acceptable.
 #[derive(Clone)]
 pub struct ConflictState {
     pub local_db: Database,
@@ -603,7 +603,7 @@ pub struct ConflictState {
     pub picks: HashMap<String, Side>,
     /// `VaultDocument::generation` at the moment `local_db` was cloned.
     /// `commit_merged_for` compares against the live document before
-    /// installing the merged result — if the user edited while this
+    /// installing the merged result - if the user edited while this
     /// conflict sat open, the merge is recomputed instead of silently
     /// discarding those edits.
     pub base_generation: u64,
@@ -644,7 +644,7 @@ pub enum ConnectFlow {
     /// once the challenge is in hand.
     Authorizing,
     /// Device code shown; background task is polling for token. No file
-    /// has been chosen yet — that comes after sign-in completes.
+    /// has been chosen yet - that comes after sign-in completes.
     SigningIn { challenge: DeviceCodeChallenge },
     /// Token in hand. Initial state shows a loading spinner while we fetch
     /// the user's `.kdbx` files; once `results` is populated the picker
@@ -694,7 +694,7 @@ pub enum VaultStatus {
         selected_strength: Option<StrengthReport>,
         /// In-memory access log: entry-id → wall-clock time of the last
         /// password/username copy. Drives the "Recently used" library
-        /// filter. Intentionally session-scoped — closing the vault drops
+        /// filter. Intentionally session-scoped - closing the vault drops
         /// the map so a read-only browse never touches disk.
         last_used: HashMap<String, DateTime<Local>>,
     },
@@ -716,7 +716,7 @@ pub enum LibrarySelection {
     Trash,
     Tag(String),
     /// Entries with a TOTP secret configured. Decoupled from the tag
-    /// system on purpose — used to be a synthetic "2FA" tag, but that
+    /// system on purpose - used to be a synthetic "2FA" tag, but that
     /// lied to users (and disagreed with KeePassXC). Driven by the real
     /// `has_otp` bit on each entry.
     TotpEnabled,
@@ -760,11 +760,11 @@ pub enum Overlay {
     None,
     /// Cloud provider picker (welcome → connect flow).
     Connect,
-    /// Unified Settings overlay — full window. Tabs (General, Sync, …)
+    /// Unified Settings overlay - full window. Tabs (General, Sync, …)
     /// are tracked in AppShell as UI-local state. Universally available
     /// (no vault-open gate), matching the Mac ⌘, convention.
     Settings,
-    /// New entry modal — appears over the vault.
+    /// New entry modal - appears over the vault.
     AddEntry,
     /// Edit existing entry. Carries the entry id so the Save handler knows
     /// what to update; same modal layout as `AddEntry`, just a different
@@ -779,7 +779,7 @@ pub enum Overlay {
     RenameGroup { group_id: String },
     /// Three-way conflict resolution.
     Conflict,
-    /// Quick vault picker — recents list + filter + "Browse other…" row.
+    /// Quick vault picker - recents list + filter + "Browse other…" row.
     /// Universal like `Settings`: reachable from any vault state, including
     /// Welcome and Unlock screens.
     VaultSwitcher,
@@ -789,7 +789,7 @@ pub enum Overlay {
     /// Release notes for the version that was just installed. Universal like
     /// Settings so it can appear on first launch before any vault is open.
     WhatsNew { info: UpdateInfo },
-    /// "About FerrisPass" modal — version, tagline, repo link. Universal
+    /// "About FerrisPass" modal - version, tagline, repo link. Universal
     /// like Settings so it's reachable from any vault state.
     About,
 }
@@ -815,14 +815,14 @@ pub struct UnlockPrompt {
 /// green "Synced" the moment a vault is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SyncTone {
-    /// Synced / idle — everything's good (green).
+    /// Synced / idle - everything's good (green).
     Synced,
     /// An operation is in flight (connecting / restoring / syncing) (blue).
     Connecting,
     /// Needs the user's attention: sign-in expired, last sync failed, or a
     /// conflict is awaiting resolution (orange).
     Attention,
-    /// No cloud sync for this vault, or no vault open — local-only (muted).
+    /// No cloud sync for this vault, or no vault open - local-only (muted).
     #[default]
     Neutral,
 }
@@ -856,7 +856,7 @@ pub struct VaultSummary {
 
 #[derive(Clone, Debug)]
 pub struct VaultBrowserModel {
-    /// Cheap `Arc` clone of the current snapshot — held so renderers can read
+    /// Cheap `Arc` clone of the current snapshot - held so renderers can read
     /// the group tree, recently-used count, etc. without re-cloning.
     pub snapshot: Arc<VaultSnapshot>,
     pub selection: LibrarySelection,
@@ -891,7 +891,7 @@ impl AppState {
 
     /// Construct an AppState that auto-resumes the most recently opened
     /// vault. Reads the recents file synchronously (a few hundred bytes
-    /// of JSON — cheap), prunes entries whose file no longer exists, and
+    /// of JSON - cheap), prunes entries whose file no longer exists, and
     /// pre-populates the unlock screen with the head of the list.
     ///
     /// Falls back to an empty AppState (Welcome screen) when the list is
@@ -1011,7 +1011,7 @@ impl AppState {
         }
         // Switching directly between overlays (e.g. ⌘O while Connect is
         // mid-`SigningIn`) has to run the same teardown as
-        // `close_overlay` — otherwise the device-code polling loop would
+        // `close_overlay` - otherwise the device-code polling loop would
         // outlive the overlay and keep mutating `connect_flow` /
         // `sync_status` behind a screen the user has already moved on
         // from.
@@ -1052,7 +1052,7 @@ impl AppState {
         self.connect_operations.advance();
         self.connect_flow = None;
         // A reconnect that's abandoned (Cancel / Esc / overlay switch) must
-        // not leave its target armed — otherwise the next plain Connect's
+        // not leave its target armed - otherwise the next plain Connect's
         // token would rebind this vault instead of opening the picker.
         self.reconnect_target = None;
         if matches!(
@@ -1094,7 +1094,7 @@ impl AppState {
         };
         self.overlay = Overlay::None;
         // Every transition into AwaitingPassword starts a fresh Touch ID
-        // story — drop stale UI state from a previous vault's attempt.
+        // story - drop stale UI state from a previous vault's attempt.
         self.clear_biometric_attempt();
         self.pending_biometric_enrollment = false;
         cx.notify();
@@ -1104,7 +1104,7 @@ impl AppState {
     /// `true` when the swap happened (caller can skip the unlock prompt),
     /// `false` when `path` is cold and needs a password.
     ///
-    /// A no-op (returning `true`) when `path` is already the active vault —
+    /// A no-op (returning `true`) when `path` is already the active vault -
     /// the caller hasn't told us they wanted to do anything, so we don't
     /// disturb selection / search state.
     pub fn switch_to_unlocked(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
@@ -1112,7 +1112,7 @@ impl AppState {
         if let VaultStatus::Open { path: active, .. } = &self.vault
             && active.as_path() == path
         {
-            // Same vault — nothing to do. Still count as "handled" so the
+            // Same vault - nothing to do. Still count as "handled" so the
             // caller doesn't fall through to the password prompt.
             return true;
         }
@@ -1125,7 +1125,7 @@ impl AppState {
         self.park_active();
         if !self.unpark(path) {
             // Defensive: park_active above could in theory race away the
-            // map entry (it can't — we just checked). Treat as cold.
+            // map entry (it can't - we just checked). Treat as cold.
             return false;
         }
         // Front-rank in recents so Welcome / ⌘O reflect the switch.
@@ -1143,7 +1143,7 @@ impl AppState {
             return false;
         };
         self.rotate_auto_type_context();
-        // We're abandoning the AwaitingPassword screen — drop it without
+        // We're abandoning the AwaitingPassword screen - drop it without
         // parking (no decrypted state to preserve).
         self.vault = VaultStatus::Empty;
         self.save_status = SaveStatus::Idle;
@@ -1270,7 +1270,7 @@ impl AppState {
             last_used,
         } = prev
         else {
-            // Unreachable — guard above already established Open. Restoring
+            // Unreachable - guard above already established Open. Restoring
             // to Empty is the safe fallthrough if a future variant slips in.
             return;
         };
@@ -1288,7 +1288,7 @@ impl AppState {
             sync_status: std::mem::take(&mut self.sync_status),
             sync_history: std::mem::take(&mut self.sync_history),
         };
-        // Refresh order — if this vault was parked before (shouldn't be,
+        // Refresh order - if this vault was parked before (shouldn't be,
         // but defend), move it to the tail.
         self.parked_order.retain(|p| p != &path);
         self.parked_order.push(path.clone());
@@ -1439,7 +1439,7 @@ impl AppState {
     /// Install a fresh `SyncBinding` for the vault at `target`, replacing
     /// any existing one (or filling an empty slot left by a failed restore).
     /// Routes to the active vault or the matching parked session. Returns
-    /// `true` when a slot was found — `false` means the vault was locked /
+    /// `true` when a slot was found - `false` means the vault was locked /
     /// closed between dispatch and callback (the on-disk config + keychain
     /// are already updated, so the next open restores cleanly). Used by the
     /// reconnect rebind, which must *set* a binding rather than mutate one
@@ -1485,7 +1485,7 @@ impl AppState {
         self.sync.is_some() || self.parked.values().any(|s| s.sync.is_some())
     }
 
-    /// `true` when the vault at `target` still has a live sync binding —
+    /// `true` when the vault at `target` still has a live sync binding -
     /// active or parked. Used to drop a background sync result whose vault
     /// was disconnected (or never synced) while the request was in flight.
     fn has_sync_binding_for(&self, target: &Path) -> bool {
@@ -1544,7 +1544,7 @@ impl AppState {
     }
 
     /// Snapshot just enough state to run a sync against `target` from a
-    /// background task — works whether `target` is the active vault or
+    /// background task - works whether `target` is the active vault or
     /// one we parked away from. Returns `None` when the vault is locked
     /// or has no sync binding (= local-only / disconnected).
     fn snapshot_sync_inputs(
@@ -1624,7 +1624,7 @@ impl AppState {
 
     /// Resolve the session's document to a deferred bytes-reader. The lookup
     /// runs here on the UI thread; the returned closure takes the storage
-    /// mutex + file locks and must only be invoked on a background thread —
+    /// mutex + file locks and must only be invoked on a background thread -
     /// an in-flight save holds those guards across the whole KDF + fsync.
     fn current_bytes_reader_for_session(
         &self,
@@ -1817,7 +1817,7 @@ impl AppState {
     /// Returns `true` iff this call actually transitioned the active
     /// slot to `Open` for `path`. Callers that fire post-unlock
     /// side-effects which themselves persist secrets (e.g. Touch ID
-    /// enrolment) **must** gate on this — a `true` KDF result is not
+    /// enrolment) **must** gate on this - a `true` KDF result is not
     /// enough, because the user may have cancelled or switched vaults
     /// between the KDF finishing and this update landing, in which
     /// case we no-op and the vault must stay closed.
@@ -1834,7 +1834,7 @@ impl AppState {
         self.rotate_auto_type_context();
 
         // Track whether the unlock succeeded so we can fire post-open
-        // side-effects (recents push, sync rebind) below — they need a
+        // side-effects (recents push, sync rebind) below - they need a
         // `&mut self` borrow that conflicts with the match arm.
         let mut opened_path: Option<PathBuf> = None;
         let mut opened_session_id: Option<VaultSessionId> = None;
@@ -1886,7 +1886,7 @@ impl AppState {
             // Opportunistic hygiene: clear launch payloads orphaned by a
             // crash that the startup sweep spared (it only removes files
             // older than 60 s, so a crash + quick relaunch slips through).
-            // `sweep_stale` — not `purge_all` — so this session's own
+            // `sweep_stale` - not `purge_all` - so this session's own
             // pending launches survive; anything past 60 s is a guaranteed
             // orphan because live payload TTLs cap at 60 s. Cheap: one
             // read_dir over a near-empty private tempdir.
@@ -1908,7 +1908,7 @@ impl AppState {
 
     /// Prepend `path` to the in-memory recents list (dedup + truncate),
     /// then schedule an atomic write to disk in the background. Failures
-    /// are intentionally swallowed — the next successful open will retry,
+    /// are intentionally swallowed - the next successful open will retry,
     /// and we don't want a transient disk error to surface as a UI toast.
     fn push_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         recents::push_front_in(&mut self.recents, path, recents::MAX_RECENTS);
@@ -1926,13 +1926,13 @@ impl AppState {
     /// background and is a no-op for local-only vaults. On
     /// `InvalidGrant` (refresh token revoked), surfaces
     /// `SyncStatus::Reconnect` so the user is prompted to re-authenticate
-    /// via SyncSettings — we don't auto-disconnect, since that would
+    /// via SyncSettings - we don't auto-disconnect, since that would
     /// silently delete their config.
     fn try_restore_sync_binding(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(session_id) = self.vault_session_id_for(&path) else {
             return;
         };
-        // Bail when there's no config on disk for this path — the common
+        // Bail when there's no config on disk for this path - the common
         // case for local-only vaults.
         let config = match crate::sync::config::load(&path) {
             Ok(Some(c)) => c,
@@ -1959,7 +1959,7 @@ impl AppState {
             // seconds, and the user may have parked this vault and
             // unlocked another one meanwhile. Writing into the *active*
             // slot here would hand this vault's SharePoint binding to a
-            // different vault — whose next save would then upload its
+            // different vault - whose next save would then upload its
             // bytes over this vault's remote copy.
             let _ = this.update(cx, |state, cx| match result {
                 Ok((config, access_token)) => {
@@ -1993,7 +1993,7 @@ impl AppState {
                     );
                 }
                 Err(e) => {
-                    // Transient (network, etc.) — park in Failed. Note
+                    // Transient (network, etc.) - park in Failed. Note
                     // that without a binding `sync_now` bails silently,
                     // so nothing retries on its own: the Retry button on
                     // the restore card (`retry_sync_restore`) is the way
@@ -2081,14 +2081,14 @@ impl AppState {
 
     /// Download + install whatever update is currently advertised. Caller is
     /// expected to have verified `update_status() == Available(_)` before
-    /// calling — we don't pre-check, the underlying library re-fetches the
+    /// calling - we don't pre-check, the underlying library re-fetches the
     /// manifest as part of `download_and_install`.
     ///
     /// Progress is reported via shared atomics: the blocking download
     /// callback writes byte counters from the background thread, and a
     /// foreground poll loop translates them into `UpdateStatus::Downloading
     /// { progress }` updates roughly every 150ms. When the server omits
-    /// `Content-Length` we keep `progress` at 0 — the UI then shows an
+    /// `Content-Length` we keep `progress` at 0 - the UI then shows an
     /// indeterminate "Downloading…" rather than a fake percentage.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2298,7 +2298,7 @@ impl AppState {
         self.connect_flow = None;
         self.pending_sync = None;
         self.reconnect_target = None;
-        // Clear with the rest of the session secrets — entry titles in
+        // Clear with the rest of the session secrets - entry titles in
         // the history would otherwise outlive the unlocked DB they came
         // from, which contradicts the rest of the lock contract.
         self.sync_history.clear();
@@ -2351,7 +2351,7 @@ impl AppState {
     /// this grace check the session-lock monitor would re-lock the vault
     /// mid-typing on every wake.
     pub fn unlocked_within(&self, window: std::time::Duration) -> bool {
-        // A backwards clock jump makes `duration_since` fail — treat that
+        // A backwards clock jump makes `duration_since` fail - treat that
         // as "grace expired": the fail-safe direction is locking.
         self.last_unlock_at.is_some_and(|at| {
             std::time::SystemTime::now()
@@ -2362,7 +2362,7 @@ impl AppState {
 
     /// Whether the deferred-lock screen may offer "Discard changes and
     /// lock": every remaining save has actually failed, or the deferred
-    /// lock has been waiting long past any realistic save duration — the
+    /// lock has been waiting long past any realistic save duration - the
     /// flock has a deadline, but open/canonicalize/write/fsync on a dead
     /// network volume can block a save task forever. The action is hidden once
     /// a worker has claimed publication because those bytes can no longer be
@@ -2406,7 +2406,7 @@ impl AppState {
     /// Escape hatch for a deferred lock whose save keeps failing (volume
     /// unmounted, disk full, file replaced externally): drop the quarantined
     /// documents together with their unsaved changes and finish the lock.
-    /// Without this, a persistent save failure wedges the app — unlock is
+    /// Without this, a persistent save failure wedges the app - unlock is
     /// refused, quit is vetoed, and retry loops forever.
     pub fn discard_deferred_saves_and_lock(&mut self, cx: &mut Context<Self>) {
         if self.discard_deferred_saves_and_lock_now() {
@@ -2468,7 +2468,7 @@ impl AppState {
             self.retry_unpersisted_vault_saves(cx);
             // The stuck-save escape (`can_discard_deferred_saves`) is
             // time-gated, but a genuinely hung save emits no further state
-            // events to re-render on — poke the UI once the gate opens so
+            // events to re-render on - poke the UI once the gate opens so
             // the discard button actually appears.
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
@@ -2513,7 +2513,7 @@ impl AppState {
     /// the routing done by `apply_sync_status` / `with_sync_binding_mut_for`
     /// so a sync that completes after the user switched away still logs
     /// against the vault it actually changed. Vaults that were locked
-    /// between dispatch and callback are dropped silently — there's no
+    /// between dispatch and callback are dropped silently - there's no
     /// active session to surface the history against.
     fn append_sync_history_for(&mut self, target: &Path, entries: Vec<SyncHistoryEntry>) {
         if entries.is_empty() {
@@ -2622,8 +2622,8 @@ impl AppState {
     /// once the loop is done we trigger a single `save_async` so the
     /// flushed bytes ride out via the normal save → sync path.
     ///
-    /// Sequential by design: a typical vault has 30–200 entries with
-    /// URLs, and DDG's icon service is fast — running these in parallel
+    /// Sequential by design: a typical vault has 30-200 entries with
+    /// URLs, and DDG's icon service is fast - running these in parallel
     /// would mostly just shave a few seconds while burning more cache
     /// quota. Keeping it serial also gives us a clean progress label
     /// without coordinating shared mutable state across workers.
@@ -2640,7 +2640,7 @@ impl AppState {
 
         // Snapshot the (id, url) pairs up front so the spawned task
         // doesn't have to re-borrow the snapshot every iteration. We
-        // skip entries that already have a custom icon — re-running
+        // skip entries that already have a custom icon - re-running
         // shouldn't blow away user-curated icons.
         let targets: Vec<(String, String)> = document
             .snapshot()
@@ -2671,7 +2671,7 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let mut succeeded = 0usize;
             for (idx, (entry_id, url)) in targets.into_iter().enumerate() {
-                // Each fetch off the UI thread — ureq is sync, so we'd
+                // Each fetch off the UI thread - ureq is sync, so we'd
                 // block the renderer otherwise.
                 let url_for_task = url.clone();
                 let bytes_result = cx
@@ -2683,7 +2683,7 @@ impl AppState {
                         && let VaultStatus::Open { document, .. } = &mut state.vault
                     {
                         // Errors here mean the entry vanished
-                        // mid-run (e.g. user deleted it) — fine to
+                        // mid-run (e.g. user deleted it) - fine to
                         // silently skip.
                         if document.set_entry_custom_icon(&entry_id, bytes).is_ok() {
                             succeeded += 1;
@@ -2702,8 +2702,8 @@ impl AppState {
                 state.favicon_status = FaviconDownloadStatus::Finished { succeeded, total };
                 cx.notify();
                 // Persist whichever icons we managed to land. `save_async`
-                // is a no-op if `succeeded == 0` would still be valid —
-                // running it harmlessly re-writes the same bytes — but
+                // is a no-op if `succeeded == 0` would still be valid -
+                // running it harmlessly re-writes the same bytes - but
                 // skip when there's nothing to save so we don't block
                 // the disk for a no-op.
                 if succeeded > 0 {
@@ -2721,7 +2721,7 @@ impl AppState {
     /// thread is free during the ~500 ms Argon2 KDF. Saves are serialized per
     /// path via `saves_in_flight`: while one runs, further requests only set
     /// a flag, and the completion callback snapshots the then-latest document
-    /// state for one trailing save — the latest state always wins, but we
+    /// state for one trailing save - the latest state always wins, but we
     /// never have two writers racing on the same file.
     pub fn save_async(&mut self, cx: &mut Context<Self>) {
         self.save_async_internal(true, cx);
@@ -2730,7 +2730,7 @@ impl AppState {
     /// Save locally but skip the cloud-sync push afterwards. Used for
     /// purely cosmetic mutations (today: sidebar group collapse/expand)
     /// where firing a SharePoint upload on every click would burn
-    /// bandwidth and — worse — race against any already-in-flight sync
+    /// bandwidth and - worse - race against any already-in-flight sync
     /// to produce a 412 ETag mismatch and an unnecessary Conflict
     /// overlay. The change still rides out to the cloud the next time
     /// any "real" mutation triggers `save_async`, so other devices
@@ -2894,7 +2894,7 @@ impl AppState {
                     // trailing save of the *latest* document state; any
                     // cloud push (ours or the queued requests') rides on
                     // that save instead, so the newest bytes are what
-                    // reach the server — pushing now would upload state
+                    // reach the server - pushing now would upload state
                     // the trailing save is about to supersede.
                     state.request_save_for_session(
                         target,
@@ -2912,7 +2912,7 @@ impl AppState {
                     return;
                 }
                 // Chain into sync against the same vault that just saved
-                // — even if the user has switched away. `sync_now_for_path`
+                // - even if the user has switched away. `sync_now_for_path`
                 // routes its results back to whichever slot still owns
                 // `target`, so a parked vault's edit still makes it to
                 // SharePoint.
@@ -2956,7 +2956,7 @@ impl AppState {
             let new_id = document.create_entry(group_id, &draft)?;
 
             // Snap the user to the entry's group so they can see what they
-            // just created — otherwise creating from inside "Favorites" or a
+            // just created - otherwise creating from inside "Favorites" or a
             // tag filter would silently land the entry off-screen.
             *selection = LibrarySelection::Group(group_id.to_string());
             search_query.clear();
@@ -3023,7 +3023,7 @@ impl AppState {
     }
 
     /// Permanent (unrecoverable) delete. Use only after a confirmation step in
-    /// the UI — `save_async` flushes the result to disk and the entry is gone.
+    /// the UI - `save_async` flushes the result to disk and the entry is gone.
     pub fn delete_entry_permanent(
         &mut self,
         entry_id: &str,
@@ -3045,7 +3045,7 @@ impl AppState {
     /// Mirrors the update/delete pattern: refresh the visible-entries
     /// cache against the current selection (which may now exclude the
     /// moved entry, e.g. when viewing only one group), then schedule a
-    /// background save. Selection-tracking is intentionally lazy —
+    /// background save. Selection-tracking is intentionally lazy -
     /// `vault_browser()` falls back to the first visible entry if the
     /// previously-selected one disappears from view, so we don't need
     /// to repoint `selected_entry_id` here.
@@ -3083,9 +3083,9 @@ impl AppState {
     }
 
     /// Create a new group under `parent_id` and select it so the user
-    /// lands on the freshly-created (empty) group. Real content mutation
-    /// — uses the full `save_async` path so the change syncs to the
-    /// cloud, unlike the cosmetic `toggle_group_expanded`.
+    /// lands on the freshly-created (empty) group. This is a real content
+    /// mutation, so it uses the full `save_async` path and the change syncs
+    /// to the cloud, unlike the cosmetic `toggle_group_expanded`.
     pub fn create_group(
         &mut self,
         parent_id: &str,
@@ -3342,7 +3342,7 @@ impl AppState {
     }
 
     /// Toggle for the "Enable Touch ID" checkbox on the Unlock screen.
-    /// Pure state flip — the actual enrolment happens in
+    /// Pure state flip - the actual enrolment happens in
     /// `complete_biometric_enrollment` after the password unlock succeeds.
     pub fn set_pending_biometric_enrollment(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.pending_biometric_enrollment == on {
@@ -3382,14 +3382,14 @@ impl AppState {
     pub fn begin_biometric_unlock(&mut self, cx: &mut Context<Self>) -> Option<BiometricLaunch> {
         // Only valid while sitting on the Unlock screen for a vault
         // that has an enrolment. Anything else is the UI dispatching
-        // an action it shouldn't have offered — bail silently.
+        // an action it shouldn't have offered - bail silently.
         let (path, keyfile) = match &self.vault {
             VaultStatus::AwaitingPassword { path, keyfile, .. } => (path.clone(), keyfile.clone()),
             _ => return None,
         };
         let enrollment = self.biometric_registry.get(&path)?.clone();
         // Prefer the keyfile the user had selected at enrolment time
-        // over whatever's currently in the Unlock form — the saved
+        // over whatever's currently in the Unlock form - the saved
         // path is the one that successfully decrypted the vault back
         // then. Falls back to the current pending value if absent
         // (matches the back-compat path for older enrolments).
@@ -3429,7 +3429,7 @@ impl AppState {
     }
 
     /// Called from the AppShell background task when the Touch ID
-    /// retrieval errors out. Success path skips this — it feeds the
+    /// retrieval errors out. Success path skips this - it feeds the
     /// password directly into `begin_open` + `finish_open_attempt`
     /// without going back through state. `generation` is the launch's
     /// stamp; a mismatch means a newer attempt superseded this one and
@@ -3460,7 +3460,7 @@ impl AppState {
         // The keychain item is gone or unusable: drop the enrolment so
         // the screen falls back to the "Enable Touch ID" checkbox. Only
         // remove the registry pointer once the keychain delete is
-        // confirmed — an unconfirmed delete keeps the entry (re-`Forget`
+        // confirmed - an unconfirmed delete keeps the entry (re-`Forget`
         // -able) rather than orphaning the stored password.
         if matches!(
             error,
@@ -3487,7 +3487,7 @@ impl AppState {
 
     /// Public companion to `clear_biometric_attempt` for the
     /// "Touch ID resolved successfully but the user already moved on"
-    /// case in `AppShell::submit_biometric_unlock`. No `cx.notify` —
+    /// case in `AppShell::submit_biometric_unlock`. No `cx.notify` -
     /// whatever screen is up now wasn't observing this attempt anyway.
     pub fn clear_biometric_attempt_public(&mut self) {
         self.clear_biometric_attempt();
@@ -3550,7 +3550,7 @@ impl AppState {
     }
 
     /// Remove an enrolment in both the registry and the OS keychain.
-    /// Idempotent — calling on an absent path is a no-op. Order is
+    /// Idempotent - calling on an absent path is a no-op. Order is
     /// keychain-first: we only drop the registry pointer once the
     /// keychain delete is confirmed, so a failed delete keeps the
     /// entry visible (and re-`Forget`-able) instead of orphaning the
@@ -3558,7 +3558,7 @@ impl AppState {
     /// gone.
     pub fn forget_biometric(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
         let Some(entry) = self.biometric_registry.get(path).cloned() else {
-            return true; // nothing enrolled — already "forgotten"
+            return true; // nothing enrolled - already "forgotten"
         };
         if self.biometric.forget(&entry.id).is_err() {
             // Keychain item may still be present; keep the registry
@@ -3725,7 +3725,7 @@ impl AppState {
     /// Stamp the currently-selected entry as "just used" in the
     /// in-memory access log. Called from the AppShell after a
     /// successful password / username copy. No-op when no vault is
-    /// open or no entry is selected. Doesn't notify — the
+    /// open or no entry is selected. Doesn't notify - the
     /// `RecentlyUsed` list is rebuilt on the next selection change,
     /// which matches KeePassXC (the list is a snapshot, not live).
     pub fn mark_selected_used(&mut self) {
@@ -3740,7 +3740,7 @@ impl AppState {
         }
     }
 
-    /// Same as `mark_selected_used` but for an explicit entry id —
+    /// Same as `mark_selected_used` but for an explicit entry id -
     /// used by the auto-type path, where the credential we just typed
     /// is the foreground-matched entry, not necessarily the one the
     /// user has selected in the sidebar.
@@ -3822,7 +3822,7 @@ impl AppState {
             crate::sync::config::SyncProvider::ICloudDrive => "iCloud Drive".to_string(),
         });
         let synced_at = sync_status_label(&self.sync_status);
-        // Header dot tone tracks the live sync status — but only matters for
+        // Header dot tone tracks the live sync status - but only matters for
         // an open vault (the sidebar header is the only consumer and only
         // renders when a vault is open). Non-open / error arms stay Neutral.
         let sync_tone = sync_status_tone(&self.sync_status);
@@ -3952,7 +3952,7 @@ impl AppState {
         self.connect_flow = None;
         self.reconnect_target = None;
         self.sync_status = SyncStatus::Disconnected;
-        // Activity log is tied to the connected sync — once the user
+        // Activity log is tied to the connected sync - once the user
         // disconnects, the events refer to a relationship that no
         // longer exists. Clearing avoids stale "Updated from remote"
         // lines hanging around after a fresh Connect.
@@ -3969,25 +3969,16 @@ impl AppState {
         .detach();
     }
 
-    /// Drop the Connect overlay's transient state. Wired to the Cancel
-    /// button + the Escape key.
-    pub fn cancel_connect(&mut self, cx: &mut Context<Self>) {
-        self.connect_operations.advance();
-        self.connect_flow = None;
-        self.reconnect_target = None;
-        cx.notify();
-    }
-
     /// User-driven *reconnect* for the active vault whose refresh token
     /// expired. Unlike `start_sharepoint_connect`, this does NOT run the
-    /// provider-pick / file-picker flow — it reuses the active vault's
+    /// provider-pick / file-picker flow - it reuses the active vault's
     /// existing on-disk `SyncConfig` and only swaps in a fresh token. We
     /// arm `reconnect_target` with the vault's path, open the Connect
     /// overlay straight onto the device-code step, and let the shared poll
     /// loop route the resulting token into `finish_reconnect` (rebind)
     /// instead of `Picking` (new download). No new local file is created.
     pub fn start_sharepoint_reconnect(&mut self, cx: &mut Context<Self>) {
-        // Reconnect always targets the active vault — the Settings → Sync
+        // Reconnect always targets the active vault - the Settings → Sync
         // card (where the Reconnect button lives) reflects `self.sync` /
         // `self.sync_status`, i.e. the active vault.
         let path = match &self.vault {
@@ -3997,7 +3988,7 @@ impl AppState {
         // Load the existing config up front: it carries the drive/item ids we
         // rebind against, and reading it here lets us fail fast (before making
         // the user sign in) when there's nothing to reconnect. A miss
-        // shouldn't happen — the Reconnect button only shows for a vault that
+        // shouldn't happen - the Reconnect button only shows for a vault that
         // had a binding.
         let Ok(Some(config)) = crate::sync::config::load(&path) else {
             self.sync_status =
@@ -4009,7 +4000,7 @@ impl AppState {
         self.reconnect_target = Some(config);
         self.open_overlay(Overlay::Connect, cx);
         // Show a spinner (not the provider picker) while the device code is
-        // requested — `start_sharepoint_connect` flips this to `SigningIn`
+        // requested - `start_sharepoint_connect` flips this to `SigningIn`
         // once the challenge arrives, then the poll loop's token branch sees
         // `reconnect_target` and rebinds (no file picker, no new download).
         self.connect_flow = Some(ConnectFlow::Authorizing);
@@ -4021,7 +4012,7 @@ impl AppState {
     /// Step 1 of Connect: request a device code and kick off the polling
     /// loop. UI should observe `connect_flow` transitioning to
     /// `Some(SigningIn { .. })` and switch to the device-code screen.
-    /// No URL/path is needed up front — the user picks a file *after*
+    /// No URL/path is needed up front - the user picks a file *after*
     /// signing in (see `Picking`).
     pub fn start_sharepoint_connect(&mut self, cx: &mut Context<Self>) {
         if matches!(self.vault, VaultStatus::LockedPendingSave) || self.connect_flow.is_none() {
@@ -4222,7 +4213,7 @@ impl AppState {
         .detach();
     }
 
-    /// Live-filter the picker as the user types. Cheap — runs against the
+    /// Live-filter the picker as the user types. Cheap - runs against the
     /// already-fetched list, no API calls.
     pub fn set_picker_query(&mut self, query: String, cx: &mut Context<Self>) {
         if let Some(ConnectFlow::Picking { query: q, .. }) = &mut self.connect_flow {
@@ -4467,7 +4458,7 @@ impl AppState {
     }
 
     /// Finish a user-driven reconnect: rebind `config`'s vault with the
-    /// freshly-acquired `token` — no new local file, no duplicate binding.
+    /// freshly-acquired `token` - no new local file, no duplicate binding.
     /// `reconnect_rebind` (account match + keychain store + `authenticated_at`
     /// re-stamp) runs on a background task; the result is installed against
     /// whichever slot still holds the vault, followed by an immediate sync so
@@ -4479,7 +4470,7 @@ impl AppState {
             return;
         };
         let generation = self.connect_operations.advance();
-        // Close the device-code overlay right away — the rebind is quick and
+        // Close the device-code overlay right away - the rebind is quick and
         // headless. The status pill carries the progress from here.
         self.connect_flow = None;
         self.overlay = Overlay::None;
@@ -4565,7 +4556,7 @@ impl AppState {
     /// updates the saving vault, not whoever is now in focus.
     ///
     /// This is the *interactive* entry point (manual "Sync now" button,
-    /// on-save push, post-resolution re-sync) — a resulting conflict is
+    /// on-save push, post-resolution re-sync) - a resulting conflict is
     /// allowed to open the Conflict overlay. Background auto-sync uses
     /// `sync_now_for_path_inner(.., false, ..)` so it can never do that.
     pub fn sync_now_for_path(&mut self, target: &Path, cx: &mut Context<Self>) {
@@ -4587,7 +4578,7 @@ impl AppState {
             return;
         }
 
-        // One push per vault at a time — see `syncs_in_flight`. Queue a
+        // One push per vault at a time - see `syncs_in_flight`. Queue a
         // follow-up instead of racing; it runs once the in-flight push
         // completes and uses the newest request's exact session + bytes.
         if let Some(queued) = self.syncs_in_flight.get_mut(target) {
@@ -4602,13 +4593,13 @@ impl AppState {
             self.snapshot_sync_inputs_for_session(target, session_id)
         else {
             // No live binding. For the active vault this usually means the
-            // unlock-time binding restore failed (network blip) — retry it
+            // unlock-time binding restore failed (network blip) - retry it
             // so any sync trigger (save push, auto-sync, Sync now) heals
             // the state instead of silently skipping the upload forever.
             // This push itself is dropped; the next one after the restore
             // completes uploads normally. `retry_sync_restore` is
             // idempotent: it no-ops when a binding exists or no sync
-            // config is on disk. Parked vaults keep the silent bail —
+            // config is on disk. Parked vaults keep the silent bail -
             // the restore path is active-vault-only by design.
             if matches!(&self.vault, VaultStatus::Open { path, .. } if path == target) {
                 self.retry_sync_restore(cx);
@@ -4682,7 +4673,7 @@ impl AppState {
                                     session_id,
                                     |binding| {
                                         binding.config.last_etag = new_etag;
-                                        // Persist updated etag — best effort; if the
+                                        // Persist updated etag - best effort; if the
                                         // disk write fails we'll just re-detect a
                                         // conflict next push (and re-resolve).
                                         let _ = crate::sync::config::save(&binding.config);
@@ -4698,7 +4689,7 @@ impl AppState {
                                     cx,
                                 );
                                 // Saves that completed while this push ran
-                                // queued behind it — run the one follow-up
+                                // queued behind it - run the one follow-up
                                 // push that carries their bytes.
                                 if let Some(pending) = queued.pending {
                                     state.start_queued_sync(&callback_path, pending, cx);
@@ -4761,7 +4752,7 @@ impl AppState {
         }
     }
 
-    /// Run a background auto-sync pull for every synced vault in memory —
+    /// Run a background auto-sync pull for every synced vault in memory -
     /// the active one plus any the user parked. Driven by the AppShell's
     /// auto-sync timer. Cheap when nothing changed remotely (one metadata
     /// round-trip per vault); only downloads + merges the vaults whose
@@ -4793,7 +4784,7 @@ impl AppState {
     ///
     /// It doubles as the OAuth keep-alive: `ensure_fresh` refreshes the
     /// access token when it's near expiry, and we write the fresh token
-    /// back into the binding — that refresh resets the refresh token's
+    /// back into the binding - that refresh resets the refresh token's
     /// sliding-inactivity window, which is the whole point of running on a
     /// timer in the first place.
     ///
@@ -4801,14 +4792,14 @@ impl AppState {
     /// leave the current status untouched rather than flapping the UI to
     /// `Failed` on every tick. A terminal `InvalidGrant` does flip to
     /// `Reconnect` (with the Azure reason) so the user discovers an expired
-    /// sign-in while the app is open — early enough to fix it before it
+    /// sign-in while the app is open - early enough to fix it before it
     /// blocks a real save.
     fn auto_sync_for_path(&mut self, target: &Path, cx: &mut Context<Self>) {
         let Some(session_id) = self.vault_session_id_for(target) else {
             return;
         };
         // Skip vaults mid-operation, and don't fire while the user is in a
-        // Connect / Conflict overlay — auto-merging underneath them would
+        // Connect / Conflict overlay - auto-merging underneath them would
         // be jarring.
         let status = self.sync_status_for(target);
         let busy = matches!(
@@ -4829,7 +4820,7 @@ impl AppState {
             return;
         }
         // Recover from a prior failed sync (e.g. a push that lost the
-        // network) with a full push retry — `sync_now_for_path` re-uploads
+        // network) with a full push retry - `sync_now_for_path` re-uploads
         // local bytes and falls into the merge path on a 412, so it heals
         // both stranded local edits and a half-finished merge. The cheap
         // pull-check below would miss those because the remote ETag hasn't
@@ -4885,7 +4876,7 @@ impl AppState {
                         // Only act on the pull result from a healthy resting
                         // state. If a manual sync moved us to Syncing, or a
                         // conflict/reconnect arrived, this background result
-                        // is stale — drop it; the next tick re-checks. (The
+                        // is stale - drop it; the next tick re-checks. (The
                         // token write above is always safe and worth keeping.)
                         let resting = matches!(
                             state.sync_status_for(&callback_path),
@@ -4896,7 +4887,7 @@ impl AppState {
                         }
                         match pulled {
                             None => {
-                                // Up to date — stamp "synced just now" so the
+                                // Up to date - stamp "synced just now" so the
                                 // UI shows the keep-alive ran.
                                 state.apply_sync_status_for_session(
                                     &callback_path,
@@ -4909,7 +4900,7 @@ impl AppState {
                                 );
                             }
                             Some((remote_bytes, remote_etag)) => {
-                                // `interactive: false` — a background pull
+                                // `interactive: false` - a background pull
                                 // silently auto-merges conflict-free changes
                                 // but must never replace whatever overlay the
                                 // user has open with the Conflict overlay; a
@@ -4937,7 +4928,7 @@ impl AppState {
                         );
                     }
                     Err(_) => {
-                        // Transient — stay quiet; the next tick (or the next
+                        // Transient - stay quiet; the next tick (or the next
                         // manual save / sync) retries.
                     }
                 }
@@ -4950,7 +4941,7 @@ impl AppState {
     /// against the in-memory local DB, and either open the Conflict overlay
     /// (when `target` is the active vault) or mark the parked vault Failed
     /// so the user can resolve it after switching back. Auto-merge is run
-    /// for both active and parked targets — silent merges don't need the UI.
+    /// for both active and parked targets - silent merges don't need the UI.
     ///
     /// `interactive` gates the Conflict overlay: the user-driven paths pass
     /// `true` and a real conflict opens the overlay; background auto-sync
@@ -4975,7 +4966,7 @@ impl AppState {
         }
         let Some(local_db) = self.database_clone_for_session(target, session_id) else {
             // Vault was locked between issuing the upload and the 412
-            // response landing — nothing to merge against. Drop silently.
+            // response landing - nothing to merge against. Drop silently.
             return;
         };
         // Stamp the mutation generation that `local_db` represents. The
@@ -5001,13 +4992,13 @@ impl AppState {
                 // Git-style: if no per-entry conflicts to decide, auto-merge
                 // silently. Remote-only additions get pulled in with their
                 // original UUIDs preserved (see merge::add_entry_under) and
-                // the result uploads back. The user sees no overlay — just a
+                // the result uploads back. The user sees no overlay - just a
                 // "Synced · N merged" badge in the status pill.
                 if report.conflicts.is_empty() {
                     let auto_merged_count = report.remote_only.len() + report.auto_resolved.len();
                     // Whether the merge actually changes the *remote*. A pure
-                    // fast-forward — we only pulled remote-only additions
-                    // and/or remote-wins resolutions — leaves the merged DB
+                    // fast-forward - we only pulled remote-only additions
+                    // and/or remote-wins resolutions - leaves the merged DB
                     // logically equal to what's already on the server, so
                     // there's nothing to push. Uploading anyway would mint a
                     // redundant SharePoint version for someone else's change.
@@ -5056,7 +5047,7 @@ impl AppState {
                 }
 
                 // Real conflicts. The Conflict overlay is single-vault by
-                // design — it edits the user's active focus. For a parked
+                // design - it edits the user's active focus. For a parked
                 // vault, mark Failed with a hint so the user knows to
                 // switch back before resolving.
                 if !target_is_active {
@@ -5064,7 +5055,7 @@ impl AppState {
                         target,
                         session_id,
                         SyncStatus::Failed(
-                            "Remote conflict — switch back to this vault to resolve.".into(),
+                            "Remote conflict - switch back to this vault to resolve.".into(),
                         ),
                         cx,
                     );
@@ -5077,7 +5068,7 @@ impl AppState {
                     self.apply_sync_status_for_session(
                         target,
                         session_id,
-                        SyncStatus::Failed("Remote conflict — choose Sync now to resolve.".into()),
+                        SyncStatus::Failed("Remote conflict - choose Sync now to resolve.".into()),
                         cx,
                     );
                     return;
@@ -5102,7 +5093,7 @@ impl AppState {
                 // Only credential/crypto failures mean "wrong password".
                 // The resource limits in `keepass::limits` surface as
                 // `Io(InvalidData)` with a user-readable message (vault too
-                // large, Argon2 memory over the cap, malformed header) —
+                // large, Argon2 memory over the cap, malformed header) -
                 // blaming the master password for those sends the user
                 // chasing a credential problem that does not exist.
                 let message = match &error {
@@ -5111,7 +5102,7 @@ impl AppState {
                     {
                         format!("Cannot read the remote vault: {io_error}")
                     }
-                    _ => "Remote file uses a different master password — \
+                    _ => "Remote file uses a different master password - \
                           cannot merge automatically."
                         .to_string(),
                 };
@@ -5193,7 +5184,7 @@ impl AppState {
             }
         };
 
-        // User-driven resolution — the "Synced · N merged" badge is reserved
+        // User-driven resolution - the "Synced · N merged" badge is reserved
         // for git-style silent merges where the user got no overlay at all.
         // Manual resolution always reports auto_merged = 0. It also always
         // uploads: the user just chose sides, so the merged result is a
@@ -5220,12 +5211,12 @@ impl AppState {
     /// - **Silent auto-merge** (in `handle_remote_conflict` when the diff
     ///   is conflict-free) where there was nothing for the user to decide.
     ///
-    /// `auto_merged` is the count surfaced in the "Synced · N merged" badge —
+    /// `auto_merged` is the count surfaced in the "Synced · N merged" badge -
     /// non-zero only on the silent-merge path.
     ///
     /// `history_entries` are the pre-computed activity-log rows for this
     /// merge. They're appended to the target vault's history only after
-    /// the local save + reload succeeds (phase 1) — so a save failure
+    /// the local save + reload succeeds (phase 1) - so a save failure
     /// can't leave phantom rows referencing changes that never
     /// actually committed.
     ///
@@ -5236,7 +5227,7 @@ impl AppState {
     /// those edits, and uploading it would publish a remote state that
     /// lacks them. Whenever the live generation no longer matches, the
     /// commit aborts and instead schedules a save + sync of the *latest*
-    /// state — the resulting 412 re-runs the whole download → diff →
+    /// state - the resulting 412 re-runs the whole download → diff →
     /// merge cycle against that state, so neither side's changes are lost.
     #[allow(clippy::too_many_arguments)]
     fn commit_merged_for(
@@ -5298,7 +5289,7 @@ impl AppState {
         // *before* we go anywhere near the network. Without that, an
         // upload failure (or a token-refresh failure) parked the user back
         // on the pre-merge in-memory state while the already-merged bytes
-        // sat on disk — the next ordinary save would clobber the merge
+        // sat on disk - the next ordinary save would clobber the merge
         // with stale data.
         let save_path = local_path.clone();
         let local_save_task =
@@ -5367,7 +5358,7 @@ impl AppState {
                     // were being encrypted + written (the UI stays
                     // interactive during the ~500 ms background save), or
                     // locked it outright. Installing the merged document
-                    // would silently discard those edits — and phase 2
+                    // would silently discard those edits - and phase 2
                     // would publish a remote state that lacks them. Abort:
                     // the save scheduled here writes the *latest* in-memory
                     // state back over the merged file on disk, and its
@@ -5546,7 +5537,7 @@ impl AppState {
                         } => {
                             // Third device wrote during resolution. Re-trigger
                             // the conflict flow against the freshly merged
-                            // local + the new remote — for the same vault.
+                            // local + the new remote - for the same vault.
                             state.apply_sync_status_for_session(
                                 &callback_path,
                                 session_id,
@@ -5567,7 +5558,7 @@ impl AppState {
                 Err(e) => {
                     // A refresh token that died mid-merge must surface as
                     // Reconnect (with the Azure reason), same as the plain
-                    // sync paths — otherwise the user loses the one-click
+                    // sync paths - otherwise the user loses the one-click
                     // reconnect affordance and just sees a generic failure.
                     let status = match e {
                         crate::sync::service::ServiceError::Auth(
@@ -5605,7 +5596,7 @@ fn entries_for_selection(
     }
 
     match selection {
-        // Selecting a group includes everything below it — entries directly
+        // Selecting a group includes everything below it - entries directly
         // in the group *plus* every entry in any nested subgroup. Without
         // this the entry-count chip in the sidebar (which is recursive,
         // see `VaultGroup::entry_count`) and the visible list disagree:
@@ -5674,7 +5665,7 @@ fn file_name(path: &Path) -> String {
 }
 
 /// Map `SyncStatus` to a short, user-facing string for the header / status pill.
-/// `None` means "no sync indicator at all" — used when the vault is local-only.
+/// `None` means "no sync indicator at all" - used when the vault is local-only.
 fn sync_status_label(status: &SyncStatus) -> Option<String> {
     use chrono::Local;
     match status {
@@ -5683,7 +5674,7 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
         SyncStatus::Connecting => Some("Connecting…".into()),
         SyncStatus::Restoring => Some("Connecting…".into()),
         SyncStatus::Syncing => Some("Syncing…".into()),
-        // Compact time only — the merge count rides as a separate
+        // Compact time only - the merge count rides as a separate
         // `auto_merged` badge in `VaultSummary`, rendered next to this
         // string by the sidebar pill. Keeping them separate stops the
         // pill from overflowing in narrow sidebars and lets the badge
@@ -6601,7 +6592,7 @@ mod park_tests {
         state.sync = Some(fake_binding("active@example.invalid"));
 
         // snapshot_sync_inputs against the parked path returns the
-        // parked vault's binding — not the active one. This is the
+        // parked vault's binding - not the active one. This is the
         // contract sync_now_for_path relies on.
         let (parked_config, _, parked_pw) =
             state.snapshot_sync_inputs(&parked_path).expect("parked");
@@ -6687,7 +6678,7 @@ mod park_tests {
 mod biometric_tests {
     //! State-machine coverage for the Touch ID surface. Like the
     //! park-tests module above, we avoid the gpui `Context` and drive
-    //! the private fields directly — the cx-bearing methods are
+    //! the private fields directly - the cx-bearing methods are
     //! exercised end-to-end in the manual verification script,
     //! while these tests pin the invariants that don't need a window.
     use super::*;
@@ -6754,7 +6745,7 @@ mod biometric_tests {
             },
         );
         let state = AppState::with_biometric(store, registry);
-        // Empty vault — even though the registry has an entry, the
+        // Empty vault - even though the registry has an entry, the
         // unlock screen isn't on the stage, so we must not surface
         // the enrollment.
         assert!(state.biometric_for_pending().is_none());
@@ -6799,7 +6790,7 @@ mod biometric_tests {
 
     #[test]
     fn lock_vault_pure_clears_biometric_session_state() {
-        // Mirrors the body of lock_vault() minus `cx.notify` — the
+        // Mirrors the body of lock_vault() minus `cx.notify` - the
         // public method needs a gpui Context which we can't build here.
         // The invariant we care about is "session-scoped Touch ID UI
         // bits get wiped along with the rest of the unlock state".
@@ -6826,7 +6817,7 @@ mod biometric_tests {
 
         assert!(!state.pending_biometric_enrollment());
         assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
-        // Registry survives the lock — enrollment is meant to outlive
+        // Registry survives the lock - enrollment is meant to outlive
         // the session; otherwise Touch ID would be useless after the
         // first auto-lock.
         // (Registry was empty here, but the field type guarantees it
@@ -6915,7 +6906,7 @@ mod biometric_tests {
     }
 
     /// Registry round-trip exercises `BiometricRegistry::remove`
-    /// returning the prior entry — the contract `complete_biometric_enrollment`
+    /// returning the prior entry - the contract `complete_biometric_enrollment`
     /// relies on to clean up the *old* keychain item before installing
     /// a new one. A regression here would silently leak keychain
     /// entries on re-enrolment.
