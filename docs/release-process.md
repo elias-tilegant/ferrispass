@@ -20,6 +20,21 @@ Every one of these is also a CI gate, so a failure here is a failure there.
 The dash grep is the house style rule: plain hyphens everywhere, including in
 commit messages.
 
+Then exercise the release binary against a real file, because a green test
+suite has never caught a broken parse path:
+
+```sh
+cargo build --release --locked
+cargo run --example make_test_vault -- /tmp/test.kdbx hunter2
+printf 'hunter2\n' > /tmp/pw
+./target/release/ferrispass-cli --vault /tmp/test.kdbx --master-password-fd 3 \
+    --format json entry list 3</tmp/pw
+```
+
+Open the same file in KeePassXC afterwards and check the entries, the group
+tree and any custom icons survived. The KDBX write path is a pinned fork, and
+that round trip is the only thing that proves it.
+
 ## Commit message conventions
 
 The Release-page body is auto-generated from commit messages by [git-cliff](https://git-cliff.org), driven by `cliff.toml` at the repo root. Prefix each commit with a Conventional-Commits-style tag so it lands in the right section.
