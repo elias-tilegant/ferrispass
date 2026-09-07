@@ -441,6 +441,8 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
                 remote_group.previous_parent_group,
             )
             || local_group.tags != remote_group.tags
+            || local_group.times.expiry != remote_group.times.expiry
+            || local_group.times.expires != remote_group.times.expires
         {
             return true;
         }
@@ -450,11 +452,19 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
         let Some(remote_entry) = remote.entry(local_entry.id()) else {
             continue;
         };
-        // Only relocation counts here. Histories are compared separately and
-        // directionally by `history_divergence`: comparing them as one
-        // undirected "differs" bit made `has_local_contribution`
-        // unconditionally true, because trimming alone diverges them.
-        if local_entry.parent().id() != remote_entry.parent().id() {
+        // Relocation, and expiry. Expiry lives in `times` rather than in the
+        // field map, so `field_diffs` never saw it and an entry whose only
+        // change was its expiry date read as no contribution at all: it was
+        // never uploaded, and the next edit from the other side erased it.
+        //
+        // Histories are compared separately and directionally by
+        // `history_divergence`: comparing them as one undirected "differs"
+        // bit made `has_local_contribution` unconditionally true, because
+        // trimming alone diverges them.
+        if local_entry.parent().id() != remote_entry.parent().id()
+            || local_entry.times.expiry != remote_entry.times.expiry
+            || local_entry.times.expires != remote_entry.times.expires
+        {
             return true;
         }
     }
@@ -491,7 +501,21 @@ fn meta_content_differs(local: &Database, remote: &Database) -> bool {
         || a.history_max_size != b.history_max_size
         || a.master_key_change_rec != b.master_key_change_rec
         || a.master_key_change_force != b.master_key_change_force
-        || a.custom_data != b.custom_data
+        || user_custom_data(a) != user_custom_data(b)
+}
+
+/// Metadata custom data minus the keys clients regenerate on every save.
+///
+/// KeePassXC rewrites `KPXC_RANDOM_SLUG` and `_LAST_MODIFIED` each time it
+/// writes the file and treats both as generated rather than user data. Left
+/// in the comparison they made every sync after a KeePassXC save look like a
+/// local change and ask for an upload, forever.
+fn user_custom_data(meta: &keepass::db::Meta) -> HashMap<&String, &CustomDataItem> {
+    const GENERATED: [&str; 2] = ["KPXC_RANDOM_SLUG", "_LAST_MODIFIED"];
+    meta.custom_data
+        .iter()
+        .filter(|(key, _)| !GENERATED.contains(&key.as_str()))
+        .collect()
 }
 
 /// Which side holds entry history versions the other does not.
@@ -693,6 +717,14 @@ pub fn apply_picks(
 
     let mut merged = local.clone();
     let mut source = remote.clone();
+
+    // The outer configuration travels with the file, not with an object, and
+    // nothing merges it. FerrisPass offers no way to change the cipher, the
+    // KDF parameters or the compression, so a difference here is always a
+    // change the other side made, and starting from our clone would have
+    // reverted it on the next upload. Someone hardening the KDF in KeePassXC
+    // would have watched it come back.
+    merged.config = source.config.clone();
 
     // Only genuinely ambiguous entries appear here. Timestamp-resolved rows
     // and one-sided additions are handled natively by Database::merge.
@@ -3186,6 +3218,111 @@ mod tests {
         assert!(
             !diff(&local, &remote).structural_writeback_required,
             "the cursor and the writer's name are not settings"
+        );
+    }
+
+    /// Expiry lives in `times`, not in the field map, so the field diff never
+    /// saw it. An entry whose only change was its expiry date read as no
+    /// contribution at all: it was never uploaded, and the next edit from the
+    /// other side erased it.
+    #[test]
+    fn an_expiry_only_edit_is_a_local_contribution() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Live".into();
+            group.id()
+        };
+        let remote = fork(&local);
+
+        assert!(!diff(&local, &remote).has_local_contribution());
+
+        local.entry_mut(id).unwrap().times.expiry =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::days(30));
+        local.entry_mut(id).unwrap().times.expires = Some(true);
+        assert!(
+            diff(&local, &remote).has_local_contribution(),
+            "an expiry set here has to reach the other copy"
+        );
+
+        let mut local = fork(&remote);
+        local.group_mut(group_id).unwrap().times.expires = Some(true);
+        assert!(
+            diff(&local, &remote).has_local_contribution(),
+            "and so does one set on a group"
+        );
+    }
+
+    /// KeePassXC rewrites two custom data keys on every save and treats both
+    /// as generated. Comparing them made every sync after a KeePassXC save
+    /// look like a local change and ask for an upload, forever.
+    #[test]
+    fn the_keys_other_clients_regenerate_are_not_a_local_change() {
+        use keepass::db::{CustomDataItem, CustomDataValue};
+        let mut local = Database::new();
+        add(&mut local, "Bank", "secret");
+        let mut remote = fork(&local);
+
+        for (db, slug) in [(&mut local, "ours"), (&mut remote, "theirs")] {
+            db.meta.custom_data.insert(
+                "KPXC_RANDOM_SLUG".into(),
+                CustomDataItem {
+                    value: Some(CustomDataValue::String(slug.into())),
+                    last_modification_time: None,
+                },
+            );
+            db.meta.custom_data.insert(
+                "_LAST_MODIFIED".into(),
+                CustomDataItem {
+                    value: Some(CustomDataValue::String(slug.into())),
+                    last_modification_time: None,
+                },
+            );
+        }
+
+        assert!(
+            !diff(&local, &remote).structural_writeback_required,
+            "a value the other client regenerates on every save is not our edit"
+        );
+
+        // A key someone actually set still counts.
+        local.meta.custom_data.insert(
+            "Plugin".into(),
+            CustomDataItem {
+                value: Some(CustomDataValue::String("configured".into())),
+                last_modification_time: None,
+            },
+        );
+        assert!(diff(&local, &remote).structural_writeback_required);
+    }
+
+    /// The outer configuration travels with the file and nothing merged it,
+    /// so someone hardening the KDF in another client watched it come back on
+    /// our next upload. FerrisPass cannot change these, so a difference is
+    /// always theirs.
+    #[test]
+    fn the_other_copys_kdf_settings_are_not_reverted() {
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        let mut remote = fork(&local);
+        remote.config.compression_config = keepass::config::CompressionConfig::None;
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_unprotected(fields::NOTES, "edited remotely");
+        remote.entry_mut(id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::minutes(1));
+
+        let report = diff(&local, &remote);
+        let merged =
+            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
+
+        assert_eq!(
+            merged.config.compression_config,
+            keepass::config::CompressionConfig::None,
+            "their file-level setting survives our merge"
         );
     }
 
