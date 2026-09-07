@@ -151,6 +151,9 @@ pub fn prepare_connect_picked(
         remote_url: hit.web_url.clone(),
         authenticated_at: now_unix(),
         remote_bookmark: None,
+        // The download is what the local file is about to become, so the two
+        // start out identical.
+        uploaded_local_revision: Some(crate::sync::config::local_revision(&remote_bytes)),
     };
     Ok(ConnectResult {
         config: cfg,

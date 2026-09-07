@@ -62,6 +62,24 @@ pub struct SyncConfig {
     /// file chosen by the user. Empty for network providers and old configs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_bookmark: Option<String>,
+    /// Digest of the local file contents as of the last successful upload.
+    ///
+    /// `last_etag` says what the *server* held; this says what *we* sent. The
+    /// pair is what makes "local is ahead" survive a lock, a quit or a crash:
+    /// without it, a save that never reached the cloud was indistinguishable
+    /// from one that did, because the remote etag had not moved either, and
+    /// the next sync reported Synced over an edit that existed on one machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uploaded_local_revision: Option<String>,
+}
+
+/// Digest of a vault file's bytes, for comparing what is on disk against what
+/// was last uploaded. Content-addressed rather than a timestamp: mtime moves
+/// for reasons that are not edits, and a restore from backup can move it
+/// backwards.
+pub fn local_revision(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +129,7 @@ impl SyncConfig {
             remote_url: remote_path.display().to_string(),
             authenticated_at: now_unix(),
             remote_bookmark: Some(bookmark),
+            uploaded_local_revision: None,
         }
     }
 
@@ -329,6 +348,7 @@ mod tests {
                 .into(),
             authenticated_at: Some(1_700_000_000),
             remote_bookmark: None,
+            uploaded_local_revision: None,
         }
     }
 

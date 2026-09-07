@@ -2318,6 +2318,50 @@ impl AppState {
         self.sync_backoff.remove(target);
     }
 
+    /// True when this vault's file differs from what was last uploaded.
+    ///
+    /// `last_etag` records what the server held; `uploaded_local_revision`
+    /// records what we sent. Only the pair can tell "the remote has not
+    /// changed because nobody else wrote" from "the remote has not changed
+    /// because our own write never happened".
+    ///
+    /// Unknown answers `false`: a config written before this field existed
+    /// has nothing to compare, and the alternative is to upload every vault
+    /// once on the first tick after an update.
+    fn local_is_ahead_of_the_cloud(target: &Path, config: &SyncConfig) -> bool {
+        let Some(uploaded) = config.uploaded_local_revision.as_deref() else {
+            return false;
+        };
+        // The file on disk, not the in-memory document: re-encrypting to
+        // compare would cost an Argon2 pass per tick, and the saved file is
+        // what an upload would send. Unsaved edits are not this function's
+        // problem, their save chains a sync of its own.
+        match std::fs::read(target) {
+            Ok(bytes) => crate::sync::config::local_revision(&bytes) != uploaded,
+            // Unreadable means the next push will fail and say so. Guessing
+            // "ahead" here would upload nothing and report a failure twice.
+            Err(_) => false,
+        }
+    }
+
+    /// True when a finished save has somewhere to go.
+    ///
+    /// Not "has a live binding": a vault whose restore has not landed yet is
+    /// still a synced vault, and gating on the binding meant such a save never
+    /// reached `sync_now_for_path_inner` and so was never even queued. It was
+    /// written locally and nothing ever sent it.
+    ///
+    /// A vault with no configuration at all, and one whose sign-in expired,
+    /// are both excluded: there is nothing to push to, and holding the vault
+    /// bytes for a push that cannot happen only keeps ciphertext alive.
+    fn save_should_reach_the_cloud(&self, target: &Path) -> bool {
+        self.has_sync_binding_for(target)
+            || matches!(
+                self.sync_activity_for(target),
+                Some(SyncActivity::Busy | SyncActivity::Failed)
+            )
+    }
+
     /// Hold a push until this vault's binding restore lands.
     fn queue_push_awaiting_restore(&mut self, target: &Path, request: QueuedSyncRequest) {
         // Replacing this vault's own entry is the intended coalesce: the
@@ -3325,7 +3369,7 @@ impl AppState {
                 if durable
                     && sync_after
                     && state.vault_session_is_current(&target, session_id)
-                    && state.snapshot_sync_inputs(&target).is_some()
+                    && state.save_should_reach_the_cloud(&target)
                 {
                     let bytes = receipt.expect("durable save has a receipt").bytes();
                     state.sync_now_for_path_inner(&target, session_id, true, Some(bytes), cx);
@@ -5127,7 +5171,8 @@ impl AppState {
             };
             let token = crate::sync::service::ensure_provider_ready(&task_config, token)?;
             let outcome = crate::sync::service::upload_after_save(&task_config, &token, &bytes)?;
-            Ok::<_, crate::sync::service::ServiceError>((outcome, token))
+            let uploaded = crate::sync::config::local_revision(&bytes);
+            Ok::<_, crate::sync::service::ServiceError>((outcome, token, uploaded))
         });
 
         let callback_path = local_path;
@@ -5157,7 +5202,7 @@ impl AppState {
                         pending.session_id == session_id && pending.interactive
                     });
                 match result {
-                    Ok((outcome, fresh_token)) => {
+                    Ok((outcome, fresh_token, uploaded_revision)) => {
                         state.with_sync_binding_mut_for_session(
                             &callback_path,
                             session_id,
@@ -5171,7 +5216,13 @@ impl AppState {
                                     session_id,
                                     |binding| {
                                         binding.config.last_etag = new_etag;
-                                        // Persist updated etag - best effort; if the
+                                        // What the server holds, and what we
+                                        // sent. The second is what lets the
+                                        // next session tell "already uploaded"
+                                        // from "saved here and never sent".
+                                        binding.config.uploaded_local_revision =
+                                            Some(uploaded_revision);
+                                        // Persist both - best effort; if the
                                         // disk write fails we'll just re-detect a
                                         // conflict next push (and re-resolve).
                                         let _ = crate::sync::config::save(&binding.config);
@@ -5325,6 +5376,16 @@ impl AppState {
         else {
             return;
         };
+
+        // A save that never reached the cloud leaves the local file ahead of
+        // what was last uploaded, and the remote etag has not moved either, so
+        // the pull check below would call that Synced. It happens whenever a
+        // push was dropped: a lock during a save, a quit, a crash, a binding
+        // that had not been restored yet. Push instead of checking.
+        if Self::local_is_ahead_of_the_cloud(target, &config) {
+            self.sync_now_for_path_inner(target, session_id, false, None, cx);
+            return;
+        }
 
         self.auto_sync_in_flight.insert(target.to_path_buf());
         let task_config = config;
@@ -6005,7 +6066,8 @@ impl AppState {
                     &token,
                     &published_bytes,
                 )?;
-                Ok::<_, crate::sync::service::ServiceError>((outcome, token))
+                let uploaded = crate::sync::config::local_revision(&published_bytes);
+                Ok::<_, crate::sync::service::ServiceError>((outcome, token, uploaded))
             });
 
             let result = network_task.await;
@@ -6014,7 +6076,7 @@ impl AppState {
                     return;
                 }
                 match result {
-                Ok((outcome, fresh_token)) => {
+                Ok((outcome, fresh_token, uploaded_revision)) => {
                     state.with_sync_binding_mut_for_session(
                         &callback_path,
                         session_id,
@@ -6028,6 +6090,7 @@ impl AppState {
                                 session_id,
                                 |b| {
                                     b.config.last_etag = new_etag;
+                                    b.config.uploaded_local_revision = Some(uploaded_revision);
                                     let _ = crate::sync::config::save(&b.config);
                                 },
                             );
@@ -6467,6 +6530,7 @@ mod park_tests {
                 remote_url: "https://example.invalid/foo.kdbx".into(),
                 authenticated_at: None,
                 remote_bookmark: None,
+                uploaded_local_revision: None,
             },
             access_token: AccessToken {
                 access_token: "token-0".into(),
@@ -6490,6 +6554,7 @@ mod park_tests {
                 remote_url: format!("https://example.invalid/{item_id}.kdbx"),
                 authenticated_at: None,
                 remote_bookmark: None,
+                uploaded_local_revision: None,
             },
             access_token: AccessToken {
                 access_token: "token-0".into(),
@@ -6858,6 +6923,73 @@ mod park_tests {
         assert!(
             matches!(state.sync_status, SyncStatus::Disconnected),
             "the vault on screen is untouched"
+        );
+    }
+
+    /// A save chains a cloud push. Gating that on a live binding meant a save
+    /// finishing while the restore had not landed never reached the push path
+    /// at all, so it was never even queued: written locally, and nothing ever
+    /// sent it.
+    #[test]
+    fn a_save_during_a_pending_restore_still_reaches_the_cloud_path() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/restoring.kdbx");
+        fresh_open(&mut state, path.clone(), "pw");
+
+        // No binding yet, and no configuration either: a local-only vault has
+        // nowhere to push and must not hold vault bytes for a push that
+        // cannot happen.
+        state.sync_status = SyncStatus::Disconnected;
+        assert!(!state.save_should_reach_the_cloud(&path));
+
+        // The restore is in flight. This is the case that was dropped.
+        state.sync_status = SyncStatus::Restoring;
+        assert!(state.save_should_reach_the_cloud(&path));
+
+        // A failed restore is the same situation, one tick later.
+        state.sync_status = SyncStatus::Failed("network".into());
+        assert!(state.save_should_reach_the_cloud(&path));
+
+        // An expired sign-in needs the user before anything can be sent.
+        state.sync_status = SyncStatus::Reconnect { detail: None };
+        assert!(!state.save_should_reach_the_cloud(&path));
+
+        // And with a binding it is the ordinary case.
+        state.sync = Some(fake_binding_for("a@example.invalid", path.clone(), "item"));
+        state.sync_status = SyncStatus::Idle;
+        assert!(state.save_should_reach_the_cloud(&path));
+    }
+
+    /// A push dropped by a lock, a quit or a crash leaves the file on disk
+    /// ahead of what was uploaded, while the remote etag has not moved
+    /// either. The pull check alone called that Synced, over an edit that
+    /// existed on exactly one machine.
+    #[test]
+    fn a_file_that_was_never_uploaded_is_recognised_as_ahead() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("ahead.kdbx");
+        std::fs::write(&vault, b"saved locally after the last upload").expect("write vault");
+
+        let mut config = fake_binding_for("a@example.invalid", vault.clone(), "item").config;
+
+        config.uploaded_local_revision = None;
+        assert!(
+            !AppState::local_is_ahead_of_the_cloud(&vault, &config),
+            "a config from before this field existed has nothing to compare"
+        );
+
+        config.uploaded_local_revision = Some(crate::sync::config::local_revision(
+            b"saved locally after the last upload",
+        ));
+        assert!(
+            !AppState::local_is_ahead_of_the_cloud(&vault, &config),
+            "what is on disk is what was sent"
+        );
+
+        std::fs::write(&vault, b"edited again, never sent").expect("write vault");
+        assert!(
+            AppState::local_is_ahead_of_the_cloud(&vault, &config),
+            "the file moved and the upload did not"
         );
     }
 
