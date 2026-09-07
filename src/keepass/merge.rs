@@ -1961,18 +1961,17 @@ fn force_group_winner(
     // reach that one too. Without this the fork ranked the move by
     // `location_changed`, which is exactly what a tie defeats, and the losing
     // side's placement went back on the next upload.
+    //
+    // The move itself is left to the fork rather than done here: the parent
+    // the user chose can be a group that only the other copy has, and the
+    // fork adds those before it looks at moves. Doing it here would have
+    // skipped exactly that case, silently, after the user had answered.
     let their_parent = source
         .group(source_id)
         .and_then(|group| group.parent().map(|parent| parent.id()));
     let our_parent = merged
         .group(group_id)
         .and_then(|group| group.parent().map(|parent| parent.id()));
-    if matches!(winner, Side::Remote)
-        && our_parent != their_parent
-        && let Some(target) = their_parent.filter(|id| merged.group(*id).is_some())
-    {
-        move_group(merged, group_id, target);
-    }
     let moved_time = resolution_time([
         merged
             .group(group_id)
@@ -1989,16 +1988,23 @@ fn force_group_winner(
             .group(source_id)
             .and_then(|group| group.times.last_modification),
     ]);
+    // The two clocks point in opposite directions when the remote placement
+    // wins: the content stays ours, because it was written into this copy
+    // above, while the move has to be one the fork performs.
+    let (our_move, their_move) = match winner {
+        Side::Local => (moved_time, Times::epoch()),
+        Side::Remote => (Times::epoch(), moved_time),
+    };
     if let Some(mut group) = merged.group_mut(group_id) {
         group.times.last_modification = Some(winner_time);
         if our_parent != their_parent {
-            group.times.location_changed = Some(moved_time);
+            group.times.location_changed = Some(our_move);
         }
     }
     if let Some(mut group) = source.group_mut(source_id) {
         group.times.last_modification = Some(Times::epoch());
         if our_parent != their_parent {
-            group.times.location_changed = Some(Times::epoch());
+            group.times.location_changed = Some(their_move);
         }
     }
     Ok(())
@@ -4436,6 +4442,45 @@ mod tests {
                 .id(),
             there,
             "choosing theirs has to put it where they put it"
+        );
+
+        // The parent they chose can be a group only they have. The fork adds
+        // those before it looks at moves, so the answer still lands.
+        let mut local = fork(&base);
+        local
+            .group_mut(moved)
+            .unwrap()
+            .track_changes()
+            .move_to(here)
+            .unwrap();
+        local.group_mut(moved).unwrap().times.location_changed = Some(tied);
+        let mut remote = fork(&base);
+        let theirs_only = remote.root_mut().add_group().id();
+        remote.group_mut(theirs_only).unwrap().name = "Only there".into();
+        remote
+            .group_mut(moved)
+            .unwrap()
+            .track_changes()
+            .move_to(theirs_only)
+            .unwrap();
+        remote.group_mut(moved).unwrap().times.location_changed = Some(tied);
+
+        let report = diff(&local, &remote);
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::from([(moved.to_string(), Side::Remote)]),
+            metadata: None,
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(
+            merged
+                .group(moved)
+                .expect("the group")
+                .parent()
+                .expect("it has a parent")
+                .id(),
+            theirs_only,
+            "even into a group this copy had never seen"
         );
     }
 
