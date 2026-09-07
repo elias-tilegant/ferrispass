@@ -18,6 +18,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -523,34 +524,15 @@ pub fn upload_after_save(
     }
 }
 
-/// Force-push local bytes ignoring the etag - used by Conflict-resolve
-/// "Keep local" path, and by manual override flows. Returns the new etag
-/// so the caller can update SyncConfig.
-pub fn force_upload(
-    config: &SyncConfig,
-    token: &AccessToken,
-    local_bytes: &Arc<Vec<u8>>,
-) -> Result<DriveItem, ServiceError> {
-    if config.provider == SyncProvider::ICloudDrive {
-        return Err(ServiceError::ICloud(ICloudError::Coordination(
-            "iCloud conflict publication must retain its revision guard".into(),
-        )));
-    }
-    match graph::upload_content(
-        &config.drive_id,
-        &config.item_id,
-        local_bytes,
-        None, // no If-Match → always wins
-        token,
-    )? {
-        UploadOutcome::Ok { item, .. } => Ok(item),
-        UploadOutcome::Conflict => {
-            // Without If-Match, Graph shouldn't ever return 412. If it does,
-            // surface as a generic graph error.
-            Err(ServiceError::Graph(GraphError::Status {
-                status: 412,
-                body: "force upload returned 412 unexpectedly".into(),
-            }))
+impl ServiceError {
+    /// How long the provider asked us to wait, if this failure was a throttle.
+    /// `Some(None)` would be ambiguous, so an unparsable or absent
+    /// `Retry-After` still returns `Some` with the caller's own backoff left
+    /// to fill in.
+    pub fn throttle_retry_after(&self) -> Option<Option<Duration>> {
+        match self {
+            ServiceError::Graph(GraphError::Throttled { retry_after }) => Some(*retry_after),
+            _ => None,
         }
     }
 }

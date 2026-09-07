@@ -10,6 +10,7 @@
 use serde::Deserialize;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use ureq::Error as UreqError;
 
@@ -48,6 +49,12 @@ pub enum GraphError {
     Network(String),
     #[error("graph returned HTTP {status}: {body}")]
     Status { status: u16, body: String },
+    /// Graph asked us to slow down (429, or 503 with a `Retry-After`).
+    /// Distinct from `Status` because the recovery is "wait", not "report":
+    /// the auto-sync tick used to re-upload the whole vault on every tick
+    /// while throttled, which extends the throttle window it is reacting to.
+    #[error("graph is throttling this client")]
+    Throttled { retry_after: Option<Duration> },
     #[error("could not parse graph response: {0}")]
     Parse(String),
     #[error("vault exceeds Microsoft Graph's 250 MB content limit")]
@@ -355,6 +362,15 @@ async fn reqwest_success(response: reqwest::Response) -> Result<reqwest::Respons
         return Ok(response);
     }
     let status = response.status().as_u16();
+    let retry_after = retry_after_seconds(
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+    );
+    if is_throttle_status(status) {
+        return Err(GraphError::Throttled { retry_after });
+    }
     let body = read_reqwest_text_truncated(response, MAX_ERROR_BODY_BYTES)
         .await
         .unwrap_or_else(|error| format!("could not read error response: {error}"));
@@ -486,12 +502,29 @@ fn parse_json<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, GraphError>
 fn map_ureq_error(e: UreqError) -> GraphError {
     match e {
         UreqError::Status(status, resp) => {
+            let retry_after = retry_after_seconds(resp.header("Retry-After"));
+            if is_throttle_status(status) {
+                return GraphError::Throttled { retry_after };
+            }
             let body = read_truncated_text(resp.into_reader(), MAX_ERROR_BODY_BYTES)
                 .unwrap_or_else(|error| format!("could not read error response: {error}"));
             GraphError::Status { status, body }
         }
         UreqError::Transport(t) => GraphError::Network(t.to_string()),
     }
+}
+
+/// 429 is always a throttle. 503 is only one when the server says how long to
+/// wait; without that header it is an ordinary outage and belongs in `Status`.
+fn is_throttle_status(status: u16) -> bool {
+    status == 429 || status == 503
+}
+
+/// `Retry-After` in delta-seconds form, which is what Graph sends. The HTTP
+/// date form is accepted by the spec but not by Graph, and guessing at a
+/// parse failure is worse than falling back to our own backoff.
+fn retry_after_seconds(header: Option<&str>) -> Option<Duration> {
+    header?.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 #[cfg(test)]
@@ -772,6 +805,40 @@ impl SearchQueryResponse {
 
 #[cfg(test)]
 mod tests {
+    use super::{is_throttle_status, retry_after_seconds};
+    use std::time::Duration;
+
+    /// Graph sends `Retry-After` in delta-seconds. Anything else (the HTTP
+    /// date form, junk) must fall through to our own backoff rather than
+    /// being guessed at.
+    #[test]
+    fn retry_after_reads_delta_seconds_and_ignores_anything_else() {
+        assert_eq!(
+            retry_after_seconds(Some("30")),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            retry_after_seconds(Some("  30 ")),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            retry_after_seconds(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(retry_after_seconds(Some("")), None);
+        assert_eq!(retry_after_seconds(None), None);
+    }
+
+    /// 429 and 503 mean "wait"; every other failure means "report".
+    #[test]
+    fn only_throttle_statuses_are_throttles() {
+        assert!(is_throttle_status(429));
+        assert!(is_throttle_status(503));
+        for status in [400, 401, 404, 409, 412, 500, 502] {
+            assert!(!is_throttle_status(status), "{status} is not a throttle");
+        }
+    }
+
     use super::*;
     use std::io::{Cursor, Read};
 
