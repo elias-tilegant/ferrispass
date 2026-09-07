@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 /// Tag we use to mark favourites. Compared case-insensitively on read so
 /// vaults that already use "favorite" / "FAVORITE" / etc. just work.
@@ -942,7 +943,10 @@ pub(crate) fn enforce_history_limits(db: &mut Database) {
 pub struct EntryDraft {
     pub title: String,
     pub username: String,
-    pub password: String,
+    /// Wiped when the draft is dropped. The editor rebuilds a draft on every
+    /// keystroke that changes the fingerprint, so a plain `String` left one
+    /// dead copy of the password per edit for the allocator to reuse.
+    pub password: Zeroizing<String>,
     pub url: String,
     pub notes: String,
     pub tags: Vec<String>,
@@ -958,6 +962,17 @@ pub struct EntryDraft {
     /// the saved database.
     pub custom_fields: Vec<CustomField>,
 }
+
+/// The password must stay in a zeroizing container. A plain `String`
+/// compiles just as well, and the editor rebuilds a draft on every keystroke
+/// that changes the fingerprint, so it would leave one dead copy of the
+/// password per edit behind for the allocator to hand out again. Checked at
+/// compile time because that is the only place the difference is visible:
+/// reading the freed buffer to prove the wipe is undefined behaviour.
+const _: fn(&EntryDraft) = |draft| {
+    fn wipes_on_drop(_: &Zeroizing<String>) {}
+    wipes_on_drop(&draft.password);
+};
 
 impl fmt::Debug for EntryDraft {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -995,7 +1010,7 @@ where
         // Clear by writing empty protected value.
         entry.set_protected(fields::PASSWORD, "");
     } else {
-        entry.set_protected(fields::PASSWORD, draft.password.clone());
+        entry.set_protected(fields::PASSWORD, draft.password.as_str());
     }
     if draft.otp.trim().is_empty() {
         entry.set_protected(fields::OTP, "");
@@ -2027,7 +2042,7 @@ mod tests {
         let draft = EntryDraft {
             title: sentinels[0].into(),
             username: sentinels[1].into(),
-            password: sentinels[2].into(),
+            password: Zeroizing::new(sentinels[2].to_string()),
             url: sentinels[3].into(),
             notes: sentinels[4].into(),
             tags: vec![sentinels[5].into()],
@@ -2470,7 +2485,7 @@ mod tests {
         let draft = EntryDraft {
             title: "GitHub".to_string(),
             username: "alice".to_string(),
-            password: "S3cret!".to_string(),
+            password: Zeroizing::new("S3cret!".to_string()),
             url: "github.com".to_string(),
             notes: "Personal account".to_string(),
             tags: vec!["Work".to_string(), "2FA".to_string()],
@@ -2510,7 +2525,7 @@ mod tests {
                 &root_id,
                 &EntryDraft {
                     title: "Before".into(),
-                    password: "old-secret".into(),
+                    password: Zeroizing::new("old-secret".to_string()),
                     ..Default::default()
                 },
             )
@@ -2527,7 +2542,7 @@ mod tests {
             &id,
             &EntryDraft {
                 title: "After".into(),
-                password: "new-secret".into(),
+                password: Zeroizing::new("new-secret".to_string()),
                 ..Default::default()
             },
         )
@@ -3161,7 +3176,7 @@ mod tests {
                 &root_id,
                 &EntryDraft {
                     title: "Original".into(),
-                    password: "old".into(),
+                    password: Zeroizing::new("old".to_string()),
                     ..Default::default()
                 },
             )
@@ -3171,7 +3186,7 @@ mod tests {
             &id,
             &EntryDraft {
                 title: "Renamed".into(),
-                password: "new".into(),
+                password: Zeroizing::new("new".to_string()),
                 ..Default::default()
             },
         )
@@ -3479,7 +3494,7 @@ mod tests {
 
         let draft = EntryDraft {
             title: "SAP DEV".into(),
-            password: "hunter2".into(),
+            password: Zeroizing::new("hunter2".to_string()),
             custom_fields: vec![
                 CustomField {
                     key: "SAP_CONN".into(),
@@ -3634,7 +3649,7 @@ mod tests {
                 &EntryDraft {
                     title: "Boring".into(),
                     username: "alice".into(),
-                    password: "p".into(),
+                    password: Zeroizing::new("p".to_string()),
                     url: "u".into(),
                     notes: "n".into(),
                     ..Default::default()

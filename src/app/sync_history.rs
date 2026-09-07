@@ -156,7 +156,7 @@ mod tests {
             id: id.into(),
             title: title.into(),
             username: String::new(),
-            password: String::new(),
+            password: Default::default(),
             url: String::new(),
             notes: String::new(),
             modified: None,

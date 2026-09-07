@@ -1050,7 +1050,7 @@ impl EntryInput {
         Ok(EntryDraft {
             title: self.title,
             username: self.username,
-            password: self.password,
+            password: Zeroizing::new(self.password),
             url: self.url,
             notes: self.notes,
             tags: self.tags,
@@ -1093,7 +1093,7 @@ fn patched_draft(
     let mut d = EntryDraft {
         title: e.title.clone(),
         username: e.username.clone(),
-        password: doc.password_for_entry(id).unwrap_or_default(),
+        password: Zeroizing::new(doc.password_for_entry(id).unwrap_or_default()),
         url: e.url.clone(),
         notes: e.notes.clone(),
         tags: e.tags.clone(),

@@ -32,6 +32,8 @@ use keepass::db::{
     Times, Value, fields,
 };
 
+use zeroize::Zeroizing;
+
 use crate::domain::CustomField;
 use crate::keepass::repository::{
     STANDARD_FIELDS, collect_custom_fields, find_entry_id, find_group_id,
@@ -53,9 +55,11 @@ pub struct EntryView {
     pub id: String,
     pub title: String,
     pub username: String,
-    /// Cleartext. Only ever rendered through `FieldDiff` (which redacts) or
-    /// in the entry detail view after explicit reveal.
-    pub password: String,
+    /// Cleartext, and wiped when the view is dropped. A conflict report holds
+    /// two of these per diverged entry for as long as the overlay is open, so
+    /// leaving the buffer behind for the allocator to hand out was the one
+    /// long-lived copy of the password outside the database itself.
+    pub password: Zeroizing<String>,
     pub url: String,
     pub notes: String,
     pub modified: Option<NaiveDateTime>,
@@ -76,6 +80,13 @@ pub struct EntryView {
     pub background_color: Option<Color>,
     pub override_url: Option<String>,
 }
+
+/// Same rule as `EntryDraft::password`: a conflict report holds two of these
+/// per diverged entry for as long as the overlay is open.
+const _: fn(&EntryView) = |view| {
+    fn wipes_on_drop(_: &Zeroizing<String>) {}
+    wipes_on_drop(&view.password);
+};
 
 impl fmt::Debug for EntryView {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1096,7 +1107,7 @@ fn entry_to_snapshot(e: &EntryRef<'_>) -> EntrySnapshot {
             id: e.id().to_string(),
             title: e.get(fields::TITLE).unwrap_or("").to_string(),
             username: e.get(fields::USERNAME).unwrap_or("").to_string(),
-            password: e.get(fields::PASSWORD).unwrap_or("").to_string(),
+            password: Zeroizing::new(e.get(fields::PASSWORD).unwrap_or("").to_string()),
             url: e.get(fields::URL).unwrap_or("").to_string(),
             notes: e.get(fields::NOTES).unwrap_or("").to_string(),
             modified: e.times.last_modification,

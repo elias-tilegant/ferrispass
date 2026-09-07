@@ -12,8 +12,8 @@ pub use recents::{RecentEntry, RecentsError};
 pub use settings::AppSettings;
 pub use state::{
     AppState, BiometricAttempt, BiometricLaunch, ConflictState, ConnectFlow, CopyValueKind,
-    FaviconDownloadStatus, LibrarySelection, Overlay, SaveStatus, SyncBinding, SyncStatus,
-    SyncTone, UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary,
+    FaviconDownloadStatus, LibrarySelection, Overlay, SaveStatus, SyncActivity, SyncBinding,
+    SyncStatus, SyncTone, UnlockPrompt, VaultBrowserModel, VaultStatus, VaultSummary,
 };
 pub use sync_history::{SyncChangeKind, SyncHistoryEntry};
 

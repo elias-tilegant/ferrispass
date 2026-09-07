@@ -587,7 +587,7 @@ pub enum SaveStatus {
 /// databases; a tick that only wants to ask "is this busy?" must not pay for
 /// them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SyncActivity {
+pub enum SyncActivity {
     /// An operation is running, or a conflict is waiting for the user.
     Busy,
     /// The last operation failed and the tick owns the retry.
@@ -599,7 +599,7 @@ enum SyncActivity {
 }
 
 impl SyncActivity {
-    fn of(status: &SyncStatus) -> Self {
+    pub(crate) fn of(status: &SyncStatus) -> Self {
         match status {
             SyncStatus::Syncing
             | SyncStatus::Connecting
@@ -2911,6 +2911,13 @@ impl AppState {
 
     pub fn sync_status(&self) -> &SyncStatus {
         &self.sync_status
+    }
+
+    /// What the active vault's sync is doing, as a `Copy` summary. Callers
+    /// that only need to branch use this instead of cloning `SyncStatus`,
+    /// whose `Conflict` variant owns two decrypted databases.
+    pub fn sync_activity(&self) -> SyncActivity {
+        SyncActivity::of(&self.sync_status)
     }
 
     pub fn sync_binding(&self) -> Option<&SyncBinding> {

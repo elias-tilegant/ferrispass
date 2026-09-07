@@ -1260,7 +1260,7 @@ impl AppShell {
         crate::keepass::EntryDraft {
             title: self.new_entry_title_input.read(cx).value().to_string(),
             username: self.new_entry_username_input.read(cx).value().to_string(),
-            password: self.new_entry_password_input.read(cx).value().to_string(),
+            password: Zeroizing::new(self.new_entry_password_input.read(cx).value().to_string()),
             url: self.new_entry_url_input.read(cx).value().to_string(),
             notes: self.new_entry_notes_input.read(cx).value().to_string(),
             tags: Vec::new(),
@@ -2203,21 +2203,20 @@ impl AppShell {
     }
 
     fn on_action_sync_now(&mut self, _: &SyncNow, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::app::SyncStatus;
+        use crate::app::SyncActivity;
 
-        let status = self.state.read(cx).sync_status().clone();
-        match status {
+        // The `Copy` summary, not a clone of the status: the branch below
+        // needs four cases, while cloning `SyncStatus` deep-copies two
+        // decrypted databases whenever a conflict is open.
+        match self.state.read(cx).sync_activity() {
             // Nothing to sync against - fall back to the Sync settings tab
             // so the user can connect or re-authenticate.
-            SyncStatus::Disconnected | SyncStatus::Reconnect { .. } => {
+            SyncActivity::Inactive => {
                 window.dispatch_action(Box::new(OpenSyncSettings), cx);
             }
             // Already in flight or awaiting user input - do nothing.
-            SyncStatus::Syncing
-            | SyncStatus::Connecting
-            | SyncStatus::Restoring
-            | SyncStatus::Conflict(_) => {}
-            SyncStatus::Idle | SyncStatus::Synced { .. } | SyncStatus::Failed(_) => {
+            SyncActivity::Busy => {}
+            SyncActivity::Resting | SyncActivity::Failed => {
                 self.state.update(cx, |state, cx| state.sync_now(cx));
             }
         }

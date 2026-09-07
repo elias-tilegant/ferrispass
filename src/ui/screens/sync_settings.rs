@@ -35,16 +35,11 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
     let state_handle = shell.state().clone();
     let snapshot = state_handle.read(cx);
     let binding = snapshot.sync_binding().cloned_for_render();
-    let status = snapshot.sync_status().clone();
+    let status = SyncStatusView::of(snapshot.sync_status());
     let history: Vec<SyncHistoryEntry> = snapshot.sync_history().to_vec();
 
     match sync_tab_mode(binding.is_some(), &status) {
-        SyncTabMode::Reconnect => {
-            let SyncStatus::Reconnect { detail } = &status else {
-                unreachable!("mode is derived from status")
-            };
-            render_reconnect(detail.as_deref(), cx)
-        }
+        SyncTabMode::Reconnect => render_reconnect(status.detail.as_deref(), cx),
         SyncTabMode::Connected => render_connected(
             binding.as_ref().expect("connected mode requires a binding"),
             &status,
@@ -57,6 +52,99 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
     }
 }
 
+/// Everything this tab renders about the sync status, taken before the
+/// `AppState` borrow ends.
+///
+/// The borrow is why the status used to be cloned here, and a `SyncStatus`
+/// clone deep-copies two decrypted databases in its `Conflict` variant, once
+/// per render of this tab. Nothing below needs those, only a label, a tone
+/// and a line of text.
+struct SyncStatusView {
+    kind: SyncStatusKind,
+    /// The status line under the provider name, already written for a person.
+    summary: String,
+    /// The failure or reconnect message, when there is one.
+    detail: Option<String>,
+}
+
+/// The `SyncStatus` variants, without their payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncStatusKind {
+    Idle,
+    Synced,
+    Syncing,
+    Failed,
+    Conflict,
+    Connecting,
+    Restoring,
+    Disconnected,
+    Reconnect,
+}
+
+impl SyncStatusView {
+    fn of(status: &SyncStatus) -> Self {
+        let kind = match status {
+            SyncStatus::Idle => SyncStatusKind::Idle,
+            SyncStatus::Synced { .. } => SyncStatusKind::Synced,
+            SyncStatus::Syncing => SyncStatusKind::Syncing,
+            SyncStatus::Failed(_) => SyncStatusKind::Failed,
+            SyncStatus::Conflict(_) => SyncStatusKind::Conflict,
+            SyncStatus::Connecting => SyncStatusKind::Connecting,
+            SyncStatus::Restoring => SyncStatusKind::Restoring,
+            SyncStatus::Disconnected => SyncStatusKind::Disconnected,
+            SyncStatus::Reconnect { .. } => SyncStatusKind::Reconnect,
+        };
+        let summary = match status {
+            SyncStatus::Synced { at, auto_merged } => {
+                let base = format!("Last synced at {}", at.format("%H:%M:%S"));
+                if *auto_merged > 0 {
+                    // Counts both fresh remote-only entries AND existing
+                    // entries where remote had a strictly newer
+                    // last_modification (the merge module auto-resolves
+                    // those). "merged" covers both cases; "pulled in N new
+                    // entries" was misleading after last-write-wins landed.
+                    let merged = plural(*auto_merged, "entry", "entries");
+                    format!("{base} · merged {merged} from remote")
+                } else {
+                    base
+                }
+            }
+            // The message is already written for a person: `note_sync_failure`
+            // classifies the error where the type is still available, so this
+            // does not have to guess from the text.
+            SyncStatus::Failed(message) => message.clone(),
+            SyncStatus::Syncing => "Syncing now…".into(),
+            SyncStatus::Connecting => "Connecting…".into(),
+            SyncStatus::Conflict(_) => "Awaiting conflict resolution".into(),
+            _ => "-".into(),
+        };
+        let detail = match status {
+            SyncStatus::Failed(message) => Some(message.clone()),
+            SyncStatus::Reconnect { detail } => detail.clone(),
+            _ => None,
+        };
+        Self {
+            kind,
+            summary,
+            detail,
+        }
+    }
+
+    fn chip(&self) -> (&'static str, ChipTone) {
+        match self.kind {
+            SyncStatusKind::Idle => ("Idle", ChipTone::Gray),
+            SyncStatusKind::Synced => ("Synced", ChipTone::Green),
+            SyncStatusKind::Syncing => ("Syncing", ChipTone::Blue),
+            SyncStatusKind::Failed => ("Failed", ChipTone::Orange),
+            SyncStatusKind::Conflict => ("Conflict", ChipTone::Orange),
+            SyncStatusKind::Connecting | SyncStatusKind::Restoring => {
+                ("Connecting", ChipTone::Blue)
+            }
+            SyncStatusKind::Disconnected | SyncStatusKind::Reconnect => ("Off", ChipTone::Gray),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SyncTabMode {
     Connected,
@@ -65,16 +153,16 @@ enum SyncTabMode {
     Disconnected,
 }
 
-fn sync_tab_mode(has_binding: bool, status: &SyncStatus) -> SyncTabMode {
-    match (has_binding, status) {
-        (_, SyncStatus::Reconnect { .. }) => SyncTabMode::Reconnect,
+fn sync_tab_mode(has_binding: bool, status: &SyncStatusView) -> SyncTabMode {
+    match (has_binding, status.kind) {
+        (_, SyncStatusKind::Reconnect) => SyncTabMode::Reconnect,
         (true, _) => SyncTabMode::Connected,
         // A restore starts only after the per-vault config was loaded from
         // disk. Until token refresh succeeds there is deliberately no live
         // SyncBinding yet, so treating this as "local-only" is misleading.
         // A binding-less failure is the corresponding failed restore and
         // should retain that context instead of offering a fresh Connect.
-        (false, SyncStatus::Restoring | SyncStatus::Failed(_)) => SyncTabMode::Restoring,
+        (false, SyncStatusKind::Restoring | SyncStatusKind::Failed) => SyncTabMode::Restoring,
         (false, _) => SyncTabMode::Disconnected,
     }
 }
@@ -83,7 +171,7 @@ fn sync_tab_mode(has_binding: bool, status: &SyncStatus) -> SyncTabMode {
 
 fn render_connected(
     binding: &BindingSnapshot,
-    status: &SyncStatus,
+    status: &SyncStatusView,
     history: &[SyncHistoryEntry],
     disconnect_armed: bool,
     cx: &mut Context<AppShell>,
@@ -92,39 +180,9 @@ fn render_connected(
         crate::sync::config::SyncProvider::SharePoint => "SharePoint",
         crate::sync::config::SyncProvider::ICloudDrive => "iCloud Drive",
     };
-    let status_chip = match status {
-        SyncStatus::Idle => chip("Idle", ChipTone::Gray),
-        SyncStatus::Synced { .. } => chip("Synced", ChipTone::Green),
-        SyncStatus::Syncing => chip("Syncing", ChipTone::Blue),
-        SyncStatus::Failed(_) => chip("Failed", ChipTone::Orange),
-        SyncStatus::Conflict(_) => chip("Conflict", ChipTone::Orange),
-        SyncStatus::Connecting | SyncStatus::Restoring => chip("Connecting", ChipTone::Blue),
-        SyncStatus::Disconnected | SyncStatus::Reconnect { .. } => chip("Off", ChipTone::Gray),
-    };
-    let last_sync = match status {
-        SyncStatus::Synced { at, auto_merged } => {
-            let base = format!("Last synced at {}", at.format("%H:%M:%S"));
-            if *auto_merged > 0 {
-                // Counts both fresh remote-only entries AND existing entries
-                // where remote had a strictly newer last_modification (the
-                // merge module auto-resolves those). "merged" covers both
-                // cases - "pulled in N new entries" was misleading after
-                // last-write-wins landed.
-                let merged = plural(*auto_merged, "entry", "entries");
-                format!("{base} · merged {merged} from remote")
-            } else {
-                base
-            }
-        }
-        // The message is already written for a person: `note_sync_failure`
-        // classifies the error where the type is still available, so this does
-        // not have to guess from the text.
-        SyncStatus::Failed(message) => message.clone(),
-        SyncStatus::Syncing => "Syncing now…".into(),
-        SyncStatus::Connecting => "Connecting…".into(),
-        SyncStatus::Conflict(_) => "Awaiting conflict resolution".into(),
-        _ => "-".into(),
-    };
+    let (chip_label, chip_tone) = status.chip();
+    let status_chip = chip(chip_label, chip_tone);
+    let last_sync = status.summary.clone();
 
     v_flex()
         .gap_4()
@@ -471,11 +529,12 @@ fn render_disconnected(cx: &mut Context<AppShell>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_restore(status: &SyncStatus, cx: &mut Context<AppShell>) -> AnyElement {
-    let (title, detail, tone) = match status {
-        SyncStatus::Failed(message) => (
+fn render_restore(status: &SyncStatusView, cx: &mut Context<AppShell>) -> AnyElement {
+    let failed = status.kind == SyncStatusKind::Failed;
+    let (title, detail, tone) = match status.detail.as_deref() {
+        Some(message) if failed => (
             "Cloud sync could not be restored",
-            message.as_str(),
+            message,
             ChipTone::Orange,
         ),
         _ => (
@@ -488,7 +547,7 @@ fn render_restore(status: &SyncStatus, cx: &mut Context<AppShell>) -> AnyElement
     // A failed restore has no binding, so "Sync now" never appears and
     // nothing retries on its own - without this button the only way out
     // of a transient network blip at unlock is relocking the vault.
-    let retry_button = matches!(status, SyncStatus::Failed(_)).then(|| {
+    let retry_button = failed.then(|| {
         div()
             .id("sync-restore-retry")
             .h(px(28.))
@@ -531,14 +590,7 @@ fn render_restore(status: &SyncStatus, cx: &mut Context<AppShell>) -> AnyElement
                 .items_center()
                 .gap_2()
                 .child(div().text_sm().text_color(palette::text()).child(title))
-                .child(chip(
-                    if matches!(status, SyncStatus::Failed(_)) {
-                        "Failed"
-                    } else {
-                        "Connecting"
-                    },
-                    tone,
-                )),
+                .child(chip(if failed { "Failed" } else { "Connecting" }, tone)),
         )
         .child(
             div()
@@ -782,7 +834,7 @@ mod tests {
     #[test]
     fn bindingless_restore_is_not_rendered_as_disconnected() {
         assert_eq!(
-            sync_tab_mode(false, &SyncStatus::Restoring),
+            sync_tab_mode(false, &SyncStatusView::of(&SyncStatus::Restoring)),
             SyncTabMode::Restoring
         );
     }
@@ -790,7 +842,10 @@ mod tests {
     #[test]
     fn bindingless_restore_failure_keeps_restore_context() {
         assert_eq!(
-            sync_tab_mode(false, &SyncStatus::Failed("keychain unavailable".into())),
+            sync_tab_mode(
+                false,
+                &SyncStatusView::of(&SyncStatus::Failed("keychain unavailable".into()))
+            ),
             SyncTabMode::Restoring
         );
     }
@@ -798,7 +853,7 @@ mod tests {
     #[test]
     fn genuinely_disconnected_vault_stays_disconnected() {
         assert_eq!(
-            sync_tab_mode(false, &SyncStatus::Disconnected),
+            sync_tab_mode(false, &SyncStatusView::of(&SyncStatus::Disconnected)),
             SyncTabMode::Disconnected
         );
     }
@@ -806,7 +861,10 @@ mod tests {
     #[test]
     fn live_binding_takes_precedence_over_failed_status() {
         assert_eq!(
-            sync_tab_mode(true, &SyncStatus::Failed("upload failed".into())),
+            sync_tab_mode(
+                true,
+                &SyncStatusView::of(&SyncStatus::Failed("upload failed".into()))
+            ),
             SyncTabMode::Connected
         );
     }

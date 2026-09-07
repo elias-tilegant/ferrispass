@@ -627,7 +627,7 @@ mod tests {
             id: "entry-id".into(),
             title: "Example".into(),
             username: "alice".into(),
-            password: password.into(),
+            password: zeroize::Zeroizing::new(password.to_string()),
             url: String::new(),
             notes: String::new(),
             modified: None,
