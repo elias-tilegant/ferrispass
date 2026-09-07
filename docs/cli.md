@@ -137,26 +137,32 @@ ferrispass-cli --vault team.kdbx --format json sync now \
   --commit --plan-token 'v1:...'
 ```
 
-The plan reports two kinds of conflict: `conflicts` for entries and
+The plan reports three kinds of conflict: `conflicts` for entries,
 `group_conflicts` for groups whose name, notes, tags or settings diverged
-without a timestamp that can rank them. Pass exactly one choice for every
-reported UUID of either kind on stdin (or a dedicated `--input-fd`), naming
-`entry_id` or `group_id` to say which. Unknown, duplicate, missing and
-wrong-kind UUIDs fail closed. Only UUIDs, group names and differing field
-names appear in the plan; secret values are never emitted.
+without a timestamp that can rank them, and `metadata_conflict` for the
+database's own settings, which is one decision for the whole file and so has
+no UUID. Pass exactly one choice for every reported UUID on stdin (or a
+dedicated `--input-fd`), naming `entry_id` or `group_id` to say which, and a
+top-level `metadata` when the plan carries one. Unknown, duplicate, missing
+and wrong-kind UUIDs fail closed, as does an answer to a question the plan did
+not ask. Only UUIDs, group names, setting names and differing field names
+appear in the plan; secret values are never emitted.
 
 ```sh
 printf '%s' '{"resolutions":[
     {"entry_id":"UUID","keep":"remote"},
     {"group_id":"UUID","keep":"local"}
-  ]}' |
+  ],
+  "metadata":"local"}' |
   ferrispass-cli --vault team.kdbx --format json sync now \
     --commit --plan-token 'v1:...'
 ```
 
-A group conflict discards the losing side outright. KDBX archives entry
-versions, not group versions, so there is nothing to keep the other name in,
-which is why this is asked rather than decided.
+A group or settings conflict discards the losing side outright. KDBX archives
+entry versions, not group or metadata versions, so there is nothing to keep
+the other name in, which is why these are asked rather than decided. The
+settings choice covers only the fields no change time could rank; one the
+other copy demonstrably edited last is merged either way.
 
 Uploads retain the provider revision guard (SharePoint ETag or iCloud content
 revision). If the remote file changes between

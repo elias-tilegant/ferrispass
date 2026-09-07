@@ -42,6 +42,10 @@ pub enum SyncChangeKind {
     /// KDBX archives entry versions, not group versions. That makes the log
     /// line the only trace of the decision.
     GroupResolved,
+    /// The database's own settings diverged without a change time that could
+    /// rank the two sides. Same finality as `GroupResolved`: KDBX keeps no
+    /// history for the metadata block, so the discarded side is gone.
+    SettingsResolved,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -111,6 +115,18 @@ pub fn entries_from_report(
             at: now,
             kind: SyncChangeKind::GroupResolved,
             entry_title: format!("{} (kept {side})", conflict.name),
+        });
+    }
+
+    if report.metadata_conflict.is_some() {
+        let side = match picks.metadata.unwrap_or(Side::Local) {
+            Side::Local => "this Mac",
+            Side::Remote => "remote",
+        };
+        out.push(SyncHistoryEntry {
+            at: now,
+            kind: SyncChangeKind::SettingsResolved,
+            entry_title: format!("Database settings (kept {side})"),
         });
     }
 
@@ -324,6 +340,7 @@ mod tests {
         let picks = Resolutions {
             entries: std::collections::HashMap::new(),
             groups: std::collections::HashMap::from([("g1".to_string(), Side::Remote)]),
+            metadata: None,
         };
 
         let entries = entries_from_report(&report, &picks, fixed_now());
@@ -334,6 +351,32 @@ mod tests {
         assert_eq!(
             entries[1].entry_title, "Travel (kept this Mac)",
             "an unanswered group defaults to local, the way entries do"
+        );
+    }
+
+    /// Same finality as a group, one level up: KDBX archives no version of
+    /// the metadata block, so the side the user did not pick is gone and the
+    /// log line is the only record that a choice was made at all.
+    #[test]
+    fn resolved_database_settings_are_logged_with_the_side_that_won() {
+        let report = ConflictReport {
+            metadata_conflict: Some(crate::keepass::merge::MetadataConflict { fields: Vec::new() }),
+            ..Default::default()
+        };
+
+        let kept_remote = Resolutions {
+            metadata: Some(Side::Remote),
+            ..Default::default()
+        };
+        let entries = entries_from_report(&report, &kept_remote, fixed_now());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, SyncChangeKind::SettingsResolved);
+        assert_eq!(entries[0].entry_title, "Database settings (kept remote)");
+
+        let entries = entries_from_report(&report, &Resolutions::default(), fixed_now());
+        assert_eq!(
+            entries[0].entry_title, "Database settings (kept this Mac)",
+            "an unanswered choice defaults to local, the way the rest do"
         );
     }
 

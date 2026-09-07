@@ -5695,6 +5695,9 @@ impl AppState {
                 for conflict in &report.group_conflicts {
                     picks.groups.insert(conflict.id.clone(), Side::Local);
                 }
+                if report.metadata_conflict.is_some() {
+                    picks.metadata = Some(Side::Local);
+                }
                 let conflict = SyncStatus::Conflict(Box::new(ConflictState {
                     local_db,
                     remote_db,
@@ -5753,9 +5756,15 @@ impl AppState {
             return;
         };
         match kind {
-            ConflictKind::Entry => state.picks.entries.insert(id.to_string(), side),
-            ConflictKind::Group => state.picks.groups.insert(id.to_string(), side),
-        };
+            ConflictKind::Entry => {
+                state.picks.entries.insert(id.to_string(), side);
+            }
+            ConflictKind::Group => {
+                state.picks.groups.insert(id.to_string(), side);
+            }
+            // One per merge, so the id is ignored.
+            ConflictKind::Metadata => state.picks.metadata = Some(side),
+        }
         cx.notify();
     }
 
@@ -5770,6 +5779,9 @@ impl AppState {
         }
         for conflict in &state.report.group_conflicts {
             state.picks.groups.insert(conflict.id.clone(), side);
+        }
+        if state.report.metadata_conflict.is_some() {
+            state.picks.metadata = Some(side);
         }
         cx.notify();
     }

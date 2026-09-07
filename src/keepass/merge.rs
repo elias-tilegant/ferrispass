@@ -21,15 +21,16 @@
 //!   screen is screen-sharing-safe.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap, HashSet},
     fmt,
-    ops::Deref,
+    ops::{Deref, Not},
 };
 
 use chrono::NaiveDateTime;
 use keepass::db::{
-    AutoType, Color, CustomDataItem, Database, Entry, EntryId, EntryRef, GroupId, GroupRef, Icon,
-    MergeWarning, Times, Value, fields,
+    AutoType, Color, CustomDataItem, CustomDataValue, Database, Entry, EntryId, EntryRef, GroupId,
+    GroupRef, Icon, MemoryProtection, MergeWarning, Meta, Times, Value, fields,
 };
 
 use zeroize::Zeroizing;
@@ -130,7 +131,9 @@ struct AttachmentFingerprint {
 /// pre-redacted; for the rest they're the cleartext field values.
 #[derive(Clone, PartialEq, Eq)]
 pub struct FieldDiff {
-    pub label: &'static str,
+    /// Owned where it has to be: a custom data key is part of the row's
+    /// identity and is not known at compile time.
+    pub label: Cow<'static, str>,
     pub local: String,
     pub remote: String,
     pub differs: bool,
@@ -176,6 +179,17 @@ pub struct GroupConflict {
     pub fields: Vec<FieldDiff>,
 }
 
+/// The database's own settings, when the two copies disagree and no change
+/// time can rank them.
+///
+/// There is one of these per merge, not one per object, so it has no id. Like
+/// a group it has no history to fall back on: whichever side is not chosen is
+/// gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetadataConflict {
+    pub fields: Vec<FieldDiff>,
+}
+
 /// The user's choices, by kind.
 ///
 /// Two maps rather than one: entry and group ids are independent id spaces,
@@ -184,6 +198,7 @@ pub struct GroupConflict {
 pub struct Resolutions {
     pub entries: HashMap<String, Side>,
     pub groups: HashMap<String, Side>,
+    pub metadata: Option<Side>,
 }
 
 impl Resolutions {
@@ -191,6 +206,7 @@ impl Resolutions {
         Self {
             entries,
             groups: HashMap::new(),
+            metadata: None,
         }
     }
 }
@@ -243,6 +259,9 @@ pub struct ConflictReport {
     /// Groups the user must decide, for the same reason entries reach
     /// `conflicts`: their content diverged and no timestamp can rank them.
     pub group_conflicts: Vec<GroupConflict>,
+    /// The database's own settings, when they diverged and no change time can
+    /// rank them. Set at most once per merge.
+    pub metadata_conflict: Option<MetadataConflict>,
 }
 
 impl ConflictReport {
@@ -269,7 +288,9 @@ impl ConflictReport {
     /// either kind takes the default side and uploads it, which is the
     /// silent loss the conflict screen exists to prevent.
     pub fn needs_a_decision(&self) -> bool {
-        !self.conflicts.is_empty() || !self.group_conflicts.is_empty()
+        !self.conflicts.is_empty()
+            || !self.group_conflicts.is_empty()
+            || self.metadata_conflict.is_some()
     }
 
     /// True when applying this report changes the *remote* - i.e. the local
@@ -305,6 +326,8 @@ pub enum Side {
 pub enum ConflictKind {
     Entry,
     Group,
+    /// The database's own settings. There is one of these, so it needs no id.
+    Metadata,
 }
 
 /// A merge was refused because it could not be completed without either data
@@ -375,6 +398,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
     }
 
     let group_conflicts = group_conflicts(local, remote);
+    let metadata_conflict = metadata_conflict(local, remote);
     let history = history_divergence(local, remote);
 
     let mut local_only: Vec<EntryView> = local_ids
@@ -406,11 +430,40 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         local_history_ahead: history.local_ahead,
         remote_history_ahead: history.remote_ahead,
         group_conflicts,
+        metadata_conflict,
     }
 }
 
+/// The database's own settings when the two copies disagree and no change
+/// time can rank them.
+///
+/// Every field here is a scalar with no history, so a tie cannot be merged:
+/// one of the two values is going to be gone whatever happens. Keeping this
+/// copy's silently was the old behaviour, and the next upload then wrote it
+/// over theirs. Asking is the only outcome that loses nothing on its own.
+fn metadata_conflict(local: &Database, remote: &Database) -> Option<MetadataConflict> {
+    // Per field, not per block. A description edited here does not make our
+    // history limit newer than theirs, and asking the wrong clock is how a
+    // tied name got uploaded over the other side on the strength of an
+    // unrelated edit.
+    let fields: Vec<FieldDiff> = meta_divergences(local, remote)
+        .into_iter()
+        .filter(|divergence| divergence.winner.is_none())
+        .map(|divergence| FieldDiff {
+            differs: true,
+            label: divergence.label,
+            local: divergence.local,
+            remote: divergence.remote,
+        })
+        .collect();
+    fields
+        .is_empty()
+        .not()
+        .then_some(MetadataConflict { fields })
+}
+
 fn structural_state_differs(local: &Database, remote: &Database) -> bool {
-    if local.deleted_objects != remote.deleted_objects || meta_local_is_newer(local, remote) {
+    if local.deleted_objects != remote.deleted_objects || meta_local_contributes(local, remote) {
         return true;
     }
 
@@ -489,69 +542,286 @@ fn expiry_equivalent(local: &Times, remote: &Times) -> bool {
     in_force(local) == in_force(remote)
 }
 
-/// Database-level settings a person set, as opposed to the ones a client
-/// rewrites on its own.
+/// One database setting the two copies disagree about, paired with the change
+/// time that decides it.
 ///
-/// The merge takes each of these from whichever side changed it last, so a
-/// difference here means the merged result differs from at least one side and
-/// has to be written back. Direction is not attributed, in keeping with the
-/// rest of `structural_state_differs`: a redundant remote version costs one
-/// upload, a skipped one strands the user's rename.
+/// The pairing is the whole point. KDBX dates some of these fields
+/// individually, leaves the rest to `SettingsChanged`, and dates each custom
+/// data item on its own, and the merge follows exactly that. Asking any other
+/// clock answers a question the merge is not asking: a description edited
+/// here does not make our database name newer than theirs.
+struct MetaDivergence {
+    field: MetaField,
+    label: Cow<'static, str>,
+    local: String,
+    remote: String,
+    /// The side the merge takes this from, or `None` when nothing here can
+    /// rank the two and the choice is the user's.
+    winner: Option<Side>,
+}
+
+/// What the merge decides in one go. Several rows share `Settings`: KDBX
+/// gives those fields no change time of their own, so they move together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MetaField {
+    Name,
+    Description,
+    DefaultUsername,
+    RecycleBin,
+    EntryTemplatesGroup,
+    Settings,
+    CustomData(String),
+}
+
+/// Every database setting the two copies disagree about, with the side the
+/// merge will take it from.
 ///
 /// `generator` is excluded because every client writes its own name into it,
 /// and `last_selected_group` and `last_top_visible_group` because they follow
-/// the cursor. Comparing those would demand an upload after every sync.
+/// the cursor: comparing those would demand an upload after every sync.
 /// `master_key_changed` describes the key the file is encrypted with, which
 /// both copies share.
-fn meta_local_is_newer(local: &Database, remote: &Database) -> bool {
-    if !meta_content_differs(local, remote) {
-        return false;
+fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> {
+    // Strictly newer wins, and a side that dates its change against one that
+    // does not is the side that recorded making it. Same rule as the fork's
+    // settings merge, so the winner named here is the value that merge keeps.
+    fn rank(ours: Option<NaiveDateTime>, theirs: Option<NaiveDateTime>) -> Option<Side> {
+        match (ours, theirs) {
+            (Some(ours), Some(theirs)) if ours > theirs => Some(Side::Local),
+            (Some(ours), Some(theirs)) if theirs > ours => Some(Side::Remote),
+            (Some(_), None) => Some(Side::Local),
+            (None, Some(_)) => Some(Side::Remote),
+            _ => None,
+        }
     }
-    // A difference is not enough. The merge takes each field from whichever
-    // side changed it last and keeps ours on a tie, so reporting every
-    // difference as ours to upload wrote our tied value over theirs and their
-    // edit was gone. Only a field we can show is newer here is ours to send;
-    // on a tie the two copies simply disagree until somebody edits one, which
-    // loses nothing.
-    let (a, b) = (&local.meta, &remote.meta);
-    let ours_is_newer =
-        |ours: Option<NaiveDateTime>, theirs: Option<NaiveDateTime>| match (ours, theirs) {
-            (Some(ours), Some(theirs)) => ours > theirs,
-            (Some(_), None) => true,
-            _ => false,
+    fn text(value: Option<&String>) -> String {
+        value.cloned().unwrap_or_default()
+    }
+    fn number<T: fmt::Display>(value: Option<T>) -> String {
+        value.map(|value| value.to_string()).unwrap_or_default()
+    }
+    fn group_name(database: &Database, id: Option<uuid::Uuid>) -> String {
+        let Some(id) = id.filter(|id| !id.is_nil()) else {
+            return "None".into();
         };
-    ours_is_newer(a.database_name_changed, b.database_name_changed)
-        || ours_is_newer(
-            a.database_description_changed,
-            b.database_description_changed,
+        database
+            .iter_all_groups()
+            .find(|group| group.id().uuid() == id)
+            .map_or_else(|| id.to_string(), |group| group.name.clone())
+    }
+    fn recycle_bin(database: &Database) -> String {
+        if !database.meta.recyclebin_enabled.unwrap_or(false) {
+            return "Off".into();
+        }
+        format!(
+            "On ({})",
+            group_name(database, database.meta.recyclebin_uuid)
         )
-        || ours_is_newer(a.default_username_changed, b.default_username_changed)
-        || ours_is_newer(a.recyclebin_changed, b.recyclebin_changed)
-        || ours_is_newer(
-            a.entry_templates_group_changed,
-            b.entry_templates_group_changed,
-        )
-        || ours_is_newer(a.settings_changed, b.settings_changed)
+    }
+    fn protected_fields(protection: Option<&MemoryProtection>) -> String {
+        let Some(protection) = protection else {
+            return String::new();
+        };
+        [
+            (protection.protect_title, "Title"),
+            (protection.protect_username, "Username"),
+            (protection.protect_password, "Password"),
+            (protection.protect_url, "URL"),
+            (protection.protect_notes, "Notes"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect::<Vec<_>>()
+        .join(", ")
+    }
+
+    let (a, b) = (&local.meta, &remote.meta);
+    let mut out = Vec::new();
+    let mut push =
+        |field: MetaField, label: Cow<'static, str>, differs: bool, values: (String, String)| {
+            if differs {
+                out.push(MetaDivergence {
+                    field,
+                    label,
+                    local: values.0,
+                    remote: values.1,
+                    winner: None,
+                });
+            }
+        };
+
+    push(
+        MetaField::Name,
+        "Database name".into(),
+        a.database_name != b.database_name,
+        (
+            text(a.database_name.as_ref()),
+            text(b.database_name.as_ref()),
+        ),
+    );
+    push(
+        MetaField::Description,
+        "Description".into(),
+        a.database_description != b.database_description,
+        (
+            text(a.database_description.as_ref()),
+            text(b.database_description.as_ref()),
+        ),
+    );
+    push(
+        MetaField::DefaultUsername,
+        "Default username".into(),
+        a.default_username != b.default_username,
+        (
+            text(a.default_username.as_ref()),
+            text(b.default_username.as_ref()),
+        ),
+    );
+    // Both values move on one clock, and the uuid alone can differ: two
+    // copies can each have made their own bin. The rendered name would hide
+    // that, so the comparison stays on the raw pair.
+    push(
+        MetaField::RecycleBin,
+        "Recycle bin".into(),
+        a.recyclebin_enabled != b.recyclebin_enabled || a.recyclebin_uuid != b.recyclebin_uuid,
+        (recycle_bin(local), recycle_bin(remote)),
+    );
+    push(
+        MetaField::EntryTemplatesGroup,
+        "Entry templates group".into(),
+        a.entry_templates_group != b.entry_templates_group,
+        (
+            group_name(local, a.entry_templates_group),
+            group_name(remote, b.entry_templates_group),
+        ),
+    );
+    push(
+        MetaField::Settings,
+        "History entries kept".into(),
+        a.history_max_items != b.history_max_items,
+        (number(a.history_max_items), number(b.history_max_items)),
+    );
+    push(
+        MetaField::Settings,
+        "History size kept".into(),
+        a.history_max_size != b.history_max_size,
+        (number(a.history_max_size), number(b.history_max_size)),
+    );
+    push(
+        MetaField::Settings,
+        "Colour".into(),
+        a.color != b.color,
+        (
+            number(a.color.as_ref().map(Color::to_string)),
+            number(b.color.as_ref().map(Color::to_string)),
+        ),
+    );
+    push(
+        MetaField::Settings,
+        "Days of history kept".into(),
+        a.maintenance_history_days != b.maintenance_history_days,
+        (
+            number(a.maintenance_history_days),
+            number(b.maintenance_history_days),
+        ),
+    );
+    push(
+        MetaField::Settings,
+        "Protected fields".into(),
+        a.memory_protection != b.memory_protection,
+        (
+            protected_fields(a.memory_protection.as_ref()),
+            protected_fields(b.memory_protection.as_ref()),
+        ),
+    );
+    push(
+        MetaField::Settings,
+        "Key change reminder".into(),
+        a.master_key_change_rec != b.master_key_change_rec,
+        (
+            number(a.master_key_change_rec),
+            number(b.master_key_change_rec),
+        ),
+    );
+    push(
+        MetaField::Settings,
+        "Key change enforcement".into(),
+        a.master_key_change_force != b.master_key_change_force,
+        (
+            number(a.master_key_change_force),
+            number(b.master_key_change_force),
+        ),
+    );
+
+    let (ours, theirs) = (user_custom_data(a), user_custom_data(b));
+    let mut keys: Vec<&String> = ours.keys().chain(theirs.keys()).copied().collect();
+    keys.sort_unstable();
+    keys.dedup();
+    for key in keys {
+        let (ours, theirs) = (ours.get(key), theirs.get(key));
+        push(
+            MetaField::CustomData(key.clone()),
+            format!("Plugin data \"{key}\"").into(),
+            ours.map(|item| &item.value) != theirs.map(|item| &item.value),
+            (custom_data_value(ours), custom_data_value(theirs)),
+        );
+    }
+
+    // The winners in one pass at the end, so every row states the clock it
+    // was decided on right next to the values it decides between.
+    for divergence in &mut out {
+        divergence.winner = match &divergence.field {
+            MetaField::Name => rank(a.database_name_changed, b.database_name_changed),
+            MetaField::Description => rank(
+                a.database_description_changed,
+                b.database_description_changed,
+            ),
+            MetaField::DefaultUsername => {
+                rank(a.default_username_changed, b.default_username_changed)
+            }
+            MetaField::RecycleBin => rank(a.recyclebin_changed, b.recyclebin_changed),
+            MetaField::EntryTemplatesGroup => rank(
+                a.entry_templates_group_changed,
+                b.entry_templates_group_changed,
+            ),
+            MetaField::Settings => rank(a.settings_changed, b.settings_changed),
+            // A key only one side has is not a disagreement about a value.
+            // The merge unions custom data, so that side simply keeps it.
+            MetaField::CustomData(key) => match (ours.get(key), theirs.get(key)) {
+                (Some(_), None) => Some(Side::Local),
+                (None, Some(_)) => Some(Side::Remote),
+                (ours, theirs) => rank(
+                    ours.and_then(|item| item.last_modification_time),
+                    theirs.and_then(|item| item.last_modification_time),
+                ),
+            },
+        };
+    }
+    out
 }
 
-/// Whether the two copies say anything different about their settings at all,
-/// regardless of which is newer.
-fn meta_content_differs(local: &Database, remote: &Database) -> bool {
-    let (a, b) = (&local.meta, &remote.meta);
-    a.database_name != b.database_name
-        || a.database_description != b.database_description
-        || a.default_username != b.default_username
-        || a.color != b.color
-        || a.maintenance_history_days != b.maintenance_history_days
-        || a.memory_protection != b.memory_protection
-        || a.recyclebin_enabled != b.recyclebin_enabled
-        || a.recyclebin_uuid != b.recyclebin_uuid
-        || a.entry_templates_group != b.entry_templates_group
-        || a.history_max_items != b.history_max_items
-        || a.history_max_size != b.history_max_size
-        || a.master_key_change_rec != b.master_key_change_rec
-        || a.master_key_change_force != b.master_key_change_force
-        || user_custom_data(a) != user_custom_data(b)
+/// A custom data value as one line. Binary plugin data is described rather
+/// than rendered: it is not text, and the row exists so a person can tell two
+/// values apart.
+fn custom_data_value(item: Option<&&CustomDataItem>) -> String {
+    match item.and_then(|item| item.value.as_ref()) {
+        Some(CustomDataValue::String(value)) => value.clone(),
+        Some(CustomDataValue::Binary(bytes)) => format!("{} bytes of binary data", bytes.len()),
+        None => String::new(),
+    }
+}
+
+/// Whether the merged settings hold anything of ours that the remote copy
+/// does not, and so have to be uploaded.
+///
+/// Only a field this copy can be shown to have changed last counts. A tie is
+/// not evidence: reporting one as ours to send wrote our value over theirs
+/// and their edit was gone. Ties reach the user through
+/// [`metadata_conflict`] instead.
+fn meta_local_contributes(local: &Database, remote: &Database) -> bool {
+    meta_divergences(local, remote)
+        .iter()
+        .any(|divergence| divergence.winner == Some(Side::Local))
 }
 
 /// Metadata custom data minus the keys clients regenerate on every save.
@@ -560,7 +830,7 @@ fn meta_content_differs(local: &Database, remote: &Database) -> bool {
 /// writes the file and treats both as generated rather than user data. Left
 /// in the comparison they made every sync after a KeePassXC save look like a
 /// local change and ask for an upload, forever.
-fn user_custom_data(meta: &keepass::db::Meta) -> HashMap<&String, &CustomDataItem> {
+fn user_custom_data(meta: &Meta) -> HashMap<&String, &CustomDataItem> {
     const GENERATED: [&str; 2] = ["KPXC_RANDOM_SLUG", "_LAST_MODIFIED"];
     meta.custom_data
         .iter()
@@ -800,6 +1070,14 @@ pub fn apply_picks(
             .copied()
             .unwrap_or(Side::Local);
         force_group_winner(&mut merged, &mut source, &conflict.id, side)?;
+    }
+    // The database's own settings, same rule and same default.
+    if report.metadata_conflict.is_some() {
+        force_metadata_winner(
+            &mut merged,
+            &mut source,
+            picks.metadata.unwrap_or(Side::Local),
+        );
     }
     for resolved in &report.auto_resolved {
         preserve_auto_resolved_history(&mut merged, &mut source, resolved)?;
@@ -1101,7 +1379,7 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
     fn row(label: &'static str, local: String, remote: String) -> FieldDiff {
         FieldDiff {
             differs: local != remote,
-            label,
+            label: label.into(),
             local,
             remote,
         }
@@ -1116,8 +1394,27 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             None => "Inherited".into(),
         }
     }
+    fn icon_row(icon: Option<&Icon>) -> String {
+        match icon {
+            Some(Icon::BuiltIn(index)) => format!("Built-in icon {index}"),
+            Some(Icon::Custom(_)) => "Custom image".into(),
+            None => "Default icon".into(),
+        }
+    }
+    fn expiry_row(times: &Times) -> String {
+        match (times.expires.unwrap_or(false), times.expiry) {
+            (true, Some(at)) => at.format("%Y-%m-%d %H:%M").to_string(),
+            _ => "Never".into(),
+        }
+    }
     vec![
         row("Name", local.name.clone(), remote.name.clone()),
+        row("Icon", icon_row(local.icon()), icon_row(remote.icon())),
+        row(
+            "Expires",
+            expiry_row(&local.times),
+            expiry_row(&remote.times),
+        ),
         row(
             "Notes",
             optional(local.notes.as_ref()),
@@ -1358,6 +1655,100 @@ fn force_group_winner(
     Ok(())
 }
 
+/// Apply the user's choice to the database settings no change time could
+/// rank, and to those only.
+///
+/// Copying the whole metadata block instead would revert a field the other
+/// side legitimately changed last, which is the very loss this screen exists
+/// to prevent. Fields a clock can rank stay the merge's business.
+fn force_metadata_winner(merged: &mut Database, source: &mut Database, winner: Side) {
+    let mut tied: Vec<MetaField> = Vec::new();
+    for divergence in meta_divergences(merged, source) {
+        // Several rows share `Settings`, and the fields under it move as one.
+        if divergence.winner.is_none() && !tied.contains(&divergence.field) {
+            tied.push(divergence.field);
+        }
+    }
+    for field in &tied {
+        if matches!(winner, Side::Remote) {
+            copy_meta_field(&mut merged.meta, &source.meta, field);
+        }
+        // The choice has to outrank both sides: for the merge that runs next,
+        // and for the next merge against a third copy that still holds the
+        // other value. Stamping the loser back to the epoch is what
+        // `force_group_winner` does with the same problem.
+        stamp_meta_field(&mut merged.meta, &mut source.meta, field);
+    }
+}
+
+fn copy_meta_field(merged: &mut Meta, source: &Meta, field: &MetaField) {
+    match field {
+        MetaField::Name => merged.database_name = source.database_name.clone(),
+        MetaField::Description => {
+            merged.database_description = source.database_description.clone();
+        }
+        MetaField::DefaultUsername => merged.default_username = source.default_username.clone(),
+        MetaField::RecycleBin => {
+            merged.recyclebin_enabled = source.recyclebin_enabled;
+            merged.recyclebin_uuid = source.recyclebin_uuid;
+        }
+        MetaField::EntryTemplatesGroup => {
+            merged.entry_templates_group = source.entry_templates_group;
+        }
+        MetaField::Settings => {
+            merged.color = source.color.clone();
+            merged.maintenance_history_days = source.maintenance_history_days;
+            merged.memory_protection = source.memory_protection.clone();
+            merged.history_max_items = source.history_max_items;
+            merged.history_max_size = source.history_max_size;
+            merged.master_key_change_rec = source.master_key_change_rec;
+            merged.master_key_change_force = source.master_key_change_force;
+        }
+        // A tied custom data key exists on both sides by definition: one that
+        // exists on only one side is ranked to that side, not tied.
+        MetaField::CustomData(key) => {
+            if let Some(item) = source.custom_data.get(key) {
+                merged.custom_data.insert(key.clone(), item.clone());
+            }
+        }
+    }
+}
+
+fn stamp_meta_field(merged: &mut Meta, source: &mut Meta, field: &MetaField) {
+    let decided = resolution_time([
+        meta_clock_mut(merged, field).and_then(|clock| *clock),
+        meta_clock_mut(source, field).and_then(|clock| *clock),
+    ]);
+    if let Some(clock) = meta_clock_mut(merged, field) {
+        *clock = Some(decided);
+    }
+    if let Some(clock) = meta_clock_mut(source, field) {
+        *clock = Some(Times::epoch());
+    }
+}
+
+/// The change time KDBX keeps for one decision unit. `None` only for a custom
+/// data key the side does not carry.
+fn meta_clock_mut<'a>(
+    meta: &'a mut Meta,
+    field: &MetaField,
+) -> Option<&'a mut Option<NaiveDateTime>> {
+    Some(match field {
+        MetaField::Name => &mut meta.database_name_changed,
+        MetaField::Description => &mut meta.database_description_changed,
+        MetaField::DefaultUsername => &mut meta.default_username_changed,
+        MetaField::RecycleBin => &mut meta.recyclebin_changed,
+        MetaField::EntryTemplatesGroup => &mut meta.entry_templates_group_changed,
+        MetaField::Settings => &mut meta.settings_changed,
+        MetaField::CustomData(key) => {
+            return meta
+                .custom_data
+                .get_mut(key)
+                .map(|item| &mut item.last_modification_time);
+        }
+    })
+}
+
 /// The user-authored half of a group, the same set `group_content_differs`
 /// compares. Kept as an owned snapshot so the read and the write can borrow
 /// two different databases in turn.
@@ -1369,6 +1760,9 @@ struct GroupContent {
     default_autotype_sequence: Option<String>,
     enable_autotype: Option<bool>,
     enable_searching: Option<bool>,
+    icon: Option<Icon>,
+    expiry: Option<NaiveDateTime>,
+    expires: Option<bool>,
 }
 
 impl GroupContent {
@@ -1381,6 +1775,9 @@ impl GroupContent {
             default_autotype_sequence: group.default_autotype_sequence.clone(),
             enable_autotype: group.enable_autotype,
             enable_searching: group.enable_searching,
+            icon: group.icon().cloned(),
+            expiry: group.times.expiry,
+            expires: group.times.expires,
         }
     }
 
@@ -1392,6 +1789,17 @@ impl GroupContent {
         group.default_autotype_sequence = self.default_autotype_sequence;
         group.enable_autotype = self.enable_autotype;
         group.enable_searching = self.enable_searching;
+        match self.icon {
+            Some(Icon::BuiltIn(index)) => group.set_icon_builtin(index),
+            // A custom icon is set by id so the reference index stays honest;
+            // the image itself is adopted by `adopt_source_custom_icons`.
+            Some(Icon::Custom(id)) => {
+                let _ = group.set_icon_custom(id);
+            }
+            None => group.set_icon_none(),
+        }
+        group.times.expiry = self.expiry;
+        group.times.expires = self.expires;
     }
 }
 
@@ -1549,7 +1957,7 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
     let remote_additional = additional_fields(&remote.fields);
     if !local_additional.is_empty() || !remote_additional.is_empty() {
         diffs.push(FieldDiff {
-            label: "Additional fields",
+            label: "Additional fields".into(),
             local: render_additional_fields(&local_additional),
             remote: render_additional_fields(&remote_additional),
             differs: local_additional != remote_additional,
@@ -1557,7 +1965,7 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
     }
 
     diffs.push(FieldDiff {
-        label: "Attachments",
+        label: "Attachments".into(),
         local: attachment_summary(local.attachments.len()),
         remote: attachment_summary(remote.attachments.len()),
         differs: local.attachments != remote.attachments,
@@ -1567,7 +1975,7 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
     let remote_protected = protected_field_names(&remote.fields);
     if !local_protected.is_empty() || !remote_protected.is_empty() {
         diffs.push(FieldDiff {
-            label: "Protected fields",
+            label: "Protected fields".into(),
             local: local_protected.join(", "),
             remote: remote_protected.join(", "),
             differs: local_protected != remote_protected,
@@ -1580,7 +1988,7 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
         // differing, so rendering the same string in both columns asked the
         // user to choose between two identical cells.
         diffs.push(FieldDiff {
-            label: "Entry settings",
+            label: "Entry settings".into(),
             local: metadata
                 .iter()
                 .map(|difference| difference.local.as_str())
@@ -1615,7 +2023,7 @@ fn entry_field_diff(
     let local_value = local.fields.get(key);
     let remote_value = remote.fields.get(key);
     FieldDiff {
-        label,
+        label: label.into(),
         local: render_field(local_value, always_redact),
         remote: render_field(remote_value, always_redact),
         // `Value` equality includes both the cleartext and its protected bit.
@@ -1750,7 +2158,7 @@ fn tags_diff(local: &[String], remote: &[String]) -> FieldDiff {
     // (including ours) preserve write order. Treating reorder as a diff
     // is the simpler + safer behaviour.
     FieldDiff {
-        label: "Tags",
+        label: "Tags".into(),
         local: local.join(", "),
         remote: remote.join(", "),
         differs: local != remote,
@@ -3293,6 +3701,259 @@ mod tests {
         );
     }
 
+    /// A settings difference no clock can rank is not ours to keep quietly.
+    ///
+    /// The tie alone raised nothing, so any other local contribution carried
+    /// the merge to a silent upload and our retained database name went over
+    /// theirs. It has to be asked, like a tied entry or a tied group.
+    #[test]
+    fn a_tied_database_name_is_a_conflict() {
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        let tied = keepass::db::Times::now();
+        local.meta.database_name = Some("Team vault".into());
+        local.meta.database_name_changed = Some(tied);
+
+        let mut remote = fork(&local);
+        remote.meta.database_name = Some("Their vault".into());
+        remote.meta.database_name_changed = Some(tied);
+        // The independent contribution that used to carry the silent upload.
+        add(&mut local, "Bank", "secret");
+
+        let report = diff(&local, &remote);
+
+        let conflict = report
+            .metadata_conflict
+            .as_ref()
+            .expect("a tied database name has to reach the user");
+        assert!(
+            conflict.fields.iter().any(|f| f.label == "Database name"
+                && f.local == "Team vault"
+                && f.remote == "Their vault"),
+            "and the row has to say what each side holds: {:?}",
+            conflict.fields
+        );
+        assert!(
+            report.needs_a_decision(),
+            "so the silent merge cannot apply the default"
+        );
+    }
+
+    /// The gate has to ask the clock of the field that differs.
+    ///
+    /// Any newer metadata timestamp used to count as evidence for every
+    /// metadata difference, so editing the history limit here made our tied
+    /// database name look like ours to send.
+    #[test]
+    fn an_unrelated_local_edit_does_not_decide_a_tied_name() {
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        let tied = keepass::db::Times::now();
+        local.meta.database_name = Some("Team vault".into());
+        local.meta.database_name_changed = Some(tied);
+
+        let mut remote = fork(&local);
+        remote.meta.database_name = Some("Their vault".into());
+        remote.meta.database_name_changed = Some(tied);
+
+        // A settings-block edit that is genuinely ours, on its own clock.
+        local.meta.history_max_items = Some(20);
+        local.meta.settings_changed = Some(tied + chrono::TimeDelta::minutes(5));
+
+        let report = diff(&local, &remote);
+
+        assert!(
+            report.structural_writeback_required,
+            "the history limit is ours and has to reach them"
+        );
+        let conflict = report
+            .metadata_conflict
+            .as_ref()
+            .expect("the name is still tied and still has to be asked");
+        assert!(
+            conflict.fields.iter().all(|f| f.label == "Database name"),
+            "and only the tied field is asked: {:?}",
+            conflict.fields
+        );
+    }
+
+    /// Keeping their settings must keep only the ones nobody could rank.
+    ///
+    /// Copying the whole metadata block was the first attempt and reverted
+    /// the description this copy demonstrably edited last, which is the loss
+    /// the screen exists to prevent.
+    #[test]
+    fn choosing_their_settings_leaves_the_ranked_fields_alone() {
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        let tied = keepass::db::Times::now();
+        local.meta.database_name = Some("Team vault".into());
+        local.meta.database_name_changed = Some(tied);
+        local.meta.database_description = Some("Shared credentials".into());
+        local.meta.database_description_changed = Some(tied);
+
+        let mut remote = fork(&local);
+        remote.meta.database_name = Some("Their vault".into());
+        remote.meta.database_name_changed = Some(tied);
+        remote.meta.database_description = Some("Stale text".into());
+        remote.meta.database_description_changed = Some(tied - chrono::TimeDelta::minutes(5));
+
+        let report = diff(&local, &remote);
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::new(),
+            metadata: Some(Side::Remote),
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+
+        assert_eq!(
+            merged.meta.database_name.as_deref(),
+            Some("Their vault"),
+            "the tied field follows the choice"
+        );
+        assert_eq!(
+            merged.meta.database_description.as_deref(),
+            Some("Shared credentials"),
+            "the field we changed last is not part of that choice"
+        );
+    }
+
+    /// The choice has to survive the merge that follows it and the next merge
+    /// against a copy that still holds the other value. Without a stamp the
+    /// fork ranked the two the same way it did before, and re-asked forever.
+    #[test]
+    fn a_settings_choice_outranks_both_sides() {
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        let tied = keepass::db::Times::now();
+        local.meta.database_name = Some("Team vault".into());
+        local.meta.database_name_changed = Some(tied);
+
+        let mut remote = fork(&local);
+        remote.meta.database_name = Some("Their vault".into());
+        remote.meta.database_name_changed = Some(tied);
+
+        let report = diff(&local, &remote);
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::new(),
+            metadata: Some(Side::Local),
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+
+        assert_eq!(
+            merged.meta.database_name.as_deref(),
+            Some("Team vault"),
+            "the merge that runs after the choice must not undo it"
+        );
+        // A third copy that never saw the decision meets it as settled.
+        let third = diff(&merged, &remote);
+        assert!(
+            third.metadata_conflict.is_none(),
+            "the decision is not re-asked"
+        );
+        assert!(
+            merged.meta.database_name_changed > Some(tied),
+            "because it now outranks the timestamp it was tied with"
+        );
+    }
+
+    /// Custom data is decided per key, on that key's own modification time.
+    /// A key only one side carries is a union, not a disagreement; a tied
+    /// value is a disagreement nobody can rank.
+    #[test]
+    fn plugin_data_is_asked_per_key_and_only_when_tied() {
+        use keepass::db::{CustomDataItem, CustomDataValue};
+        let item = |value: &str, at: Option<NaiveDateTime>| CustomDataItem {
+            value: Some(CustomDataValue::String(value.into())),
+            last_modification_time: at,
+        };
+        let tied = keepass::db::Times::now();
+
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        local
+            .meta
+            .custom_data
+            .insert("Browser".into(), item("ours", Some(tied)));
+        let mut remote = fork(&local);
+        remote
+            .meta
+            .custom_data
+            .insert("Browser".into(), item("theirs", Some(tied)));
+        // A key only this copy has, and undated, which is how older clients
+        // wrote them. The merge unions it, so nothing is lost and nothing is
+        // asked, whatever the clocks say.
+        local
+            .meta
+            .custom_data
+            .insert("OnlyHere".into(), item("kept", None));
+
+        let report = diff(&local, &remote);
+
+        let conflict = report
+            .metadata_conflict
+            .as_ref()
+            .expect("a tied plugin value has to be asked");
+        assert_eq!(
+            conflict
+                .fields
+                .iter()
+                .map(|f| f.label.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["Plugin data \"Browser\""],
+            "only the tied key, and named so the user can tell which"
+        );
+        assert!(
+            report.structural_writeback_required,
+            "the key only we have still has to reach them"
+        );
+
+        // And the choice applies to that key alone.
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::new(),
+            metadata: Some(Side::Remote),
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(
+            merged
+                .meta
+                .custom_data
+                .get("Browser")
+                .and_then(|i| i.value.clone()),
+            Some(CustomDataValue::String("theirs".into()))
+        );
+        assert!(
+            merged.meta.custom_data.contains_key("OnlyHere"),
+            "the union is untouched by the choice"
+        );
+    }
+
+    /// A setting the other copy changed last is theirs to send, not ours.
+    /// Reporting every difference as ours meant a pull that only adopted
+    /// their value still uploaded, on every tick.
+    #[test]
+    fn a_setting_they_changed_last_is_not_our_upload() {
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        let earlier = keepass::db::Times::now() - chrono::TimeDelta::minutes(5);
+        local.meta.database_name = Some("Old name".into());
+        local.meta.database_name_changed = Some(earlier);
+
+        let mut remote = fork(&local);
+        remote.meta.database_name = Some("New name".into());
+        remote.meta.database_name_changed = Some(keepass::db::Times::now());
+
+        let report = diff(&local, &remote);
+
+        assert!(report.metadata_conflict.is_none(), "the clock ranks this");
+        assert!(
+            !report.structural_writeback_required,
+            "adopting their name is a pull, not something to send back"
+        );
+    }
+
     /// Expiry lives in `times`, not in the field map, so the field diff never
     /// saw it. An entry whose only change was its expiry date read as no
     /// contribution at all: it was never uploaded, and the next edit from the
@@ -3401,8 +4062,9 @@ mod tests {
             "a value the other client regenerates on every save is not our edit"
         );
 
-        // A key someone actually set still counts, once we can show it is
-        // ours: the settings block carries the date for custom data.
+        // A key someone actually set still counts. The merge unions custom
+        // data, so a key only this copy carries is one only this copy can
+        // send, whatever the clocks say.
         local.meta.custom_data.insert(
             "Plugin".into(),
             CustomDataItem {
@@ -3410,7 +4072,6 @@ mod tests {
                 last_modification_time: None,
             },
         );
-        local.meta.settings_changed = Some(keepass::db::Times::now());
         assert!(diff(&local, &remote).structural_writeback_required);
     }
 
@@ -3663,6 +4324,7 @@ mod tests {
         let picks = Resolutions {
             entries: HashMap::new(),
             groups: HashMap::from([(conflict.id.clone(), Side::Remote)]),
+            metadata: None,
         };
         let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
         assert_eq!(merged.group(group_id).expect("group").name, "Finance");
@@ -3803,10 +4465,30 @@ mod tests {
         let mut remote = fork(&local);
         remote.group_mut(group_id).unwrap().set_icon_builtin(9);
         remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        let report = diff(&local, &remote);
         assert_eq!(
-            diff(&local, &remote).group_conflicts.len(),
+            report.group_conflicts.len(),
             1,
             "a tied icon has to reach the user"
+        );
+        assert!(
+            report.group_conflicts[0]
+                .fields
+                .iter()
+                .any(|field| field.label == "Icon"),
+            "and the row has to say what each side holds: {:?}",
+            report.group_conflicts[0].fields
+        );
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::from([(group_id.to_string(), Side::Remote)]),
+            metadata: None,
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(
+            merged.group(group_id).unwrap().icon(),
+            Some(&keepass::db::Icon::BuiltIn(9)),
+            "choosing theirs has to apply theirs"
         );
 
         // Same group, different expiry, same second.
@@ -3814,10 +4496,28 @@ mod tests {
         remote.group_mut(group_id).unwrap().times.expiry =
             Some(keepass::db::Times::now() + chrono::TimeDelta::days(20));
         remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        let report = diff(&local, &remote);
         assert_eq!(
-            diff(&local, &remote).group_conflicts.len(),
+            report.group_conflicts.len(),
             1,
             "and so does a tied expiry date"
+        );
+        assert!(
+            report.group_conflicts[0]
+                .fields
+                .iter()
+                .any(|field| field.label == "Expires")
+        );
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::from([(group_id.to_string(), Side::Remote)]),
+            metadata: None,
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(
+            merged.group(group_id).unwrap().times.expiry,
+            remote.group(group_id).unwrap().times.expiry,
+            "choosing theirs has to apply theirs"
         );
     }
 

@@ -355,6 +355,7 @@ fn history_row(
         SyncChangeKind::UpdatedFromRemote => (palette::blue(), "Updated"),
         SyncChangeKind::ResolvedKeptRemote => (palette::orange(), "Resolved → remote"),
         SyncChangeKind::GroupResolved => (palette::orange(), "Group resolved"),
+        SyncChangeKind::SettingsResolved => (palette::orange(), "Settings resolved"),
         SyncChangeKind::ResolvedKeptLocal => (palette::text_faint(), "Resolved → local"),
     };
     let title: SharedString = if entry.entry_title.trim().is_empty() {

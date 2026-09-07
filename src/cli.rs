@@ -112,6 +112,11 @@ struct SyncNow {
 #[serde(deny_unknown_fields)]
 struct SyncResolutions {
     resolutions: Vec<SyncResolution>,
+    /// The database's own settings are one decision for the whole file, not
+    /// one per object, so they get a field of their own rather than a
+    /// resolution with a made-up id.
+    #[serde(default)]
+    metadata: Option<ResolutionSide>,
 }
 
 #[derive(Deserialize)]
@@ -584,7 +589,7 @@ fn execute_sync(
                 .fields
                 .iter()
                 .filter(|field| field.differs)
-                .map(|field| field.label)
+                .map(|field| field.label.as_ref())
                 .collect();
             json!({"entry_id":conflict.id,"fields":fields})
         })
@@ -597,7 +602,7 @@ fn execute_sync(
                 .fields
                 .iter()
                 .filter(|field| field.differs)
-                .map(|field| field.label)
+                .map(|field| field.label.as_ref())
                 .collect();
             json!({
                 "group_id":conflict.id,
@@ -607,6 +612,15 @@ fn execute_sync(
             })
         })
         .collect();
+    let metadata_conflict = report.metadata_conflict.as_ref().map(|conflict| {
+        let fields: Vec<&str> = conflict
+            .fields
+            .iter()
+            .filter(|field| field.differs)
+            .map(|field| field.label.as_ref())
+            .collect();
+        json!({ "fields": fields })
+    });
     let plan_token = sync_plan_token(&local_bytes, &remote_etag, &report);
     let needs_upload = report.has_local_contribution();
     let remote_changes = report.remote_only.len()
@@ -616,7 +630,8 @@ fn execute_sync(
             .filter(|r| matches!(r.winner, crate::keepass::merge::Side::Remote))
             .count();
     if !args.commit {
-        let undecided = !conflicts.is_empty() || !group_conflicts.is_empty();
+        let undecided =
+            !conflicts.is_empty() || !group_conflicts.is_empty() || metadata_conflict.is_some();
         return Ok(json!({
             "status":if undecided {"conflict"} else {"ready"},
             "committed":false,
@@ -624,7 +639,8 @@ fn execute_sync(
             "would_upload":needs_upload || undecided,
             "remote_changes":remote_changes,
             "conflicts":conflicts,
-            "group_conflicts":group_conflicts
+            "group_conflicts":group_conflicts,
+            "metadata_conflict":metadata_conflict
         }));
     }
     let supplied = args
@@ -668,8 +684,7 @@ fn execute_sync(
     // pure pull the merged file is the new baseline, and after an upload it
     // is what we sent.
     config.uploaded_local_revision = Some(crate::sync::config::local_revision(&upload_bytes));
-    let resolved_upload =
-        needs_upload || !report.conflicts.is_empty() || !report.group_conflicts.is_empty();
+    let resolved_upload = needs_upload || report.needs_a_decision();
     if resolved_upload {
         match crate::sync::service::upload_after_save(&config, &token, &upload_bytes)
             .map_err(sync_error)?
@@ -687,8 +702,9 @@ fn execute_sync(
         }
     }
     crate::sync::config::save(&config).map_err(sync_error)?;
+    let resolved = picks.entries.len() + picks.groups.len() + usize::from(picks.metadata.is_some());
     Ok(
-        json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":picks.entries.len() + picks.groups.len()}),
+        json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":resolved}),
     )
 }
 
@@ -717,6 +733,14 @@ fn sync_plan_token(
             hasher.update(field.label.as_bytes());
         }
     }
+    // Same reason again: a decision about the database settings is part of
+    // the plan the user answered.
+    if let Some(conflict) = &report.metadata_conflict {
+        hasher.update(b"metadata\0");
+        for field in conflict.fields.iter().filter(|field| field.differs) {
+            hasher.update(field.label.as_bytes());
+        }
+    }
     format!(
         "v1:{}",
         hasher
@@ -731,7 +755,7 @@ fn validated_resolutions(
     fd: u32,
     report: &crate::keepass::merge::ConflictReport,
 ) -> Result<crate::keepass::merge::Resolutions, CliError> {
-    if report.conflicts.is_empty() && report.group_conflicts.is_empty() {
+    if !report.needs_a_decision() {
         return Ok(crate::keepass::merge::Resolutions::default());
     }
     let input: SyncResolutions = read_json_fd(fd)?;
@@ -742,13 +766,19 @@ fn validated_resolutions(
         .iter()
         .map(|c| c.id.clone())
         .collect();
-    validate_resolution_input(input, &expected_entries, &expected_groups)
+    validate_resolution_input(
+        input,
+        &expected_entries,
+        &expected_groups,
+        report.metadata_conflict.is_some(),
+    )
 }
 
 fn validate_resolution_input(
     input: SyncResolutions,
     expected_entries: &std::collections::HashSet<String>,
     expected_groups: &std::collections::HashSet<String>,
+    expects_metadata: bool,
 ) -> Result<crate::keepass::merge::Resolutions, CliError> {
     let invalid = |message: &'static str| CliError::new("invalid_resolution", 6, message);
     let mut picks = crate::keepass::merge::Resolutions::default();
@@ -773,7 +803,23 @@ fn validate_resolution_input(
             return Err(invalid("resolution contains a duplicate UUID"));
         }
     }
-    if picks.entries.len() != expected_entries.len() || picks.groups.len() != expected_groups.len()
+    match (input.metadata, expects_metadata) {
+        (Some(side), true) => {
+            picks.metadata = Some(match side {
+                ResolutionSide::Local => crate::keepass::merge::Side::Local,
+                ResolutionSide::Remote => crate::keepass::merge::Side::Remote,
+            });
+        }
+        (Some(_), false) => {
+            return Err(invalid(
+                "resolution decides database settings that are not in conflict",
+            ));
+        }
+        (None, _) => {}
+    }
+    if picks.entries.len() != expected_entries.len()
+        || picks.groups.len() != expected_groups.len()
+        || picks.metadata.is_some() != expects_metadata
     {
         return Err(CliError::new(
             "incomplete_resolution",
@@ -1323,6 +1369,21 @@ mod tests {
             token,
             sync_plan_token(b"local revision", "etag-1", &with_group)
         );
+
+        // The database settings are part of the plan for the same reason.
+        let mut with_metadata = report.clone();
+        with_metadata.metadata_conflict = Some(crate::keepass::merge::MetadataConflict {
+            fields: vec![crate::keepass::merge::FieldDiff {
+                label: "Database name".into(),
+                local: "Ours".into(),
+                remote: "Theirs".into(),
+                differs: true,
+            }],
+        });
+        assert_ne!(
+            token,
+            sync_plan_token(b"local revision", "etag-1", &with_metadata)
+        );
     }
 
     #[test]
@@ -1359,7 +1420,7 @@ mod tests {
             r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"entry-b","keep":"remote"},{"group_id":"group-a","keep":"remote"}]}"#,
         )
         .unwrap();
-        let picks = validate_resolution_input(valid, &entries, &groups).unwrap();
+        let picks = validate_resolution_input(valid, &entries, &groups, false).unwrap();
         assert_eq!(picks.entries.len(), 2);
         assert_eq!(picks.entries["entry-a"], crate::keepass::merge::Side::Local);
         assert_eq!(
@@ -1394,12 +1455,45 @@ mod tests {
         ] {
             let input = serde_json::from_str(json).unwrap();
             assert_eq!(
-                validate_resolution_input(input, &entries, &groups)
+                validate_resolution_input(input, &entries, &groups, false)
                     .unwrap_err()
                     .code,
                 code
             );
         }
+    }
+
+    /// The database settings are one decision for the whole file, so they
+    /// travel beside the id-keyed list rather than inside it. A plan that
+    /// asks for one and gets none must not commit: the merge would then
+    /// apply the default and upload it, which is what the question was for.
+    #[test]
+    fn a_metadata_conflict_needs_its_own_answer() {
+        let none: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        let answered: SyncResolutions =
+            serde_json::from_str(r#"{"resolutions":[],"metadata":"remote"}"#).unwrap();
+        let picks = validate_resolution_input(answered, &none, &none, true).unwrap();
+        assert_eq!(picks.metadata, Some(crate::keepass::merge::Side::Remote));
+
+        let unanswered: SyncResolutions = serde_json::from_str(r#"{"resolutions":[]}"#).unwrap();
+        assert_eq!(
+            validate_resolution_input(unanswered, &none, &none, true)
+                .unwrap_err()
+                .code,
+            "incomplete_resolution"
+        );
+
+        // And an answer to a question nobody asked is a stale plan, not a
+        // decision to act on.
+        let spurious: SyncResolutions =
+            serde_json::from_str(r#"{"resolutions":[],"metadata":"local"}"#).unwrap();
+        assert_eq!(
+            validate_resolution_input(spurious, &none, &none, false)
+                .unwrap_err()
+                .code,
+            "invalid_resolution"
+        );
     }
 
     /// `launch` keeps a 0600 file holding a cleartext password alive while
