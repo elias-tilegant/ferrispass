@@ -1,4 +1,5 @@
 mod app_shell;
+pub mod errors;
 pub mod icons;
 pub mod palette;
 pub mod screens;

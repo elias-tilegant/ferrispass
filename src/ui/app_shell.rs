@@ -13,8 +13,9 @@ use crate::{
         },
     },
     autotype,
-    keepass::KeePassRepository,
+    keepass::{KeePassRepository, MutationError},
     launch::{self, LaunchContext, LaunchError, LaunchHandle},
+    ui::errors,
 };
 
 /// Which section of the unified Settings overlay is currently active.
@@ -140,6 +141,10 @@ pub struct AppShell {
     /// chip instead of the plain delete button. Click outside / different
     /// entry / Escape clears it.
     pending_perma_delete: Option<String>,
+    /// Group the user asked to delete, waiting for confirmation. Deleting a
+    /// group takes its whole subtree with it, which used to happen on one
+    /// unconfirmed click from a context menu.
+    pending_group_delete: Option<String>,
     /// 1 Hz tick task that drives the live TOTP countdown in the detail panel.
     /// Started after a vault opens and dropped (= cancelled) on lock. We only
     /// need this for the seconds-resolution countdown; the actual TOTP code
@@ -491,6 +496,7 @@ impl AppShell {
             focus_handle,
             search_debounce: None,
             pending_perma_delete: None,
+            pending_group_delete: None,
             totp_tick: None,
             clipboard_clear_task: None,
             pending_clipboard_write: None,
@@ -552,6 +558,10 @@ impl AppShell {
 
     pub fn pending_perma_delete(&self) -> Option<&str> {
         self.pending_perma_delete.as_deref()
+    }
+
+    pub fn pending_group_delete(&self) -> Option<&str> {
+        self.pending_group_delete.as_deref()
     }
 
     /// Start the per-second TOTP refresh loop only when the currently-selected
@@ -1454,11 +1464,15 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Escape unwinds in priority order: armed perma-delete → open overlay
-        // → unlock prompt. Each layer eats the keystroke so a single Escape
-        // never collapses two layers at once.
+        // Escape unwinds in priority order: armed perma-delete → armed group
+        // delete → open overlay → unlock prompt. Each layer eats the keystroke
+        // so a single Escape never collapses two layers at once.
         if self.pending_perma_delete.is_some() {
             self.clear_perma_delete(cx);
+            return;
+        }
+        if self.pending_group_delete.is_some() {
+            self.cancel_group_delete(cx);
             return;
         }
         let closed = self.state.update(cx, |state, cx| state.close_overlay(cx));
@@ -1999,23 +2013,30 @@ impl AppShell {
     fn on_action_delete_group(
         &mut self,
         action: &DeleteGroup,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_group_delete = Some(action.group_id.clone());
+        cx.notify();
+    }
+
+    /// Second half of the armed group delete. The id comes from the banner so
+    /// a stale arm can never delete a group the user is no longer looking at.
+    pub(crate) fn confirm_group_delete(
+        &mut self,
+        group_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let group_id = action.group_id.clone();
-        let result = self
-            .state
-            .clone()
-            .update(cx, |state, cx| state.delete_group(&group_id, cx));
-        match result {
-            Ok(()) => window.push_notification("Group moved to Trash.", cx),
-            Err(crate::keepass::MutationError::CannotDeleteRoot) => {
-                window.push_notification("The root group cannot be deleted.", cx)
-            }
-            Err(crate::keepass::MutationError::CannotDeleteRecycleBin) => {
-                window.push_notification("The Recycle Bin cannot be deleted.", cx)
-            }
-            Err(e) => window.push_notification(format!("Could not delete group: {e}"), cx),
+        self.pending_group_delete = None;
+        self.run_mutation("Group moved to Trash.", window, cx, |state, cx| {
+            state.delete_group(group_id, cx)
+        });
+    }
+
+    pub(crate) fn cancel_group_delete(&mut self, cx: &mut Context<Self>) {
+        if self.pending_group_delete.take().is_some() {
+            cx.notify();
         }
     }
 
@@ -2094,33 +2115,72 @@ impl AppShell {
 
     /// Move the currently-selected entry to the Recycle Bin. No confirmation
     /// (it's recoverable from Trash). Toasts on success/failure.
+    /// Run a vault mutation and tell the user what happened, win or lose.
+    /// Every mutation goes through here: the drag-and-drop and star paths
+    /// used to discard their `Result`, so a failed drop looked exactly like
+    /// a successful one.
+    pub(crate) fn run_mutation<F>(
+        &mut self,
+        success: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        mutate: F,
+    ) where
+        F: FnOnce(&mut AppState, &mut Context<AppState>) -> Result<(), MutationError>,
+    {
+        match self.state.clone().update(cx, mutate) {
+            Ok(()) => window.push_notification(success.into(), cx),
+            Err(error) => window.push_notification(errors::mutation_message(&error), cx),
+        }
+    }
+
     pub fn delete_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.selected_entry_id(cx) else {
             window.push_notification("Select an entry to delete first.", cx);
             return;
         };
-        let result = self
-            .state
-            .clone()
-            .update(cx, |state, cx| state.delete_entry(&id, cx));
-        match result {
-            Ok(()) => window.push_notification("Moved to Trash.", cx),
-            Err(e) => window.push_notification(format!("Could not delete entry: {e}"), cx),
-        }
+        self.run_mutation("Moved to Trash.", window, cx, |state, cx| {
+            state.delete_entry(&id, cx)
+        });
     }
 
     pub fn restore_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.selected_entry_id(cx) else {
             return;
         };
-        let result = self
+        self.run_mutation("Entry restored.", window, cx, |state, cx| {
+            state.restore_entry(&id, cx)
+        });
+    }
+
+    /// Flip the favourite marker. The star icon is its own success feedback,
+    /// so this reports only failures.
+    pub(crate) fn toggle_starred(
+        &mut self,
+        entry_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self
             .state
             .clone()
-            .update(cx, |state, cx| state.restore_entry(&id, cx));
-        match result {
-            Ok(()) => window.push_notification("Entry restored.", cx),
-            Err(e) => window.push_notification(format!("Could not restore: {e}"), cx),
+            .update(cx, |state, cx| state.toggle_starred(entry_id, cx))
+        {
+            window.push_notification(errors::mutation_message(&error), cx);
         }
+    }
+
+    /// Lift a deleted group back out of the Trash. Dispatched from the
+    /// "Deleted groups" rows, which are the only place a trashed group shows.
+    pub(crate) fn restore_group(
+        &mut self,
+        group_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_mutation("Group restored.", window, cx, |state, cx| {
+            state.restore_group(group_id, cx)
+        });
     }
 
     /// Permanently delete an entry (id passed in so the call site can match
@@ -2132,17 +2192,10 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let result = self
-            .state
-            .clone()
-            .update(cx, |state, cx| state.delete_entry_permanent(&entry_id, cx));
         self.pending_perma_delete = None;
-        match result {
-            Ok(()) => window.push_notification("Entry permanently deleted.", cx),
-            Err(e) => {
-                window.push_notification(format!("Could not delete: {e}"), cx);
-            }
-        }
+        self.run_mutation("Entry permanently deleted.", window, cx, |state, cx| {
+            state.delete_entry_permanent(&entry_id, cx)
+        });
         cx.notify();
     }
 
@@ -2741,6 +2794,8 @@ impl AppShell {
         });
         self.clear_unlock_form(window, cx);
         self.clear_entry_form(window, cx);
+        self.pending_perma_delete = None;
+        self.pending_group_delete = None;
         self.search_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         // If Settings was sitting on the Sync tab when the user locked,

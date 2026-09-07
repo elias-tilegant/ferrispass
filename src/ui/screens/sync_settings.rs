@@ -24,7 +24,7 @@ use crate::app::{SyncBinding, SyncChangeKind, SyncHistoryEntry, SyncStatus};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::atoms::{ChipTone, chip};
+use crate::ui::widgets::atoms::{ChipTone, chip, plural};
 use crate::ui::widgets::interaction::Interaction as _;
 
 /// Render the Sync tab body - content only, no chrome. The unified
@@ -108,12 +108,8 @@ fn render_connected(
                 // merge module auto-resolves those). "merged" covers both
                 // cases - "pulled in N new entries" was misleading after
                 // last-write-wins landed.
-                let noun = if *auto_merged == 1 {
-                    "entry"
-                } else {
-                    "entries"
-                };
-                format!("{base} · merged {auto_merged} {noun} from remote")
+                let merged = plural(*auto_merged, "entry", "entries");
+                format!("{base} · merged {merged} from remote")
             } else {
                 base
             }
@@ -252,7 +248,7 @@ fn history_section(history: &[SyncHistoryEntry], cx: &mut Context<AppShell>) -> 
         .map(|(idx, entry)| history_row(idx, entry, now, cx))
         .collect();
     let header_meta: Option<SharedString> = if total > 0 {
-        Some(format!("{total} change{}", if total == 1 { "" } else { "s" }).into())
+        Some(plural(total, "change", "changes").into())
     } else {
         None
     };

@@ -2,6 +2,16 @@ use gpui::{AnyElement, Hsla, IntoElement as _, ParentElement as _, Styled as _, 
 
 use crate::ui::palette;
 
+/// `"1 entry"` / `"4 entries"`. Three call sites open-coded this and two more
+/// printed "1 entries", so the count strings disagreed across the app.
+pub fn plural(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("{count} {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
 /// Small uppercase muted label used above form fields and in section headers.
 pub fn label(text: impl Into<String>) -> AnyElement {
     div()

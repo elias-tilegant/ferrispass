@@ -3159,11 +3159,39 @@ impl AppState {
     /// Soft-delete a group: hand off to `VaultDocument::delete_group`,
     /// then if the deleted group was the active selection, snap back to
     /// the root so the entry list isn't pointing at a now-orphaned id.
+    /// Move a group and everything under it into the Recycle Bin.
     pub fn delete_group(
         &mut self,
         group_id: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), MutationError> {
+        self.run_group_mutation(cx, |document| document.delete_group(group_id))
+    }
+
+    /// Lift a deleted group back out of the Recycle Bin, subtree included.
+    /// Reachable from the "Deleted groups" section of the Trash view, which
+    /// is the only place a trashed group is visible.
+    pub fn restore_group(
+        &mut self,
+        group_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        self.run_group_mutation(cx, |document| document.restore_group(group_id))
+    }
+
+    /// Shared bookkeeping for the group operations that relocate a subtree.
+    /// The search query is dropped because the tree it ran against just
+    /// changed shape, and a selection pointing at a group that moved into the
+    /// bin falls back to the root instead of rendering an empty list with no
+    /// explanation.
+    fn run_group_mutation<F>(
+        &mut self,
+        cx: &mut Context<Self>,
+        mutate: F,
+    ) -> Result<(), MutationError>
+    where
+        F: FnOnce(&mut VaultDocument) -> Result<(), MutationError>,
+    {
         {
             let VaultStatus::Open {
                 document,
@@ -3179,12 +3207,16 @@ impl AppState {
                 return Err(MutationError::GroupNotFound);
             };
 
-            document.delete_group(group_id)?;
+            mutate(document)?;
 
             let snapshot = document.snapshot();
-            if let LibrarySelection::Group(sel_id) = selection.clone()
-                && sel_id == group_id
-            {
+            let selection_is_stale = match &*selection {
+                LibrarySelection::Group(id) => {
+                    snapshot.find_group(id).is_none_or(|g| g.in_recycle_bin)
+                }
+                _ => false,
+            };
+            if selection_is_stale {
                 *selection = LibrarySelection::Group(snapshot.root.id.clone());
             }
             search_query.clear();

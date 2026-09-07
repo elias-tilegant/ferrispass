@@ -3,12 +3,7 @@ use gpui::{
     IntoElement as _, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    Sizable as _, h_flex,
-    input::{Input, InputState},
-    menu::ContextMenuExt as _,
-    v_flex,
-};
+use gpui_component::{Sizable as _, h_flex, input::Input, menu::ContextMenuExt as _, v_flex};
 
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, SyncTone, VaultBrowserModel, VaultStatus, VaultSummary,
@@ -21,7 +16,7 @@ use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, section_heading};
+use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, plural, section_heading};
 use crate::ui::widgets::brand::brand;
 use crate::ui::widgets::entry_chrome::favicon;
 use crate::ui::widgets::interaction::{Interaction as _, darken};
@@ -365,13 +360,13 @@ fn library_section(
             // explicit Delete button. Build the drop listener BEFORE
             // calling nav_row so the two cx borrows don't overlap (in
             // edition 2024 the `impl IntoElement` return captures cx).
-            let state_for_drop = state_entity.clone();
-            let drop_listener = cx.listener(move |_: &mut AppShell, drag: &EntryDrag, _, cx| {
-                let entry_id = drag.entry_id.clone();
-                state_for_drop.update(cx, |state, cx| {
-                    let _ = state.delete_entry(&entry_id, cx);
+            let drop_listener =
+                cx.listener(move |shell: &mut AppShell, drag: &EntryDrag, window, cx| {
+                    let entry_id = drag.entry_id.clone();
+                    shell.run_mutation("Moved to Trash.", window, cx, |state, cx| {
+                        state.delete_entry(&entry_id, cx)
+                    });
                 });
-            });
             let trash_row = nav_row(
                 "lib-trash",
                 AppIcon::Note,
@@ -489,7 +484,6 @@ fn groups_section(
         let is_expanded = group.is_expanded;
         let state_for_click = state_entity.clone();
         let group_id_for_drop = group.id.clone();
-        let state_for_drop = state_entity.clone();
         let group_id_for_toggle = group.id.clone();
         let state_for_toggle = state_entity.clone();
 
@@ -549,11 +543,11 @@ fn groups_section(
                         .border_color(palette::blue())
                 })
                 .on_drop(
-                    cx.listener(move |_: &mut AppShell, drag: &EntryDrag, _, cx| {
+                    cx.listener(move |shell: &mut AppShell, drag: &EntryDrag, window, cx| {
                         let target = group_id_for_drop.clone();
                         let entry_id = drag.entry_id.clone();
-                        state_for_drop.update(cx, |state, cx| {
-                            let _ = state.move_entry(&entry_id, &target, cx);
+                        shell.run_mutation("Entry moved.", window, cx, |state, cx| {
+                            state.move_entry(&entry_id, &target, cx)
                         });
                     }),
                 )
@@ -589,7 +583,7 @@ fn groups_section(
                         }),
                     )
                     .separator()
-                    .menu("Delete", Box::new(DeleteGroup { group_id: gid }))
+                    .menu("Delete…", Box::new(DeleteGroup { group_id: gid }))
                 }),
         );
     }
@@ -1146,6 +1140,32 @@ fn vault_split(
     } else {
         browser.selection_label.clone()
     };
+    let pending_group_delete = shell.pending_group_delete().and_then(|id| {
+        browser
+            .snapshot
+            .find_group(id)
+            .map(|group| DeletedGroupRow {
+                id: group.id.clone(),
+                name: group.name.clone(),
+                entry_count: group.entry_count(),
+            })
+    });
+    // Deleted groups are invisible in the sidebar tree, so Trash is the only
+    // place they can be seen or restored from.
+    let deleted_groups = if browser.selection.is_trash() && !browser.showing_search_results {
+        browser
+            .snapshot
+            .trashed_groups()
+            .iter()
+            .map(|group| DeletedGroupRow {
+                id: group.id.clone(),
+                name: group.name.clone(),
+                entry_count: group.entry_count(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     h_flex()
         .flex_1()
@@ -1153,12 +1173,15 @@ fn vault_split(
         .min_w(px(0.))
         .overflow_hidden()
         .child(entry_list(
-            entries,
-            &group_name,
-            browser.search_query.clone(),
-            browser.showing_search_results,
-            browser.selected_entry_id.clone(),
-            shell.search_input(),
+            EntryListModel {
+                entries,
+                group_name,
+                search_query: browser.search_query.clone(),
+                showing_search: browser.showing_search_results,
+                selected_entry_id: browser.selected_entry_id.clone(),
+                deleted_groups,
+                pending_group_delete,
+            },
             shell.state().clone(),
             shell.entry_list_scroll().clone(),
             cx,
@@ -1193,22 +1216,47 @@ enum ListRow {
     Entry(usize),
 }
 
+/// A group sitting in the Recycle Bin, as the Trash view renders it.
+struct DeletedGroupRow {
+    id: String,
+    name: String,
+    entry_count: usize,
+}
+
+/// Everything the entry column needs from the browser model for one frame.
+/// Bundled so the renderer keeps a readable signature as the Trash view adds
+/// its own section.
+struct EntryListModel {
+    entries: std::rc::Rc<Vec<VaultEntry>>,
+    group_name: String,
+    search_query: String,
+    showing_search: bool,
+    selected_entry_id: Option<String>,
+    /// Non-empty only while the user is looking at Trash.
+    deleted_groups: Vec<DeletedGroupRow>,
+    /// Group awaiting delete confirmation, if any.
+    pending_group_delete: Option<DeletedGroupRow>,
+}
+
 const ROW_HEIGHT: f32 = 56.0;
 const ROW_GAP: f32 = 2.0;
 const HEADER_HEIGHT: f32 = 28.0;
 
-#[allow(clippy::too_many_arguments)]
 fn entry_list(
-    entries: std::rc::Rc<Vec<VaultEntry>>,
-    group_name: &str,
-    search_query: String,
-    showing_search: bool,
-    selected_entry_id: Option<String>,
-    _search_input: &gpui::Entity<InputState>,
+    model: EntryListModel,
     state_entity: gpui::Entity<AppState>,
     scroll_handle_for_virtual: gpui_component::VirtualListScrollHandle,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
+    let EntryListModel {
+        entries,
+        group_name,
+        search_query,
+        showing_search,
+        selected_entry_id,
+        deleted_groups,
+        pending_group_delete,
+    } = model;
     let total = entries.len();
 
     // Build the flat virtual-row list once per render. We store INDEX into the shared
@@ -1375,7 +1423,7 @@ fn entry_list(
                                 .flex_shrink_0()
                                 .text_xs()
                                 .text_color(palette::text_muted())
-                                .child(format!("{} entries", total)),
+                                .child(plural(total, "entry", "entries")),
                         ),
                 )
                 .when(showing_search, |this| {
@@ -1384,11 +1432,163 @@ fn entry_list(
                             .truncate()
                             .text_xs()
                             .text_color(palette::text_muted())
-                            .child(format!("Across vault for \"{search_query}\"")),
+                            .child(format!("Results for \"{search_query}\" across the vault")),
                     )
                 }),
         )
+        .when_some(pending_group_delete, |this, group| {
+            this.child(delete_group_confirmation(&group, cx))
+        })
+        .when(!deleted_groups.is_empty(), |this| {
+            this.child(deleted_groups_section(&deleted_groups, cx))
+        })
         .child(body)
+}
+
+/// Armed confirmation for deleting a group. Mirrors the "Delete forever"
+/// strip on the entry detail panel: the destructive click is always the
+/// second one, and it names what is about to move.
+fn delete_group_confirmation(
+    group: &DeletedGroupRow,
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    let confirm_id = group.id.clone();
+    let contents = plural(group.entry_count, "entry", "entries");
+    v_flex()
+        .flex_shrink_0()
+        .gap_2()
+        .m_2()
+        .p_3()
+        .rounded(px(8.))
+        .bg(palette::orange_soft())
+        .border_1()
+        .border_color(palette::orange_border())
+        .child(div().text_sm().text_color(palette::text()).child(format!(
+            "Move \"{}\" and its {contents} to Trash?",
+            group.name
+        )))
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child("Subgroups move with it. You can restore it from Trash."),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .id("group-delete-confirm")
+                        .h(px(28.))
+                        .px_3()
+                        .rounded(px(5.))
+                        .bg(palette::red())
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(palette::panel())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .pressable_dim()
+                        .child("Move to Trash")
+                        .on_click(cx.listener(
+                            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                                shell.confirm_group_delete(&confirm_id, window, cx);
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .id("group-delete-cancel")
+                        .h(px(28.))
+                        .px_3()
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(palette::border_strong())
+                        .text_xs()
+                        .text_color(palette::text())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover_press(palette::border())
+                        .child("Cancel")
+                        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                            shell.cancel_group_delete(cx);
+                        })),
+                ),
+        )
+}
+
+/// The "Deleted groups" band above the Trash entry list. Short by nature (a
+/// deleted group is a deliberate act), so it is a plain column rather than a
+/// second virtual list.
+fn deleted_groups_section(
+    groups: &[DeletedGroupRow],
+    cx: &mut Context<AppShell>,
+) -> impl gpui::IntoElement {
+    let mut column = v_flex()
+        .flex_shrink_0()
+        .gap_1()
+        .px_2()
+        .pb_2()
+        .child(list_section_heading("Deleted groups", groups.len()));
+
+    for group in groups {
+        let group_id = group.id.clone();
+        column = column.child(
+            h_flex()
+                .id(SharedString::from(format!("trashed-group-{}", group.id)))
+                .h(px(40.))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .rounded(px(6.))
+                .bg(palette::sidebar())
+                .border_1()
+                .border_color(palette::border())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .text_color(palette::text())
+                                .child(group.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(palette::text_faint())
+                                .child(plural(group.entry_count, "entry", "entries")),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("restore-group-{}", group.id)))
+                        .flex_shrink_0()
+                        .h(px(28.))
+                        .px_2p5()
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(palette::border_strong())
+                        .text_xs()
+                        .text_color(palette::text())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover_press(palette::border())
+                        .child("Restore")
+                        .on_click(cx.listener(
+                            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                                shell.restore_group(&group_id, window, cx);
+                            },
+                        )),
+                ),
+        );
+    }
+    column
 }
 
 fn list_section_heading(label: &'static str, count: usize) -> impl gpui::IntoElement {
@@ -1621,7 +1821,6 @@ fn entry_detail_body(
     let updated = entry.updated.clone();
     let starred = entry.starred;
     let entry_id_for_star = entry.id.clone();
-    let state_for_star = state_entity.clone();
     let fav = entry.favicon.clone();
     let has_password = entry.has_password;
     let has_otp = entry.has_otp;
@@ -1683,12 +1882,12 @@ fn entry_detail_body(
                         .rounded(px(6.))
                         .hover(|s| s.bg(palette::panel()))
                         .pressable()
-                        .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
-                            let id = entry_id_for_star.clone();
-                            state_for_star.update(cx, |state, cx| {
-                                let _ = state.toggle_starred(&id, cx);
-                            });
-                        }))
+                        .on_click(cx.listener(
+                            move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                                let id = entry_id_for_star.clone();
+                                shell.toggle_starred(&id, window, cx);
+                            },
+                        ))
                         .child(
                             gpui_component::Icon::from(if starred {
                                 gpui_component::IconName::StarFill
