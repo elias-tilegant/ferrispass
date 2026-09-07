@@ -410,9 +410,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
 }
 
 fn structural_state_differs(local: &Database, remote: &Database) -> bool {
-    if local.deleted_objects != remote.deleted_objects
-        || local.meta.recyclebin_uuid != remote.meta.recyclebin_uuid
-    {
+    if local.deleted_objects != remote.deleted_objects || meta_content_differs(local, remote) {
         return true;
     }
 
@@ -462,6 +460,38 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
     }
 
     false
+}
+
+/// Database-level settings a person set, as opposed to the ones a client
+/// rewrites on its own.
+///
+/// The merge takes each of these from whichever side changed it last, so a
+/// difference here means the merged result differs from at least one side and
+/// has to be written back. Direction is not attributed, in keeping with the
+/// rest of `structural_state_differs`: a redundant remote version costs one
+/// upload, a skipped one strands the user's rename.
+///
+/// `generator` is excluded because every client writes its own name into it,
+/// and `last_selected_group` and `last_top_visible_group` because they follow
+/// the cursor. Comparing those would demand an upload after every sync.
+/// `master_key_changed` describes the key the file is encrypted with, which
+/// both copies share.
+fn meta_content_differs(local: &Database, remote: &Database) -> bool {
+    let (a, b) = (&local.meta, &remote.meta);
+    a.database_name != b.database_name
+        || a.database_description != b.database_description
+        || a.default_username != b.default_username
+        || a.color != b.color
+        || a.maintenance_history_days != b.maintenance_history_days
+        || a.memory_protection != b.memory_protection
+        || a.recyclebin_enabled != b.recyclebin_enabled
+        || a.recyclebin_uuid != b.recyclebin_uuid
+        || a.entry_templates_group != b.entry_templates_group
+        || a.history_max_items != b.history_max_items
+        || a.history_max_size != b.history_max_size
+        || a.master_key_change_rec != b.master_key_change_rec
+        || a.master_key_change_force != b.master_key_change_force
+        || a.custom_data != b.custom_data
 }
 
 /// Which side holds entry history versions the other does not.
@@ -3075,11 +3105,12 @@ mod tests {
         add_history_at(&mut local, id, "v1", oldest);
         add_history_at(&mut local, id, "v2", newer);
 
-        // The other client keeps one version, and is at that limit, so the
+        // Both vaults keep one version, so the remote is at its limit and the
         // older one is demonstrably something it dropped rather than
-        // something it never had.
+        // something it never had. The cap is set on both sides because a cap
+        // that differs is itself a setting the merge has to write back.
+        local.meta.history_max_items = Some(1);
         let mut remote = fork(&local);
-        remote.meta.history_max_items = Some(1);
         remote.entry_mut(id).unwrap().history = None;
         add_history_at(&mut remote, id, "v2", newer);
 
@@ -3122,6 +3153,40 @@ mod tests {
             "the remote had room, so the missing version is one it never saw"
         );
         assert!(report.has_local_contribution());
+    }
+
+    /// Database settings are merged by the fork now, so a difference in them
+    /// means the merged result differs from at least one side and has to be
+    /// written back. Nothing reported that, so renaming the database here
+    /// stayed here.
+    #[test]
+    fn a_database_setting_that_differs_needs_writing_back() {
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        let mut remote = fork(&local);
+
+        assert!(
+            !diff(&local, &remote).structural_writeback_required,
+            "identical copies need nothing"
+        );
+
+        local.meta.database_name = Some("Team vault".into());
+        assert!(
+            diff(&local, &remote).structural_writeback_required,
+            "a rename here has to reach the other copy"
+        );
+
+        remote.meta.database_name = Some("Team vault".into());
+        assert!(!diff(&local, &remote).structural_writeback_required);
+
+        // View state must not: it follows the cursor, and comparing it would
+        // demand an upload after every sync.
+        local.meta.last_selected_group = Some(uuid::Uuid::new_v4());
+        local.meta.generator = Some("SomeOtherClient".into());
+        assert!(
+            !diff(&local, &remote).structural_writeback_required,
+            "the cursor and the writer's name are not settings"
+        );
     }
 
     /// The fork gives a version with no timestamp the epoch and unions it
@@ -3169,8 +3234,10 @@ mod tests {
             keepass::db::Times::now() - chrono::TimeDelta::minutes(10),
         );
 
+        // Set on both sides: a differing cap is itself a setting the merge
+        // has to write back, which would mask what this test is about.
+        local.meta.history_max_items = Some(0);
         let mut remote = fork(&local);
-        remote.meta.history_max_items = Some(0);
         remote.entry_mut(id).unwrap().history = None;
 
         let report = diff(&local, &remote);
