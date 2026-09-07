@@ -173,6 +173,20 @@ revisions before saving or uploading.
 
 Pinned to the `elias-tilegant/keepass-rs` fork because upstream's KDBX-4 write path produced files unreadable by KeePassXC. The fork carries three interop fixes: AES-KDF UUID handling, omit-None XML field serialization, and base64-encoded timestamp formatting. The pin in `Cargo.toml` is the single source of truth for the exact fork commit; bump it deliberately and re-run interop tests against KeePassXC + KeePass2 before shipping.
 
+### Custom-icon-aware database merge
+
+Icon references travel with entries and groups during a merge while the images
+live in a database-local table, so the fork copies the images a merged
+reference needs and drops those nothing points at any more. Where both
+databases use one `CustomIconUUID` for different images, which happens when two
+clients each add an icon offline, the source's id is renamed before any
+reference is copied: afterwards there is no way left to tell which side meant
+which image.
+
+The fork reports what a merge could not do cleanly as a `MergeWarning` enum
+rather than as sentences. FerrisPass decides from those whether a merge lost
+anything, and that decision must not depend on wording it does not control.
+
 ### Attachment-aware database merge
 
 The fork's database merge translates database-local attachment IDs, copies new blobs, preserves attachment names and current/history references, and reuses equal protected or unprotected values. FerrisPass can therefore resolve local/remote attachment divergence without dropping binaries or leaving dangling references.
