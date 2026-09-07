@@ -283,20 +283,7 @@ fn render_icloud_transferring(message: &str) -> AnyElement {
     v_flex()
         .gap_4()
         .child(heading("Connecting iCloud Drive…", message))
-        .child(
-            div()
-                .h(px(4.))
-                .w_full()
-                .rounded(px(2.))
-                .bg(palette::sidebar())
-                .child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative(0.4))
-                        .rounded(px(2.))
-                        .bg(palette::blue()),
-                ),
-        )
+        .child(crate::ui::widgets::progress::working("Working…"))
         .into_any_element()
 }
 
@@ -313,20 +300,7 @@ fn render_authorizing() -> AnyElement {
             "Asking Microsoft for a fresh sign-in code. This keeps your \
              existing vault and file - we're only renewing the connection.",
         ))
-        .child(
-            div()
-                .h(px(4.))
-                .w_full()
-                .rounded(px(2.))
-                .bg(palette::sidebar())
-                .child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative(0.4))
-                        .rounded(px(2.))
-                        .bg(palette::blue()),
-                ),
-        )
+        .child(crate::ui::widgets::progress::working("Working…"))
         .into_any_element()
 }
 
@@ -463,20 +437,7 @@ fn render_picking(
         // Loading: show a thin progress bar + message. Zero results yet.
         v_flex()
             .gap_3()
-            .child(
-                div()
-                    .h(px(4.))
-                    .w_full()
-                    .rounded(px(2.))
-                    .bg(palette::sidebar())
-                    .child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(0.4))
-                            .rounded(px(2.))
-                            .bg(palette::blue()),
-                    ),
-            )
+            .child(crate::ui::widgets::progress::working("Working…"))
             .child(
                 div()
                     .text_xs()
@@ -678,20 +639,7 @@ fn render_downloading(_cx: &mut Context<AppShell>) -> AnyElement {
             "Fetching the file, saving a local copy. This usually takes a \
              couple of seconds.",
         ))
-        .child(
-            div()
-                .h(px(4.))
-                .w_full()
-                .rounded(px(2.))
-                .bg(palette::sidebar())
-                .child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative(0.4))
-                        .rounded(px(2.))
-                        .bg(palette::blue()),
-                ),
-        )
+        .child(crate::ui::widgets::progress::working("Working…"))
         .into_any_element()
 }
 

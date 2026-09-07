@@ -16,17 +16,21 @@ If your tenant has tightened admin policies, the OAuth grant for `Files.ReadWrit
 
 ## 1. Open FerrisPass and start the connect flow
 
-![FerrisPass welcome screen with Connect OneDrive option](./img/sharepoint/01-welcome.jpeg)
+![FerrisPass welcome screen with the Connect Cloud Vault option](./img/sharepoint/01-welcome.jpeg)
 
-On the Welcome screen, click **Connect OneDrive**.
+On the Welcome screen, click **Connect Cloud Vault**.
 
-> **Heads up:** Despite the label, this entry kicks off the *SharePoint* flow - it covers SharePoint document libraries plus your personal OneDrive in a single sign-in. Dedicated OneDrive Personal and iCloud entries are placeholders for upcoming releases.
+> **Heads up:** The screenshots below are from v0.2.0 and some labels have
+> changed. The Welcome screen entry is now "Connect Cloud Vault", and the
+> provider picker offers SharePoint and iCloud Drive. One SharePoint sign-in
+> covers SharePoint document libraries and your OneDrive for Business files;
+> only OneDrive for personal Microsoft accounts is still missing.
 
 If you already have a vault open, the same flow lives at **Settings → Sync → Connect** (⌘⇧, jumps straight there).
 
 ## 2. Pick the provider
 
-![Provider picker showing SharePoint, OneDrive (coming soon), iCloud Drive (coming soon)](./img/sharepoint/02-choose-provider.jpeg)
+![Provider picker showing SharePoint, OneDrive and iCloud Drive](./img/sharepoint/02-choose-provider.jpeg)
 
 Click **SharePoint**. The other two options are wired in as placeholders so the visual roadmap is visible - only SharePoint is functional in v0.2.
 

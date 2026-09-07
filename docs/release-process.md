@@ -7,14 +7,18 @@ End-to-end checklist for cutting a `v0.x.y` release. Read once before your first
 Run before bumping the version:
 
 ```sh
-cargo check                                      # warnings ok, errors not
-cargo test                                       # all 82+ green
-cargo clippy --all-targets                       # informational
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked                              # all 476+ green
+cargo audit
+grep -rnP '\x{2014}|\x{2013}' src/ docs/ README.md SECURITY.md   # must be empty
 git status                                       # working tree clean
 git pull --rebase origin master                  # in sync with remote
 ```
 
-If any of these fail, fix before tagging - the CI will refuse the release otherwise.
+Every one of these is also a CI gate, so a failure here is a failure there.
+The dash grep is the house style rule: plain hyphens everywhere, including in
+commit messages.
 
 ## Commit message conventions
 

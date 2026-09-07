@@ -976,13 +976,17 @@ impl AppShell {
         autotype::permissions::is_trusted()
     }
 
-    /// Trigger the system prompt that opens the Privacy → Accessibility
-    /// pane. Called from the "Grant access" button in Settings. The
-    /// return value isn't actionable here - even on grant, the macOS
-    /// trust bit only refreshes for new processes, so the user must
-    /// restart FerrisPass after granting.
-    pub fn auto_type_request_trust(&self) {
+    /// Trigger the system prompt that opens the Privacy → Accessibility pane.
+    ///
+    /// macOS only re-reads the trust bit for new processes, so the Settings
+    /// label keeps saying "Not granted" however the user answers. Without the
+    /// note that follows, the button looks broken.
+    pub fn auto_type_request_trust(&self, window: &mut Window, cx: &mut gpui::App) {
         let _ = autotype::permissions::request_trust();
+        window.push_notification(
+            "Approve FerrisPass in System Settings, then restart the app for Auto-Type to see it.",
+            cx,
+        );
     }
 
     /// Drop reveal state, cancel timers, and clear the clipboard write owned
@@ -3412,8 +3416,23 @@ impl AppShell {
         // synchronously so the Settings UI shows the right state on
         // the very next render.
         self.sync_auto_type_listener(cx);
-        cx.background_spawn(async move {
-            let _ = crate::app::settings::save(&new_settings);
+        // A failed write used to be invisible, so a preference the UI said
+        // was saved silently reverted on the next launch.
+        let write = cx.background_spawn(async move { crate::app::settings::save(&new_settings) });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = write.await {
+                let _ = this.update(cx, |_shell, cx| {
+                    if let Some(handle) = cx.active_window() {
+                        let _ = handle.update(cx, |_root, window, cx| {
+                            Self::notify_error(
+                                window,
+                                format!("Could not save your settings: {error}"),
+                                cx,
+                            );
+                        });
+                    }
+                });
+            }
         })
         .detach();
         cx.notify();

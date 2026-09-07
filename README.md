@@ -19,9 +19,9 @@ For headless and agent-oriented workflows, see the [FerrisPass CLI](docs/cli.md)
 - **Clipboard auto-clear**: configurable wipe after copy (default 10 s, "Never" supported); also wipes on lock
 - **Auto-Type**: global hotkey (default ⌃⌥⌘V) types `{USERNAME}{TAB}{PASSWORD}{ENTER}` into the previously-focused window; foreground app is matched to a vault entry by URL hostname. Off by default - enable in Settings → Auto-Type. Requires the macOS Accessibility permission.
 - **Resume**: most-recently-opened vault auto-loads at startup; Recents list on the welcome screen
-- **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, three-way merge) - see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) for the connect walkthrough
+- **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, merge on conflict) and iCloud Drive - see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) and [Getting Started: iCloud Drive](./docs/getting-started-icloud.md)
+- **Appearance**: light, dark, or follow macOS (⌘⇧D cycles); the window remembers where you left it
 - **CLI**: headless vault access for scripts and local AI agents, with JSON output, explicit secret reads, dry-run writes, Touch ID and two-step SharePoint sync
-- **Theming**: light + dark mode (⌘⇧D)
 
 ## Feature matrix
 
@@ -38,7 +38,7 @@ FerrisPass is still young, so this matrix is intentionally honest about what is 
 | Search and basic entry editing | Yes | Yes | Yes | Yes |
 | Browser or OS AutoFill | Not yet | Browser extension | iOS/macOS AutoFill | iOS/macOS AutoFill and browser extensions |
 | Auto-Type | Yes, global hotkey | Yes | Not a primary feature | Not a primary feature |
-| Cloud sync | SharePoint only | File-based / bring your own sync | Broad Files app and direct cloud support | Broad cloud, WebDAV, SFTP support |
+| Cloud sync | SharePoint, iCloud Drive | File-based / bring your own sync | Broad Files app and direct cloud support | Broad cloud, WebDAV, SFTP support |
 | Conflict handling / merge | Three-way merge for SharePoint | KeeShare / database tools | Merge support | Advanced sync and merge |
 | Passkeys | Not yet | Yes | Yes | Yes |
 | Hardware keys | Not yet | YubiKey / OnlyKey challenge-response | YubiKey | YubiKey |

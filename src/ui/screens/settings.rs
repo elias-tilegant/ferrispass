@@ -10,6 +10,7 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 
 use crate::app::actions::{DownloadFavicons, InstallUpdate, OpenWhatsNew, RestartToUpdate};
+use crate::app::settings::ThemeChoice;
 use crate::app::{AppSettings, FaviconDownloadStatus, VaultStatus};
 use crate::ui::app_shell::{AppShell, SettingsTab};
 use crate::ui::icons::AppIcon;
@@ -296,6 +297,7 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
     let biometric_supported = state.biometric_store().is_supported();
     v_flex()
         .gap_4()
+        .child(appearance_section(&settings, cx))
         .child(auto_lock_section(&settings, cx))
         .when(biometric_supported, |this| {
             this.child(touch_id_section(&settings, cx))
@@ -443,6 +445,40 @@ fn touch_id_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl 
          system-level Touch ID dialogs - which is what lets you \
          unlock in clamshell mode where the sensor is unreachable.",
         toggle_row,
+    )
+}
+
+/// Appearance picker. Cmd+Shift+D rotates the same setting; this is where a
+/// user who does not know the shortcut finds it, and where "System" is
+/// visible as a choice rather than as an invisible default.
+fn appearance_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
+    let current = settings.theme;
+    let items: Vec<_> = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark]
+        .into_iter()
+        .map(|choice| {
+            let baseline = settings.clone();
+            segment_item(
+                SharedString::from(format!("appearance-{}", choice.label())),
+                choice.label().to_string(),
+                choice == current,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    crate::ui::theme::apply_choice(choice, Some(window), cx);
+                    shell.update_settings(
+                        AppSettings {
+                            theme: choice,
+                            ..baseline.clone()
+                        },
+                        cx,
+                    );
+                }),
+            )
+        })
+        .collect();
+    section_card(
+        "Appearance",
+        "System follows your macOS setting, including a change while FerrisPass is running. \
+         Cmd+Shift+D cycles the same three.",
+        option_group(items),
     )
 }
 
@@ -838,8 +874,8 @@ fn auto_type_permission_section(trusted: bool, cx: &mut Context<AppShell>) -> im
                 "Grant Accessibility access…",
                 ActionKind::Primary,
                 true,
-                cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                    shell.auto_type_request_trust();
+                cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                    shell.auto_type_request_trust(window, cx);
                     // Re-render so the status line updates after the
                     // system prompt closes. macOS only refreshes the
                     // process trust bit on next launch, so the label

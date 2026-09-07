@@ -2686,6 +2686,10 @@ fn opening_panel(summary: &VaultSummary) -> impl gpui::IntoElement {
                 .text_color(palette::text_muted())
                 .child(summary.subtitle.clone()),
         )
+        // Argon2 takes about half a second on a modern Mac and much longer on
+        // a vault with high KDF parameters. Without a moving indicator that
+        // wait looks like the app has stopped.
+        .child(crate::ui::widgets::progress::working("Decrypting vault…"))
 }
 
 fn status_bar(
