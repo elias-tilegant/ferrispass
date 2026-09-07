@@ -356,6 +356,51 @@ impl QueuedSave {
     }
 }
 
+/// What the completion of a remote pull should do with the merge report.
+///
+/// A pure decision, split out because the branch it replaced lived inside a
+/// spawn closure where nothing could reach it: a fix to it was silently lost
+/// to a stray `git checkout` and only an outside reviewer noticed. The cases
+/// it distinguishes are the ones where getting it wrong loses an edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteMergePlan {
+    /// Nothing to decide. Merge silently and push if the local side
+    /// contributed anything.
+    AutoMerge,
+    /// Open the conflict screen.
+    Ask,
+    /// Something has to be decided, but not now: the vault is parked, the
+    /// user is mid-edit, or this is a background pull that must not seize the
+    /// screen. Report and wait for an explicit "Sync now".
+    Defer,
+}
+
+impl RemoteMergePlan {
+    fn of(
+        report: &ConflictReport,
+        target_is_active: bool,
+        interactive: bool,
+        editing: bool,
+    ) -> Self {
+        // Group conflicts count here as much as entry ones. Falling through
+        // to the silent merge with one applies the default side and uploads
+        // it, which is the loss the conflict screen exists to prevent.
+        if !report.needs_a_decision() {
+            return Self::AutoMerge;
+        }
+        // The conflict screen is single-vault by design: it edits the user's
+        // active focus. And replacing an open entry editor with it throws
+        // away whatever they had typed, while the interactive push that lands
+        // here fires on every save, so an unlucky 412 can arrive at any
+        // moment. A background pull must not seize the screen either.
+        if target_is_active && interactive && !editing {
+            Self::Ask
+        } else {
+            Self::Defer
+        }
+    }
+}
+
 /// What `AppState::apply_sync_binding_restore` decided, so its caller can run
 /// the two effects that need a gpui context.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2361,6 +2406,35 @@ impl AppState {
                 self.sync_activity_for(target),
                 Some(SyncActivity::Busy | SyncActivity::Failed)
             )
+    }
+
+    /// Adopt the merged file as this vault's new baseline after a pure
+    /// fast-forward. Returns the configuration the caller should persist, or
+    /// `None` when the vault was locked meanwhile.
+    ///
+    /// The file just changed without an upload, and every save re-encrypts
+    /// with a fresh seed, so its digest will never match the last one we sent
+    /// again. Recording the merged file is what says "local holds nothing the
+    /// cloud lacks"; without it the next tick reads the difference as an
+    /// unsent edit and uploads after every single pull.
+    ///
+    /// The disk write is the caller's, so a test can drive the decision
+    /// without writing into the user's configuration directory.
+    fn adopt_fast_forward_baseline(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        remote_etag: String,
+        merged_bytes: &[u8],
+    ) -> Option<SyncConfig> {
+        let revision = crate::sync::config::local_revision(merged_bytes);
+        let mut updated = None;
+        self.with_sync_binding_mut_for_session(target, session_id, |binding| {
+            binding.config.last_etag = remote_etag;
+            binding.config.uploaded_local_revision = Some(revision);
+            updated = Some(binding.config.clone());
+        });
+        updated
     }
 
     /// Hold a push until this vault's binding restore lands.
@@ -5537,12 +5611,13 @@ impl AppState {
             Ok(remote_db) => {
                 let report = crate::keepass::merge::diff(&local_db, &remote_db);
 
-                // Git-style: if no per-entry conflicts to decide, auto-merge
-                // silently. Remote-only additions get pulled in with their
-                // original UUIDs preserved (see merge::add_entry_under) and
-                // the result uploads back. The user sees no overlay - just a
-                // "Synced · N merged" badge in the status pill.
-                if report.conflicts.is_empty() {
+                let editing = matches!(
+                    self.overlay,
+                    Overlay::AddEntry | Overlay::EditEntry { .. } | Overlay::AddGroup { .. }
+                );
+                if RemoteMergePlan::of(&report, target_is_active, interactive, editing)
+                    == RemoteMergePlan::AutoMerge
+                {
                     let auto_merged_count = report.remote_only.len() + report.auto_resolved.len();
                     // Whether the merge actually changes the *remote*. A pure
                     // fast-forward - we only pulled remote-only additions
@@ -5594,10 +5669,6 @@ impl AppState {
                     return;
                 }
 
-                // Real conflicts. The Conflict overlay is single-vault by
-                // design - it edits the user's active focus. For a parked
-                // vault, mark Failed with a hint so the user knows to
-                // switch back before resolving.
                 if !target_is_active {
                     self.apply_sync_status_for_session(
                         target,
@@ -5609,20 +5680,6 @@ impl AppState {
                     );
                     return;
                 }
-                // The user is mid-edit. Replacing the entry editor with the
-                // conflict screen throws away whatever they had typed, and
-                // the interactive push that lands here fires on *every* save,
-                // so an unlucky 412 could arrive at any moment. `auto_sync`
-                // already refuses to run under the Connect and Conflict
-                // overlays; the editor deserves the same protection.
-                //
-                // Background pull: never seize the screen either. Both defer
-                // to a Failed hint; the user resolves on their next explicit
-                // "Sync now", which runs interactively and opens the overlay.
-                let editing = matches!(
-                    self.overlay,
-                    Overlay::AddEntry | Overlay::EditEntry { .. } | Overlay::AddGroup { .. }
-                );
                 if !interactive || editing {
                     self.apply_sync_status_for_session(
                         target,
@@ -6037,19 +6094,16 @@ impl AppState {
                     if !state.vault_session_is_current(&callback_path, session_id) {
                         return;
                     }
-                    let merged_revision = crate::sync::config::local_revision(&published_bytes);
-                    state.with_sync_binding_mut_for_session(&callback_path, session_id, |b| {
-                        b.config.last_etag = if_match.clone();
-                        // The file just changed without an upload, and every
-                        // save re-encrypts with a fresh seed, so its digest
-                        // will never match the last one we sent. Recording
-                        // the merged file as the baseline is what says "local
-                        // holds nothing the cloud lacks"; without it the next
-                        // tick reads the difference as an unsent edit and
-                        // uploads after every single pull.
-                        b.config.uploaded_local_revision = Some(merged_revision.clone());
-                        let _ = crate::sync::config::save(&b.config);
-                    });
+                    if let Some(config) = state.adopt_fast_forward_baseline(
+                        &callback_path,
+                        session_id,
+                        if_match.clone(),
+                        &published_bytes,
+                    ) {
+                        // Best effort: a failed write means the next start
+                        // re-detects the difference and uploads once.
+                        let _ = crate::sync::config::save(&config);
+                    }
                     state.apply_sync_status_for_session(
                         &callback_path,
                         session_id,
@@ -6970,10 +7024,47 @@ mod park_tests {
         assert!(state.save_should_reach_the_cloud(&path));
     }
 
-    /// A push dropped by a lock, a quit or a crash leaves the file on disk
-    /// ahead of what was uploaded, while the remote etag has not moved
-    /// either. The pull check alone called that Synced, over an edit that
-    /// existed on exactly one machine.
+    /// A pull rewrites the local file, and every save re-encrypts with a
+    /// fresh seed, so the file's digest can never match the last one we sent.
+    /// Reading that difference as an unsent edit would upload after every
+    /// single pull, which is the loop the fast-forward path exists to avoid.
+    ///
+    /// This drives the production decision, not the comparison alone: an
+    /// earlier version of this test checked only the pure function, and
+    /// removing the branch that records the baseline left it green.
+    #[test]
+    fn a_fast_forward_records_the_merged_file_as_the_new_baseline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("pulled.kdbx");
+        let merged_bytes = b"re-encrypted after the pull";
+
+        let mut state = AppState::default();
+        fresh_open(&mut state, vault.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session");
+        let mut binding = fake_binding_for("a@example.invalid", vault.clone(), "item");
+        binding.config.uploaded_local_revision =
+            Some(crate::sync::config::local_revision(b"as uploaded"));
+        state.sync = Some(binding);
+
+        let config = state
+            .adopt_fast_forward_baseline(&vault, session_id, "etag-after".into(), merged_bytes)
+            .expect("the vault is still open, so there is a binding to update");
+
+        assert_eq!(config.last_etag, "etag-after");
+        assert_eq!(
+            config.uploaded_local_revision.as_deref(),
+            Some(crate::sync::config::local_revision(merged_bytes).as_str()),
+            "the merged file is the new baseline"
+        );
+
+        // And the vault is no longer read as holding an unsent edit.
+        std::fs::write(&vault, merged_bytes).expect("write vault");
+        assert!(!AppState::local_is_ahead_of_the_cloud(&vault, &config));
+    }
+
+    /// The other half of the same rule: a file that differs from what was
+    /// sent is an unsent edit, whatever the remote etag says. That is the
+    /// case a push dropped by a lock, a quit or a crash leaves behind.
     #[test]
     fn a_file_that_was_never_uploaded_is_recognised_as_ahead() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7003,35 +7094,65 @@ mod park_tests {
         );
     }
 
-    /// A pull rewrites the local file, and every save re-encrypts with a
-    /// fresh seed, so the file's digest can never match the last one we sent.
-    /// Reading that difference as an unsent edit would upload after every
-    /// single pull, which is the loop the fast-forward path exists to avoid.
+    /// The branch this replaces lived inside a spawn closure, so nothing
+    /// could reach it: a fix to it was lost to a stray `git checkout` and
+    /// only an outside reviewer noticed. Each row is a way to lose an edit.
     #[test]
-    fn a_fast_forward_does_not_look_like_an_unsent_edit() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let vault = dir.path().join("pulled.kdbx");
-        let mut config = fake_binding_for("a@example.invalid", vault.clone(), "item").config;
+    fn a_pull_only_merges_silently_when_there_is_nothing_to_decide() {
+        use crate::keepass::merge::{EntryConflict, EntryView, GroupConflict};
 
-        std::fs::write(&vault, b"as uploaded").expect("write vault");
-        config.uploaded_local_revision = Some(crate::sync::config::local_revision(b"as uploaded"));
-        assert!(!AppState::local_is_ahead_of_the_cloud(&vault, &config));
+        let nothing = ConflictReport::default();
+        let entry_conflict = ConflictReport {
+            conflicts: vec![EntryConflict {
+                id: "e1".into(),
+                local: EntryView::default(),
+                remote: EntryView::default(),
+                fields: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let group_conflict = ConflictReport {
+            group_conflicts: vec![GroupConflict {
+                id: "g1".into(),
+                name: "Banking".into(),
+                path: Vec::new(),
+                fields: Vec::new(),
+            }],
+            ..Default::default()
+        };
 
-        // A pull merges and saves. Different bytes, same content as remote.
-        std::fs::write(&vault, b"re-encrypted after the pull").expect("write vault");
-        assert!(
-            AppState::local_is_ahead_of_the_cloud(&vault, &config),
-            "without recording the merged file, the tick sees an edit"
+        let active_and_asked =
+            |report: &ConflictReport| RemoteMergePlan::of(report, true, true, false);
+
+        assert_eq!(active_and_asked(&nothing), RemoteMergePlan::AutoMerge);
+        assert_eq!(active_and_asked(&entry_conflict), RemoteMergePlan::Ask);
+        assert_eq!(
+            active_and_asked(&group_conflict),
+            RemoteMergePlan::Ask,
+            "a group conflict alone must reach the user, not the default side"
         );
 
-        // Which is why the fast-forward branch records it.
-        config.uploaded_local_revision = Some(crate::sync::config::local_revision(
-            b"re-encrypted after the pull",
-        ));
-        assert!(
-            !AppState::local_is_ahead_of_the_cloud(&vault, &config),
-            "a pure pull leaves nothing to push"
-        );
+        // A parked vault, a background pull and an open editor each defer
+        // rather than seizing the screen, and none of them merges silently.
+        for (active, interactive, editing) in [
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            assert_eq!(
+                RemoteMergePlan::of(&group_conflict, active, interactive, editing),
+                RemoteMergePlan::Defer
+            );
+            assert_eq!(
+                RemoteMergePlan::of(&entry_conflict, active, interactive, editing),
+                RemoteMergePlan::Defer
+            );
+            assert_eq!(
+                RemoteMergePlan::of(&nothing, active, interactive, editing),
+                RemoteMergePlan::AutoMerge,
+                "with nothing to decide there is nothing to defer"
+            );
+        }
     }
 
     /// Two vaults can each be waiting for their binding restore. With one

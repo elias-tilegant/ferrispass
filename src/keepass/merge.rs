@@ -47,7 +47,7 @@ use crate::keepass::repository::{
 /// five visible-in-UI ones. When the user picks "Remote" for a conflict, all
 /// these fields get transplanted onto the local entry - partial transplants
 /// were the source of a silent-data-loss bug pre-v0.2.1.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct EntryView {
     /// EntryId stringified to its UUID. Stable across diff/apply, and
     /// re-hydrated via `EntryId::from_uuid` when adding remote-only entries

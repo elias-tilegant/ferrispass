@@ -662,6 +662,13 @@ fn execute_sync(
         local_bytes
     };
     config.last_etag = remote_etag;
+    // What the file on disk now holds. The GUI compares this against the file
+    // on its next tick to tell "nobody else wrote" from "our own write never
+    // happened", so a CLI sync that left it stale made the next GUI tick
+    // upload for no reason. It is recorded whether or not we upload: after a
+    // pure pull the merged file is the new baseline, and after an upload it
+    // is what we sent.
+    config.uploaded_local_revision = Some(crate::sync::config::local_revision(&upload_bytes));
     let resolved_upload =
         needs_upload || !report.conflicts.is_empty() || !report.group_conflicts.is_empty();
     if resolved_upload {
