@@ -470,14 +470,19 @@ fn column(
         chip("Keep this", ChipTone::Gray)
     };
 
-    // The element id must be unique per conflict, not just per side: GPUI
-    // keys interactive state by id, and duplicated ids make the first
-    // painted column swallow every later column's mouse-up.
+    // The element id must be unique per conflict and per kind, not just per
+    // side: GPUI keys interactive state by id, and duplicated ids make the
+    // first painted column swallow every later column's mouse-up.
     let mut col = v_flex()
         .flex_1()
         .id(SharedString::from(format!(
-            "conflict-col-{}-{}",
-            entry_id_for_click, side as u8
+            "conflict-col-{}-{}-{}",
+            match kind {
+                ConflictKind::Entry => "entry",
+                ConflictKind::Group => "group",
+            },
+            entry_id_for_click,
+            side as u8
         )))
         .rounded(px(10.))
         .border_1()

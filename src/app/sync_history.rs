@@ -37,6 +37,11 @@ pub enum SyncChangeKind {
     /// DB didn't actually change, but the divergence itself is worth
     /// surfacing so the user can trace their own decision later.
     ResolvedKeptLocal,
+    /// A group whose content diverged without a timestamp that could rank the
+    /// two sides. The user chose, and the side they did not choose is gone:
+    /// KDBX archives entry versions, not group versions. That makes the log
+    /// line the only trace of the decision.
+    GroupResolved,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -90,6 +95,23 @@ pub fn entries_from_report(
                 entry_title: resolved.remote.title.clone(),
             });
         }
+    }
+
+    for conflict in &report.group_conflicts {
+        let kept = picks
+            .groups
+            .get(&conflict.id)
+            .copied()
+            .unwrap_or(Side::Local);
+        let side = match kept {
+            Side::Local => "this Mac",
+            Side::Remote => "remote",
+        };
+        out.push(SyncHistoryEntry {
+            at: now,
+            kind: SyncChangeKind::GroupResolved,
+            entry_title: format!("{} (kept {side})", conflict.name),
+        });
     }
 
     for conflict in &report.conflicts {
@@ -275,6 +297,44 @@ mod tests {
         };
         let entries = entries_from_report(&report, &Resolutions::default(), fixed_now());
         assert_eq!(entries[0].kind, SyncChangeKind::ResolvedKeptLocal);
+    }
+
+    /// A group resolution discards the side the user did not pick, and KDBX
+    /// keeps no archived version of a group to recover it from. The activity
+    /// log is the only trace, so it has to name the group and the side.
+    #[test]
+    fn a_resolved_group_is_logged_with_the_side_that_won() {
+        let report = ConflictReport {
+            group_conflicts: vec![
+                crate::keepass::merge::GroupConflict {
+                    id: "g1".into(),
+                    name: "Banking".into(),
+                    path: vec!["Root".into()],
+                    fields: Vec::new(),
+                },
+                crate::keepass::merge::GroupConflict {
+                    id: "g2".into(),
+                    name: "Travel".into(),
+                    path: Vec::new(),
+                    fields: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let picks = Resolutions {
+            entries: std::collections::HashMap::new(),
+            groups: std::collections::HashMap::from([("g1".to_string(), Side::Remote)]),
+        };
+
+        let entries = entries_from_report(&report, &picks, fixed_now());
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, SyncChangeKind::GroupResolved);
+        assert_eq!(entries[0].entry_title, "Banking (kept remote)");
+        assert_eq!(
+            entries[1].entry_title, "Travel (kept this Mac)",
+            "an unanswered group defaults to local, the way entries do"
+        );
     }
 
     #[test]
