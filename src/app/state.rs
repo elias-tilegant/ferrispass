@@ -294,12 +294,14 @@ pub struct AppState {
     /// requests only mark the queue flag; the completion callback runs
     /// one follow-up push that reads the then-latest bytes.
     syncs_in_flight: HashMap<PathBuf, QueuedSync>,
-    /// A push that arrived while the vault had no live binding, held until
-    /// the restore that it triggered installs one. Without this the save was
+    /// Pushes that arrived while their vault had no live binding, held until
+    /// the restore each one triggered installs one. Without this the save was
     /// written locally, the push was dropped, and auto-sync (pull-only unless
     /// the status is `Failed`) never uploaded it: the edit lived on one
-    /// machine while the UI said everything was in sync.
-    push_awaiting_restore: Option<(PathBuf, QueuedSyncRequest)>,
+    /// machine while the UI said everything was in sync. Keyed per vault
+    /// because a single slot let a second vault's queued push evict the
+    /// first, and let an unrelated restore consume the survivor.
+    pushes_awaiting_restore: HashMap<PathBuf, QueuedSyncRequest>,
     /// Per-vault backoff after the provider asked us to slow down. The
     /// failure-recovery branch of the auto-sync tick re-uploads the whole
     /// vault, so without this a throttled client hammered Graph on every
@@ -353,6 +355,17 @@ impl QueuedSave {
     }
 }
 
+/// What `AppState::apply_sync_binding_restore` decided, so its caller can run
+/// the two effects that need a gpui context.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RestoreOutcome {
+    /// A binding landed in this vault's slot, so a push that was waiting for
+    /// one may now go out.
+    bound: bool,
+    /// The active vault's status changed.
+    repaint: bool,
+}
+
 /// Bookkeeping value for `AppState::syncs_in_flight` - see the field docs.
 #[derive(Clone, Debug)]
 struct QueuedSync {
@@ -362,11 +375,24 @@ struct QueuedSync {
     pending: Option<QueuedSyncRequest>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct QueuedSyncRequest {
     session_id: VaultSessionId,
     interactive: bool,
     bytes: Option<Arc<Vec<u8>>>,
+}
+
+/// Redacted by hand: `bytes` is the published KDBX ciphertext, and a derived
+/// `Debug` would print the whole vault into any log or panic message.
+impl std::fmt::Debug for QueuedSyncRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QueuedSyncRequest")
+            .field("session_id", &self.session_id)
+            .field("interactive", &self.interactive)
+            .field("bytes", &self.bytes.as_ref().map(|bytes| bytes.len()))
+            .finish()
+    }
 }
 
 /// How long a deferred lock may wait on nominally in-flight saves before
@@ -485,7 +511,7 @@ impl Default for AppState {
             auto_sync_in_flight: HashSet::new(),
             saves_in_flight: HashMap::new(),
             syncs_in_flight: HashMap::new(),
-            push_awaiting_restore: None,
+            pushes_awaiting_restore: HashMap::new(),
             sync_backoff: HashMap::new(),
         }
     }
@@ -1543,6 +1569,18 @@ impl AppState {
         }
     }
 
+    /// `route_sync_status` with the session guard, for completion bodies
+    /// that must stay reachable without a gpui context. Returns true when
+    /// the active vault was touched and the window needs a repaint.
+    fn route_sync_status_for_session(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        status: SyncStatus,
+    ) -> bool {
+        self.vault_session_is_current(target, session_id) && self.route_sync_status(target, status)
+    }
+
     /// Session-aware counterpart used by async callbacks. A path can be
     /// locked and reopened while a request is in flight; only the exact
     /// session that dispatched it may consume the result.
@@ -2117,61 +2155,93 @@ impl AppState {
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            // Route everything by path: the keychain refresh can take
-            // seconds, and the user may have parked this vault and
-            // unlocked another one meanwhile. Writing into the *active*
-            // slot here would hand this vault's SharePoint binding to a
-            // different vault - whose next save would then upload its
-            // bytes over this vault's remote copy.
-            let _ = this.update(cx, |state, cx| match result {
-                Ok((config, access_token)) => {
-                    let binding = SyncBinding {
-                        config,
-                        access_token,
-                    };
-                    if state.rebind_sync_for_session(&path, session_id, binding) {
-                        // Idle, not Synced: restoring refreshes the token and
-                        // re-reads the local binding. It never contacts the
-                        // server, so claiming a fresh sync timestamp here hid
-                        // pending local edits behind a green pill.
-                        state.apply_sync_status_for_session(
-                            &path,
-                            session_id,
-                            SyncStatus::Idle,
-                            cx,
-                        );
-                        state.replay_push_awaiting_restore(&path, cx);
-                    }
-                    // `false` = the vault was locked while the refresh
-                    // ran. Keychain + on-disk config are untouched, so
-                    // the next open restores cleanly; drop the result.
-                }
-                Err(crate::sync::service::ServiceError::Auth(
-                    crate::sync::auth::AuthError::InvalidGrant(detail),
-                )) => {
-                    state.apply_sync_status_for_session(
-                        &path,
-                        session_id,
-                        SyncStatus::Reconnect { detail },
-                        cx,
-                    );
-                }
-                Err(e) => {
-                    // Transient (network, etc.) - park in Failed. Note
-                    // that without a binding `sync_now` bails silently,
-                    // so nothing retries on its own: the Retry button on
-                    // the restore card (`retry_sync_restore`) is the way
-                    // out short of relocking the vault.
-                    state.apply_sync_status_for_session(
-                        &path,
-                        session_id,
-                        SyncStatus::Failed(e.to_string()),
-                        cx,
-                    );
-                }
+            let _ = this.update(cx, |state, cx| {
+                state.finish_sync_binding_restore(&path, session_id, result, cx);
             });
         })
         .detach();
+    }
+
+    /// Completion half of `try_restore_sync_binding`. Splits into a context-
+    /// free core plus the two effects that need one, so a test can run the
+    /// real callback body with the vault parked.
+    fn finish_sync_binding_restore(
+        &mut self,
+        path: &Path,
+        session_id: VaultSessionId,
+        result: Result<(SyncConfig, AccessToken), crate::sync::service::ServiceError>,
+        cx: &mut Context<Self>,
+    ) {
+        let outcome = self.apply_sync_binding_restore(path, session_id, result);
+        if outcome.repaint {
+            cx.notify();
+        }
+        if outcome.bound {
+            self.replay_push_awaiting_restore(path, cx);
+        }
+    }
+
+    /// The decisions `finish_sync_binding_restore` makes, without a gpui
+    /// context.
+    ///
+    /// Everything routes by session: the keychain refresh can take seconds,
+    /// and the user may have parked this vault and unlocked another one
+    /// meanwhile. Writing into the *active* slot here would hand this vault's
+    /// SharePoint binding to a different vault, whose next save would then
+    /// upload its bytes over this vault's remote copy.
+    fn apply_sync_binding_restore(
+        &mut self,
+        path: &Path,
+        session_id: VaultSessionId,
+        result: Result<(SyncConfig, AccessToken), crate::sync::service::ServiceError>,
+    ) -> RestoreOutcome {
+        match result {
+            Ok((config, access_token)) => {
+                let binding = SyncBinding {
+                    config,
+                    access_token,
+                };
+                if !self.rebind_sync_for_session(path, session_id, binding) {
+                    // The vault was locked while the refresh ran. Keychain +
+                    // on-disk config are untouched, so the next open restores
+                    // cleanly; drop the result.
+                    return RestoreOutcome::default();
+                }
+                // Idle, not Synced: restoring refreshes the token and
+                // re-reads the local binding. It never contacts the server,
+                // so claiming a fresh sync timestamp here hid pending local
+                // edits behind a green pill.
+                RestoreOutcome {
+                    bound: true,
+                    repaint: self.route_sync_status_for_session(path, session_id, SyncStatus::Idle),
+                }
+            }
+            Err(crate::sync::service::ServiceError::Auth(
+                crate::sync::auth::AuthError::InvalidGrant(detail),
+            )) => RestoreOutcome {
+                bound: false,
+                repaint: self.route_sync_status_for_session(
+                    path,
+                    session_id,
+                    SyncStatus::Reconnect { detail },
+                ),
+            },
+            Err(error) => {
+                // Transient (network, etc.) - park in Failed. Note that
+                // without a binding `sync_now` bails silently, so nothing
+                // retries on its own: the Retry button on the restore card
+                // (`retry_sync_restore`) is the way out short of relocking
+                // the vault.
+                RestoreOutcome {
+                    bound: false,
+                    repaint: self.route_sync_status_for_session(
+                        path,
+                        session_id,
+                        SyncStatus::Failed(error.to_string()),
+                    ),
+                }
+            }
+        }
     }
 
     /// Re-run the sync-binding restore for the active vault after a
@@ -2250,18 +2320,34 @@ impl AppState {
         self.sync_backoff.remove(target);
     }
 
-    /// Dispatch the push that a missing binding parked, now that one exists.
-    /// Cleared unconditionally so a failed restore cannot leave stale vault
-    /// bytes queued for the next unrelated restore.
+    /// Hold a push until this vault's binding restore lands.
+    fn queue_push_awaiting_restore(&mut self, target: &Path, request: QueuedSyncRequest) {
+        // Replacing this vault's own entry is the intended coalesce: the
+        // newest request carries the newest full snapshot. Other vaults'
+        // entries stay, which is the whole point of keying by path.
+        self.pushes_awaiting_restore
+            .insert(target.to_path_buf(), request);
+    }
+
+    /// Claim the push that a missing binding parked for `restored`. Only that
+    /// vault's entry is consumed: another vault's queued push is not this
+    /// restore's to drop, it waits for its own. A request whose session has
+    /// since been locked is discarded rather than returned, so its ciphertext
+    /// does not outlive the session that produced it.
+    fn take_push_awaiting_restore(&mut self, restored: &Path) -> Option<QueuedSyncRequest> {
+        let request = self.pushes_awaiting_restore.remove(restored)?;
+        self.vault_session_is_current(restored, request.session_id)
+            .then_some(request)
+    }
+
+    /// Dispatch the push that a missing binding parked for `restored`, now
+    /// that one exists.
     fn replay_push_awaiting_restore(&mut self, restored: &Path, cx: &mut Context<Self>) {
-        let Some((path, request)) = self.push_awaiting_restore.take() else {
+        let Some(request) = self.take_push_awaiting_restore(restored) else {
             return;
         };
-        if path != restored {
-            return;
-        }
         self.sync_now_for_path_inner(
-            &path,
+            restored,
             request.session_id,
             request.interactive,
             request.bytes,
@@ -2524,7 +2610,7 @@ impl AppState {
         self.pending_sync = None;
         self.reconnect_target = None;
         // Holds published vault ciphertext; it must not outlive the lock.
-        self.push_awaiting_restore = None;
+        self.pushes_awaiting_restore.clear();
         self.auto_sync_in_flight.clear();
         self.syncs_in_flight.clear();
         self.clear_biometric_attempt();
@@ -2555,7 +2641,7 @@ impl AppState {
         self.pending_sync = None;
         self.reconnect_target = None;
         // Holds published vault ciphertext; it must not outlive the lock.
-        self.push_awaiting_restore = None;
+        self.pushes_awaiting_restore.clear();
         // A run belonging to the vault being locked. Leaving it Running made
         // `start_favicon_download` early-return for the next vault opened.
         self.favicon_status = FaviconDownloadStatus::Idle;
@@ -4799,55 +4885,62 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |state, cx| {
-                let current = state.connect_operations.is_current(generation)
-                    && state.vault_session_is_current(&local_path, session_id);
-                match result {
-                    Ok(Some(config)) if current => {
-                        state.connect_operations.advance();
-                        // Route by session, never into the active slot.
-                        // `vault_session_is_current` is also true for a vault
-                        // the user parked while the copy ran, and writing
-                        // `state.sync` there handed this vault's iCloud
-                        // binding to whichever vault happened to be on screen.
-                        // Its next save then uploaded its own bytes over this
-                        // vault's remote file.
-                        let binding = SyncBinding {
-                            config,
-                            access_token: AccessToken::provider_placeholder(),
-                        };
-                        if state.rebind_sync_for_session(&local_path, session_id, binding) {
-                            // Idle, not Synced: publishing wrote the file, but
-                            // no revision check has run for this session yet.
-                            state.apply_sync_status_for_session(
-                                &local_path,
-                                session_id,
-                                SyncStatus::Idle,
-                                cx,
-                            );
-                        }
-                        // The overlay belongs to the window, so it only closes
-                        // when this vault is still the one in front of the user.
-                        if state.is_active_vault(&local_path) {
-                            state.connect_flow = None;
-                            state.overlay = Overlay::None;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) if current => {
-                        state.connect_flow = Some(ConnectFlow::Failed(error.to_string()));
-                        state.apply_sync_status_for_session(
-                            &local_path,
-                            session_id,
-                            SyncStatus::Failed(error.to_string()),
-                            cx,
-                        );
-                    }
-                    Err(_) => {}
-                }
+                state.apply_icloud_publish_result(&local_path, session_id, generation, result);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Completion half of `publish_active_to_icloud`, kept out of the spawn
+    /// closure so a test can run the real callback body against a state where
+    /// the user switched vaults meanwhile.
+    ///
+    /// Everything routes by session, never into the active slot:
+    /// `vault_session_is_current` is also true for a vault the user parked
+    /// while the copy ran, and writing `state.sync` here handed this vault's
+    /// iCloud binding to whichever vault happened to be on screen. That
+    /// vault's next save then uploaded its own bytes over this vault's
+    /// remote file.
+    fn apply_icloud_publish_result(
+        &mut self,
+        local_path: &Path,
+        session_id: VaultSessionId,
+        generation: u64,
+        result: Result<Option<SyncConfig>, crate::sync::service::ServiceError>,
+    ) {
+        let current = self.connect_operations.is_current(generation)
+            && self.vault_session_is_current(local_path, session_id);
+        match result {
+            Ok(Some(config)) if current => {
+                self.connect_operations.advance();
+                let binding = SyncBinding {
+                    config,
+                    access_token: AccessToken::provider_placeholder(),
+                };
+                if self.rebind_sync_for_session(local_path, session_id, binding) {
+                    // Idle, not Synced: publishing wrote the file, but no
+                    // revision check has run for this session yet.
+                    self.route_sync_status_for_session(local_path, session_id, SyncStatus::Idle);
+                }
+                // The overlay belongs to the window, so it only closes when
+                // this vault is still the one in front of the user.
+                if self.is_active_vault(local_path) {
+                    self.connect_flow = None;
+                    self.overlay = Overlay::None;
+                }
+            }
+            Ok(_) => {}
+            Err(error) if current => {
+                self.connect_flow = Some(ConnectFlow::Failed(error.to_string()));
+                self.route_sync_status_for_session(
+                    local_path,
+                    session_id,
+                    SyncStatus::Failed(error.to_string()),
+                );
+            }
+            Err(_) => {}
+        }
     }
 
     /// Finish a user-driven reconnect: rebind `config`'s vault with the
@@ -4992,14 +5085,14 @@ impl AppState {
             // Parked vaults keep the silent bail: the restore path is
             // active-vault-only by design.
             if self.is_active_vault(target) {
-                self.push_awaiting_restore = Some((
-                    target.to_path_buf(),
+                self.queue_push_awaiting_restore(
+                    target,
                     QueuedSyncRequest {
                         session_id,
                         interactive,
                         bytes: published_bytes,
                     },
-                ));
+                );
                 self.retry_sync_restore(cx);
             }
             return;
@@ -5474,7 +5567,7 @@ impl AppState {
                 for c in &report.conflicts {
                     picks.insert(c.id.clone(), Side::Local);
                 }
-                self.sync_status = SyncStatus::Conflict(Box::new(ConflictState {
+                let conflict = SyncStatus::Conflict(Box::new(ConflictState {
                     local_db,
                     remote_db,
                     remote_etag,
@@ -5483,7 +5576,13 @@ impl AppState {
                     base_generation,
                     session_id,
                 }));
-                self.overlay = Overlay::Conflict;
+                // Route like every other async result even though the guard
+                // above already established the active vault: the overlay
+                // seizes the window, so it may only open when routing
+                // confirms this session still owns the screen.
+                if self.route_sync_status_for_session(target, session_id, conflict) {
+                    self.overlay = Overlay::Conflict;
+                }
                 cx.notify();
             }
             Err(error) => {
@@ -5574,7 +5673,11 @@ impl AppState {
         let merged = match merge_result {
             Ok(merged) => merged,
             Err(error) => {
-                self.sync_status = SyncStatus::Failed(format!("Merge blocked: {error}"));
+                self.route_sync_status_for_session(
+                    &target,
+                    session_id,
+                    SyncStatus::Failed(format!("Merge blocked: {error}")),
+                );
                 self.overlay = Overlay::None;
                 cx.notify();
                 return;
@@ -6647,6 +6750,7 @@ mod park_tests {
 
         fresh_open(&mut state, published.clone(), "pw-a");
         let publishing_session = state.active_vault_session_id.expect("session a");
+        let generation = state.connect_operations.advance();
         state.park_active();
 
         fresh_open(&mut state, switched_to.clone(), "pw-b");
@@ -6656,13 +6760,17 @@ mod park_tests {
             "item-b",
         ));
 
-        let installed = state.rebind_sync_for_session(
+        // The production callback body, not the routing helper it calls: a
+        // regression that writes `state.sync` directly has to fail here.
+        state.apply_icloud_publish_result(
             &published,
             publishing_session,
-            fake_binding_for("a@example.invalid", published.clone(), "item-a"),
+            generation,
+            Ok(Some(
+                fake_binding_for("a@example.invalid", published.clone(), "item-a").config,
+            )),
         );
 
-        assert!(installed, "the parked vault still owns its session");
         assert_eq!(
             state
                 .parked
@@ -6699,9 +6807,21 @@ mod park_tests {
         fresh_open(&mut state, switched_to, "pw-b");
         state.sync_status = SyncStatus::Disconnected;
 
-        assert!(state.vault_session_is_current(&published, publishing_session));
-        let repaint = state.route_sync_status(&published, SyncStatus::Idle);
-        assert!(!repaint, "a parked vault does not repaint the window");
+        // Run the restore completion the way the spawn closure does. A
+        // regression that assigns `sync_status` directly has to fail here.
+        let outcome = state.apply_sync_binding_restore(
+            &published,
+            publishing_session,
+            Ok((
+                fake_binding_for("a@example.invalid", published.clone(), "item-a").config,
+                AccessToken::provider_placeholder(),
+            )),
+        );
+        assert!(outcome.bound, "the parked vault still owns its session");
+        assert!(
+            !outcome.repaint,
+            "a parked vault does not repaint the window"
+        );
 
         assert!(
             matches!(
@@ -6716,6 +6836,111 @@ mod park_tests {
         assert!(
             matches!(state.sync_status, SyncStatus::Disconnected),
             "the vault on screen is untouched"
+        );
+    }
+
+    /// Two vaults can each be waiting for their binding restore. With one
+    /// shared slot the second queued push evicted the first, and the first
+    /// vault's restore then consumed and dropped the survivor: both edits
+    /// stayed on one machine while the UI reported everything in sync.
+    #[test]
+    fn a_queued_push_survives_another_vault_queueing_and_restoring() {
+        let mut state = AppState::default();
+        let vault_a = PathBuf::from("/tmp/queue-a.kdbx");
+        let vault_b = PathBuf::from("/tmp/queue-b.kdbx");
+
+        fresh_open(&mut state, vault_a.clone(), "pw-a");
+        let session_a = state.active_vault_session_id.expect("session a");
+        state.queue_push_awaiting_restore(
+            &vault_a,
+            QueuedSyncRequest {
+                session_id: session_a,
+                interactive: false,
+                bytes: Some(Arc::new(b"vault-a-bytes".to_vec())),
+            },
+        );
+        state.park_active();
+
+        fresh_open(&mut state, vault_b.clone(), "pw-b");
+        let session_b = state.active_vault_session_id.expect("session b");
+        state.queue_push_awaiting_restore(
+            &vault_b,
+            QueuedSyncRequest {
+                session_id: session_b,
+                interactive: false,
+                bytes: Some(Arc::new(b"vault-b-bytes".to_vec())),
+            },
+        );
+
+        let replayed_a = state
+            .take_push_awaiting_restore(&vault_a)
+            .expect("vault A's push is still queued");
+        assert_eq!(replayed_a.session_id, session_a);
+        assert_eq!(
+            replayed_a.bytes.as_deref().map(Vec::as_slice),
+            Some(b"vault-a-bytes".as_slice()),
+            "vault A replays its own bytes"
+        );
+
+        let replayed_b = state
+            .take_push_awaiting_restore(&vault_b)
+            .expect("vault B's push survived vault A's restore");
+        assert_eq!(replayed_b.session_id, session_b);
+        assert!(
+            state.pushes_awaiting_restore.is_empty(),
+            "a replayed push is not queued twice"
+        );
+    }
+
+    /// A queued push carries the published KDBX ciphertext. A derived `Debug`
+    /// would print the whole vault into any log line or panic message.
+    #[test]
+    fn a_queued_push_debug_omits_the_vault_bytes() {
+        let request = QueuedSyncRequest {
+            session_id: VaultSessionId::next(),
+            interactive: true,
+            bytes: Some(Arc::new(b"KDBX-ciphertext-marker".to_vec())),
+        };
+
+        let rendered = format!("{request:?}");
+
+        assert!(!rendered.contains("KDBX-ciphertext-marker"));
+        assert!(
+            rendered.contains("22"),
+            "byte length stays visible: {rendered}"
+        );
+        assert!(rendered.contains("interactive: true"), "{rendered}");
+    }
+
+    /// A queued push holds vault ciphertext. If the vault was locked and
+    /// reopened meanwhile, replaying it would upload bytes from a session
+    /// that no longer exists.
+    #[test]
+    fn a_queued_push_from_a_dead_session_is_dropped() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/relocked.kdbx");
+
+        fresh_open(&mut state, path.clone(), "pw");
+        let first_session = state.active_vault_session_id.expect("first session");
+        state.queue_push_awaiting_restore(
+            &path,
+            QueuedSyncRequest {
+                session_id: first_session,
+                interactive: false,
+                bytes: Some(Arc::new(b"stale".to_vec())),
+            },
+        );
+
+        // Same path, new session: the vault was locked and unlocked again.
+        fresh_open(&mut state, path.clone(), "pw");
+
+        assert!(
+            state.take_push_awaiting_restore(&path).is_none(),
+            "a push from the previous session is not replayed"
+        );
+        assert!(
+            state.pushes_awaiting_restore.is_empty(),
+            "and its ciphertext is not kept"
         );
     }
 

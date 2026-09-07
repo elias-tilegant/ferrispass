@@ -38,12 +38,26 @@ pub enum ICloudError {
     },
 }
 
-#[derive(Debug)]
 pub struct ICloudRead {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
     pub revision: String,
     pub refreshed_bookmark: String,
+}
+
+/// Redacted by hand: `bytes` is the whole KDBX file and `refreshed_bookmark`
+/// is a security-scoped handle to it. A derived `Debug` would print both into
+/// any log line or panic message that formatted this value.
+impl std::fmt::Debug for ICloudRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ICloudRead")
+            .field("path", &self.path)
+            .field("bytes", &self.bytes.len())
+            .field("revision", &self.revision)
+            .field("refreshed_bookmark", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -451,5 +465,25 @@ mod tests {
             validate_kdbx_path(Path::new("vault.txt")),
             Err(ICloudError::NotKdbx)
         ));
+    }
+
+    #[test]
+    fn read_debug_omits_the_vault_bytes_and_the_bookmark() {
+        let read = ICloudRead {
+            path: PathBuf::from("/tmp/vault.kdbx"),
+            bytes: b"KDBX-ciphertext-marker".to_vec(),
+            revision: "rev-1".into(),
+            refreshed_bookmark: "bookmark-secret-marker".into(),
+        };
+
+        let rendered = format!("{read:?}");
+
+        assert!(!rendered.contains("KDBX-ciphertext-marker"));
+        assert!(!rendered.contains("bookmark-secret-marker"));
+        assert!(rendered.contains("rev-1"), "{rendered}");
+        assert!(
+            rendered.contains("22"),
+            "byte length stays visible: {rendered}"
+        );
     }
 }
