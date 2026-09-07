@@ -2339,9 +2339,10 @@ impl AppState {
         self.sync_blocked.remove(target);
     }
 
-    /// True while only a local change can move this vault's merge forward.
-    /// Explicit "Sync now" still goes through: the user asked, and a remote
-    /// change since the last attempt may have resolved it.
+    /// True while this vault's merge needs something to change before it can
+    /// succeed. Suppresses only the expensive automatic push retry: the cheap
+    /// pull check still runs, because the other machine can resolve the tie,
+    /// and explicit "Sync now" still goes through because the user asked.
     fn merge_is_blocked(&self, target: &Path) -> bool {
         self.sync_blocked.contains(target)
     }
@@ -5353,14 +5354,14 @@ impl AppState {
             if self.sync_is_backing_off(target) {
                 return;
             }
-            // A merge that needs the user to break a tie fails the same way
-            // every time. Spending that upload and download once a minute
-            // forever helps nobody; the status pill already says what to do.
-            if self.merge_is_blocked(target) {
+            // A merge that needs a tie broken fails identically on every
+            // retry, so it does not get the expensive push. It still falls
+            // through to the cheap pull check below: the other machine can
+            // resolve the tie, and without this we would never notice.
+            if !self.merge_is_blocked(target) {
+                self.sync_now_for_path_inner(target, session_id, false, None, cx);
                 return;
             }
-            self.sync_now_for_path_inner(target, session_id, false, None, cx);
-            return;
         }
         let Some((config, token)) = self.snapshot_sync_inputs_for_session(target, session_id)
         else {
