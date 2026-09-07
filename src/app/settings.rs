@@ -162,8 +162,9 @@ pub struct WindowBoundsSetting {
 }
 
 impl WindowBoundsSetting {
-    /// Reject geometry that would open a window nobody can reach or use: a
-    /// display that is gone, or a size below the app's own minimum.
+    /// Reject a size below the app's own minimum, and the non-finite values a
+    /// hand-edited settings file can carry. Says nothing about position: see
+    /// [`Self::is_reachable_on`].
     pub fn is_usable(&self) -> bool {
         self.width >= MIN_WINDOW_WIDTH
             && self.height >= MIN_WINDOW_HEIGHT
@@ -172,10 +173,32 @@ impl WindowBoundsSetting {
             && self.width.is_finite()
             && self.height.is_finite()
     }
+
+    /// True when enough of the window would land on one of `displays` for the
+    /// user to grab its title bar. The saved position outlives the display it
+    /// was saved on: undock a laptop, and the window reopens at coordinates
+    /// that are now off every screen, with no way to drag it back.
+    ///
+    /// `displays` are screen rectangles in the same logical pixel space, in
+    /// the same field order. An empty list means the platform could not tell
+    /// us, and is accepted rather than silently discarding the user's layout.
+    pub fn is_reachable_on(&self, displays: &[Self]) -> bool {
+        displays.is_empty()
+            || displays.iter().any(|display| {
+                let horizontal =
+                    (self.x + self.width).min(display.x + display.width) - self.x.max(display.x);
+                let vertical =
+                    (self.y + self.height).min(display.y + display.height) - self.y.max(display.y);
+                horizontal >= MIN_VISIBLE_EDGE && vertical >= MIN_VISIBLE_EDGE
+            })
+    }
 }
 
 pub const MIN_WINDOW_WIDTH: f32 = 860.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 560.0;
+/// How much of a restored window must be on screen, in logical pixels. Sized
+/// to leave a grabbable piece of title bar, not a whole window.
+const MIN_VISIBLE_EDGE: f32 = 80.0;
 
 /// Store the window geometry, unless it is already what is on disk.
 ///
@@ -400,8 +423,8 @@ mod tests {
         assert_eq!(ThemeChoice::Dark.next(), ThemeChoice::System);
     }
 
-    /// Geometry from a hand-edited file, or from a display that no longer
-    /// exists, must not open a window the user cannot use.
+    /// Geometry from a hand-edited file must not open a window the user
+    /// cannot use.
     #[test]
     fn unusable_window_geometry_is_rejected() {
         let usable = WindowBoundsSetting {
@@ -435,6 +458,67 @@ mod tests {
             .is_usable(),
             "a non-finite coordinate is not a position"
         );
+    }
+
+    /// Undocking a laptop leaves the saved position on a screen that is no
+    /// longer there. Restoring it put the window where nobody could drag it
+    /// back, and the size-only check accepted every one of those positions.
+    #[test]
+    fn geometry_on_a_display_that_is_gone_is_rejected() {
+        let built_in = WindowBoundsSetting {
+            x: 0.0,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+        let on_built_in = WindowBoundsSetting {
+            x: 100.0,
+            y: 80.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        // Where an external display to the right of the built-in one was.
+        let on_unplugged_display = WindowBoundsSetting {
+            x: 2000.0,
+            ..on_built_in
+        };
+
+        assert!(on_unplugged_display.is_usable(), "the size is fine");
+        assert!(on_built_in.is_reachable_on(&[built_in]));
+        assert!(!on_unplugged_display.is_reachable_on(&[built_in]));
+        assert!(
+            on_unplugged_display.is_reachable_on(&[
+                built_in,
+                WindowBoundsSetting {
+                    x: 1512.0,
+                    ..built_in
+                }
+            ]),
+            "plugging the display back in restores the saved position"
+        );
+        assert!(
+            on_unplugged_display.is_reachable_on(&[]),
+            "an unknown display layout keeps the user's geometry"
+        );
+    }
+
+    /// A window dragged mostly off the edge still has to come back where the
+    /// user left it. Only the unreachable case is rejected.
+    #[test]
+    fn geometry_hanging_off_a_screen_edge_is_kept() {
+        let screen = WindowBoundsSetting {
+            x: 0.0,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+        let mostly_off_the_right = WindowBoundsSetting {
+            x: 1400.0,
+            y: 40.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        assert!(mostly_off_the_right.is_reachable_on(&[screen]));
     }
 
     #[test]

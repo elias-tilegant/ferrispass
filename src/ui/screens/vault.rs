@@ -659,7 +659,6 @@ fn tags_section(
 /// group keeps its colour when the list around it changes. Expanding a folder
 /// used to re-colour every group below it.
 fn stable_accent(name: &str) -> Hsla {
-    use std::hash::{Hash as _, Hasher as _};
     let palette_colors = [
         palette::blue(),
         palette::green(),
@@ -667,9 +666,29 @@ fn stable_accent(name: &str) -> Hsla {
         palette::yellow(),
         palette::red(),
     ];
+    palette_colors[(name_hash(name) as usize) % palette_colors.len()]
+}
+
+/// The chip counterpart of [`stable_accent`]. Tag chips used to hard-code
+/// orange for "Work" and green for "2FA", so two vaults with different tags
+/// looked identical and a tag named after its group changed colour with it.
+fn stable_chip_tone(name: &str) -> ChipTone {
+    const TONES: [ChipTone; 4] = [
+        ChipTone::Blue,
+        ChipTone::Green,
+        ChipTone::Orange,
+        ChipTone::Gray,
+    ];
+    TONES[(name_hash(name) as usize) % TONES.len()]
+}
+
+/// Case-insensitive so a tag spelled two ways keeps one colour, matching how
+/// the sidebar groups and selects tags.
+fn name_hash(name: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     name.to_lowercase().hash(&mut hasher);
-    palette_colors[(hasher.finish() as usize) % palette_colors.len()]
+    hasher.finish()
 }
 
 /// One clickable row in the sidebar's library or tag list.
@@ -1783,14 +1802,7 @@ fn entry_row(
                 .child({
                     let mut row = h_flex().gap_1();
                     for tag in tags.iter().take(2) {
-                        let tone = if tag.eq_ignore_ascii_case("Work") {
-                            ChipTone::Orange
-                        } else if tag.eq_ignore_ascii_case("2FA") {
-                            ChipTone::Green
-                        } else {
-                            ChipTone::Blue
-                        };
-                        row = row.child(chip(tag.clone(), tone));
+                        row = row.child(chip(tag.clone(), stable_chip_tone(tag)));
                     }
                     row
                 })
@@ -1883,14 +1895,7 @@ fn entry_detail_body(
 
     let mut chips_row = h_flex().gap_1().flex_wrap();
     for tag in tags.iter().take(4) {
-        let tone = if tag.eq_ignore_ascii_case("Work") || tag.eq_ignore_ascii_case(&group) {
-            ChipTone::Orange
-        } else if tag.eq_ignore_ascii_case("2FA") {
-            ChipTone::Green
-        } else {
-            ChipTone::Blue
-        };
-        chips_row = chips_row.child(chip(tag.clone(), tone));
+        chips_row = chips_row.child(chip(tag.clone(), stable_chip_tone(tag)));
     }
 
     let header = div()

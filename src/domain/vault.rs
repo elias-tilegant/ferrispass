@@ -292,18 +292,30 @@ impl VaultSnapshot {
     /// The sidebar used to render a hard-coded "Personal" and "Work"
     /// regardless of the vault, so clicking either in a vault that had never
     /// heard of them produced an empty list with no explanation.
+    ///
+    /// Grouped case-insensitively to match `entries_with_tag`: with
+    /// case-sensitive rows, "Work" and "work" appeared as two entries whose
+    /// counts were each too low, and clicking either one selected both sets.
+    /// The label shown is the first spelling in alphabetical order, which is
+    /// stable for a given vault.
     pub fn tags(&self) -> Vec<(String, usize)> {
-        let mut counts: std::collections::BTreeMap<String, usize> =
+        let mut counts: std::collections::BTreeMap<String, (String, usize)> =
             std::collections::BTreeMap::new();
         for entry in self.live_entries() {
             for tag in &entry.tags {
                 if tag.eq_ignore_ascii_case(crate::keepass::FAVORITE_TAG) {
                     continue;
                 }
-                *counts.entry(tag.clone()).or_default() += 1;
+                let row = counts
+                    .entry(tag.to_lowercase())
+                    .or_insert_with(|| (tag.clone(), 0));
+                if tag < &row.0 {
+                    row.0 = tag.clone();
+                }
+                row.1 += 1;
             }
         }
-        counts.into_iter().collect()
+        counts.into_values().collect()
     }
 
     /// Entries that have a TOTP secret configured. Drives the sidebar's
@@ -519,6 +531,34 @@ mod tests {
             vec![("Work".to_string(), 2)],
             "counted, alphabetical, without the Favorite marker the star owns, \
              and without tags only a deleted entry carries"
+        );
+    }
+
+    /// Tag selection has always matched case-insensitively, so listing rows
+    /// case-sensitively produced two sidebar entries for one tag, each with
+    /// too low a count, and either row then selected both sets.
+    #[test]
+    fn tags_spelled_differently_are_one_row() {
+        let mut upper = entry("a", "Bank");
+        upper.tags = vec!["Work".into()];
+        let mut lower = entry("b", "Payroll");
+        lower.tags = vec!["work".into()];
+        let mut mixed = entry("c", "Travel");
+        mixed.tags = vec!["WoRk".into()];
+
+        let root = VaultGroup {
+            id: "root".into(),
+            name: "Root".into(),
+            entries: vec![upper, lower, mixed],
+            ..VaultGroup::default()
+        };
+        let snapshot = VaultSnapshot::new(root);
+
+        assert_eq!(snapshot.tags(), vec![("WoRk".to_string(), 3)]);
+        assert_eq!(
+            snapshot.entries_with_tag("WoRk").len(),
+            3,
+            "the row's count matches what selecting it shows"
         );
     }
 
