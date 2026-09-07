@@ -227,10 +227,8 @@ pub enum Side {
 /// surface the error as a sync conflict/failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
-    #[error(
-        "custom-icon stores differ and cannot be merged safely (local: {local}, remote: {remote})"
-    )]
-    CustomIconsDiffer { local: usize, remote: usize },
+    #[error("custom icon {id} is referenced by the merged vault but its image is missing")]
+    CustomIconUnrecoverable { id: String },
     #[error("cannot merge databases with different root group UUIDs")]
     DifferentRoots,
     #[error("{side:?} entry {id} referenced by the conflict report no longer exists")]
@@ -627,33 +625,7 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
         return Err(ApplyError::DifferentRoots);
     }
 
-    let local_icons = custom_icon_store(local);
-    let remote_icons = custom_icon_store(remote);
-    if local_icons != remote_icons {
-        return Err(ApplyError::CustomIconsDiffer {
-            local: local_icons.len(),
-            remote: remote_icons.len(),
-        });
-    }
-
     Ok(())
-}
-
-type CustomIconSnapshot = (Vec<u8>, Option<String>, Option<NaiveDateTime>);
-
-fn custom_icon_store(db: &Database) -> HashMap<uuid::Uuid, CustomIconSnapshot> {
-    db.iter_all_custom_icons()
-        .map(|icon| {
-            (
-                icon.id().uuid(),
-                (
-                    icon.data.clone(),
-                    icon.name.clone(),
-                    icon.last_modification_time,
-                ),
-            )
-        })
-        .collect()
 }
 
 /// The pinned fork's `Database::merge` fails closed when two entries or
@@ -2265,25 +2237,43 @@ mod tests {
         assert!(!warning_is_harmless(unknown, &local, &remote));
     }
 
+    /// A remote-only custom icon used to be fatal: the fork copied the icon
+    /// reference but not the image, so the merge was refused outright rather
+    /// than write a reference nothing could resolve. Downloading favicons on
+    /// one machine therefore made that vault unsyncable. The fork now carries
+    /// the image, and the merge has to succeed with the picture intact.
     #[test]
-    fn remote_added_custom_icon_fails_closed_instead_of_being_dropped() {
+    fn a_remote_only_custom_icon_survives_the_merge() {
+        use chrono::NaiveDate;
+        let older = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let newer = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(13, 0, 0)
+            .unwrap();
+
         let mut local = Database::new();
         let id = add(&mut local, "With custom icon", "pw");
+        local.entry_mut(id).unwrap().times.last_modification = Some(older);
         let mut remote = fork(&local);
+        let image = vec![1, 2, 3];
         remote
             .entry_mut(id)
             .unwrap()
-            .set_icon_custom_new(vec![1, 2, 3]);
+            .set_icon_custom_new(image.clone());
+        remote.entry_mut(id).unwrap().times.last_modification = Some(newer);
 
-        let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
-            .expect_err("custom-icon merge must be refused");
-        assert!(matches!(
-            error,
-            ApplyError::CustomIconsDiffer {
-                local: 0,
-                remote: 1
-            }
-        ));
+        let merged = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
+            .expect("a remote icon is merged, not refused");
+
+        let entry = merged.entry(id).expect("entry survives");
+        assert_eq!(
+            entry.custom_icon().expect("icon resolves").data,
+            image,
+            "the image travelled with the reference"
+        );
     }
 
     #[test]

@@ -491,16 +491,18 @@ impl VaultDocument {
         }
         let changed_at = next_change_time(entry.times.last_modification);
         let mut entry = entry.track_changes();
-        // `set_icon_custom_new` drops any previous icon (built-in or
-        // custom) and registers a fresh `CustomIconId`. We don't try to
-        // dedupe identical blobs across entries - the typical vault has
-        // distinct icons per site, and the dedup bookkeeping isn't worth
-        // it for an explicit user action.
+        // `set_icon_custom_new` registers a fresh `CustomIconId` and leaves
+        // the previous image in the table. Re-fetching favicons for a whole
+        // vault would otherwise grow it on every run and push its icon table
+        // away from every other copy, so the prune below collects it.
         let mut current = entry.as_mut();
         let mut icon = current.set_icon_custom_new(bytes);
         icon.last_modification_time = Some(changed_at);
         entry.times.last_modification = Some(changed_at);
         drop(entry);
+        // `refresh_snapshot` collects the replaced image. It has to run after
+        // this `drop`: `track_changes` writes its archived version there, and
+        // pruning earlier would delete an image that version still needs.
         self.refresh_snapshot();
         Ok(())
     }
@@ -882,6 +884,10 @@ impl VaultDocument {
 
     fn refresh_snapshot(&mut self) {
         enforce_history_limits(&mut self.database);
+        // Right after the trim, and after every tracked edit has closed: an
+        // image whose last history version was just trimmed away is now
+        // unreferenced, and every mutation path ends here.
+        self.database.prune_unused_custom_icons();
         self.generation = self.generation.wrapping_add(1);
         self.snapshot = Arc::new(snapshot_from_database(&self.database));
     }
@@ -3006,6 +3012,77 @@ mod tests {
         let child = parent.groups.first().expect("child group").clone();
         let entry = child.entries.first().expect("entry").id.clone();
         (parent.id, child.id, entry)
+    }
+
+    /// Every icon fetch archives the previous image with the entry version
+    /// that used it. Once history is trimmed to `HistoryMaxItems` those images
+    /// have no referrer left, and before the prune they stayed in the vault
+    /// forever: re-running the favicon download grew the file on every pass
+    /// and pushed the icon table away from every other copy of the vault.
+    #[test]
+    fn repeated_icon_fetches_do_not_grow_the_vault_without_bound() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let entry_id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Site".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("entry");
+
+        for round in 0..40u8 {
+            doc.set_entry_custom_icon(&entry_id, vec![round, round, round])
+                .expect("icon");
+        }
+
+        let history = doc
+            .database
+            .entry(find_entry_id(&doc.database, &entry_id).expect("id"))
+            .expect("entry")
+            .history
+            .as_ref()
+            .map_or(0, |h| h.get_entries().len());
+        assert_eq!(
+            doc.database.num_custom_icons(),
+            history + 1,
+            "one image per retained version plus the current one, not forty"
+        );
+    }
+
+    /// The image an archived version renders must survive the prune. It is
+    /// not registered in the icon's own reference set, so a prune that
+    /// trusted that set would blank the icon on every history entry.
+    #[test]
+    fn pruning_keeps_the_image_an_archived_version_renders() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let entry_id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Site".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("entry");
+
+        doc.set_entry_custom_icon(&entry_id, vec![1, 1, 1])
+            .expect("first icon");
+        doc.set_entry_custom_icon(&entry_id, vec![2, 2, 2])
+            .expect("second icon");
+
+        assert_eq!(
+            doc.database.num_custom_icons(),
+            2,
+            "the current image and the one the archived version still uses"
+        );
     }
 
     #[test]

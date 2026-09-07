@@ -1489,6 +1489,27 @@ impl AppState {
         }
     }
 
+    /// The decrypted document of the vault at `target`, but only while that
+    /// exact session still owns it. Parked vaults included: a long-running
+    /// background mutation keeps writing to the vault that started it, not to
+    /// whichever one the user switched to.
+    fn document_mut_for_session(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+    ) -> Option<&mut VaultDocument> {
+        if let VaultStatus::Open { document, path, .. } = &mut self.vault
+            && path.as_path() == target
+            && self.active_vault_session_id == Some(session_id)
+        {
+            return Some(document);
+        }
+        self.parked
+            .get_mut(target)
+            .filter(|session| session.session_id == session_id)
+            .map(|session| session.document.as_mut())
+    }
+
     /// Install a fresh `SyncBinding` for the vault at `target`, replacing
     /// any existing one (or filling an empty slot left by a failed restore).
     /// Routes to the active vault or the matching parked session. Returns
@@ -2433,6 +2454,13 @@ impl AppState {
         self.reconnect_target = None;
         // Holds published vault ciphertext; it must not outlive the lock.
         self.push_awaiting_restore = None;
+        // A run belonging to the vault being locked. Leaving it Running made
+        // `start_favicon_download` early-return for the next vault opened.
+        self.favicon_status = FaviconDownloadStatus::Idle;
+        // A stale "not a valid KDBX" message would otherwise reappear on the
+        // next Welcome screen.
+        self.vault_selection_error = None;
+        self.deferred_lock_since = None;
         // Clear with the rest of the session secrets - entry titles in
         // the history would otherwise outlive the unlocked DB they came
         // from, which contradicts the rest of the lock contract.
@@ -2769,17 +2797,27 @@ impl AppState {
         if self.favicon_status.is_running() {
             return;
         }
-        let VaultStatus::Open { document, .. } = &self.vault else {
+        let VaultStatus::Open { path, document, .. } = &self.vault else {
+            return;
+        };
+        // A run over a few hundred entries is minutes of sequential HTTP. Bind
+        // it to the vault that started it: without this the icons, and the
+        // save and cloud push that follow, landed on whichever vault the user
+        // had switched to meanwhile.
+        let vault_path = path.clone();
+        let Some(session_id) = self.active_vault_session_id else {
             return;
         };
 
         // Snapshot the (id, url) pairs up front so the spawned task
         // doesn't have to re-borrow the snapshot every iteration. We
         // skip entries that already have a custom icon - re-running
-        // shouldn't blow away user-curated icons.
+        // shouldn't blow away user-curated icons. Deleted entries are
+        // skipped too; fetching an icon for something in the Trash would
+        // dirty the vault for nothing.
         let targets: Vec<(String, String)> = document
             .snapshot()
-            .entries_recursive()
+            .live_entries()
             .into_iter()
             .filter(|entry| !entry.url.trim().is_empty())
             .filter(|entry| entry.favicon.image.is_none())
@@ -2813,36 +2851,47 @@ impl AppState {
                     .background_spawn(async move { crate::favicon::fetch_favicon(&url_for_task) })
                     .await;
 
-                let _ = this.update(cx, |state, cx| {
-                    if let Ok(bytes) = bytes_result
-                        && let VaultStatus::Open { document, .. } = &mut state.vault
-                    {
-                        // Errors here mean the entry vanished
-                        // mid-run (e.g. user deleted it) - fine to
-                        // silently skip.
-                        if document.set_entry_custom_icon(&entry_id, bytes).is_ok() {
-                            succeeded += 1;
+                let still_ours = this
+                    .update(cx, |state, cx| {
+                        if !state.vault_session_is_current(&vault_path, session_id) {
+                            return false;
                         }
-                    }
-                    state.favicon_status = FaviconDownloadStatus::Running {
-                        done: idx + 1,
-                        total,
-                        succeeded,
-                    };
-                    cx.notify();
-                });
+                        if let Ok(bytes) = bytes_result
+                            && let Some(document) =
+                                state.document_mut_for_session(&vault_path, session_id)
+                        {
+                            // Errors here mean the entry vanished
+                            // mid-run (e.g. user deleted it) - fine to
+                            // silently skip.
+                            if document.set_entry_custom_icon(&entry_id, bytes).is_ok() {
+                                succeeded += 1;
+                                // Mark it dirty now rather than at the end of
+                                // the run: an auto-lock partway through used to
+                                // take the clean path and throw the icons away.
+                                state.mark_vault_session_unpersisted(session_id);
+                            }
+                        }
+                        state.favicon_status = FaviconDownloadStatus::Running {
+                            done: idx + 1,
+                            total,
+                            succeeded,
+                        };
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !still_ours {
+                    return;
+                }
             }
 
             let _ = this.update(cx, |state, cx| {
                 state.favicon_status = FaviconDownloadStatus::Finished { succeeded, total };
                 cx.notify();
-                // Persist whichever icons we managed to land. `save_async`
-                // is a no-op if `succeeded == 0` would still be valid -
-                // running it harmlessly re-writes the same bytes - but
-                // skip when there's nothing to save so we don't block
-                // the disk for a no-op.
+                // Persist whichever icons we managed to land, against the
+                // session that fetched them.
                 if succeeded > 0 {
-                    state.save_async(cx);
+                    state.request_save_for_session(vault_path.clone(), session_id, true, cx);
                 }
             });
         })
