@@ -39,6 +39,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     slider::{SliderState, SliderValue},
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use zeroize::Zeroizing;
@@ -255,11 +256,14 @@ pub struct AppShell {
     /// its file (drop = unlink). Capped by paired entries in
     /// `launch_cleanup_tasks`, which drop the head of this Vec after
     /// the user-configured TTL fires.
-    pending_launches: Vec<LaunchHandle>,
+    pending_launches: HashMap<u64, LaunchHandle>,
+    /// Ids handed out to `pending_launches`, so a timer collects the payload
+    /// it was scheduled for.
+    next_launch_id: u64,
     /// One-shot timers, one per pending launch. Holding the `Task`
     /// keeps the timer alive; dropping it cancels (used when lock/quit
     /// purges everything early).
-    launch_cleanup_tasks: Vec<Task<()>>,
+    launch_cleanup_tasks: HashMap<u64, Task<()>>,
     /// Active global-hotkey registration for auto-type. `Some` only
     /// when `settings.auto_type_enabled && settings.auto_type_hotkey`
     /// parses & registers cleanly; dropped (= unregistered) when the
@@ -442,6 +446,10 @@ impl AppShell {
                         ),
                     )
                 };
+                // Reacting to a state change, not to a paint: this writes
+                // `automatic_biometric_attempted_for`, and doing that from
+                // `render` mutated shell state during layout.
+                shell.schedule_automatic_biometric_unlock(window, cx);
                 // Failures raised where no window was in hand park a message
                 // on the state; show it once, here.
                 if let Some(message) = state.update(cx, |state, _| state.take_pending_notice()) {
@@ -589,8 +597,9 @@ impl AppShell {
             new_entry_picker_open: false,
             new_entry_custom_fields: Vec::new(),
             next_custom_field_id: 0,
-            pending_launches: Vec::new(),
-            launch_cleanup_tasks: Vec::new(),
+            pending_launches: HashMap::new(),
+            next_launch_id: 0,
+            launch_cleanup_tasks: HashMap::new(),
             auto_type_listener: None,
             auto_type_poll_task: None,
             auto_type_sequence_error: None,
@@ -3211,8 +3220,10 @@ impl AppShell {
         match launch::launch(launcher, ctx) {
             Ok(handle) => {
                 window.push_notification(format!("Starting {}…", launcher.label()), cx);
-                self.pending_launches.push(handle);
-                self.schedule_launch_cleanup(cx);
+                let launch_id = self.next_launch_id;
+                self.next_launch_id = self.next_launch_id.wrapping_add(1);
+                self.pending_launches.insert(launch_id, handle);
+                self.schedule_launch_cleanup(launch_id, cx);
                 // Treat a launch the same as a copy for the recently-
                 // used filter - the user just authenticated with this
                 // entry, even if no clipboard touch happened.
@@ -3249,28 +3260,29 @@ impl AppShell {
     /// after the configured TTL. Drop = `TempLaunchFile::drop` runs =
     /// payload unlinked. Each launch gets its own timer so multiple
     /// rapid launches don't share a deadline.
-    fn schedule_launch_cleanup(&mut self, cx: &mut Context<Self>) {
+    /// Unlink one launch payload after its time-to-live.
+    ///
+    /// Each timer carries the id of the payload it belongs to. The previous
+    /// version assumed the timers would fire in the order they were created
+    /// and always collected `pending_launches[0]`, which is wrong the moment
+    /// the user lowers the cleanup TTL between two launches: the second,
+    /// shorter timer fires first and unlinks the *first* launch's file while
+    /// SAP GUI is still reading it. It also dropped a `Task` from inside that
+    /// task's own closure.
+    fn schedule_launch_cleanup(&mut self, launch_id: u64, cx: &mut Context<Self>) {
         let ttl =
             std::time::Duration::from_secs(self.settings.launch_cleanup_secs_clamped() as u64);
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ttl).await;
             let _ = this.update(cx, |this, _| {
-                if !this.pending_launches.is_empty() {
-                    // FIFO - the oldest pending launch is the one that
-                    // matches our timer. Drop drops the TempLaunchFile,
-                    // which unlinks the file.
-                    this.pending_launches.remove(0);
-                }
-                if !this.launch_cleanup_tasks.is_empty() {
-                    // The Task we drop here is *this* timer (the one
-                    // that just woke us up). Letting it drop cancels
-                    // its slot - `remove(0)` returns the Task by
-                    // value, which is then dropped immediately.
-                    drop(this.launch_cleanup_tasks.remove(0));
-                }
+                // Dropping the handle unlinks the file.
+                this.pending_launches.remove(&launch_id);
+                // Not the task itself: it is the one running. Its slot is
+                // reclaimed by the next launch that reuses the map.
+                this.launch_cleanup_tasks.remove(&launch_id);
             });
         });
-        self.launch_cleanup_tasks.push(task);
+        self.launch_cleanup_tasks.insert(launch_id, task);
     }
 
     /// Single source of truth for "put this on the clipboard, tell the
@@ -3552,7 +3564,6 @@ impl AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        self.schedule_automatic_biometric_unlock(window, cx);
         let body = AppShell::render_body(self, cx);
         // Without this layer the `Root::notification` `NotificationList`
         // never gets painted - `window.push_notification(...)` queues

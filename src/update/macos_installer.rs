@@ -47,6 +47,17 @@ pub(super) fn install(target: &Path, bytes: Vec<u8>) -> Result<(), UpdateError> 
         ));
     }
 
+    // Running straight from the mounted disk image is the other common way to
+    // land in a directory nothing can be written to. The swap further down
+    // would fail with a bare "Read-only file system", which names the symptom
+    // and not the remedy.
+    if parent_is_read_only(&target) {
+        return Err(install_error(
+            "FerrisPass is running from a read-only location, such as its disk image. \
+             Drag FerrisPass.app to /Applications and start it from there, then update again.",
+        ));
+    }
+
     // A kill/crash mid-install orphans the hidden staging directory (up to
     // the full bundle size) next to the app forever. Sweep leftovers ONLY
     // when the installed bundle validates as a working app: after a failed
@@ -385,6 +396,16 @@ fn replace_bundle_with(
             preserve_staging: false,
         }),
     }
+}
+
+/// Whether the directory holding the app refuses writes. Checked by asking
+/// the filesystem rather than by matching on the path, so a read-only mount
+/// anywhere is caught, not just `/Volumes`.
+fn parent_is_read_only(target: &Path) -> bool {
+    target
+        .parent()
+        .and_then(|parent| std::fs::metadata(parent).ok())
+        .is_some_and(|metadata| metadata.permissions().readonly())
 }
 
 fn sync_swap_parents(first: &Path, second: &Path) -> io::Result<()> {

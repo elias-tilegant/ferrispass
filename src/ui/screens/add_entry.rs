@@ -806,7 +806,7 @@ fn picker_row_icon(group: &VaultGroup, is_selected: bool) -> AnyElement {
     };
     if let Some(image) = group.icon.as_ref() {
         return div()
-            .id("picker-row-icon")
+            .id(SharedString::from(format!("picker-row-icon-{}", group.id)))
             .size(px(12.))
             .rounded(px(3.))
             .overflow_hidden()

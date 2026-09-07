@@ -61,7 +61,10 @@ pub fn favicon_color(palette_index: u8) -> Hsla {
 /// the synthesized colored letter. If the cached image bytes turn out to be
 /// undecodable (corrupt blob, format we sniffed wrong), GPUI's image loader
 /// hits `with_fallback` and we render the letter view there too.
-pub fn favicon(fav: &Favicon, size: f32) -> AnyElement {
+/// `id` scopes the image element. Every entry row and the detail header used
+/// the literal "favicon-img", and GPUI keys element state by id, so sibling
+/// rows shared one image slot.
+pub fn favicon(id: &str, fav: &Favicon, size: f32) -> AnyElement {
     let radius = px((size / 4.5).max(6.0));
     if let Some(image) = fav.image.as_ref() {
         // Snapshot the letter bits up-front so the fallback closure (which
@@ -69,7 +72,7 @@ pub fn favicon(fav: &Favicon, size: f32) -> AnyElement {
         let letter = fav.letter.clone();
         let palette_index = fav.palette_index;
         return div()
-            .id("favicon-img")
+            .id(gpui::SharedString::from(format!("favicon-{id}")))
             .size(px(size))
             .rounded(radius)
             .overflow_hidden()

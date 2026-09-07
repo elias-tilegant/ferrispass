@@ -19,7 +19,7 @@ use crate::ui::palette;
 use crate::ui::widgets::atoms::{ChipTone, chip, dot, label, plural, section_heading};
 use crate::ui::widgets::brand::brand;
 use crate::ui::widgets::entry_chrome::favicon;
-use crate::ui::widgets::interaction::{Interaction as _, darken};
+use crate::ui::widgets::interaction::{Interaction as _, Labelled as _, darken};
 use crate::ui::widgets::password::strength_card;
 use crate::ui::widgets::update_chip;
 
@@ -180,8 +180,11 @@ fn sidebar(
                 .child(
                     div()
                         .id("sidebar-add-vault")
-                        .size(px(24.))
+                        // 28 px is the macOS minimum for a comfortable click
+                        // target; these were 16 to 24.
+                        .size(px(28.))
                         .flex_shrink_0()
+                        .labelled("Add a vault")
                         .rounded(px(5.))
                         .border_1()
                         .border_color(palette::border())
@@ -286,7 +289,8 @@ fn sidebar(
                     div()
                         .id("sidebar-settings")
                         .flex_shrink_0()
-                        .size(px(22.))
+                        .size(px(28.))
+                        .labelled("Settings")
                         .flex()
                         .items_center()
                         .justify_center()
@@ -458,8 +462,9 @@ fn groups_section(
                 .child(
                     div()
                         .id("groups-add-btn")
-                        .w(px(20.))
-                        .h(px(20.))
+                        .w(px(28.))
+                        .h(px(28.))
+                        .labelled("New group")
                         .flex()
                         .items_center()
                         .justify_center()
@@ -513,8 +518,13 @@ fn groups_section(
         let chevron = if has_children {
             div()
                 .id(chevron_id)
-                .w(px(16.))
-                .h(px(16.))
+                .w(px(28.))
+                .h(px(24.))
+                .labelled(if is_expanded {
+                    "Collapse group"
+                } else {
+                    "Expand group"
+                })
                 .flex()
                 .items_center()
                 .justify_center()
@@ -741,7 +751,7 @@ fn nav_pill(
     let label_owned = label_text;
 
     h_flex()
-        .id(id)
+        .id(id.clone())
         .gap_2()
         .items_center()
         .h(px(26.))
@@ -765,7 +775,7 @@ fn nav_pill(
         .when(!selected, |this| this.hover(|s| s.bg(palette::border())))
         .pressable()
         .on_click(on_click)
-        .child(nav_pill_icon(icon, icon_image, icon_resolved))
+        .child(nav_pill_icon(&id, icon, icon_image, icon_resolved))
         .child(div().flex_1().min_w_0().truncate().child(label_owned))
         .when_some(count, |this, c| {
             this.child(
@@ -783,10 +793,18 @@ fn nav_pill(
 /// gets `with_fallback` so a corrupt blob falls back to the glyph
 /// instead of an empty slot - same defensive treatment as the entry
 /// favicon path in `entry_chrome::favicon`.
-fn nav_pill_icon(icon: AppIcon, icon_image: Option<&FaviconImage>, icon_color: Hsla) -> AnyElement {
+fn nav_pill_icon(
+    id: &SharedString,
+    icon: AppIcon,
+    icon_image: Option<&FaviconImage>,
+    icon_color: Hsla,
+) -> AnyElement {
     if let Some(image) = icon_image {
         return div()
-            .id("nav-pill-icon")
+            // Suffixed with the row's own id. Every group row shared the
+            // literal "nav-pill-icon", and GPUI keys interactive state by id,
+            // so sibling rows swapped hover and image state between them.
+            .id(SharedString::from(format!("{id}-icon")))
             .size(px(13.))
             .rounded(px(3.))
             .overflow_hidden()
@@ -1714,7 +1732,7 @@ fn entry_row(
             this.hover(|s| s.bg(palette::sidebar()).border_color(palette::border()))
         })
         .pressable()
-        .child(favicon(&fav, 28.))
+        .child(favicon(&format!("row-{}", entry.id), &fav, 28.))
         .child(
             v_flex()
                 .gap_0p5()
@@ -1884,7 +1902,11 @@ fn entry_detail_body(
             h_flex()
                 .gap_3()
                 .items_start()
-                .child(div().flex_shrink_0().child(favicon(&fav, 44.)))
+                .child(div().flex_shrink_0().child(favicon(
+                    &format!("detail-{}", entry.id),
+                    &fav,
+                    44.,
+                )))
                 .child(
                     v_flex()
                         .flex_1()
@@ -1915,7 +1937,12 @@ fn entry_detail_body(
                     div()
                         .id("entry-detail-star")
                         .flex_shrink_0()
-                        .p_1p5()
+                        .p_2()
+                        .labelled(if starred {
+                            "Remove from Favorites"
+                        } else {
+                            "Add to Favorites"
+                        })
                         .rounded(px(6.))
                         .hover(|s| s.bg(palette::panel()))
                         .pressable()
@@ -1991,7 +2018,13 @@ fn entry_detail_body(
         // on AppState every second, which causes this re-render with a fresh
         // value + countdown. Read once to avoid borrowing state twice.
         let otp = state_entity.read(cx).totp_for_selected_entry();
+        // The label carries the warning too, not just the colour: a colour on
+        // its own is invisible to anyone who cannot distinguish it, and this
+        // is the only signal that the code is about to rotate.
         let label_text = match &otp {
+            Some(o) if o.remaining_secs <= 5 => {
+                format!("TOTP · expires in {}s", o.remaining_secs)
+            }
             Some(o) => format!("TOTP · {}s", o.remaining_secs),
             None => "TOTP".to_string(),
         };
@@ -2000,10 +2033,9 @@ fn entry_detail_body(
             .map(|o| o.code.clone())
             .unwrap_or_else(|| "-".to_string());
 
-        // Warn the user when the code is about to rotate. The thresholds
-        // mirror KeePassXC: <=5s = orange (about to expire), then back to
-        // neutral once a fresh code lands. The 30s window is short enough
-        // that visual warning is more reliable than reading the countdown.
+        // Warn the user when the code is about to rotate. The threshold
+        // mirrors KeePassXC: 5 s or less, then back to neutral once a fresh
+        // code lands.
         let warning = otp.as_ref().is_some_and(|o| o.remaining_secs <= 5);
         let (border_color, text_color) = if warning {
             (palette::orange(), palette::orange_deep())
@@ -2065,7 +2097,12 @@ fn entry_detail_body(
         .child(
             v_flex().gap_1().child(label("Notes")).child(
                 div()
+                    .id("entry-detail-notes")
                     .min_h(px(54.))
+                    // A long note used to push the strength card and the
+                    // whole footer off the panel. It scrolls on its own now.
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
                     .p_3()
                     .rounded(px(6.))
                     .bg(palette::panel())
@@ -2283,7 +2320,7 @@ fn entry_detail_body(
 /// whole section behind `.when(!entry.custom_fields.is_empty(), …)`).
 fn custom_fields_section(entry: &VaultEntry, cx: &mut Context<AppShell>) -> impl gpui::IntoElement {
     let mut col = v_flex().gap_1().child(label("Additional fields"));
-    for (idx, cf) in entry.custom_fields.iter().enumerate() {
+    for cf in &entry.custom_fields {
         let key_label: SharedString = cf.key.clone().into();
         let display: SharedString = if cf.protected {
             "••••".into()
@@ -2295,7 +2332,10 @@ fn custom_fields_section(entry: &VaultEntry, cx: &mut Context<AppShell>) -> impl
         let entry_id = entry.id.clone();
         let field_key = cf.key.clone();
         let copyable = !cf.value.is_empty();
-        let row_id = SharedString::from(format!("detail-cf-{idx}"));
+        // Keyed by the entry and the field, not by row position: switching
+        // between two entries with different field lists reused interactive
+        // state across unrelated rows.
+        let row_id = SharedString::from(format!("detail-cf-{}-{}", entry.id, cf.key));
         let mut row = h_flex()
             .id(row_id)
             .gap_2()
@@ -2455,6 +2495,11 @@ where
 
     let reveal_button = div()
         .id("detail-row-password-reveal")
+        .labelled(if revealed {
+            "Hide password"
+        } else {
+            "Show password"
+        })
         .flex_shrink_0()
         .h(px(34.))
         .w(px(34.))

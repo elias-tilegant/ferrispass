@@ -54,6 +54,22 @@ pub fn mix(color: Hsla, accent: Hsla, t: f32) -> Hsla {
 /// Press / hover / cursor helpers for any stateful, styled element. Available
 /// only after `.id(...)` (the `StatefulInteractiveElement` bound), which is the
 /// whole point - see the module docs.
+/// A hover label for a control that shows only an icon.
+///
+/// Nothing in the app had one: the star, the reveal eye, the two `+` buttons,
+/// the settings gear and the group chevrons were unlabelled glyphs, which is
+/// a guess for a sighted user and nothing at all for a screen reader.
+pub trait Labelled: StatefulInteractiveElement + gpui_component::ElementExt + Sized {
+    fn labelled(self, text: impl Into<gpui::SharedString>) -> Self {
+        let text = text.into();
+        self.tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+        })
+    }
+}
+
+impl<E: StatefulInteractiveElement + gpui_component::ElementExt> Labelled for E {}
+
 pub trait Interaction: StatefulInteractiveElement + Styled + Sized {
     /// The floor for every clickable surface: a pointer cursor and a press dim.
     /// Leaves any hover the element already declares untouched, so it layers

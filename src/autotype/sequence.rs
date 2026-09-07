@@ -181,6 +181,13 @@ pub fn parse(template: &str) -> Result<Vec<Token>, ParseError> {
     Ok(out)
 }
 
+/// What may follow `DELAY` inside a placeholder: whitespace or digits, the
+/// two forms this parser has always accepted. A letter means the token merely
+/// starts with the same five characters and is something else entirely.
+fn is_delay_argument(rest: &str) -> bool {
+    rest.starts_with(|c: char| c.is_whitespace() || c.is_ascii_digit())
+}
+
 fn parse_token(body: &str) -> Result<Token, ParseError> {
     // KeePass placeholders are case-insensitive (`{username}` and
     // `{USERNAME}` mean the same thing), so we normalise for matching.
@@ -192,7 +199,10 @@ fn parse_token(body: &str) -> Result<Token, ParseError> {
     // `{DELAY 500}` carries a numeric parameter after a space. Split
     // on the original (cased) string so the error message preserves
     // user input casing.
-    if upper.starts_with("DELAY") {
+    // `DELAY 200`, not `DELAYED`: the prefix test alone reported the latter as
+    // an invalid delay of "ED" rather than as an unknown placeholder, which
+    // sends the user looking for a number that was never there.
+    if upper == "DELAY" || upper.strip_prefix("DELAY").is_some_and(is_delay_argument) {
         let original_rest = trimmed[5..].trim();
         if original_rest.is_empty() {
             return Err(ParseError::InvalidDelay(String::new()));
@@ -287,6 +297,19 @@ mod tests {
                 Token::Literal("-suffix".into()),
             ],
         );
+    }
+
+    /// `{DELAYED}` is an unknown placeholder, not a delay of "ED". Reporting
+    /// it as an invalid number sends the user looking for a digit that was
+    /// never in their sequence.
+    #[test]
+    fn a_token_that_merely_starts_with_delay_is_unknown() {
+        assert!(matches!(
+            parse("{DELAYED}"),
+            Err(ParseError::UnknownToken(token)) if token.eq_ignore_ascii_case("DELAYED")
+        ));
+        assert!(parse("{DELAY 200}").is_ok());
+        assert!(parse("{DELAY200}").is_ok());
     }
 
     #[test]

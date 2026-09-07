@@ -115,8 +115,11 @@ pub fn alphabet_size(classes: CharClasses) -> usize {
 /// `generate`'s output should hit it almost exactly while user-typed
 /// passwords often score lower under zxcvbn.
 pub fn estimate_bits(length: usize, classes: CharClasses) -> u32 {
-    let size = alphabet_size(classes) as f32;
-    (length as f32 * size.log2()) as u32
+    // `f64` and a round, not a truncating `as`. Truncating under-reported by
+    // up to a bit, which is enough to flip the 40 and 60-bit band boundaries
+    // that `strength_from_bits` reads.
+    let size = alphabet_size(classes) as f64;
+    (length as f64 * size.log2()).round().max(0.0) as u32
 }
 
 /// Bucket entropy bits into the same three-band Strength enum used elsewhere

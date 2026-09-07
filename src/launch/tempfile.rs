@@ -194,23 +194,19 @@ fn is_cloud_storage_path(path: &Path) -> bool {
         })
 }
 
-/// Stable per-user tag mixed into the tempdir name. Username + uid
-/// gives each macOS account on a shared box its own subdir; without
-/// this, two users running FerrisPass would race for the same path
-/// (and the `0700` would lock the second one out).
+/// Stable per-user tag mixed into the tempdir name, so two accounts on a
+/// shared machine get their own subdir instead of racing for one path that
+/// `0700` then locks the loser out of.
+///
+/// The uid, not `$USER`. The old comment claimed `unsafe` had to be avoided
+/// here, but `process_uid` already wraps `getuid` a few lines up. `$USER` is
+/// also environment-driven and passes through `sanitize`, so `user.name` and
+/// `username` collapsed to the same tag and one of those accounts lost the
+/// launch feature entirely.
 fn instance_tag() -> String {
     #[cfg(unix)]
     {
-        // Safe: getuid() is signal-safe and infallible on POSIX.
-        // We can't avoid `unsafe` for getuid itself, so we wrap it
-        // in a helper module further below to keep the unsafe block
-        // contained to a single line. forbid(unsafe_code) at the
-        // crate root means we use `users`-style fallback instead:
-        // read $USER from env, hash with the process's start time.
-        let user = std::env::var("USER").unwrap_or_else(|_| "anon".to_string());
-        // On macOS $TMPDIR is already per-user (`/var/folders/.../T/`),
-        // so $USER alone is sufficient as a uniqueness tag.
-        sanitize(&user)
+        process_uid().to_string()
     }
     #[cfg(not(unix))]
     {
@@ -222,20 +218,6 @@ fn instance_tag() -> String {
 }
 
 /// Strip anything that would be questionable in a directory name.
-/// Conservative - alphanumeric only, lowercased.
-fn sanitize(raw: &str) -> String {
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
-    if cleaned.is_empty() {
-        "anon".into()
-    } else {
-        cleaned
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,12 +269,14 @@ mod tests {
         assert_eq!(mode, 0o600, "launch payload must be user-only");
     }
 
+    /// The tag has to separate two accounts on a shared machine. `$USER` did
+    /// not: it was sanitized to alphanumerics, so `user.name` and `username`
+    /// produced the same directory and the second account was locked out of
+    /// the launch feature by the first one's 0700.
+    #[cfg(unix)]
     #[test]
-    fn sanitize_drops_specials() {
-        assert_eq!(sanitize("user.name"), "username");
-        assert_eq!(sanitize("Alice/Bob"), "alicebob");
-        assert_eq!(sanitize(""), "anon");
-        assert_eq!(sanitize("---"), "anon");
+    fn the_instance_tag_is_the_uid() {
+        assert_eq!(instance_tag(), process_uid().to_string());
     }
 
     #[cfg(unix)]
