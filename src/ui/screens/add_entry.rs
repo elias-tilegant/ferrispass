@@ -149,10 +149,7 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .child("Cancel")
         .on_click(
             cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                shell.clear_entry_form(window, cx);
-                shell.state().clone().update(cx, |state, cx| {
-                    let _ = state.close_overlay(cx);
-                });
+                shell.request_close_entry_form(window, cx);
             }),
         );
 
@@ -394,15 +391,36 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .child(
                     div()
                         .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
                         .text_xs()
-                        .text_color(palette::text_muted())
-                        .font_family("JetBrains Mono")
-                        .child("Saves locally, syncs to your cloud provider"),
+                        .text_color(if shell.entry_discard_armed() {
+                            palette::red()
+                        } else {
+                            palette::text_muted()
+                        })
+                        .child(footer_hint(shell, cx)),
                 )
                 .child(cancel_button)
                 .child(save_button),
         )
         .into_any_element()
+}
+
+/// Footer line under the form. Normally says where the entry lands; once a
+/// discard is armed it says what the next Escape or Cancel will throw away,
+/// because that used to happen silently on the first keystroke of Escape.
+fn footer_hint(shell: &AppShell, cx: &Context<AppShell>) -> String {
+    if shell.entry_discard_armed() {
+        return "Discard your changes? Press Escape or Cancel again.".to_string();
+    }
+    shell
+        .state()
+        .read(cx)
+        .summary()
+        .provider
+        .map(|provider| format!("Saves locally, syncs to {provider}"))
+        .unwrap_or_else(|| "Saves locally to this vault".to_string())
 }
 
 /// Dynamic "Additional fields" section. One row per

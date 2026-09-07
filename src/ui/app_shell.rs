@@ -40,7 +40,7 @@ use gpui_component::{
     slider::{SliderState, SliderValue},
 };
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use zeroize::Zeroizing;
 
 struct EditPrefill {
@@ -184,10 +184,24 @@ pub struct AppShell {
     /// Tracks leaving Add/Edit through any route, including global Escape or
     /// another overlay replacing the editor without calling its Cancel button.
     entry_editor_was_open: bool,
+    /// Fingerprint of the entry editor's contents when it opened. Compared on
+    /// close to tell an untouched form from one the user typed into, so
+    /// Escape, a lock, or switching overlays cannot discard a half-written
+    /// entry (and its freshly generated password) without asking.
+    ///
+    /// A hash, not a copy of the draft: the draft carries a cleartext
+    /// password and this outlives every keystroke that produced it.
+    entry_form_baseline: Option<[u8; 32]>,
+    /// Set by the first Escape on a dirty editor. The second one discards.
+    entry_discard_armed: bool,
     /// Wall-clock timestamp of the last user input event (mouse-move,
     /// click, key-down). Updated cheaply on every event without
     /// triggering a re-render - only the auto-lock checker reads it.
-    last_activity: Instant,
+    /// `SystemTime`, not `Instant`: `Instant` does not advance while macOS
+    /// sleeps, so a machine asleep for hours accrued no idle time and the
+    /// auto-lock threshold was measured in awake-seconds only. `AppState`
+    /// documents the same hazard for `last_unlock_at`.
+    last_activity: SystemTime,
     /// Periodic checker that locks the vault after the configured
     /// auto-lock timeout. Only running while a vault is open AND a
     /// non-`None` timeout is configured (managed alongside `totp_tick`
@@ -508,7 +522,9 @@ impl AppShell {
             secret_context_path,
             secret_context_was_open,
             entry_editor_was_open,
-            last_activity: Instant::now(),
+            entry_form_baseline: None,
+            entry_discard_armed: false,
+            last_activity: SystemTime::now(),
             auto_lock_task: None,
             #[cfg(target_os = "macos")]
             _session_lock_monitor: crate::session_lock::SessionLockMonitor::new(),
@@ -626,7 +642,7 @@ impl AppShell {
                 // Reset the activity baseline at vault-open so a stale
                 // timestamp from earlier in the session doesn't trip an
                 // immediate lock.
-                self.last_activity = Instant::now();
+                self.last_activity = SystemTime::now();
                 let window_handle = self.window_handle;
                 self.auto_lock_task = Some(cx.spawn(async move |this, cx| {
                     loop {
@@ -639,7 +655,13 @@ impl AppShell {
                             let Some(threshold) = shell.settings.auto_lock_secs else {
                                 return None; // settings disabled - exit.
                             };
-                            if shell.last_activity.elapsed() >= Duration::from_secs(threshold) {
+                            // A backwards clock jump must not postpone a
+                            // lock, so an unreadable elapsed time counts as
+                            // "long enough".
+                            let idle = SystemTime::now()
+                                .duration_since(shell.last_activity)
+                                .unwrap_or(Duration::MAX);
+                            if idle >= Duration::from_secs(threshold) {
                                 Some(true)
                             } else {
                                 Some(false)
@@ -1149,6 +1171,63 @@ impl AppShell {
         }
     }
 
+    /// Fingerprint the editor's current contents. Hashing the same draft the
+    /// save path builds means a field the save ignores cannot count as an
+    /// unsaved change.
+    fn entry_form_fingerprint(&self, cx: &gpui::App) -> [u8; 32] {
+        use sha2::{Digest as _, Sha256};
+        let draft = self.collect_entry_draft(cx);
+        let mut hasher = Sha256::new();
+        for part in [
+            &draft.title,
+            &draft.username,
+            &draft.password,
+            &draft.url,
+            &draft.notes,
+            &draft.otp,
+        ] {
+            hasher.update(part.as_bytes());
+            hasher.update([0]);
+        }
+        for field in &draft.custom_fields {
+            hasher.update(field.key.as_bytes());
+            hasher.update([0]);
+            hasher.update(field.value.as_bytes());
+            hasher.update([u8::from(field.protected)]);
+        }
+        hasher.finalize().into()
+    }
+
+    /// Remember what the editor looked like when it opened. Call after any
+    /// prefill, or the prefill itself reads as the user's typing.
+    pub(crate) fn mark_entry_form_pristine(&mut self, cx: &gpui::App) {
+        self.entry_form_baseline = Some(self.entry_form_fingerprint(cx));
+        self.entry_discard_armed = false;
+    }
+
+    pub fn entry_form_is_dirty(&self, cx: &gpui::App) -> bool {
+        self.entry_form_baseline
+            .is_some_and(|baseline| baseline != self.entry_form_fingerprint(cx))
+    }
+
+    pub fn entry_discard_armed(&self) -> bool {
+        self.entry_discard_armed
+    }
+
+    /// Close the entry editor, asking first if there is anything to lose.
+    /// Shared by the Cancel button and the Escape key so both behave the same.
+    pub(crate) fn request_close_entry_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.entry_form_is_dirty(cx) && !self.entry_discard_armed {
+            self.entry_discard_armed = true;
+            cx.notify();
+            return;
+        }
+        self.clear_entry_form(window, cx);
+        self.state.clone().update(cx, |state, cx| {
+            let _ = state.close_overlay(cx);
+        });
+    }
+
     /// Read-only access to the live editor rows, used by the modal's
     /// render code to lay out the inputs.
     pub fn new_entry_custom_fields(&self) -> &[CustomFieldDraftInputs] {
@@ -1240,6 +1319,8 @@ impl AppShell {
     /// Clear every AddEntry input. Called after a successful save and on
     /// Cancel so the next "New entry" opens with a blank form.
     pub fn clear_entry_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.entry_form_baseline = None;
+        self.entry_discard_armed = false;
         for input in [
             &self.new_entry_title_input,
             &self.new_entry_username_input,
@@ -1473,6 +1554,14 @@ impl AppShell {
         }
         if self.pending_group_delete.is_some() {
             self.cancel_group_delete(cx);
+            return;
+        }
+        // A half-written entry, and its freshly generated password, used to
+        // vanish on one Escape with no warning. The first Escape arms the
+        // discard, the second one performs it.
+        if self.entry_form_is_dirty(cx) && !self.entry_discard_armed {
+            self.entry_discard_armed = true;
+            cx.notify();
             return;
         }
         let closed = self.state.update(cx, |state, cx| state.close_overlay(cx));
@@ -1920,6 +2009,7 @@ impl AppShell {
             // Reset the form before showing it - otherwise reopening the modal
             // after a previous Save/Cancel would carry the prior values.
             self.clear_entry_form(window, cx);
+            self.mark_entry_form_pristine(cx);
             self.state
                 .update(cx, |state, cx| state.open_overlay(Overlay::AddEntry, cx));
         }
@@ -2286,6 +2376,9 @@ impl AppShell {
             });
         }
 
+        // After the prefill, not before: the values just written are the
+        // starting point, not the user's edits.
+        self.mark_entry_form_pristine(cx);
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::EditEntry { entry_id: p.id }, cx);
         });
@@ -3242,10 +3335,10 @@ impl Render for AppShell {
             // here - only the auto-lock checker reads the field, and
             // it does so on its own schedule.
             .on_mouse_move(cx.listener(|shell: &mut AppShell, _, _, _| {
-                shell.last_activity = Instant::now();
+                shell.last_activity = SystemTime::now();
             }))
             .on_key_down(cx.listener(|shell: &mut AppShell, _, _, _| {
-                shell.last_activity = Instant::now();
+                shell.last_activity = SystemTime::now();
             }))
             .on_action(cx.listener(Self::on_action_open_vault))
             .on_action(cx.listener(Self::on_action_open_vault_switcher))

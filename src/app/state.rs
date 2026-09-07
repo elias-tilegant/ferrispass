@@ -36,6 +36,12 @@ static NEXT_VAULT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 /// still have local changes whose latest save has not succeeded.
 static UNPERSISTED_VAULT_SESSION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// File name of a vault whose save has settled into `SaveStatus::Failed` with
+/// no writer left running. A save in that state never completes on its own,
+/// so the quit veto has to offer a way past it instead of blocking forever
+/// with a message about a save that is not in progress.
+static STALLED_SAVE_VAULT: Mutex<Option<String>> = Mutex::new(None);
+
 #[derive(Clone, Debug, Default)]
 struct ConnectOperationGate {
     inner: Arc<ConnectOperationGateInner>,
@@ -116,6 +122,14 @@ impl VaultSessionId {
 /// terminate while doing so could discard a queued or failed vault save.
 pub(crate) fn has_unpersisted_vault_saves() -> bool {
     UNPERSISTED_VAULT_SESSION_COUNT.load(Ordering::Acquire) != 0
+}
+
+/// The vault named in [`STALLED_SAVE_VAULT`], if a save is stuck.
+pub(crate) fn stalled_save_vault() -> Option<String> {
+    STALLED_SAVE_VAULT
+        .lock()
+        .ok()
+        .and_then(|stalled| stalled.clone())
 }
 
 #[derive(Debug)]
@@ -534,6 +548,36 @@ pub enum SaveStatus {
     Saved,
     /// The most recent save failed; message is suitable for a toast.
     Failed(String),
+}
+
+/// What a background tick needs to know about a vault's sync state, without
+/// copying the state itself. `SyncStatus::Conflict` owns two decrypted
+/// databases; a tick that only wants to ask "is this busy?" must not pay for
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncActivity {
+    /// An operation is running, or a conflict is waiting for the user.
+    Busy,
+    /// The last operation failed and the tick owns the retry.
+    Failed,
+    /// Connected and settled.
+    Resting,
+    /// Local-only, or the sign-in expired.
+    Inactive,
+}
+
+impl SyncActivity {
+    fn of(status: &SyncStatus) -> Self {
+        match status {
+            SyncStatus::Syncing
+            | SyncStatus::Connecting
+            | SyncStatus::Restoring
+            | SyncStatus::Conflict(_) => SyncActivity::Busy,
+            SyncStatus::Failed(_) => SyncActivity::Failed,
+            SyncStatus::Synced { .. } | SyncStatus::Idle => SyncActivity::Resting,
+            SyncStatus::Disconnected | SyncStatus::Reconnect { .. } => SyncActivity::Inactive,
+        }
+    }
 }
 
 /// Live sync binding for an open synced vault. Owns the access token in
@@ -1260,7 +1304,10 @@ impl AppState {
 
     fn mark_vault_session_unpersisted(&mut self, session_id: VaultSessionId) {
         if self.unpersisted_vault_sessions.insert(session_id) {
-            UNPERSISTED_VAULT_SESSION_COUNT.fetch_add(1, Ordering::Release);
+            // AcqRel, matching the decrement below: this counter gates
+            // whether quitting can discard a save, so both edges need the
+            // same ordering.
+            UNPERSISTED_VAULT_SESSION_COUNT.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -1412,9 +1459,45 @@ impl AppState {
         status: SaveStatus,
         cx: &mut Context<Self>,
     ) {
-        if self.set_save_status_for_session(target, session_id, status) {
+        let notify = self.set_save_status_for_session(target, session_id, status);
+        self.publish_stalled_save();
+        if notify {
             cx.notify();
         }
+    }
+
+    /// Republish whether a save is stuck rather than running, so the app-global
+    /// quit handler can tell the two apart without borrowing this state.
+    fn publish_stalled_save(&self) {
+        let stalled = self
+            .failed_save_paths()
+            .next()
+            .map(file_name)
+            .filter(|_| self.saves_in_flight.is_empty());
+        if let Ok(mut slot) = STALLED_SAVE_VAULT.lock() {
+            *slot = stalled;
+        }
+    }
+
+    /// Every retained session whose latest save failed.
+    fn failed_save_paths(&self) -> impl Iterator<Item = &Path> {
+        let active = matches!(self.save_status, SaveStatus::Failed(_))
+            .then(|| match &self.vault {
+                VaultStatus::Open { path, .. } => Some(path.as_path()),
+                _ => None,
+            })
+            .flatten();
+        let parked = self
+            .parked
+            .iter()
+            .filter(|(_, session)| matches!(session.save_status, SaveStatus::Failed(_)))
+            .map(|(path, _)| path.as_path());
+        let deferred = self
+            .deferred_lock_sessions
+            .values()
+            .filter(|session| matches!(session.save_status, SaveStatus::Failed(_)))
+            .map(|session| session.path.as_path());
+        active.into_iter().chain(parked).chain(deferred)
     }
 
     /// Mirror of `apply_save_status` for the cloud-sync lifecycle. Notifies
@@ -1540,16 +1623,18 @@ impl AppState {
         self.vault_session_is_current(target, session_id) && self.rebind_sync(target, binding)
     }
 
-    /// Read a clone of the sync status for the vault at `target`, whether
-    /// it's the active vault or one the user parked. `None` when no such
-    /// vault is in memory. The auto-sync tick uses this to skip vaults
-    /// that are mid-operation (Syncing / Conflict / …) before spending a
-    /// Graph round-trip on them.
-    fn sync_status_for(&self, target: &Path) -> Option<SyncStatus> {
-        if self.is_active_vault(target) {
-            return Some(self.sync_status.clone());
-        }
-        self.parked.get(target).map(|p| p.sync_status.clone())
+    /// What the auto-sync tick needs to know about a vault before spending a
+    /// round-trip on it. Returns a `Copy` summary rather than a clone of
+    /// `SyncStatus`, whose `Conflict` variant owns two decrypted databases:
+    /// the tick asked for it once per vault per tick and paid a full deep
+    /// copy of both, leaving the cleartext behind for the allocator to reuse.
+    fn sync_activity_for(&self, target: &Path) -> Option<SyncActivity> {
+        let status = if self.is_active_vault(target) {
+            &self.sync_status
+        } else {
+            &self.parked.get(target)?.sync_status
+        };
+        Some(SyncActivity::of(status))
     }
 
     /// `true` when at least one synced vault is in memory (active or
@@ -1620,34 +1705,27 @@ impl AppState {
     /// background task - works whether `target` is the active vault or
     /// one we parked away from. Returns `None` when the vault is locked
     /// or has no sync binding (= local-only / disconnected).
+    /// The config and token a push needs. It used to hand back a third
+    /// element, a fresh heap copy of the master password, which both callers
+    /// bound to `_master_password` and dropped unread: a cleartext copy made
+    /// on every sync attempt, never used and never wiped.
     fn snapshot_sync_inputs(
         &self,
         target: &Path,
-    ) -> Option<(crate::sync::config::SyncConfig, AccessToken, String)> {
-        if let VaultStatus::Open { path, document, .. } = &self.vault
-            && path.as_path() == target
-        {
-            let binding = self.sync.as_ref()?;
-            return Some((
-                binding.config.clone(),
-                binding.access_token.clone(),
-                document.password().to_string(),
-            ));
-        }
-        let parked = self.parked.get(target)?;
-        let binding = parked.sync.as_ref()?;
-        Some((
-            binding.config.clone(),
-            binding.access_token.clone(),
-            parked.document.password().to_string(),
-        ))
+    ) -> Option<(crate::sync::config::SyncConfig, AccessToken)> {
+        let binding = if self.is_active_vault(target) {
+            self.sync.as_ref()?
+        } else {
+            self.parked.get(target)?.sync.as_ref()?
+        };
+        Some((binding.config.clone(), binding.access_token.clone()))
     }
 
     fn snapshot_sync_inputs_for_session(
         &self,
         target: &Path,
         session_id: VaultSessionId,
-    ) -> Option<(crate::sync::config::SyncConfig, AccessToken, String)> {
+    ) -> Option<(crate::sync::config::SyncConfig, AccessToken)> {
         self.vault_session_is_current(target, session_id)
             .then(|| self.snapshot_sync_inputs(target))
             .flatten()
@@ -2744,16 +2822,34 @@ impl AppState {
     /// Compute the live TOTP code for the currently-selected entry, if any.
     /// Recomputed on every render (cheap, ~µs); the per-second AppShell tick
     /// triggers `cx.notify` which causes the detail panel to re-call this.
-    pub fn totp_for_selected_entry(&self) -> Option<OtpDisplay> {
+    /// The entry the detail panel is actually showing.
+    ///
+    /// `selected_entry_id` can point at an entry that is no longer in the
+    /// visible list: `move_entry` deliberately leaves it dangling because
+    /// `vault_browser` falls back to the first visible row. Anything that
+    /// read the raw id instead disagreed with the panel around it, so after
+    /// dragging the selected entry into another group the panel showed entry
+    /// X while the TOTP box showed Y's code and clicking it copied Y's.
+    fn shown_entry_id(&self) -> Option<&str> {
         let VaultStatus::Open {
-            document,
             selected_entry_id,
+            visible_entries,
             ..
         } = &self.vault
         else {
             return None;
         };
-        let id = selected_entry_id.as_deref()?;
+        match selected_entry_id.as_deref() {
+            Some(id) if visible_entries.iter().any(|entry| entry.id == id) => Some(id),
+            _ => visible_entries.first().map(|entry| entry.id.as_str()),
+        }
+    }
+
+    pub fn totp_for_selected_entry(&self) -> Option<OtpDisplay> {
+        let id = self.shown_entry_id()?;
+        let VaultStatus::Open { document, .. } = &self.vault else {
+            return None;
+        };
         document.totp_for_entry(id)
     }
 
@@ -3007,16 +3103,27 @@ impl AppState {
         }
 
         self.mark_vault_session_unpersisted(session_id);
-        self.apply_save_status_for_session(&target, session_id, SaveStatus::Saving, cx);
 
         if let Some(queued) = self.saves_in_flight.get_mut(&target) {
             queued.pending_session = Some(session_id);
             queued.sync_after |= sync_after;
+            self.apply_save_status_for_session(&target, session_id, SaveStatus::Saving, cx);
             return;
         }
+        // Resolve the payload before announcing `Saving`. Announcing first and
+        // then bailing left the session counted as unpersisted with no writer
+        // running: quit stayed vetoed, the status never left `Saving`, and the
+        // discard escape waits for `Failed`, which would never arrive.
         let Some(payload) = self.save_payload_for_session(&target, session_id) else {
+            self.apply_save_status_for_session(
+                &target,
+                session_id,
+                SaveStatus::Failed("This vault is no longer open for saving.".into()),
+                cx,
+            );
             return;
         };
+        self.apply_save_status_for_session(&target, session_id, SaveStatus::Saving, cx);
         let queued_save = QueuedSave::new(session_id);
         let abort = queued_save.abort.clone();
         self.saves_in_flight.insert(target.clone(), queued_save);
@@ -3945,13 +4052,10 @@ impl AppState {
     /// `RecentlyUsed` list is rebuilt on the next selection change,
     /// which matches KeePassXC (the list is a snapshot, not live).
     pub fn mark_selected_used(&mut self) {
-        if let VaultStatus::Open {
-            selected_entry_id,
-            last_used,
-            ..
-        } = &mut self.vault
-            && let Some(id) = selected_entry_id.clone()
-        {
+        let Some(id) = self.shown_entry_id().map(str::to_string) else {
+            return;
+        };
+        if let VaultStatus::Open { last_used, .. } = &mut self.vault {
             last_used.insert(id, Local::now());
         }
     }
@@ -4011,6 +4115,8 @@ impl AppState {
         let snapshot = document.snapshot_rc();
         let showing_search_results = !search_query.trim().is_empty();
 
+        // Same rule as `shown_entry_id`, which the TOTP and recently-used
+        // paths read; this one needs the whole entry rather than the id.
         let selected_entry = selected_entry_id
             .as_deref()
             .and_then(|id| visible_entries.iter().find(|entry| entry.id == id))
@@ -4831,8 +4937,7 @@ impl AppState {
             });
             return;
         }
-        let Some((config, token, _master_password)) =
-            self.snapshot_sync_inputs_for_session(target, session_id)
+        let Some((config, token)) = self.snapshot_sync_inputs_for_session(target, session_id)
         else {
             // No live binding. For the active vault this usually means the
             // unlock-time binding restore failed (network blip), so retry it
@@ -5044,16 +5149,8 @@ impl AppState {
         // Skip vaults mid-operation, and don't fire while the user is in a
         // Connect / Conflict overlay - auto-merging underneath them would
         // be jarring.
-        let status = self.sync_status_for(target);
-        let busy = matches!(
-            &status,
-            Some(
-                SyncStatus::Syncing
-                    | SyncStatus::Connecting
-                    | SyncStatus::Restoring
-                    | SyncStatus::Conflict(_)
-            )
-        );
+        let activity = self.sync_activity_for(target);
+        let busy = activity == Some(SyncActivity::Busy);
         if busy || matches!(self.overlay, Overlay::Conflict | Overlay::Connect) {
             return;
         }
@@ -5069,7 +5166,7 @@ impl AppState {
         // pull-check below would miss those because the remote ETag hasn't
         // moved. `interactive: false` so a background retry of a *conflict*
         // never pops the overlay unattended.
-        if matches!(&status, Some(SyncStatus::Failed(_))) {
+        if activity == Some(SyncActivity::Failed) {
             // A throttled vault waits. Retrying a full upload every tick is
             // what provoked the limit, and the recovery push is the most
             // expensive request this app makes.
@@ -5079,8 +5176,7 @@ impl AppState {
             self.sync_now_for_path_inner(target, session_id, false, None, cx);
             return;
         }
-        let Some((config, token, _master_password)) =
-            self.snapshot_sync_inputs_for_session(target, session_id)
+        let Some((config, token)) = self.snapshot_sync_inputs_for_session(target, session_id)
         else {
             return;
         };
@@ -5127,11 +5223,7 @@ impl AppState {
                         // conflict/reconnect arrived, this background result
                         // is stale - drop it; the next tick re-checks. (The
                         // token write above is always safe and worth keeping.)
-                        let resting = matches!(
-                            state.sync_status_for(&callback_path),
-                            Some(SyncStatus::Synced { .. } | SyncStatus::Idle)
-                        );
-                        if !resting {
+                        if state.sync_activity_for(&callback_path) != Some(SyncActivity::Resting) {
                             return;
                         }
                         match pulled {
@@ -5310,10 +5402,21 @@ impl AppState {
                     );
                     return;
                 }
-                // Background pull: never seize the screen. Defer to a Failed
-                // hint; the user resolves on their next explicit "Sync now",
-                // which runs interactively and opens the overlay.
-                if !interactive {
+                // The user is mid-edit. Replacing the entry editor with the
+                // conflict screen throws away whatever they had typed, and
+                // the interactive push that lands here fires on *every* save,
+                // so an unlucky 412 could arrive at any moment. `auto_sync`
+                // already refuses to run under the Connect and Conflict
+                // overlays; the editor deserves the same protection.
+                //
+                // Background pull: never seize the screen either. Both defer
+                // to a Failed hint; the user resolves on their next explicit
+                // "Sync now", which runs interactively and opens the overlay.
+                let editing = matches!(
+                    self.overlay,
+                    Overlay::AddEntry | Overlay::EditEntry { .. } | Overlay::AddGroup { .. }
+                );
+                if !interactive || editing {
                     self.apply_sync_status_for_session(
                         target,
                         session_id,
@@ -5496,7 +5599,7 @@ impl AppState {
         }
         // Pull config + token from whichever slot owns `target` right now.
         let (config, token) = match self.snapshot_sync_inputs_for_session(target, session_id) {
-            Some((config, token, _password)) => (config, token),
+            Some(inputs) => inputs,
             None => return,
         };
 
@@ -6648,6 +6751,84 @@ mod park_tests {
         );
     }
 
+    /// `move_entry` deliberately leaves `selected_entry_id` pointing at an
+    /// entry that is no longer visible, because `vault_browser` falls back to
+    /// the first row. Anything reading the raw id disagreed with the panel:
+    /// after dragging the selected entry into another group the panel showed
+    /// one entry and the TOTP box showed a different entry's code.
+    #[test]
+    fn the_shown_entry_follows_the_list_not_a_stale_selection() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/shown.kdbx");
+        fresh_open(&mut state, path, "pw");
+
+        let visible = vec![
+            VaultEntry {
+                id: "visible".into(),
+                ..VaultEntry::default()
+            },
+            VaultEntry {
+                id: "also-visible".into(),
+                ..VaultEntry::default()
+            },
+        ];
+        let VaultStatus::Open {
+            selected_entry_id,
+            visible_entries,
+            ..
+        } = &mut state.vault
+        else {
+            unreachable!("just opened");
+        };
+        *visible_entries = Rc::new(visible);
+        *selected_entry_id = Some("also-visible".into());
+        assert_eq!(state.shown_entry_id(), Some("also-visible"));
+
+        let VaultStatus::Open {
+            selected_entry_id, ..
+        } = &mut state.vault
+        else {
+            unreachable!()
+        };
+        // The selection was moved out of the current group.
+        *selected_entry_id = Some("moved-away".into());
+        assert_eq!(
+            state.shown_entry_id(),
+            Some("visible"),
+            "falls back to the row the detail panel renders"
+        );
+    }
+
+    /// A save that has settled into `Failed` never completes on its own. The
+    /// quit handler cannot borrow AppState, so it reads this signal to tell a
+    /// running save from a stuck one and stop vetoing forever.
+    #[test]
+    fn a_settled_save_failure_is_published_for_the_quit_handler() {
+        let mut state = AppState::default();
+        let path = PathBuf::from("/tmp/stalled.kdbx");
+        fresh_open(&mut state, path.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session");
+
+        state.set_save_status_for_session(&path, session_id, SaveStatus::Saving);
+        state.publish_stalled_save();
+        assert_eq!(stalled_save_vault(), None, "a running save is not stalled");
+
+        state.set_save_status_for_session(
+            &path,
+            session_id,
+            SaveStatus::Failed("volume disappeared".into()),
+        );
+        state.publish_stalled_save();
+        assert_eq!(stalled_save_vault().as_deref(), Some("stalled.kdbx"));
+
+        // A writer picking the work back up clears it again.
+        state
+            .saves_in_flight
+            .insert(path.clone(), QueuedSave::new(session_id));
+        state.publish_stalled_save();
+        assert_eq!(stalled_save_vault(), None);
+    }
+
     #[test]
     fn deferred_lock_waits_for_dirty_session_and_writer_slot() {
         let mut state = AppState::default();
@@ -7001,15 +7182,11 @@ mod park_tests {
         // snapshot_sync_inputs against the parked path returns the
         // parked vault's binding - not the active one. This is the
         // contract sync_now_for_path relies on.
-        let (parked_config, _, parked_pw) =
-            state.snapshot_sync_inputs(&parked_path).expect("parked");
+        let (parked_config, _) = state.snapshot_sync_inputs(&parked_path).expect("parked");
         assert_eq!(parked_config.account_email, "parked@example.invalid");
-        assert_eq!(parked_pw, "pw-parked");
 
-        let (active_config, _, active_pw) =
-            state.snapshot_sync_inputs(&active_path).expect("active");
+        let (active_config, _) = state.snapshot_sync_inputs(&active_path).expect("active");
         assert_eq!(active_config.account_email, "active@example.invalid");
-        assert_eq!(active_pw, "pw-active");
 
         // Unknown path → None.
         assert!(

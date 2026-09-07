@@ -21,8 +21,6 @@ pub(crate) const FAVORITE_TAG: &str = "Favorite";
 pub struct VaultDocument {
     database: Database,
     snapshot: Arc<VaultSnapshot>,
-    /// Master password retained for decrypting remote conflict payloads.
-    password: String,
     /// Display/source path of the key file selected at unlock time.
     keyfile_path: Option<PathBuf>,
     /// Exact key material that successfully opened the database. The type
@@ -95,20 +93,22 @@ impl VaultDocument {
     ) -> Self {
         let database_key = database_key_from_sources(&password, keyfile_path.as_deref())
             .expect("VaultDocument::new keyfile must be readable");
-        Self::new_with_key(database, snapshot, password, keyfile_path, database_key)
+        Self::new_with_key(database, snapshot, keyfile_path, database_key)
     }
 
+    /// The password is deliberately not a parameter and never stored. It is
+    /// consumed once to derive `database_key`, which zeroizes itself on drop;
+    /// keeping a cleartext copy for the life of the session bought nothing,
+    /// because every path that needs to decrypt or re-encrypt uses the key.
     pub(crate) fn new_with_key(
         database: Database,
         snapshot: VaultSnapshot,
-        password: String,
         keyfile_path: Option<PathBuf>,
         database_key: DatabaseKey,
     ) -> Self {
         Self {
             database,
             snapshot: Arc::new(snapshot),
-            password,
             keyfile_path,
             database_key,
             generation: 0,
@@ -119,7 +119,6 @@ impl VaultDocument {
     pub(crate) fn new_with_storage(
         database: Database,
         snapshot: VaultSnapshot,
-        password: String,
         keyfile_path: Option<PathBuf>,
         database_key: DatabaseKey,
         storage_path: PathBuf,
@@ -128,7 +127,6 @@ impl VaultDocument {
         Self {
             database,
             snapshot: Arc::new(snapshot),
-            password,
             keyfile_path,
             database_key,
             generation: 0,
@@ -147,15 +145,6 @@ impl VaultDocument {
 
     pub fn snapshot(&self) -> &VaultSnapshot {
         &self.snapshot
-    }
-
-    /// The master password used to unlock this vault. Required by the sync
-    /// flow when a 412 conflict happens - we need to decrypt the remote
-    /// bytes against the same key, then re-encrypt the merged result.
-    /// Lifetime-bound to `&self` so callers don't accidentally store it
-    /// outside the document's scope.
-    pub fn password(&self) -> &str {
-        &self.password
     }
 
     /// Optional keyfile path - same reason as `password()`. `None` for

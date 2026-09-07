@@ -1,5 +1,6 @@
 use gpui::{App, KeyBinding, Menu, MenuItem, Window, actions};
 use gpui_component::WindowExt as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const APP_CONTEXT: &str = "FerrisPass";
 
@@ -101,18 +102,42 @@ pub struct DeleteGroup {
     pub group_id: String,
 }
 
-const SAVE_IN_PROGRESS_MESSAGE: &str = "FerrisPass is still saving vault changes. Wait for the save to finish, or retry Save if it failed.";
+const SAVE_IN_PROGRESS_MESSAGE: &str =
+    "FerrisPass is still saving vault changes. Wait for the save to finish.";
+
+/// Set by the first refused quit against a stalled save. A save that has
+/// settled into `Failed` never completes on its own, so vetoing forever left
+/// the user with no way to quit short of killing the process. The second
+/// attempt goes through and loses those changes, which is the user's call to
+/// make once they have been told.
+static QUIT_ARMED_OVER_STALLED_SAVE: AtomicBool = AtomicBool::new(false);
 
 fn block_lifecycle_action_while_saving(window: Option<&mut Window>, cx: &mut App) -> bool {
     if !super::state::has_unpersisted_vault_saves() {
+        QUIT_ARMED_OVER_STALLED_SAVE.store(false, Ordering::Release);
         return false;
     }
 
+    let message = match super::state::stalled_save_vault() {
+        Some(vault) => {
+            if QUIT_ARMED_OVER_STALLED_SAVE.swap(true, Ordering::AcqRel) {
+                // Told once, asked again: let them out.
+                QUIT_ARMED_OVER_STALLED_SAVE.store(false, Ordering::Release);
+                return false;
+            }
+            format!(
+                "Saving \"{vault}\" failed and is not retrying. Try Save again, or repeat this \
+                 to quit and lose those changes."
+            )
+        }
+        None => SAVE_IN_PROGRESS_MESSAGE.to_string(),
+    };
+
     if let Some(window) = window {
-        window.push_notification(SAVE_IN_PROGRESS_MESSAGE, cx);
+        window.push_notification(message, cx);
     } else if let Some(window) = cx.active_window() {
         let _ = window.update(cx, |_root, window, cx| {
-            window.push_notification(SAVE_IN_PROGRESS_MESSAGE, cx);
+            window.push_notification(message, cx);
         });
     }
     true

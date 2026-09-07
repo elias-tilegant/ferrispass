@@ -63,7 +63,6 @@ impl KeePassRepository {
         Ok(VaultDocument::new_with_storage(
             database,
             snapshot,
-            password.to_string(),
             keyfile.map(PathBuf::from),
             database_key,
             storage_path,
@@ -93,7 +92,6 @@ impl KeePassRepository {
         Ok(VaultDocument::new_with_key(
             database,
             snapshot,
-            password.to_string(),
             keyfile.map(PathBuf::from),
             database_key,
         ))
