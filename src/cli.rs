@@ -37,6 +37,10 @@ struct Cli {
     master_password_fd: Option<u32>,
     #[arg(long, global = true)]
     touch_id: bool,
+    /// Never use an enrolled Touch ID identity, even on a terminal. For a
+    /// script that must not block on a biometric prompt.
+    #[arg(long, global = true, conflicts_with = "touch_id")]
+    no_touch_id: bool,
     #[arg(long, global = true, requires = "touch_id")]
     allow_device_passcode: bool,
     #[command(subcommand)]
@@ -325,7 +329,6 @@ struct CliError {
     code: &'static str,
     message: String,
     exit: i32,
-    details: Option<Value>,
 }
 impl CliError {
     fn new(code: &'static str, exit: i32, message: impl Into<String>) -> Self {
@@ -333,12 +336,16 @@ impl CliError {
             code,
             exit,
             message: message.into(),
-            details: None,
         }
     }
 }
 
 pub fn run() -> i32 {
+    // Only the GUI ever swept the launch tempdir, so a CLI `launch` killed
+    // mid-flight left a 0600 file holding a cleartext password behind with
+    // nothing to collect it. Cheap, and it runs before any vault is opened.
+    crate::launch::sweeper::sweep_stale(std::time::Duration::from_secs(60));
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
@@ -423,6 +430,10 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
     // `open` returns after handing the file to Launch Services, before SAP GUI
     // necessarily reads it. Keep ownership (and thus the 0600 payload) alive
     // for the same minimum grace period used by the GUI settings clamp.
+    //
+    // A signal during that window skips `Drop`. The startup sweep in `run`
+    // collects what it leaves behind, so the exposure ends at the next
+    // FerrisPass start rather than lasting until the machine is rebooted.
     std::thread::sleep(std::time::Duration::from_secs(10));
     drop(handle);
     Ok(json!({"launched":true,"target":target.id(),"entry_id":args.id}))
@@ -442,6 +453,11 @@ fn launch_error(error: crate::launch::LaunchError) -> CliError {
             "launch_unsupported",
             6,
             format!("{target} launch is unsupported on this platform"),
+        ),
+        crate::launch::LaunchError::UnsupportedCharacter { field } => CliError::new(
+            "invalid_launch_profile",
+            6,
+            format!("the {field} field contains a character this connection file cannot carry"),
         ),
         crate::launch::LaunchError::Io(error) => CliError::new(
             "launch_failed",
@@ -674,7 +690,18 @@ fn unlock_password(cli: &Cli) -> Result<Zeroizing<String>, CliError> {
         std::fs::canonicalize(vault).map_err(|e| CliError::new("io", 7, e.to_string()))?;
     let registry = crate::biometric::registry::load_or_default();
     let enrollment = registry.get(&canonical).or_else(|| registry.get(vault));
-    if cli.touch_id || (enrollment.is_some() && crate::biometric::default_store().is_available()) {
+    // Biometry needs a person in front of the machine. Preferring it whenever
+    // an enrolment existed meant a scripted invocation raised an OS prompt and
+    // blocked on it for up to two minutes with nobody there to answer, which
+    // made agent runs nondeterministic. Ask only when explicitly requested, or
+    // when stdin is a terminal and so someone is plausibly watching.
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let wants_biometrics = cli.touch_id
+        || (!cli.no_touch_id
+            && interactive
+            && enrollment.is_some()
+            && crate::biometric::default_store().is_available());
+    if wants_biometrics {
         let enrollment = enrollment.ok_or_else(|| {
             CliError::new(
                 "touch_id_not_enrolled",
@@ -1061,7 +1088,7 @@ fn print_error(format: OutputFormat, e: &CliError) {
     match format {
         OutputFormat::Json => eprintln!(
             "{}",
-            json!({"schema":SCHEMA,"ok":false,"error":{"code":e.code,"message":e.message,"details":e.details}})
+            json!({"schema":SCHEMA,"ok":false,"error":{"code":e.code,"message":e.message}})
         ),
         OutputFormat::Human => eprintln!("error [{}]: {}", e.code, e.message),
     }

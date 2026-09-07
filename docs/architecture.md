@@ -130,6 +130,12 @@ Reference implementation: `try_restore_sync_binding` in `state.rs:541`. Copy thi
 │   - service: ferrispass-sync                            │
 │   - account: user-email                                 │
 │   - secret:  OAuth refresh token (long-lived)           │
+│                                                         │
+│   - service: ferrispass-biometric   (Touch ID only)     │
+│   - account: enrolment id                               │
+│   - secret:  that vault's master password               │
+│     Written only when the user enables Touch ID for a   │
+│     vault. See SECURITY.md for what guards it.          │
 └─────────────────────────────────────────────────────────┘
               │ HTTPS / Microsoft Graph
               ▼
@@ -140,7 +146,11 @@ Reference implementation: `try_restore_sync_binding` in `state.rs:541`. Copy thi
 └─────────────────────────────────────────────────────────┘
 ```
 
-The cloud only ever sees ciphertext. The master password never leaves process memory; it's required to re-encrypt on save and is wiped when the vault locks.
+The cloud only ever sees ciphertext. The master password is consumed once to
+derive the `DatabaseKey` and is not retained: the key does the re-encryption on
+save, and zeroizes itself on drop. The one exception is Touch ID, which writes
+the password to the login keychain by design; SECURITY.md describes that
+boundary.
 
 ## CLI trust boundary
 
@@ -183,7 +193,17 @@ GPUI provides its own task scheduler. Two flavors:
 - `cx.background_spawn(fut)` - runs on a thread pool. Use for blocking I/O (network, disk, Argon2 KDF). Future is cancelled on drop unless `.detach()`-ed.
 - `cx.spawn(fut)` - runs on the foreground render loop. Use to update `Entity` state after a background task completes. Inside the future, call `this.update(cx, |state, cx| ...)` to mutate state safely.
 
-We do NOT pull in `tokio` directly - but `cargo-packager-updater` uses `reqwest` which transitively brings tokio in. Tokio code runs only inside the updater's downloader; everything else stays sync + GPUI-scheduled.
+All HTTP goes through `sync::http`, which owns a small Tokio runtime and two
+reqwest clients: `metadata_client` for short request/response calls (sign-in,
+Graph metadata, the update manifest, favicons) and `transfer_client` for
+vault-sized bodies. They differ only in their deadline, so the system proxy and
+the native trust store cannot apply to one and not the other. Background tasks
+enter the runtime synchronously; nothing else in the app is async.
+
+| Call class | Connect | Total |
+|---|---|---|
+| Metadata (sign-in, Graph, manifest, favicon) | 10 s | 30 s |
+| Transfer (vault, update bundle) | 10 s | 1 h, plus a 120 s idle cap |
 
 ## UI rendering
 

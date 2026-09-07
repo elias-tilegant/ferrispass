@@ -3016,6 +3016,16 @@ impl AppShell {
             Err(LaunchError::UnsupportedTarget(target)) => {
                 window.push_notification(format!("{target} launch is not supported here."), cx);
             }
+            Err(LaunchError::UnsupportedCharacter { field }) => {
+                // Naming the field is safe; showing the value is not.
+                window.push_notification(
+                    format!(
+                        "The {field} value contains & = or a line break, which this connection \
+                         file cannot carry. Change it in the entry and try again."
+                    ),
+                    cx,
+                );
+            }
             Err(LaunchError::Io(e)) => {
                 // Show only the kind, never the file body. The path is
                 // ours, but even leaking it is unnecessary for the user.

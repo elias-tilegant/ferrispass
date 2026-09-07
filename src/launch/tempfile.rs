@@ -55,10 +55,15 @@ impl TempLaunchFile {
             use std::os::unix::fs::OpenOptionsExt as _;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&path)?;
-        f.write_all(contents)?;
-        f.sync_all()?;
-        Ok(Self { path })
+        let mut file = opts.open(&path)?;
+        // Take ownership before the first fallible write. `Drop` unlinks, so
+        // constructing only after `write_all` and `sync_all` succeeded left a
+        // file holding a prefix of the body on any mid-write failure, and that
+        // prefix can already include the password.
+        let handle = Self { path };
+        file.write_all(contents)?;
+        file.sync_all()?;
+        Ok(handle)
     }
 
     pub fn path(&self) -> &Path {

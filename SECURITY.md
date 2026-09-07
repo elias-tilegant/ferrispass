@@ -35,7 +35,7 @@ Out of scope (will be acknowledged but won't be patched as security issues):
 
 ## Supported versions
 
-We patch the **latest minor release line only**. As of 2026-05, that's `0.2.x`. Older versions don't receive security updates - auto-update is on by default specifically so users land on the patched version within ~24 hours of release.
+We patch the **latest minor release line only**. As of 2026-09, that's `0.9.x`. Older versions don't receive security updates - auto-update is on by default specifically so users land on the patched version within ~24 hours of release.
 
 ## Cryptographic summary
 
@@ -56,9 +56,35 @@ The dual signing (Apple Developer ID *and* minisign) is intentional: each layer 
 
 | | |
 |---|---|
-| Password held in memory while vault is unlocked | yes - required to re-encrypt on save |
+| Password held in memory while vault is unlocked | the derived key, yes; the password itself is dropped after the key is built |
 | Password persisted to disk | **never** |
 | Password sent over the network | **never** - the cloud provider only sees ciphertext |
-| Password stored in Keychain | **no** - we don't auto-fill it; you re-type to unlock |
+| Password stored in Keychain | **only if you enable Touch ID for that vault** - see below |
+
+### Touch ID and the login keychain
+
+Enabling Touch ID for a vault writes that vault's master password into your
+**login keychain**, under the service `ferrispass-biometric`. This is what
+makes an unlock without typing possible at all.
+
+What that means, precisely:
+
+- The Touch ID prompt runs inside FerrisPass. It gates *our* read of the item,
+  not the item itself. macOS guards the item with the login keychain's own
+  access control.
+- Another program running as you can therefore ask macOS for it. On a standard
+  setup macOS shows an "allow" dialog for a program that is not FerrisPass, and
+  you can deny it; it is not a silent read for an arbitrary process, but it is
+  also not gated on your fingerprint.
+- We would rather bind the item to FerrisPass's code signature with a
+  `SecAccess` list. The `security-framework` crate exposes no safe way to do
+  that for a generic password item, and doing it by hand means Core Foundation
+  FFI around the most sensitive secret in the app. That is a change worth
+  making on its own, with its own review, and it has not been made yet.
+- Turning the feature off, or choosing "Forget Touch ID" on the unlock screen,
+  removes the item. A vault without Touch ID enabled never has its password in
+  the keychain.
+
+The enrolment checkbox says this in one line where you decide.
 | Auto-lock timeout | configurable in Settings; default 4 minutes idle |
 | Clipboard auto-clear after copy | configurable; default 10 seconds |

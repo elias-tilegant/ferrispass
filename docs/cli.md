@@ -33,11 +33,18 @@ Use `ferrispass-cli <command> --help` for command-specific arguments. Most
 commands require `--vault FILE`; `sync status` only reads the local provider
 binding and does not unlock the database.
 
+The JSON error envelope is `{"code", "message"}`. It briefly also carried a
+`details` field, which was never populated on any path and has been removed.
+
 ## Unlocking safely
 
 The CLI never accepts a master password in an argument or environment variable.
-Without an explicit option it uses an enrolled Touch ID identity when available.
-If no biometric enrollment is available, it uses a hidden terminal prompt.
+On a terminal it uses an enrolled Touch ID identity when one is available, and
+otherwise prompts without echo. When stdin is not a terminal it never raises a
+biometric prompt on its own: nobody would be there to answer it, and the OS
+prompt blocks for two minutes before giving up. Pass `--touch-id` to require
+biometrics anyway, or `--no-touch-id` to rule them out.
+
 Automation must inherit a dedicated descriptor (3 or higher):
 
 ```sh

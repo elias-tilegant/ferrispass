@@ -143,7 +143,12 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 // user can opt in here and the unlock button
                 // appears next time the sensor is reachable.
                 .when(biometric_supported && !has_enrollment, |this| {
-                    this.child(touch_id_enrollment_checkbox(enrollment_pending, cx))
+                    this.child(
+                        v_flex()
+                            .gap_1()
+                            .child(touch_id_enrollment_checkbox(enrollment_pending, cx))
+                            .child(touch_id_enrollment_caveat()),
+                    )
                 })
                 .when_some(prompt.error.clone(), |this, error| {
                     this.child(div().text_sm().text_color(palette::red()).child(error))
@@ -230,6 +235,21 @@ fn touch_id_enrollment_checkbox(
                 }),
         )
         .child("Enable Touch ID for this vault")
+}
+
+/// The honest version of what enrolling does. The master password goes into
+/// the login keychain, and macOS guards it with the keychain's own access
+/// control, not with the Touch ID prompt: that prompt runs inside FerrisPass.
+/// `security-framework` exposes no way to attach a `SecAccess` list to a
+/// generic password item, so tightening this needs hand-written Core
+/// Foundation FFI around the most sensitive secret in the app. Until that is
+/// written and reviewed on its own, the user gets to know the trade before
+/// they take it.
+fn touch_id_enrollment_caveat() -> impl gpui::IntoElement {
+    div()
+        .text_xs()
+        .text_color(palette::text_faint())
+        .child("Stores the master password in your login keychain.")
 }
 
 fn touch_id_unlock_button(

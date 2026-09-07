@@ -119,7 +119,7 @@ impl Launcher for SapGuiMacLauncher {
             .unwrap_or_default();
         let expert = expert_flag(ctx.custom_fields);
 
-        let body = render_sapc_body(&host, &instance, &user, &lang, &client, password, expert);
+        let body = render_sapc_body(&host, &instance, &user, &lang, &client, password, expert)?;
         let temp_file = TempLaunchFile::create("sapc", body.as_bytes())?;
 
         // We don't `.wait()` - `open` returns as soon as Launch Services
@@ -127,7 +127,16 @@ impl Launcher for SapGuiMacLauncher {
         // seconds parsing it and connecting. The cleanup-TTL timer
         // (`AppShell::schedule_launch_cleanup`) holds the file alive
         // until SAP GUI has had time to read it.
-        Command::new("open").arg(temp_file.path()).spawn()?;
+        // Absolute path and a scrubbed environment: this hands a file holding
+        // a cleartext password to a child process, and resolving `open`
+        // through an inherited `$PATH` would let a shim placed anywhere on it
+        // receive that path instead of Launch Services.
+        Command::new("/usr/bin/open")
+            .arg(temp_file.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+            .spawn()?;
 
         Ok(LaunchHandle {
             temp_file: Some(temp_file),
@@ -198,7 +207,26 @@ pub(crate) fn render_sapc_body(
     client: &str,
     password: &str,
     expert: bool,
-) -> String {
+) -> Result<String, LaunchError> {
+    // SAP GUI reads this file literally: there is no escaping and no
+    // URL-decoding. A `&` or `=` inside a value therefore ends that value and
+    // starts a new parameter, so a host or user field could rewrite `pass=`,
+    // and a password containing `&` was silently truncated at it and the user
+    // logged in with the wrong credential. Refuse rather than emit a body that
+    // does not mean what the entry says.
+    for (field, value) in [
+        ("SAP_HOST", host),
+        ("SAP_INSTANCE", instance),
+        ("SAP_USER", user),
+        ("SAP_LANG", lang),
+        ("SAP_CLIENT", client),
+        ("password", password),
+    ] {
+        if value.contains(['&', '=', '\r', '\n']) {
+            return Err(LaunchError::UnsupportedCharacter { field });
+        }
+    }
+
     let mut body = format!("conn=/H/{host}/S/{instance}");
     if !user.is_empty() {
         body.push_str("&user=");
@@ -217,7 +245,7 @@ pub(crate) fn render_sapc_body(
     if expert {
         body.push_str("&expert=true");
     }
-    body
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -249,7 +277,8 @@ mod tests {
             "100",
             "hunter2",
             true,
-        );
+        )
+        .expect("body");
 
         // Slashes must be literal - the parser keys off /H/ and /S/.
         assert!(
@@ -279,7 +308,8 @@ mod tests {
             "",
             "Ss^i4Kcw$FeLtzS^HLET33smA%^ywi*",
             true,
-        );
+        )
+        .expect("body");
         assert!(
             body.contains("&pass=Ss^i4Kcw$FeLtzS^HLET33smA%^ywi*"),
             "password chars must survive: {body}"
@@ -291,7 +321,7 @@ mod tests {
     /// treat an empty value differently from an absent param.
     #[test]
     fn render_sapc_body_omits_empty_optional_params() {
-        let body = render_sapc_body("host", "00", "u", "", "", "p", true);
+        let body = render_sapc_body("host", "00", "u", "", "", "p", true).expect("body");
         assert!(!body.contains("lang="));
         assert!(!body.contains("client="));
         // user + pass + expert still present.
@@ -304,7 +334,7 @@ mod tests {
     /// matches the user's reference payload.
     #[test]
     fn expert_defaults_on_when_field_absent() {
-        let body = render_sapc_body("host", "00", "u", "DE", "100", "p", true);
+        let body = render_sapc_body("host", "00", "u", "DE", "100", "p", true).expect("body");
         assert!(body.contains("&expert=true"));
     }
 
@@ -359,13 +389,46 @@ mod tests {
     /// primary identity (e.g. shared SAP technical user vs. the
     /// employee's email used elsewhere). The Quick-Add template
     /// doesn't include this row - most users want the standard
+    /// SAP GUI reads this file literally, with no escaping and no
+    /// URL-decoding. A `&` or `=` inside a value ends that value and starts a
+    /// new parameter, so a host or user field could rewrite `pass=` and take
+    /// the password with it. Refusing is the only honest outcome.
+    #[test]
+    fn a_value_that_could_rewrite_the_connection_is_refused() {
+        for (field, host, user, password) in [
+            ("SAP_HOST", "evil&pass=stolen", "u", "p"),
+            ("SAP_USER", "h", "evil&pass=stolen", "p"),
+            ("SAP_USER", "h", "has=equals", "p"),
+            ("SAP_HOST", "line\nbreak", "u", "p"),
+        ] {
+            let error = render_sapc_body(host, "00", user, "", "", password, false)
+                .expect_err("a value that changes the connection must not be written");
+            assert!(
+                matches!(error, LaunchError::UnsupportedCharacter { field: named } if named == field),
+                "{host}/{user} should name {field}, got {error:?}"
+            );
+        }
+    }
+
+    /// A password containing `&` used to be truncated at it, and the user
+    /// logged in with a shorter password than the one in their vault.
+    #[test]
+    fn a_password_that_cannot_be_carried_is_refused_not_truncated() {
+        let error = render_sapc_body("h", "00", "u", "", "", "before&after", false)
+            .expect_err("a truncating password must not be written");
+        assert!(matches!(
+            error,
+            LaunchError::UnsupportedCharacter { field: "password" }
+        ));
+    }
+
     /// Username, this is power-user territory only.
     #[test]
     fn user_override_via_sap_user_custom_field() {
         let user = lookup(&[cf(KEY_USER, "service-acct")], KEY_USER)
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "primary-name".into());
-        let body = render_sapc_body("h", "00", &user, "", "", "p", false);
+        let body = render_sapc_body("h", "00", &user, "", "", "p", false).expect("body");
         assert!(body.contains("&user=service-acct"));
     }
 
@@ -375,7 +438,7 @@ mod tests {
         let user = lookup(&[], KEY_USER)
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "primary-name".into());
-        let body = render_sapc_body("h", "00", &user, "", "", "p", false);
+        let body = render_sapc_body("h", "00", &user, "", "", "p", false).expect("body");
         assert!(body.contains("&user=primary-name"));
     }
 

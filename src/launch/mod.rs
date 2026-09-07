@@ -97,6 +97,16 @@ pub enum LaunchError {
     #[error("{0} launch is unsupported on this platform")]
     UnsupportedTarget(&'static str),
 
+    /// A field carries a character the connection file cannot represent.
+    /// The body is a flat `key=value&key=value` string that SAP GUI does not
+    /// URL-decode, so a `&` or `=` inside a value rewrites the connection
+    /// rather than travelling inside it. Naming the field is safe; its value
+    /// is not, and is never included.
+    #[error(
+        "the {field} field contains a character this connection file cannot carry (& = or a line break)"
+    )]
+    UnsupportedCharacter { field: &'static str },
+
     /// I/O during temp-file write or process spawn. Display value is
     /// safe (no body) - only the kind + path; never log the file
     /// contents themselves.
