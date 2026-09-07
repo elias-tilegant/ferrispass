@@ -765,8 +765,10 @@ impl AppShell {
                             Ok(Some(false)) => continue,
                             Ok(Some(true)) => {
                                 let _ = window_handle.update(cx, |_root, window, app| {
-                                    this.update(app, |shell, cx| shell.lock_vault(window, cx))
-                                        .ok();
+                                    this.update(app, |shell, cx| {
+                                        shell.lock_vault_automatically(window, cx)
+                                    })
+                                    .ok();
                                 });
                                 break;
                             }
@@ -815,7 +817,7 @@ impl AppShell {
                         {
                             return;
                         }
-                        shell.lock_vault(window, cx);
+                        shell.lock_vault_automatically(window, cx);
                     })
                     .is_ok()
                 });
@@ -2292,6 +2294,10 @@ impl AppShell {
     }
 
     fn on_action_edit_entry(&mut self, _: &EditEntry, window: &mut Window, cx: &mut Context<Self>) {
+        // Opening a different entry overwrites whatever is in the editor.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.begin_edit_selected_entry(window, cx);
     }
 
@@ -3167,6 +3173,24 @@ impl AppShell {
         self.wipe_session_secrets(cx);
     }
 
+    /// Lock because the idle timer or the screen lock said so, not the user.
+    ///
+    /// An unsaved draft cannot veto this one: refusing to lock would turn the
+    /// security feature off for anyone who left the editor open. The draft is
+    /// discarded either way, so the difference this makes is that the user is
+    /// told, rather than finding an empty editor and guessing.
+    pub fn lock_vault_automatically(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let had_unsaved_draft = self.entry_form_is_dirty(cx);
+        self.lock_vault(window, cx);
+        if had_unsaved_draft {
+            Self::notify_error(
+                window,
+                "The vault locked while an entry was open. Its unsaved changes were discarded.",
+                cx,
+            );
+        }
+    }
+
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.read(cx).vault_browser().is_some() {
             self.search_input
@@ -3509,6 +3533,11 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Same gate as Cmd+L: locking clears the editor, and the button and
+        // the shortcut are the same action.
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
         self.lock_vault(window, cx);
     }
 
