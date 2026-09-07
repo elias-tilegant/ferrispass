@@ -27,8 +27,11 @@ escapes rather than a Perl pattern. The test count is deliberately not written
 down here: a number in a checklist is wrong by the next commit, and a stale
 one teaches the reader to ignore the line.
 
-Then exercise the release binary against a real file, because a green test
-suite has never caught a broken parse path:
+`cargo test` already drives the shipped CLI over a vault written by the
+fixture builder (`tests/vault_round_trip.rs`), because a green unit suite has
+never caught a broken parse path: the units hand each other in-memory
+databases and never serialise. What that test cannot do is read the file with
+a second implementation, so do the KeePassXC leg by hand:
 
 ```sh
 cargo build --release --locked
