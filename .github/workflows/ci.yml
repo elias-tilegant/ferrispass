@@ -17,15 +17,43 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Format
+        run: cargo fmt --all --check
+
+      # `--locked` is the pin for the Zed dependency: gpui-component forces us
+      # to reference Zed without a rev, so Cargo.lock is the only thing holding
+      # the revision. A drifting lock must fail the build, not slip through.
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --locked --verbose
 
       - name: Build headless CLI
-        run: cargo build --bin ferrispass-cli --verbose
+        run: cargo build --locked --bin ferrispass-cli --verbose
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
+
+      # UI copy, comments and docs use plain hyphens, never em or en dashes.
+      - name: Reject em and en dashes
+        run: |
+          if grep -rnP '\x{2014}|\x{2013}' src/ docs/ README.md SECURITY.md; then
+            echo "::error::em or en dash found; use a plain hyphen"
+            exit 1
+          fi
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

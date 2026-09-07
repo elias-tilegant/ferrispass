@@ -9,7 +9,7 @@ name: "FerrisPass CodeQL config"
 # Production threat model: every credential in this app is supplied by
 # the user at runtime (the KeePass master password); no real cryptographic
 # material is embedded in the binary. Disabling this query repo-wide does
-# not weaken that model — and the Rust queries that DO matter for a
+# not weaken that model - and the Rust queries that DO matter for a
 # password manager (taint flow, unsafe blocks, weak crypto APIs) stay on.
 query-filters:
   - exclude:

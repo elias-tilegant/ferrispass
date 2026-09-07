@@ -17,9 +17,9 @@ For headless and agent-oriented workflows, see the [FerrisPass CLI](docs/cli.md)
 - **QOL**: click-on-field to copy, password reveal toggle, click-on-URL to open in browser, copy-toast notifications
 - **Auto-lock**: idle-timeout configurable in Settings (default 4 min, "Never" supported)
 - **Clipboard auto-clear**: configurable wipe after copy (default 10 s, "Never" supported); also wipes on lock
-- **Auto-Type**: global hotkey (default ⌃⌥⌘V) types `{USERNAME}{TAB}{PASSWORD}{ENTER}` into the previously-focused window; foreground app is matched to a vault entry by URL hostname. Off by default — enable in Settings → Auto-Type. Requires the macOS Accessibility permission.
+- **Auto-Type**: global hotkey (default ⌃⌥⌘V) types `{USERNAME}{TAB}{PASSWORD}{ENTER}` into the previously-focused window; foreground app is matched to a vault entry by URL hostname. Off by default - enable in Settings → Auto-Type. Requires the macOS Accessibility permission.
 - **Resume**: most-recently-opened vault auto-loads at startup; Recents list on the welcome screen
-- **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, three-way merge) — see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) for the connect walkthrough
+- **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, three-way merge) - see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) for the connect walkthrough
 - **CLI**: headless vault access for scripts and local AI agents, with JSON output, explicit secret reads, dry-run writes, Touch ID and two-step SharePoint sync
 - **Theming**: light + dark mode (⌘⇧D)
 
@@ -58,7 +58,7 @@ src/
   sync/       SharePoint device-code auth, Graph API, sync service, keychain tokens
   ui/         GPUI views, screens, widgets, palette, theme
 examples/
-  dump_xml.rs interop diagnostic — prints the decoded KDBX inner XML
+  dump_xml.rs interop diagnostic - prints the decoded KDBX inner XML
 ```
 
 ## Installation
@@ -97,7 +97,7 @@ command overview, safe password input and SharePoint sync flow.
 
 ## Auto-updates
 
-FerrisPass checks GitHub Releases on launch (rate-limited to once per day). When a newer build is published, a banner appears on the Welcome screen with an **Install** button — click it and the app downloads the new bundle, verifies its Ed25519 signature against an embedded public key, atomic-replaces itself, and prompts you to restart.
+FerrisPass checks GitHub Releases on launch (rate-limited to once per day). When a newer build is published, a banner appears on the Welcome screen with an **Install** button - click it and the app downloads the new bundle, verifies its Ed25519 signature against an embedded public key, atomic-replaces itself, and prompts you to restart.
 
 Independent of Apple's Developer ID + notarization (which signs the DMG), every update payload and its complete manifest carry separate [minisign](https://jedisct1.github.io/minisign/) signatures. The signed manifest binds the version, URL, payload size, and payload signature; all checks must pass before an update is applied.
 
@@ -112,10 +112,20 @@ For local development:
 ```sh
 cargo check
 cargo test
+cargo clippy --all-targets -- -D warnings
 cargo run
 ```
 
 Tested on macOS only. Linux builds but the SharePoint sync expects the Apple Keychain.
+
+CPU-specific codegen speeds up Argon2 and AES noticeably, but it must not be
+committed: a binary built with it crashes on any Mac older than the build
+machine. Opt in locally by adding this to `~/.cargo/config.toml`:
+
+```toml
+[build]
+rustflags = "-C target-cpu=native"
+```
 
 ## Building a release DMG
 
@@ -135,10 +145,10 @@ Requirements (one-time setup):
       --apple-id <your-apple-id> --team-id <your-team-id> \
       --password <app-specific-password>
   ```
-- `bundle/icon.png` — a 1024×1024 master PNG of the app icon
+- `bundle/icon.png` - a 1024×1024 master PNG of the app icon
 - Optional: `brew install create-dmg` (prettier DMG window; falls back to plain `hdiutil` if absent)
 
-Forks must edit the `TEAM_ID`, `SIGNING_IDENTITY`, and `BUNDLE_ID` constants at the top of `scripts/build-mac.sh` to match their own Apple Developer account, plus generate their own minisign keypair (`scripts/setup-minisign.sh`) and update the `UPDATE_ENDPOINT` constant in `src/update/mod.rs` to point at their fork's release URL. The embedded public key is unique per fork — users of one fork won't accept update bundles signed by another.
+Forks must edit the `TEAM_ID`, `SIGNING_IDENTITY`, and `BUNDLE_ID` constants at the top of `scripts/build-mac.sh` to match their own Apple Developer account, plus generate their own minisign keypair (`scripts/setup-minisign.sh`) and update the `UPDATE_ENDPOINT` constant in `src/update/mod.rs` to point at their fork's release URL. The embedded public key is unique per fork - users of one fork won't accept update bundles signed by another.
 
 ### Automated releases (GitHub Actions)
 
@@ -151,12 +161,12 @@ Forks must edit the `TEAM_ID`, `SIGNING_IDENTITY`, and `BUNDLE_ID` constants at 
 | `APPLE_ID` | Apple ID email used for notarization |
 | `APPLE_TEAM_ID` | 10-char Team ID |
 | `APPLE_NOTARIZE_PASSWORD` | app-specific password from [appleid.apple.com](https://appleid.apple.com) |
-| `MINISIGN_PRIVATE_KEY` | full content of `~/.ferrispass/minisign.key` — paste **both lines** including the `untrusted comment:` header. Generated by `scripts/setup-minisign.sh`. |
+| `MINISIGN_PRIVATE_KEY` | full content of `~/.ferrispass/minisign.key` - paste **both lines** including the `untrusted comment:` header. Generated by `scripts/setup-minisign.sh`. |
 | `MINISIGN_PASSWORD` | passphrase you typed when running `scripts/setup-minisign.sh`. Used by the release pipeline to sign update bundles for the in-app auto-updater. |
 
 See [`docs/release-process.md`](./docs/release-process.md) for the full release workflow, common failure modes, and minisign-key backup strategy.
 
-If you'd rather keep signing material off GitHub, leave the secrets unset and run `scripts/build-mac.sh` locally instead. The release workflow only fires on tag pushes, so until you set the secrets it won't run successfully — that's the intended fail-safe.
+If you'd rather keep signing material off GitHub, leave the secrets unset and run `scripts/build-mac.sh` locally instead. The release workflow only fires on tag pushes, so until you set the secrets it won't run successfully - that's the intended fail-safe.
 
 ## Keyboard shortcuts
 
@@ -184,7 +194,7 @@ If you'd rather keep signing material off GitHub, leave the secrets unset and ru
 - Master password is held in memory only while the vault is open; required to re-encrypt on save.
 - KDBX writer is pinned to a [forked keepass-rs](https://github.com/elias-tilegant/keepass-rs) (`cc6845a`) carrying three KDBX 4 interop fixes the upstream lacks; without these, written files don't reopen in KeePassXC.
 - SharePoint refresh tokens live in the macOS Keychain (`ferrispass-sync` service); access tokens are in-memory and ~1 h TTL.
-- Recents file (`~/Library/Application Support/ferrispass/recent.json`) holds **paths only** — no passwords, no tokens.
+- Recents file (`~/Library/Application Support/ferrispass/recent.json`) holds **paths only** - no passwords, no tokens.
 
 ## Author
 
@@ -196,4 +206,4 @@ FerrisPass is licensed under the **GNU General Public License v3.0 or later** (`
 
 The GPL is required because FerrisPass links GPUI, which transitively depends on `ztracing` / `zlog` (both GPL-3.0-or-later). It also matches the convention of the broader KeePass-compatible ecosystem (KeePass2, KeePassXC, Bitwarden are all GPL).
 
-This means: anyone distributing a modified FerrisPass binary must publish their source modifications under the same terms — a deliberate guarantee for a security-critical app.
+This means: anyone distributing a modified FerrisPass binary must publish their source modifications under the same terms - a deliberate guarantee for a security-critical app.

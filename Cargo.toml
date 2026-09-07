@@ -24,6 +24,12 @@ incremental = false
 # unreadable by KeePass2 / KeePassXC without these patches. Re-evaluate the
 # pin if those fixes land upstream.
 keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "234a582", features = ["save_kdbx4", "totp", "_merge"] }
+# Deliberately without a `rev`. gpui-component's manifest references Zed
+# without one, and Cargo treats `git+url` and `git+url?rev=X` as two distinct
+# sources: adding a rev here compiles two incompatible `gpui::App` types and
+# fails with hundreds of trait mismatches. Cargo.lock is therefore the only
+# pin (currently 1870e269), and CI builds with `--locked` so a drifting lock
+# fails the build instead of silently pulling an arbitrary upstream commit.
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 # Keep both Longbridge crates on the same tested source revision. Their manifest
@@ -61,7 +67,7 @@ minisign-verify = "0.2"
 semver = "1"
 # Used to wrap the embedded minisign public key in base64 at runtime.
 # `cargo-packager-updater` expects `Config::pubkey` as base64(file content),
-# not the raw minisign-pub.txt — see `update/client.rs::build_config`.
+# not the raw minisign-pub.txt - see `update/client.rs::build_config`.
 base64 = "0.22"
 # Direct uuid dep so merge.rs can re-hydrate EntryId from a stringified
 # UUID (`EntryId::from_uuid(Uuid::parse_str(s)?)`). Same crate the keepass
@@ -72,7 +78,7 @@ clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 
 # Auto-type stack. The crates encapsulate macOS FFI internally so our
-# workspace `unsafe_code = "forbid"` lint stays intact — `src/autotype/`
+# workspace `unsafe_code = "forbid"` lint stays intact - `src/autotype/`
 # only ever calls into safe wrappers. global-hotkey is the Tauri team's
 # Carbon `RegisterEventHotKey` wrapper; enigo synthesises CGEvent
 # keystrokes; active-win-pos-rs reads NSWorkspace + AX for the
@@ -88,12 +94,12 @@ active-win-pos-rs = "0.10"
 macos-accessibility-client = "0.0"
 
 # Local fuzzy search ranker for the entry list. Pure in-memory, no index on
-# disk — keeps with the rule that no plaintext vault metadata may be persisted.
+# disk - keeps with the rule that no plaintext vault metadata may be persisted.
 nucleo-matcher = "0.3"
 
 # Biometric unlock. `zeroize` is used only on the cleartext-password buffer
 # between the OS keychain handing it back and `KeePassRepository::open`
-# consuming it — a narrow window that's worth wiping. `security-framework`
+# consuming it - a narrow window that's worth wiping. `security-framework`
 # is macOS-only; non-Apple targets fall back to the noop store in
 # `src/biometric/noop.rs`, so cargo check still passes on Linux/Windows.
 zeroize = { version = "1", features = ["derive"] }
@@ -111,7 +117,7 @@ core-foundation = "0.10"
 # the legacy file-based macOS keychain (no entitlement required); the
 # OS biometric prompt is driven separately via LAContext from this
 # crate. This split is the same pattern Bitwarden / 1Password use for
-# their Developer-ID-distributed Mac builds — the iOS-style
+# their Developer-ID-distributed Mac builds - the iOS-style
 # `kSecAttrAccessControl` ACL would force the data-protection keychain,
 # which isn't reachable without an App-Store provisioning profile.
 # `objc2-local-authentication` wraps the LocalAuthentication framework
@@ -131,9 +137,9 @@ block2 = "0.6"
 tempfile = "3"
 
 [lints.rust]
-# `deny` (rather than `forbid`) so a single targeted module — currently
+# `deny` (rather than `forbid`) so a single targeted module - currently
 # only `src/biometric/macos.rs`, which wraps LocalAuthentication FFI
-# whose bindings expose `unsafe fn` even for ordinary calls — can opt
+# whose bindings expose `unsafe fn` even for ordinary calls - can opt
 # in with a documented `#![allow(unsafe_code)]`. Every other file in
 # the workspace still fails the build on the first `unsafe` block; the
 # allow-list lives in code review.
