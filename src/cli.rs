@@ -350,6 +350,9 @@ pub fn run() -> i32 {
     // mid-flight left a 0600 file holding a cleartext password behind with
     // nothing to collect it. Cheap, and it runs before any vault is opened.
     crate::launch::sweeper::sweep_stale(std::time::Duration::from_secs(60));
+    // Before any command runs, so `launch` cannot stage a cleartext payload
+    // into a window where Ctrl+C still kills the process outright.
+    arm_interrupt_cleanup();
 
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -431,6 +434,9 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
         custom_fields: &entry.custom_fields,
     };
     let handle = crate::launch::launch(target, context).map_err(launch_error)?;
+    if let Some(staged) = handle.temp_file.as_ref() {
+        remove_this_file_on_interrupt(staged.path());
+    }
 
     // `open` returns after handing the file to Launch Services, before SAP GUI
     // necessarily reads it. Keep ownership (and thus the 0600 payload) alive
@@ -439,9 +445,6 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
     // Ctrl+C during that window skips `Drop`, and the file holds a cleartext
     // password. The startup sweep in `run` only collects it on the next
     // FerrisPass start, which may be days later, so the signal unlinks it now.
-    if let Some(staged) = handle.temp_file.as_ref() {
-        unlink_on_interrupt(staged.path());
-    }
     std::thread::sleep(std::time::Duration::from_secs(10));
     drop(handle);
     Ok(json!({"launched":true,"target":target.id(),"entry_id":args.id}))
@@ -454,25 +457,34 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
 static STAGED_LAUNCH_FILE: std::sync::Mutex<Option<std::path::PathBuf>> =
     std::sync::Mutex::new(None);
 
-/// Remove `path` if the user interrupts the grace period.
+/// Install the interrupt handler, before anything can be staged.
+///
+/// Order matters: staging first and installing after leaves a window in which
+/// the file exists and the default SIGINT disposition still applies, which is
+/// exactly the case this handler is for. Installed unconditionally at start,
+/// so the window does not exist.
 ///
 /// `ctrlc` runs the closure on a thread of its own rather than inside the
-/// signal context, so unlinking a file here is allowed. The handler can only
-/// be installed once per process, which suits a binary that stages one
-/// payload per run.
-fn unlink_on_interrupt(path: &Path) {
-    if let Ok(mut staged) = STAGED_LAUNCH_FILE.lock() {
-        *staged = Some(path.to_path_buf());
-    }
-    let installed = ctrlc::set_handler(|| {
+/// signal context, so unlinking a file there is allowed. It can be installed
+/// once per process, which suits a binary that stages one payload per run.
+fn arm_interrupt_cleanup() {
+    // Failure means a handler is already installed, which for a one-shot
+    // binary means this ran twice. The one already there reads the same slot
+    // and does the same job.
+    let _ = ctrlc::set_handler(|| {
         remove_staged_launch_file();
         // 128 + SIGINT, the shell's convention for "killed by signal 2".
         std::process::exit(130);
     });
-    // The only way this fails is a handler already being installed, which for
-    // a one-shot binary means this ran twice in one process. The handler that
-    // is already there reads the same slot and does the same job.
-    let _ = installed;
+}
+
+/// Name the file the armed handler should remove. Until this is called the
+/// handler has nothing to do, which is the correct behaviour before anything
+/// is staged.
+fn remove_this_file_on_interrupt(path: &Path) {
+    if let Ok(mut staged) = STAGED_LAUNCH_FILE.lock() {
+        *staged = Some(path.to_path_buf());
+    }
 }
 
 /// Unlink whatever this process staged, once. Split out of the handler so it
@@ -1398,7 +1410,7 @@ mod tests {
         let staged = dir.path().join("launch-test.sapc");
         std::fs::write(&staged, b"pass=secret").expect("stage the payload");
 
-        *STAGED_LAUNCH_FILE.lock().expect("slot") = Some(staged.clone());
+        remove_this_file_on_interrupt(&staged);
         remove_staged_launch_file();
 
         assert!(!staged.exists(), "the cleartext payload is gone");
@@ -1406,7 +1418,13 @@ mod tests {
             STAGED_LAUNCH_FILE.lock().expect("slot").is_none(),
             "and the slot is cleared, so a second signal is a no-op"
         );
-        // Idempotent: the grace period may have unlinked it first.
+        // Idempotent: the grace period may have unlinked it first, and a
+        // second signal must not fall over a slot that is already empty.
+        remove_staged_launch_file();
+
+        // Before anything is staged the handler has nothing to do, which is
+        // the correct behaviour rather than an error.
+        assert!(STAGED_LAUNCH_FILE.lock().expect("slot").is_none());
         remove_staged_launch_file();
     }
 }
