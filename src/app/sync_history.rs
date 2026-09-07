@@ -39,11 +39,6 @@ pub enum SyncChangeKind {
     /// DB didn't actually change, but the divergence itself is worth
     /// surfacing so the user can trace their own decision later.
     ResolvedKeptLocal,
-    /// A group's name, notes, tags or settings differed on both sides with
-    /// the same modification timestamp. Groups have no conflict overlay, so
-    /// the tie resolves in local's favour; the log line is the only place the
-    /// user can see that a remote change was set aside.
-    GroupKeptLocal,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -97,14 +92,6 @@ pub fn entries_from_report(
                 entry_title: resolved.remote.title.clone(),
             });
         }
-    }
-
-    for name in &report.groups_kept_local {
-        out.push(SyncHistoryEntry {
-            at: now,
-            kind: SyncChangeKind::GroupKeptLocal,
-            entry_title: name.clone(),
-        });
     }
 
     for conflict in &report.conflicts {

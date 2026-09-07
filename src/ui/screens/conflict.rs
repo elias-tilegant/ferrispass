@@ -37,6 +37,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 conflicts: state.report.conflicts.clone(),
                 local_only_count: state.report.local_only.len(),
                 remote_only_count: state.report.remote_only.len(),
+                future_dated_count: state.report.future_dated.len(),
                 picks: state.picks.clone(),
             };
             let header = header(&snapshot, cx);
@@ -168,6 +169,19 @@ fn header(snapshot: &ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement
     } else {
         format!("Pick a version per entry. {}.", subtitle_parts.join(", "))
     };
+    // A timestamp in the future is not drift, it is a claim. Last-write-wins
+    // is decided entirely by that number inside the shared file, so anyone
+    // who can write the file could have set it to win silently. It buys a
+    // prompt instead, and the prompt has to say why.
+    let future_dated_note = (snapshot.future_dated_count > 0).then(|| {
+        let n = snapshot.future_dated_count;
+        let subject = if n == 1 { "entry is" } else { "entries are" };
+        format!(
+            "{n} {subject} dated in the future. A modification time nobody \
+             could have written yet cannot decide anything, so it is asked \
+             here instead."
+        )
+    });
 
     h_flex()
         .gap_3()
@@ -208,7 +222,16 @@ fn header(snapshot: &ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement
                         .text_xs()
                         .text_color(palette::text_muted())
                         .child(subtitle),
-                ),
+                )
+                .when_some(future_dated_note, |this, note| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(palette::orange())
+                            .child(note),
+                    )
+                }),
         )
         .child(bulk_button(
             "conflict-all-local",
@@ -588,6 +611,10 @@ struct ConflictSnapshot {
     conflicts: Vec<EntryConflict>,
     local_only_count: usize,
     remote_only_count: usize,
+    /// How many of these entries carry a modification time nobody could have
+    /// written yet. Anyone who can write the shared file can set one, so the
+    /// user has to be told why the decision landed here.
+    future_dated_count: usize,
     picks: std::collections::HashMap<String, Side>,
 }
 

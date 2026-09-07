@@ -566,7 +566,10 @@ fn execute_sync(
     let needs_local_save = !report.remote_only.is_empty()
         || !report.auto_resolved.is_empty()
         || !report.conflicts.is_empty()
-        || report.structural_writeback_required;
+        || report.structural_writeback_required
+        // History the remote holds and this copy does not is a real change to
+        // write: without it the merged versions were dropped on the floor.
+        || report.remote_history_ahead;
     let upload_bytes = if needs_local_save {
         let receipt = document
             .save_payload_for_database(merged.clone())
