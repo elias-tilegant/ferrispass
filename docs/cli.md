@@ -111,7 +111,9 @@ password. Optional fields are `SAP_USER`, `SAP_LANG`, `SAP_CLIENT`, and
 FerrisPass passes only a private temporary file path to macOS Launch Services;
 the password never appears in process arguments, stdout, JSON output, or error
 messages. The command keeps the protected payload alive briefly so SAP GUI can
-consume it, removes it before returning, and does not modify the vault. SAP
+consume it, removes it before returning, and does not modify the vault.
+Pressing Ctrl+C during that window unlinks the payload too, then exits 130;
+without that the file would have waited for the next FerrisPass start. SAP
 launch is currently supported on macOS. The typed launch command is designed
 to add protocols such as SSH later without changing vault unlocking or entry
 selection semantics.

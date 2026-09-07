@@ -431,12 +431,60 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
     // necessarily reads it. Keep ownership (and thus the 0600 payload) alive
     // for the same minimum grace period used by the GUI settings clamp.
     //
-    // A signal during that window skips `Drop`. The startup sweep in `run`
-    // collects what it leaves behind, so the exposure ends at the next
-    // FerrisPass start rather than lasting until the machine is rebooted.
+    // Ctrl+C during that window skips `Drop`, and the file holds a cleartext
+    // password. The startup sweep in `run` only collects it on the next
+    // FerrisPass start, which may be days later, so the signal unlinks it now.
+    if let Some(staged) = handle.temp_file.as_ref() {
+        unlink_on_interrupt(staged.path());
+    }
     std::thread::sleep(std::time::Duration::from_secs(10));
     drop(handle);
     Ok(json!({"launched":true,"target":target.id(),"entry_id":args.id}))
+}
+
+/// The launch payload this process staged, for the signal handler to unlink.
+///
+/// Deliberately not `sweeper::purge_all`: a GUI instance stages its own files
+/// in the same per-user directory and this process does not own those.
+static STAGED_LAUNCH_FILE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// Remove `path` if the user interrupts the grace period.
+///
+/// `ctrlc` runs the closure on a thread of its own rather than inside the
+/// signal context, so unlinking a file here is allowed. The handler can only
+/// be installed once per process, which suits a binary that stages one
+/// payload per run.
+fn unlink_on_interrupt(path: &Path) {
+    if let Ok(mut staged) = STAGED_LAUNCH_FILE.lock() {
+        *staged = Some(path.to_path_buf());
+    }
+    let installed = ctrlc::set_handler(|| {
+        remove_staged_launch_file();
+        // 128 + SIGINT, the shell's convention for "killed by signal 2".
+        std::process::exit(130);
+    });
+    // The only way this fails is a handler already being installed, which for
+    // a one-shot binary means this ran twice in one process. The handler that
+    // is already there reads the same slot and does the same job.
+    let _ = installed;
+}
+
+/// Unlink whatever this process staged, once. Split out of the handler so it
+/// can be tested: the handler itself ends the process.
+fn remove_staged_launch_file() {
+    let Ok(mut staged) = STAGED_LAUNCH_FILE.lock() else {
+        // Poisoned means a previous holder panicked while the slot was
+        // locked. Nothing here can recover the path, and the startup sweep
+        // remains the backstop.
+        return;
+    };
+    if let Some(path) = staged.take() {
+        // Best effort: the file may already be gone because the grace period
+        // ended first. Nothing the user can do either way, and naming the
+        // path in an error would defeat the point of unlinking it.
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn launch_error(error: crate::launch::LaunchError) -> CliError {
@@ -1255,5 +1303,26 @@ mod tests {
                 code
             );
         }
+    }
+
+    /// `launch` keeps a 0600 file holding a cleartext password alive while
+    /// the target app reads it. Ctrl+C in that window runs no destructor, so
+    /// the interrupt path has to unlink the file itself.
+    #[test]
+    fn an_interrupt_removes_the_staged_launch_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staged = dir.path().join("launch-test.sapc");
+        std::fs::write(&staged, b"pass=secret").expect("stage the payload");
+
+        *STAGED_LAUNCH_FILE.lock().expect("slot") = Some(staged.clone());
+        remove_staged_launch_file();
+
+        assert!(!staged.exists(), "the cleartext payload is gone");
+        assert!(
+            STAGED_LAUNCH_FILE.lock().expect("slot").is_none(),
+            "and the slot is cleared, so a second signal is a no-op"
+        );
+        // Idempotent: the grace period may have unlinked it first.
+        remove_staged_launch_file();
     }
 }

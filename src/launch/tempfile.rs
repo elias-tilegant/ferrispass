@@ -15,6 +15,9 @@
 //!    crash + quick relaunch leaves the orphan younger than 60 s, so
 //!    the startup pass alone would spare it for the whole session),
 //!    and on every vault unlock.
+//! 4. `ferrispass-cli launch` unlinks its own staged file on Ctrl+C.
+//!    That command holds the file across a grace period while the target
+//!    app reads it, and a signal there skips every destructor above.
 //!
 //! We deliberately do NOT use the `tempfile` crate: its `NamedTempFile`
 //! is dev-only in our Cargo.toml, and its eager `Drop` semantics

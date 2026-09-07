@@ -78,6 +78,13 @@ base64 = "0.22"
 uuid = "1"
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
+# Ctrl+C handling for `ferrispass-cli launch`. That command stages a 0600
+# file holding a cleartext password and has to keep it alive while the target
+# app reads it; a signal in that window skips every destructor. `ctrlc` runs
+# the handler on its own thread rather than inside the signal context, so it
+# can unlink a file, which a raw `signal(2)` handler could not do safely, and
+# it needs no `unsafe` in this crate.
+ctrlc = "3"
 
 # Auto-type stack. The crates encapsulate macOS FFI internally so our
 # workspace `unsafe_code = "forbid"` lint stays intact - `src/autotype/`
