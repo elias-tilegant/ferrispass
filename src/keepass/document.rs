@@ -98,9 +98,10 @@ impl VaultDocument {
     }
 
     /// The password is deliberately not a parameter and never stored. It is
-    /// consumed once to derive `database_key`, which zeroizes itself on drop;
-    /// keeping a cleartext copy for the life of the session bought nothing,
-    /// because every path that needs to decrypt or re-encrypt uses the key.
+    /// consumed once to build `database_key`, which keeps only its SHA-256,
+    /// the one form KDBX actually uses, and zeroizes on drop. Keeping the
+    /// plaintext for the life of the session bought nothing and made every
+    /// memory dump a disclosure of a credential the user very likely reuses.
     pub(crate) fn new_with_key(
         database: Database,
         snapshot: VaultSnapshot,

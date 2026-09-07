@@ -29,7 +29,7 @@ Out of scope (will be acknowledged but won't be patched as security issues):
 
 - Risks from a compromised host OS - we trust macOS to be honest about which app is asking for Keychain items
 - Hardware key-loggers, screen recorders, evil-maid attacks on a laptop the attacker has physical access to
-- Memory-dump attacks on a running unlocked vault - the decrypted entries and the key derived from your master password are unavoidably in process memory while you're using the app. The master password itself is consumed at unlock and not retained, except in the login keychain when you enable Touch ID
+- Memory-dump attacks on a running unlocked vault - the decrypted entries and the composite key are unavoidably in process memory while you're using the app. The master password itself is not: it is reduced to its SHA-256 at unlock, which is the only form KDBX uses, so a dump yields something an attacker has to brute-force rather than a password they can try elsewhere. The exception is the login keychain when you enable Touch ID
 - Brute-force against weak master passwords - this is a user-side issue, not a FerrisPass bug
 - Denial of service against the update endpoint (GitHub's problem)
 
@@ -56,7 +56,7 @@ The dual signing (Apple Developer ID *and* minisign) is intentional: each layer 
 
 | | |
 |---|---|
-| Password held in memory while vault is unlocked | the derived key, yes; the password itself is dropped after the key is built |
+| Password held in memory while vault is unlocked | its SHA-256, which is what KDBX uses; the password itself is dropped at unlock |
 | Password persisted to disk | **never** |
 | Password sent over the network | **never** - the cloud provider only sees ciphertext |
 | Password stored in Keychain | **only if you enable Touch ID for that vault** - see below |

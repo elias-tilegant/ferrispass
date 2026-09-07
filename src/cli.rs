@@ -1,5 +1,6 @@
 //! Headless, machine-readable FerrisPass command line interface.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     fs::File,
     io::Read as _,
@@ -352,7 +353,7 @@ pub fn run() -> i32 {
     crate::launch::sweeper::sweep_stale(std::time::Duration::from_secs(60));
     // Before any command runs, so `launch` cannot stage a cleartext payload
     // into a window where Ctrl+C still kills the process outright.
-    arm_interrupt_cleanup();
+    INTERRUPT_CLEANUP_ARMED.store(arm_interrupt_cleanup(), Ordering::Release);
 
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -433,10 +434,18 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
         password: password.as_deref().map(String::as_str),
         custom_fields: &entry.custom_fields,
     };
-    let handle = crate::launch::launch(target, context).map_err(launch_error)?;
-    if let Some(staged) = handle.temp_file.as_ref() {
-        remove_this_file_on_interrupt(staged.path());
+    if !INTERRUPT_CLEANUP_ARMED.load(Ordering::Acquire) {
+        // Not fatal: the launch still works and the file is still unlinked on
+        // the ordinary path. But the user is about to have a cleartext
+        // password on disk for ten seconds with only the next start's sweep
+        // behind it, and that is worth one line on stderr rather than
+        // silence. stdout stays reserved for the JSON envelope.
+        eprintln!(
+            "warning: could not install the interrupt handler; \
+             Ctrl+C during the launch will leave the staged file until the next start"
+        );
     }
+    let handle = crate::launch::launch(target, context).map_err(launch_error)?;
 
     // `open` returns after handing the file to Launch Services, before SAP GUI
     // necessarily reads it. Keep ownership (and thus the 0600 payload) alive
@@ -450,56 +459,42 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
     Ok(json!({"launched":true,"target":target.id(),"entry_id":args.id}))
 }
 
-/// The launch payload this process staged, for the signal handler to unlink.
-///
-/// Deliberately not `sweeper::purge_all`: a GUI instance stages its own files
-/// in the same per-user directory and this process does not own those.
-static STAGED_LAUNCH_FILE: std::sync::Mutex<Option<std::path::PathBuf>> =
-    std::sync::Mutex::new(None);
-
 /// Install the interrupt handler, before anything can be staged.
 ///
-/// Order matters: staging first and installing after leaves a window in which
-/// the file exists and the default SIGINT disposition still applies, which is
-/// exactly the case this handler is for. Installed unconditionally at start,
-/// so the window does not exist.
+/// The handler asks the launch module which payloads this process currently
+/// owns, rather than being told after the fact: the file exists from the
+/// moment it is created, and anything that registers it afterwards leaves a
+/// window in which a cleartext password is on disk and the default SIGINT
+/// disposition still applies.
 ///
 /// `ctrlc` runs the closure on a thread of its own rather than inside the
 /// signal context, so unlinking a file there is allowed. It can be installed
 /// once per process, which suits a binary that stages one payload per run.
-fn arm_interrupt_cleanup() {
-    // Failure means a handler is already installed, which for a one-shot
-    // binary means this ran twice. The one already there reads the same slot
-    // and does the same job.
-    let _ = ctrlc::set_handler(|| {
-        remove_staged_launch_file();
+///
+/// Returns whether cleanup is armed. A failure is not fatal, but it is not
+/// silent either: the sixty-second sweep at the next start becomes the only
+/// backstop, and `launch` says so before it stages anything.
+/// Whether [`arm_interrupt_cleanup`] succeeded, so `launch` can warn before
+/// it writes a password to disk with no interrupt cleanup behind it.
+static INTERRUPT_CLEANUP_ARMED: AtomicBool = AtomicBool::new(false);
+
+fn arm_interrupt_cleanup() -> bool {
+    ctrlc::set_handler(|| {
+        remove_staged_launch_files();
         // 128 + SIGINT, the shell's convention for "killed by signal 2".
         std::process::exit(130);
-    });
+    })
+    .is_ok()
 }
 
-/// Name the file the armed handler should remove. Until this is called the
-/// handler has nothing to do, which is the correct behaviour before anything
-/// is staged.
-fn remove_this_file_on_interrupt(path: &Path) {
-    if let Ok(mut staged) = STAGED_LAUNCH_FILE.lock() {
-        *staged = Some(path.to_path_buf());
-    }
-}
-
-/// Unlink whatever this process staged, once. Split out of the handler so it
-/// can be tested: the handler itself ends the process.
-fn remove_staged_launch_file() {
-    let Ok(mut staged) = STAGED_LAUNCH_FILE.lock() else {
-        // Poisoned means a previous holder panicked while the slot was
-        // locked. Nothing here can recover the path, and the startup sweep
-        // remains the backstop.
-        return;
-    };
-    if let Some(path) = staged.take() {
-        // Best effort: the file may already be gone because the grace period
-        // ended first. Nothing the user can do either way, and naming the
-        // path in an error would defeat the point of unlinking it.
+/// Unlink every payload this process still owns.
+///
+/// Deliberately not the whole launch directory: another FerrisPass process
+/// stages its own files there and this one does not own those.
+fn remove_staged_launch_files() {
+    for path in crate::launch::tempfile::live_staged_files() {
+        // Best effort: the grace period may have unlinked it already, and
+        // naming the path in an error would defeat the point of removing it.
         let _ = std::fs::remove_file(path);
     }
 }
@@ -1403,28 +1398,37 @@ mod tests {
 
     /// `launch` keeps a 0600 file holding a cleartext password alive while
     /// the target app reads it. Ctrl+C in that window runs no destructor, so
-    /// the interrupt path has to unlink the file itself.
+    /// the interrupt path has to unlink the file itself, and it has to be
+    /// able to name it from the moment it exists rather than from whenever
+    /// the caller gets around to registering it.
     #[test]
-    fn an_interrupt_removes_the_staged_launch_file() {
+    fn an_interrupt_removes_every_staged_launch_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let staged = dir.path().join("launch-test.sapc");
-        std::fs::write(&staged, b"pass=secret").expect("stage the payload");
 
-        remove_this_file_on_interrupt(&staged);
-        remove_staged_launch_file();
+        // Nothing staged: the handler has nothing to do, which is correct
+        // rather than an error.
+        remove_staged_launch_files();
 
-        assert!(!staged.exists(), "the cleartext payload is gone");
+        let staged =
+            crate::launch::tempfile::TempLaunchFile::create_in(dir.path(), "sapc", b"pass=secret")
+                .expect("stage the payload");
+        let path = staged.path().to_path_buf();
+        assert!(path.exists());
         assert!(
-            STAGED_LAUNCH_FILE.lock().expect("slot").is_none(),
-            "and the slot is cleared, so a second signal is a no-op"
+            crate::launch::tempfile::live_staged_files().contains(&path),
+            "registered by creation, not by the caller afterwards"
         );
-        // Idempotent: the grace period may have unlinked it first, and a
-        // second signal must not fall over a slot that is already empty.
-        remove_staged_launch_file();
 
-        // Before anything is staged the handler has nothing to do, which is
-        // the correct behaviour rather than an error.
-        assert!(STAGED_LAUNCH_FILE.lock().expect("slot").is_none());
-        remove_staged_launch_file();
+        remove_staged_launch_files();
+        assert!(!path.exists(), "the cleartext payload is gone");
+
+        // Idempotent: a second signal, or the ordinary drop arriving after
+        // the handler, must not fall over a file that is already gone.
+        remove_staged_launch_files();
+        drop(staged);
+        assert!(
+            !crate::launch::tempfile::live_staged_files().contains(&path),
+            "and the entry does not outlive the file"
+        );
     }
 }

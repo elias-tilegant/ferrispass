@@ -116,8 +116,11 @@ Reference implementation: `try_restore_sync_binding` in `state.rs:541`. Copy thi
 ```
 ┌─────────────────────────────────────────────────────────┐
 │ Process memory (vault unlocked)                         │
-│   - VaultDocument (decrypted entries, derived key)      │
-│     The master password is consumed at unlock, not kept │
+│   - VaultDocument (decrypted entries, composite key)    │
+│     The master password is reduced to its SHA-256 at    │
+│     unlock; the plaintext is not kept                   │
+│   - a 0600 launch file while an entry is launching,     │
+│     holding that entry's password until it is unlinked  │
 │   - SyncBinding (in-flight access token, ~1h TTL)       │
 └─────────────────────────────────────────────────────────┘
               │ atomic write (fsync + rename)
@@ -152,10 +155,11 @@ Reference implementation: `try_restore_sync_binding` in `state.rs:541`. Copy thi
 ```
 
 The cloud only ever sees ciphertext. The master password is consumed once to
-derive the `DatabaseKey` and is not retained: the key does the re-encryption on
-save, and zeroizes itself on drop. The one exception is Touch ID, which writes
-the password to the login keychain by design; SECURITY.md describes that
-boundary.
+build the `DatabaseKey`, which keeps only its SHA-256, the single form KDBX
+uses, and zeroizes on drop. The plaintext is not retained. Two exceptions are
+deliberate and documented: Touch ID writes the password to the login keychain,
+described in SECURITY.md, and launching an entry stages a 0600 file holding
+that entry's password until the launcher has read it.
 
 ## CLI trust boundary
 

@@ -29,6 +29,31 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+/// Paths this process has staged and not yet unlinked.
+///
+/// A signal handler cannot ask the owner of a `TempLaunchFile` for its path:
+/// the owner is on another stack, mid-call. Registering here at the moment of
+/// creation closes the window the CLI otherwise had between writing a
+/// cleartext payload and being able to name it.
+static LIVE_STAGED_FILES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Every launch payload this process currently owns.
+///
+/// Deliberately not everything in the launch directory: another FerrisPass
+/// process stages its own files there and this one does not own those.
+pub fn live_staged_files() -> Vec<PathBuf> {
+    LIVE_STAGED_FILES
+        .lock()
+        .map(|paths| paths.clone())
+        .unwrap_or_default()
+}
+
+fn forget_staged(path: &Path) {
+    if let Ok(mut paths) = LIVE_STAGED_FILES.lock() {
+        paths.retain(|known| known != path);
+    }
+}
+
 /// A file we wrote into the launch tempdir. Drop = best-effort unlink.
 pub struct TempLaunchFile {
     path: PathBuf,
@@ -59,6 +84,14 @@ impl TempLaunchFile {
             opts.mode(0o600);
         }
         let mut file = opts.open(&path)?;
+        // Register before the first fallible write, for the same reason the
+        // handle is constructed here: from this point the path exists on
+        // disk, and everything that might have to remove it needs to be able
+        // to name it. That includes a signal handler, which cannot reach the
+        // handle.
+        if let Ok(mut paths) = LIVE_STAGED_FILES.lock() {
+            paths.push(path.clone());
+        }
         // Take ownership before the first fallible write. `Drop` unlinks, so
         // constructing only after `write_all` and `sync_all` succeeded left a
         // file holding a prefix of the body on any mid-write failure, and that
@@ -83,6 +116,7 @@ impl Drop for TempLaunchFile {
         // point, and logging the path or content here would defeat
         // the whole "no body in logs" rule.
         let _ = std::fs::remove_file(&self.path);
+        forget_staged(&self.path);
     }
 }
 

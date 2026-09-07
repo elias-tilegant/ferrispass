@@ -196,7 +196,7 @@ the Dock icon brings it back at the unlock screen.
 
 ## Security notes
 
-- The master password is consumed once at unlock to derive the database key and is not retained. The key, which zeroizes itself on drop, is what re-encrypts on save. Enabling Touch ID for a vault is the one exception: that writes the password to your login keychain, and [SECURITY.md](./SECURITY.md) describes the boundary.
+- The master password is consumed once at unlock and reduced to its SHA-256, which is the only form KDBX uses. That composite key, which zeroizes itself on drop, is what re-encrypts on save; the plaintext password is not retained. Enabling Touch ID for a vault is the exception: that writes the password to your login keychain, and [SECURITY.md](./SECURITY.md) describes the boundary.
 - KDBX writer is pinned to a [forked keepass-rs](https://github.com/elias-tilegant/keepass-rs) carrying KDBX 4 interop fixes the upstream lacks, without which written files don't reopen in KeePassXC, plus the attachment-aware and custom-icon-aware merge this app relies on. `Cargo.toml` holds the exact revision; naming it here as well only produces a second copy to go stale.
 - SharePoint refresh tokens live in the macOS Keychain (`ferrispass-sync` service); access tokens are in-memory and ~1 h TTL.
 - Recents file (`~/Library/Application Support/ferrispass/recent.json`) holds **paths only** - no passwords, no tokens.
