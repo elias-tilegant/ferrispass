@@ -410,7 +410,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
 }
 
 fn structural_state_differs(local: &Database, remote: &Database) -> bool {
-    if local.deleted_objects != remote.deleted_objects || meta_content_differs(local, remote) {
+    if local.deleted_objects != remote.deleted_objects || meta_local_is_newer(local, remote) {
         return true;
     }
 
@@ -503,6 +503,39 @@ fn expiry_equivalent(local: &Times, remote: &Times) -> bool {
 /// the cursor. Comparing those would demand an upload after every sync.
 /// `master_key_changed` describes the key the file is encrypted with, which
 /// both copies share.
+fn meta_local_is_newer(local: &Database, remote: &Database) -> bool {
+    if !meta_content_differs(local, remote) {
+        return false;
+    }
+    // A difference is not enough. The merge takes each field from whichever
+    // side changed it last and keeps ours on a tie, so reporting every
+    // difference as ours to upload wrote our tied value over theirs and their
+    // edit was gone. Only a field we can show is newer here is ours to send;
+    // on a tie the two copies simply disagree until somebody edits one, which
+    // loses nothing.
+    let (a, b) = (&local.meta, &remote.meta);
+    let ours_is_newer =
+        |ours: Option<NaiveDateTime>, theirs: Option<NaiveDateTime>| match (ours, theirs) {
+            (Some(ours), Some(theirs)) => ours > theirs,
+            (Some(_), None) => true,
+            _ => false,
+        };
+    ours_is_newer(a.database_name_changed, b.database_name_changed)
+        || ours_is_newer(
+            a.database_description_changed,
+            b.database_description_changed,
+        )
+        || ours_is_newer(a.default_username_changed, b.default_username_changed)
+        || ours_is_newer(a.recyclebin_changed, b.recyclebin_changed)
+        || ours_is_newer(
+            a.entry_templates_group_changed,
+            b.entry_templates_group_changed,
+        )
+        || ours_is_newer(a.settings_changed, b.settings_changed)
+}
+
+/// Whether the two copies say anything different about their settings at all,
+/// regardless of which is newer.
 fn meta_content_differs(local: &Database, remote: &Database) -> bool {
     let (a, b) = (&local.meta, &remote.meta);
     a.database_name != b.database_name
@@ -1125,6 +1158,13 @@ fn group_content_differs(a: &GroupRef<'_>, b: &GroupRef<'_>) -> bool {
         || a.default_autotype_sequence != b.default_autotype_sequence
         || a.enable_autotype != b.enable_autotype
         || a.enable_searching != b.enable_searching
+        // Both are things a person picked, and both were missing here, so a
+        // tie on either was resolved in this copy's favour and uploaded over
+        // the other one. Each is compared through the same normalisation the
+        // rest of the module uses: two spellings of the default icon are one
+        // icon, and a date that is not in force is not a date.
+        || !icons_equivalent(a.icon(), b.icon(), DEFAULT_GROUP_ICON)
+        || !expiry_equivalent(&a.times, &b.times)
 }
 
 fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
@@ -3224,9 +3264,20 @@ mod tests {
         );
 
         local.meta.database_name = Some("Team vault".into());
+        local.meta.database_name_changed = Some(keepass::db::Times::now());
         assert!(
             diff(&local, &remote).structural_writeback_required,
             "a rename here has to reach the other copy"
+        );
+
+        // A difference we cannot show is ours is not ours to upload: the
+        // merge keeps our value on a tie, and sending it would write over
+        // theirs. The two copies disagree until somebody edits one.
+        remote.meta.database_name = Some("Their name".into());
+        remote.meta.database_name_changed = local.meta.database_name_changed;
+        assert!(
+            !diff(&local, &remote).structural_writeback_required,
+            "a tie is not evidence that ours is the one to send"
         );
 
         remote.meta.database_name = Some("Team vault".into());
@@ -3350,7 +3401,8 @@ mod tests {
             "a value the other client regenerates on every save is not our edit"
         );
 
-        // A key someone actually set still counts.
+        // A key someone actually set still counts, once we can show it is
+        // ours: the settings block carries the date for custom data.
         local.meta.custom_data.insert(
             "Plugin".into(),
             CustomDataItem {
@@ -3358,6 +3410,7 @@ mod tests {
                 last_modification_time: None,
             },
         );
+        local.meta.settings_changed = Some(keepass::db::Times::now());
         assert!(diff(&local, &remote).structural_writeback_required);
     }
 
@@ -3716,6 +3769,56 @@ mod tests {
         let merged =
             apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
         assert_eq!(merged.group(group_id).expect("group").name, "Finance");
+    }
+
+    /// A group's icon and its expiry are things a person picked, and both
+    /// were missing from the content comparison. A tie on either was resolved
+    /// in this copy's favour and uploaded over the other one, with no overlay
+    /// and no way back: KDBX archives entry versions, not group versions.
+    #[test]
+    fn a_tied_group_icon_or_expiry_is_a_conflict_too() {
+        let build = |icon: usize, expiry_days: i64| {
+            let mut db = Database::new();
+            let id = {
+                let mut root = db.root_mut();
+                let mut group = root.add_group();
+                group.name = "Banking".to_string();
+                group.id()
+            };
+            {
+                let mut group = db.group_mut(id).unwrap();
+                group.set_icon_builtin(icon);
+                group.times.expiry =
+                    Some(keepass::db::Times::now() + chrono::TimeDelta::days(expiry_days));
+                group.times.expires = Some(true);
+            }
+            (db, id)
+        };
+
+        let (mut local, group_id) = build(3, 10);
+        let tied = keepass::db::Times::now();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        // Same group, different icon, same second.
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().set_icon_builtin(9);
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        assert_eq!(
+            diff(&local, &remote).group_conflicts.len(),
+            1,
+            "a tied icon has to reach the user"
+        );
+
+        // Same group, different expiry, same second.
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().times.expiry =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::days(20));
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        assert_eq!(
+            diff(&local, &remote).group_conflicts.len(),
+            1,
+            "and so does a tied expiry date"
+        );
     }
 
     /// A collapse toggle is written without bumping the modification time, so

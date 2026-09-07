@@ -2371,12 +2371,14 @@ impl AppState {
     /// changed because nobody else wrote" from "the remote has not changed
     /// because our own write never happened".
     ///
-    /// Unknown answers `false`: a config written before this field existed
-    /// has nothing to compare, and the alternative is to upload every vault
-    /// once on the first tick after an update.
+    /// Unknown answers `true`. A configuration written before this field
+    /// existed cannot say whether the file was ever sent, and answering "in
+    /// sync" to a question nothing can answer is how an edit gets stranded
+    /// while the pill says Synced. The cost is one upload per vault, once,
+    /// after which the recorded revision answers properly.
     fn local_is_ahead_of_the_cloud(target: &Path, config: &SyncConfig) -> bool {
         let Some(uploaded) = config.uploaded_local_revision.as_deref() else {
-            return false;
+            return true;
         };
         // The file on disk, not the in-memory document: re-encrypting to
         // compare would cost an Argon2 pass per tick, and the saved file is
@@ -7072,8 +7074,9 @@ mod park_tests {
 
         config.uploaded_local_revision = None;
         assert!(
-            !AppState::local_is_ahead_of_the_cloud(&vault, &config),
-            "a config from before this field existed has nothing to compare"
+            AppState::local_is_ahead_of_the_cloud(&vault, &config),
+            "a config from before this field existed cannot say the file was sent, \
+             and guessing that it was is how an edit gets stranded"
         );
 
         config.uploaded_local_revision = Some(crate::sync::config::local_revision(
