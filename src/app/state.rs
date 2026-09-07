@@ -5030,13 +5030,15 @@ impl AppState {
                             access_token,
                         };
                         if state.rebind_sync_for_session(&path, session_id, binding) {
+                            // Idle, not Synced: the rebind refreshed a token
+                            // and touched no server, so a fresh sync timestamp
+                            // here would be a green pill over a pending
+                            // upload. The push below is what earns Synced, and
+                            // it may queue behind an in-flight one or fail.
                             state.apply_sync_status_for_session(
                                 &path,
                                 session_id,
-                                SyncStatus::Synced {
-                                    at: chrono::Local::now(),
-                                    auto_merged: 0,
-                                },
+                                SyncStatus::Idle,
                                 cx,
                             );
                             // Verify the new grant works and pull anything that
