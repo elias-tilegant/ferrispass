@@ -586,6 +586,14 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
     // does not is the side that recorded making it. Same rule as the fork's
     // settings merge, so the winner named here is the value that merge keeps.
     fn rank(ours: Option<NaiveDateTime>, theirs: Option<NaiveDateTime>) -> Option<Side> {
+        // A time nobody could have written yet is a claim, not a record.
+        // Anyone who can write the shared file could set one, so it decides
+        // nothing here either: the field becomes the user's to settle, and
+        // `force_metadata_winner` then stamps a time we do believe. Same rule
+        // as `timestamp_winner`, one level up.
+        if [ours, theirs].into_iter().flatten().any(is_future_dated) {
+            return None;
+        }
         match (ours, theirs) {
             (Some(ours), Some(theirs)) if ours > theirs => Some(Side::Local),
             (Some(ours), Some(theirs)) if theirs > ours => Some(Side::Remote),
@@ -601,7 +609,7 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         value.map(|value| value.to_string()).unwrap_or_default()
     }
     fn group_name(database: &Database, id: Option<uuid::Uuid>) -> String {
-        let Some(id) = id.filter(|id| !id.is_nil()) else {
+        let Some(id) = normalised_group_uuid(id) else {
             return "None".into();
         };
         database
@@ -610,18 +618,29 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
             .map_or_else(|| id.to_string(), |group| group.name.clone())
     }
     fn recycle_bin(database: &Database) -> String {
-        if !database.meta.recyclebin_enabled.unwrap_or(false) {
-            return "Off".into();
-        }
-        format!(
-            "On ({})",
-            group_name(database, database.meta.recyclebin_uuid)
-        )
-    }
-    fn protected_fields(protection: Option<&MemoryProtection>) -> String {
-        let Some(protection) = protection else {
-            return String::new();
+        let state = if database.meta.recyclebin_enabled.unwrap_or(false) {
+            "On"
+        } else {
+            "Off"
         };
+        // Two copies can each have made their own bin, and both are called
+        // "Recycle Bin". Without the id the row showed two identical cells.
+        match normalised_group_uuid(database.meta.recyclebin_uuid) {
+            Some(id) => format!(
+                "{state}, {} ({})",
+                group_name(database, Some(id)),
+                &id.to_string()[..8]
+            ),
+            None => format!("{state}, no group"),
+        }
+    }
+    // An absent block means the format's defaults, which the reader applies
+    // when it parses one, so a file that omits it and a file that writes
+    // those same values say the same thing.
+    fn protection(meta: &Meta) -> MemoryProtection {
+        meta.memory_protection.clone().unwrap_or_default()
+    }
+    fn protected_fields(protection: &MemoryProtection) -> String {
         [
             (protection.protect_title, "Title"),
             (protection.protect_username, "Username"),
@@ -635,122 +654,166 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         .join(", ")
     }
 
+    // The rendered value is built only for a field that differs: naming a
+    // group walks every group in the file, and a diff runs on every sync tick.
+    fn push(
+        out: &mut Vec<MetaDivergence>,
+        field: MetaField,
+        label: Cow<'static, str>,
+        differs: bool,
+        values: impl FnOnce() -> (String, String),
+    ) {
+        if differs {
+            let (local, remote) = values();
+            out.push(MetaDivergence {
+                field,
+                label,
+                local,
+                remote,
+                winner: None,
+            });
+        }
+    }
+
     let (a, b) = (&local.meta, &remote.meta);
     let mut out = Vec::new();
-    let mut push =
-        |field: MetaField, label: Cow<'static, str>, differs: bool, values: (String, String)| {
-            if differs {
-                out.push(MetaDivergence {
-                    field,
-                    label,
-                    local: values.0,
-                    remote: values.1,
-                    winner: None,
-                });
-            }
-        };
 
     push(
+        &mut out,
         MetaField::Name,
         "Database name".into(),
         a.database_name != b.database_name,
-        (
-            text(a.database_name.as_ref()),
-            text(b.database_name.as_ref()),
-        ),
+        || {
+            (
+                text(a.database_name.as_ref()),
+                text(b.database_name.as_ref()),
+            )
+        },
     );
     push(
+        &mut out,
         MetaField::Description,
         "Description".into(),
         a.database_description != b.database_description,
-        (
-            text(a.database_description.as_ref()),
-            text(b.database_description.as_ref()),
-        ),
+        || {
+            (
+                text(a.database_description.as_ref()),
+                text(b.database_description.as_ref()),
+            )
+        },
     );
     push(
+        &mut out,
         MetaField::DefaultUsername,
         "Default username".into(),
         a.default_username != b.default_username,
-        (
-            text(a.default_username.as_ref()),
-            text(b.default_username.as_ref()),
-        ),
+        || {
+            (
+                text(a.default_username.as_ref()),
+                text(b.default_username.as_ref()),
+            )
+        },
     );
-    // Both values move on one clock, and the uuid alone can differ: two
-    // copies can each have made their own bin. The rendered name would hide
-    // that, so the comparison stays on the raw pair.
+    // Both values move on one clock. An absent `RecycleBinEnabled` means off,
+    // and a nil uuid and an absent element both mean there is no such group:
+    // clients disagree about which to write, and comparing the raw pair made
+    // a KeePassXC round trip look like a settings change on every sync.
     push(
+        &mut out,
         MetaField::RecycleBin,
         "Recycle bin".into(),
-        a.recyclebin_enabled != b.recyclebin_enabled || a.recyclebin_uuid != b.recyclebin_uuid,
-        (recycle_bin(local), recycle_bin(remote)),
+        a.recyclebin_enabled.unwrap_or(false) != b.recyclebin_enabled.unwrap_or(false)
+            || !group_uuids_equivalent(a.recyclebin_uuid, b.recyclebin_uuid),
+        || (recycle_bin(local), recycle_bin(remote)),
     );
     push(
+        &mut out,
         MetaField::EntryTemplatesGroup,
         "Entry templates group".into(),
-        a.entry_templates_group != b.entry_templates_group,
-        (
-            group_name(local, a.entry_templates_group),
-            group_name(remote, b.entry_templates_group),
-        ),
+        !group_uuids_equivalent(a.entry_templates_group, b.entry_templates_group),
+        || {
+            (
+                group_name(local, a.entry_templates_group),
+                group_name(remote, b.entry_templates_group),
+            )
+        },
     );
     push(
+        &mut out,
         MetaField::Settings,
         "History entries kept".into(),
         a.history_max_items != b.history_max_items,
-        (number(a.history_max_items), number(b.history_max_items)),
+        || (number(a.history_max_items), number(b.history_max_items)),
     );
     push(
+        &mut out,
         MetaField::Settings,
         "History size kept".into(),
         a.history_max_size != b.history_max_size,
-        (number(a.history_max_size), number(b.history_max_size)),
+        || (number(a.history_max_size), number(b.history_max_size)),
     );
     push(
+        &mut out,
         MetaField::Settings,
         "Colour".into(),
         a.color != b.color,
-        (
-            number(a.color.as_ref().map(Color::to_string)),
-            number(b.color.as_ref().map(Color::to_string)),
-        ),
+        || {
+            (
+                number(a.color.as_ref().map(Color::to_string)),
+                number(b.color.as_ref().map(Color::to_string)),
+            )
+        },
     );
     push(
+        &mut out,
         MetaField::Settings,
         "Days of history kept".into(),
         a.maintenance_history_days != b.maintenance_history_days,
-        (
-            number(a.maintenance_history_days),
-            number(b.maintenance_history_days),
-        ),
+        || {
+            (
+                number(a.maintenance_history_days),
+                number(b.maintenance_history_days),
+            )
+        },
     );
+    // An absent block is not "nothing protected": the reader substitutes the
+    // format's defaults, which protect the password. Comparing the raw pair
+    // asked the user about a difference neither file actually holds.
     push(
+        &mut out,
         MetaField::Settings,
         "Protected fields".into(),
-        a.memory_protection != b.memory_protection,
-        (
-            protected_fields(a.memory_protection.as_ref()),
-            protected_fields(b.memory_protection.as_ref()),
-        ),
+        protection(a) != protection(b),
+        || {
+            (
+                protected_fields(&protection(a)),
+                protected_fields(&protection(b)),
+            )
+        },
     );
     push(
+        &mut out,
         MetaField::Settings,
         "Key change reminder".into(),
         a.master_key_change_rec != b.master_key_change_rec,
-        (
-            number(a.master_key_change_rec),
-            number(b.master_key_change_rec),
-        ),
+        || {
+            (
+                number(a.master_key_change_rec),
+                number(b.master_key_change_rec),
+            )
+        },
     );
     push(
+        &mut out,
         MetaField::Settings,
         "Key change enforcement".into(),
         a.master_key_change_force != b.master_key_change_force,
-        (
-            number(a.master_key_change_force),
-            number(b.master_key_change_force),
-        ),
+        || {
+            (
+                number(a.master_key_change_force),
+                number(b.master_key_change_force),
+            )
+        },
     );
 
     let (ours, theirs) = (user_custom_data(a), user_custom_data(b));
@@ -760,10 +823,11 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
     for key in keys {
         let (ours, theirs) = (ours.get(key), theirs.get(key));
         push(
+            &mut out,
             MetaField::CustomData(key.clone()),
             format!("Plugin data \"{key}\"").into(),
             ours.map(|item| &item.value) != theirs.map(|item| &item.value),
-            (custom_data_value(ours), custom_data_value(theirs)),
+            || (custom_data_value(ours), custom_data_value(theirs)),
         );
     }
 
@@ -1103,6 +1167,8 @@ pub fn apply_picks(
         return Err(ApplyError::DatabaseMergeWarnings(lossy.join("; ")));
     }
 
+    reunite_recycle_bins(&mut merged, [local, remote]);
+
     // The merged database is saved directly (no document mutation runs in
     // between), and `merge_history` unions both sides' histories - trim here
     // or repeated conflicts grow entries past the vault's HistoryMaxItems.
@@ -1203,14 +1269,18 @@ fn icons_equivalent(local: Option<&Icon>, remote: Option<&Icon>, default_index: 
 /// round-tripped the field (pre-0.7) have it stripped on every entry -
 /// comparing it would re-conflict a whole foreign-written vault forever.
 fn previous_groups_equivalent(local: Option<GroupId>, remote: Option<GroupId>) -> bool {
-    previous_group_uuids_equivalent(local.map(|id| id.uuid()), remote.map(|id| id.uuid()))
+    group_uuids_equivalent(local.map(|id| id.uuid()), remote.map(|id| id.uuid()))
 }
 
-fn previous_group_uuids_equivalent(local: Option<uuid::Uuid>, remote: Option<uuid::Uuid>) -> bool {
-    fn norm(group: Option<uuid::Uuid>) -> Option<uuid::Uuid> {
-        group.filter(|id| !id.is_nil())
-    }
-    norm(local) == norm(remote)
+fn group_uuids_equivalent(local: Option<uuid::Uuid>, remote: Option<uuid::Uuid>) -> bool {
+    normalised_group_uuid(local) == normalised_group_uuid(remote)
+}
+
+/// Some clients serialize "no such group" as the nil UUID, others omit the
+/// element. Both mean the same thing, in `PreviousParentGroup` and in the
+/// metadata pointers alike.
+fn normalised_group_uuid(id: Option<uuid::Uuid>) -> Option<uuid::Uuid> {
+    id.filter(|id| !id.is_nil())
 }
 
 fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
@@ -1394,10 +1464,18 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             None => "Inherited".into(),
         }
     }
-    fn icon_row(icon: Option<&Icon>) -> String {
-        match icon {
+    fn icon_row(group: &GroupRef<'_>) -> String {
+        match group.icon() {
             Some(Icon::BuiltIn(index)) => format!("Built-in icon {index}"),
-            Some(Icon::Custom(_)) => "Custom image".into(),
+            // Naming the image matters: two different ones both read as
+            // "Custom image", so the row compared equal and never appeared.
+            Some(Icon::Custom(_)) => group.custom_icon().map_or_else(
+                || "Custom image".to_string(),
+                |icon| match icon.name.as_deref() {
+                    Some(name) => format!("Custom image \"{name}\""),
+                    None => format!("Custom image ({})", image_fingerprint(&icon.data)),
+                },
+            ),
             None => "Default icon".into(),
         }
     }
@@ -1409,7 +1487,7 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
     }
     vec![
         row("Name", local.name.clone(), remote.name.clone()),
-        row("Icon", icon_row(local.icon()), icon_row(remote.icon())),
+        row("Icon", icon_row(local), icon_row(remote)),
         row(
             "Expires",
             expiry_row(&local.times),
@@ -1440,6 +1518,24 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
     .into_iter()
     .filter(|diff| diff.differs)
     .collect()
+}
+
+fn group_with_uuid(database: &Database, id: uuid::Uuid) -> Option<GroupId> {
+    database
+        .iter_all_groups()
+        .map(|group| group.id())
+        .find(|group_id| group_id.uuid() == id)
+}
+
+/// A short, stable name for an image nobody gave a name to, so the conflict
+/// row can say "these are two different pictures" without rendering either.
+fn image_fingerprint(data: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(data)
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Content the user authored, as opposed to view state a client may rewrite
@@ -1622,20 +1718,34 @@ fn force_group_winner(
     })?;
 
     if matches!(winner, Side::Remote) {
-        let Some(chosen) = source.group(source_id) else {
-            return Err(ApplyError::GroupMissing {
-                id: raw_id.to_string(),
-                side: Side::Remote,
-            });
+        let content = {
+            let Some(chosen) = source.group(source_id) else {
+                return Err(ApplyError::GroupMissing {
+                    id: raw_id.to_string(),
+                    side: Side::Remote,
+                });
+            };
+            GroupContent::of(&chosen)
         };
-        let content = GroupContent::of(&chosen);
+        // The image has to be here before the reference to it can be written:
+        // `set_icon_custom` clears the object's current icon and only then
+        // rejects an unknown id, so writing the reference first left the
+        // group with no icon at all. The fork's merge adopts images too, but
+        // it runs after this.
+        if let Some(Icon::Custom(icon)) = content.icon
+            && !merged.adopt_custom_icon_from(source, icon)
+        {
+            return Err(ApplyError::CustomIconUnrecoverable {
+                id: icon.to_string(),
+            });
+        }
         let Some(mut target) = merged.group_mut(group_id) else {
             return Err(ApplyError::GroupMissing {
                 id: raw_id.to_string(),
                 side: Side::Local,
             });
         };
-        content.write_to(&mut target);
+        content.write_to(&mut target)?;
     }
 
     let winner_time = resolution_time([
@@ -1653,6 +1763,48 @@ fn force_group_winner(
         group.times.last_modification = Some(Times::epoch());
     }
     Ok(())
+}
+
+/// Put a recycle bin that lost the metadata merge inside the one that won.
+///
+/// Two copies can each have made their own bin. The merge keeps both groups
+/// and can only designate one, and everything the user deleted into the other
+/// silently became live again: an ordinary group holding entries they had
+/// thrown away, listed next to the ones they kept. Nesting the loser inside
+/// the winner keeps both sides' deletions deleted, because everything below
+/// the bin counts as deleted, and leaves the groups themselves intact so the
+/// user can still restore from either.
+fn reunite_recycle_bins(merged: &mut Database, sides: [&Database; 2]) {
+    let Some(designated) = normalised_group_uuid(merged.meta.recyclebin_uuid) else {
+        return;
+    };
+    let Some(bin) = group_with_uuid(merged, designated) else {
+        return;
+    };
+    let displaced: BTreeSet<uuid::Uuid> = sides
+        .into_iter()
+        .filter_map(|side| normalised_group_uuid(side.meta.recyclebin_uuid))
+        .filter(|id| *id != designated)
+        .collect();
+    for id in displaced {
+        let Some(group_id) = group_with_uuid(merged, id) else {
+            continue;
+        };
+        let previous_parent = merged
+            .group(group_id)
+            .and_then(|group| group.parent().map(|parent| parent.id()));
+        let Some(mut group) = merged.group_mut(group_id) else {
+            continue;
+        };
+        // `move_to` refuses only a cycle here, and a cycle means the winning
+        // bin already sits inside this one: its contents are deleted either
+        // way, so there is nothing to repair. `track_changes` dates the move,
+        // without which the next merge against a third copy undoes it.
+        if group.track_changes().move_to(bin).is_err() {
+            continue;
+        }
+        group.previous_parent_group = previous_parent;
+    }
 }
 
 /// Apply the user's choice to the database settings no change time could
@@ -1781,7 +1933,10 @@ impl GroupContent {
         }
     }
 
-    fn write_to(self, group: &mut keepass::db::GroupMut<'_>) {
+    /// Fails only on a custom icon whose image is in neither database, which
+    /// is a dangling reference in the file rather than a merge outcome.
+    /// Dropping that error silently produced a group with no icon at all.
+    fn write_to(self, group: &mut keepass::db::GroupMut<'_>) -> Result<(), ApplyError> {
         group.name = self.name;
         group.notes = self.notes;
         group.custom_data = self.custom_data;
@@ -1791,15 +1946,16 @@ impl GroupContent {
         group.enable_searching = self.enable_searching;
         match self.icon {
             Some(Icon::BuiltIn(index)) => group.set_icon_builtin(index),
-            // A custom icon is set by id so the reference index stays honest;
-            // the image itself is adopted by `adopt_source_custom_icons`.
-            Some(Icon::Custom(id)) => {
-                let _ = group.set_icon_custom(id);
-            }
+            // By id, so the reference stays the one both files agree on. The
+            // caller has already brought the image across.
+            Some(Icon::Custom(id)) => group
+                .set_icon_custom(id)
+                .map_err(|_| ApplyError::CustomIconUnrecoverable { id: id.to_string() })?,
             None => group.set_icon_none(),
         }
         group.times.expiry = self.expiry;
         group.times.expires = self.expires;
+        Ok(())
     }
 }
 
@@ -2244,14 +2400,11 @@ mod tests {
 
     #[test]
     fn nil_previous_group_vs_absent_previous_group_is_not_a_difference() {
-        assert!(previous_group_uuids_equivalent(
-            Some(uuid::Uuid::nil()),
-            None,
-        ));
+        assert!(group_uuids_equivalent(Some(uuid::Uuid::nil()), None,));
 
         let actual_group = uuid::Uuid::new_v4();
-        assert!(!previous_group_uuids_equivalent(Some(actual_group), None));
-        assert!(!previous_group_uuids_equivalent(
+        assert!(!group_uuids_equivalent(Some(actual_group), None));
+        assert!(!group_uuids_equivalent(
             Some(actual_group),
             Some(uuid::Uuid::new_v4()),
         ));
@@ -3699,6 +3852,190 @@ mod tests {
             !diff(&local, &remote).structural_writeback_required,
             "the cursor and the writer's name are not settings"
         );
+    }
+
+    /// Choosing the remote group has to bring its picture with it.
+    ///
+    /// `set_icon_custom` clears the current icon and only then rejects an id
+    /// this file does not hold yet, and the error was dropped: the group came
+    /// out with no icon at all, and that result was uploaded. The image has
+    /// to be adopted before the reference is written.
+    #[test]
+    fn choosing_a_remote_group_keeps_its_custom_image() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        let tied = keepass::db::Times::now();
+        let ours = local
+            .group_mut(group_id)
+            .unwrap()
+            .set_icon_custom_new(vec![0x89, b'P', b'N', b'G', 1])
+            .id();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let mut remote = fork(&local);
+        let theirs = remote
+            .group_mut(group_id)
+            .unwrap()
+            .set_icon_custom_new(vec![0x89, b'P', b'N', b'G', 2])
+            .id();
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        assert_ne!(ours, theirs, "two different images, two different ids");
+
+        let report = diff(&local, &remote);
+        let conflict = report
+            .group_conflicts
+            .first()
+            .expect("two images, one second: the user has to choose");
+        assert!(
+            conflict.fields.iter().any(|field| field.label == "Icon"),
+            "and the row has to tell them apart rather than saying \
+             \"Custom image\" twice: {:?}",
+            conflict.fields
+        );
+
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::from([(group_id.to_string(), Side::Remote)]),
+            metadata: None,
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+
+        assert_eq!(
+            merged.group(group_id).unwrap().icon(),
+            Some(&Icon::Custom(theirs)),
+            "the group keeps the reference it was given"
+        );
+        assert_eq!(
+            merged
+                .custom_icon(theirs)
+                .expect("and the image itself is here")
+                .data,
+            vec![0x89, b'P', b'N', b'G', 2]
+        );
+    }
+
+    /// A settings clock nobody could have written yet decides nothing.
+    ///
+    /// Last-write-wins on the metadata block is a number inside the shared
+    /// file, so anyone who can write it could stamp their database name with
+    /// the year 2099 and have it replace everyone else's. It also reversed a
+    /// decision already taken: the resolution is stamped with a time we
+    /// believe, which the claimed one still outranks.
+    #[test]
+    fn a_future_dated_settings_clock_decides_nothing() {
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        local.meta.database_name = Some("Team vault".into());
+        local.meta.database_name_changed = Some(keepass::db::Times::now());
+
+        let mut remote = fork(&local);
+        remote.meta.database_name = Some("Their vault".into());
+        remote.meta.database_name_changed =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::days(365));
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.metadata_conflict.is_some(),
+            "a claim about the future is not evidence, so it is asked"
+        );
+
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::new(),
+            metadata: Some(Side::Local),
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(merged.meta.database_name.as_deref(), Some("Team vault"));
+
+        // A third copy still holding the claimed date meets the decision as
+        // an open question, not as a settled loss.
+        assert!(
+            diff(&merged, &remote).metadata_conflict.is_some(),
+            "the future date must not quietly take the name back"
+        );
+    }
+
+    /// Two copies can each have made their own recycle bin.
+    ///
+    /// The merge keeps both groups and can designate only one, and everything
+    /// deleted into the other became live again: an ordinary group holding
+    /// entries the user had thrown away, listed next to the ones they kept.
+    #[test]
+    fn two_recycle_bins_keep_both_sides_deletions() {
+        // One shared starting point, then each side makes its own bin: the
+        // shape two clients produce when each deletes something before they
+        // ever meet.
+        fn make_bin(db: &mut Database, trashed: EntryId, changed: NaiveDateTime) {
+            let bin_id = {
+                let mut root = db.root_mut();
+                let mut bin = root.add_group();
+                bin.name = "Recycle Bin".to_string();
+                bin.id()
+            };
+            db.meta.recyclebin_uuid = Some(bin_id.uuid());
+            db.meta.recyclebin_enabled = Some(true);
+            db.meta.recyclebin_changed = Some(changed);
+            let mut entry = db.entry_mut(trashed).unwrap();
+            entry.move_to(bin_id).unwrap();
+            // A real delete dates the move and the entry, which is what lets
+            // the other side rank it rather than calling it a tie.
+            entry.times.location_changed = Some(changed);
+            entry.times.last_modification = Some(changed);
+        }
+
+        let mut base = Database::new();
+        add(&mut base, "Kept", "secret");
+        let here = add(&mut base, "Deleted here", "secret");
+        let there = add(&mut base, "Deleted there", "secret");
+        // Both deletes have to be strictly newer than the shared starting
+        // point, or the untouched copy ties with the moved one.
+        let ids: Vec<EntryId> = base.iter_all_entries().map(|entry| entry.id()).collect();
+        let start = keepass::db::Times::now() - chrono::TimeDelta::minutes(30);
+        for id in ids {
+            let mut entry = base.entry_mut(id).unwrap();
+            entry.times.last_modification = Some(start);
+            entry.times.location_changed = Some(start);
+        }
+
+        let mut local = fork(&base);
+        make_bin(
+            &mut local,
+            here,
+            keepass::db::Times::now() - chrono::TimeDelta::minutes(5),
+        );
+        let mut remote = fork(&base);
+        make_bin(&mut remote, there, keepass::db::Times::now());
+        assert_ne!(
+            local.meta.recyclebin_uuid, remote.meta.recyclebin_uuid,
+            "two bins, made independently"
+        );
+
+        let report = diff(&local, &remote);
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
+            .expect("different bins are not a reason to refuse the merge");
+
+        let live: Vec<String> = live_entries(&merged)
+            .into_values()
+            .map(|snapshot| snapshot.view.title)
+            .collect();
+        assert!(
+            !live.iter().any(|title| title.starts_with("Deleted")),
+            "a deletion on either side stays a deletion: {live:?}"
+        );
+        assert_eq!(
+            merged.iter_all_entries().count(),
+            3,
+            "and nothing is dropped either"
+        );
+        // The losing bin is kept as a group rather than emptied into the
+        // other, so the user can still see where each deletion came from and
+        // restore from either.
+        assert_eq!(merged.iter_all_groups().count(), 3, "root plus both bins");
     }
 
     /// A settings difference no clock can rank is not ours to keep quietly.

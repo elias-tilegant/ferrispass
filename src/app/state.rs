@@ -2439,6 +2439,32 @@ impl AppState {
         updated
     }
 
+    /// Record what the server now holds and what we sent it.
+    ///
+    /// The second half is the point: without it the next session cannot tell
+    /// "already uploaded" from "saved here and never sent", and a config
+    /// written before the field existed reads as ahead, which costs one
+    /// upload rather than stranding an edit.
+    ///
+    /// The disk write is the caller's, so a test can drive the decision
+    /// without writing into the user's configuration directory. Both call
+    /// sites sit inside spawn closures no test can reach.
+    fn record_upload_baseline(
+        &mut self,
+        target: &Path,
+        session_id: VaultSessionId,
+        new_etag: String,
+        uploaded_revision: String,
+    ) -> Option<SyncConfig> {
+        let mut updated = None;
+        self.with_sync_binding_mut_for_session(target, session_id, |binding| {
+            binding.config.last_etag = new_etag;
+            binding.config.uploaded_local_revision = Some(uploaded_revision);
+            updated = Some(binding.config.clone());
+        });
+        updated
+    }
+
     /// Hold a push until this vault's binding restore lands.
     fn queue_push_awaiting_restore(&mut self, target: &Path, request: QueuedSyncRequest) {
         // Replacing this vault's own entry is the intended coalesce: the
@@ -5288,23 +5314,17 @@ impl AppState {
                         use crate::sync::service::UploadAfterSave;
                         match outcome {
                             UploadAfterSave::Synced { new_etag, item: _ } => {
-                                state.with_sync_binding_mut_for_session(
+                                // Persist best effort; if the disk write fails
+                                // we'll just re-detect a conflict next push
+                                // (and re-resolve).
+                                if let Some(config) = state.record_upload_baseline(
                                     &callback_path,
                                     session_id,
-                                    |binding| {
-                                        binding.config.last_etag = new_etag;
-                                        // What the server holds, and what we
-                                        // sent. The second is what lets the
-                                        // next session tell "already uploaded"
-                                        // from "saved here and never sent".
-                                        binding.config.uploaded_local_revision =
-                                            Some(uploaded_revision);
-                                        // Persist both - best effort; if the
-                                        // disk write fails we'll just re-detect a
-                                        // conflict next push (and re-resolve).
-                                        let _ = crate::sync::config::save(&binding.config);
-                                    },
-                                );
+                                    new_etag,
+                                    uploaded_revision,
+                                ) {
+                                    let _ = crate::sync::config::save(&config);
+                                }
                                 state.apply_sync_status_for_session(
                                     &callback_path,
                                     session_id,
@@ -6160,15 +6180,14 @@ impl AppState {
                     use crate::sync::service::UploadAfterSave;
                     match outcome {
                         UploadAfterSave::Synced { new_etag, .. } => {
-                            state.with_sync_binding_mut_for_session(
+                            if let Some(config) = state.record_upload_baseline(
                                 &callback_path,
                                 session_id,
-                                |b| {
-                                    b.config.last_etag = new_etag;
-                                    b.config.uploaded_local_revision = Some(uploaded_revision);
-                                    let _ = crate::sync::config::save(&b.config);
-                                },
-                            );
+                                new_etag,
+                                uploaded_revision,
+                            ) {
+                                let _ = crate::sync::config::save(&config);
+                            }
                             state.apply_sync_status_for_session(
                                 &callback_path,
                                 session_id,
@@ -7106,6 +7125,68 @@ mod park_tests {
         );
     }
 
+    /// A successful upload has to record the bytes it sent, not just the
+    /// revision the server returned.
+    ///
+    /// This drives the production path, not the comparison alone: the test
+    /// next to it checked only `local_is_ahead_of_the_cloud`, and removing
+    /// the line that records the baseline left it green while every later
+    /// tick re-uploaded a file the cloud already had.
+    #[test]
+    fn a_successful_upload_records_what_it_sent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("pushed.kdbx");
+        let sent = b"encrypted bytes as uploaded";
+        std::fs::write(&vault, sent).expect("write vault");
+
+        let mut state = AppState::default();
+        fresh_open(&mut state, vault.clone(), "pw");
+        let session_id = state.active_vault_session_id.expect("session");
+        state.sync = Some(fake_binding_for("a@example.invalid", vault.clone(), "item"));
+
+        let config = state
+            .record_upload_baseline(
+                &vault,
+                session_id,
+                "etag-from-server".into(),
+                crate::sync::config::local_revision(sent),
+            )
+            .expect("the vault is open, so there is a binding to update");
+
+        assert_eq!(config.last_etag, "etag-from-server");
+        assert!(
+            !AppState::local_is_ahead_of_the_cloud(&vault, &config),
+            "what is on disk is exactly what was just sent"
+        );
+
+        // An upload that lands after the user switched vaults belongs to the
+        // one it was started for, not to the one on screen.
+        state.park_active();
+        let other = dir.path().join("other.kdbx");
+        fresh_open(&mut state, other.clone(), "pw");
+        state.sync = Some(fake_binding_for("b@example.invalid", other, "other-item"));
+
+        let parked = state
+            .record_upload_baseline(
+                &vault,
+                session_id,
+                "etag-late".into(),
+                crate::sync::config::local_revision(sent),
+            )
+            .expect("the parked vault still has its binding");
+        assert_eq!(parked.last_etag, "etag-late");
+        assert_eq!(
+            state
+                .sync
+                .as_ref()
+                .expect("active binding")
+                .config
+                .last_etag,
+            "etag-0",
+            "and the vault on screen is untouched"
+        );
+    }
+
     /// The branch this replaces lived inside a spawn closure, so nothing
     /// could reach it: a fix to it was lost to a stray `git checkout` and
     /// only an outside reviewer noticed. Each row is a way to lose an edit.
@@ -7133,6 +7214,11 @@ mod park_tests {
             ..Default::default()
         };
 
+        let settings_conflict = ConflictReport {
+            metadata_conflict: Some(crate::keepass::merge::MetadataConflict { fields: Vec::new() }),
+            ..Default::default()
+        };
+
         let active_and_asked =
             |report: &ConflictReport| RemoteMergePlan::of(report, true, true, false);
 
@@ -7143,6 +7229,11 @@ mod park_tests {
             RemoteMergePlan::Ask,
             "a group conflict alone must reach the user, not the default side"
         );
+        assert_eq!(
+            active_and_asked(&settings_conflict),
+            RemoteMergePlan::Ask,
+            "and so must a settings conflict: the default side is uploaded"
+        );
 
         // A parked vault, a background pull and an open editor each defer
         // rather than seizing the screen, and none of them merges silently.
@@ -7151,6 +7242,10 @@ mod park_tests {
             (true, false, false),
             (true, true, true),
         ] {
+            assert_eq!(
+                RemoteMergePlan::of(&settings_conflict, active, interactive, editing),
+                RemoteMergePlan::Defer
+            );
             assert_eq!(
                 RemoteMergePlan::of(&group_conflict, active, interactive, editing),
                 RemoteMergePlan::Defer

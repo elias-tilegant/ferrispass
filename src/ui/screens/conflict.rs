@@ -179,10 +179,12 @@ fn header(snapshot: &ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement
             snapshot.remote_only_count
         ));
     }
+    // Not "per entry": a group or the database settings can be the only
+    // thing on the screen.
     let subtitle = if subtitle_parts.is_empty() {
-        "Pick a version per entry. Apply when you're ready.".to_string()
+        "Pick a version for each. Apply when you're ready.".to_string()
     } else {
-        format!("Pick a version per entry. {}.", subtitle_parts.join(", "))
+        format!("Pick a version for each. {}.", subtitle_parts.join(", "))
     };
     // A timestamp in the future is not drift, it is a claim. Last-write-wins
     // is decided entirely by that number inside the shared file, so anyone

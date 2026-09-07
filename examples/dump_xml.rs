@@ -7,7 +7,7 @@
 //! ```
 //!
 //! Then it prompts for the master password (or read it from `FERRISPASS_KDBX_PW`
-//! env var). The password never leaves your machine. Output is XML —
+//! env var). The password never leaves your machine. Output is XML;
 //! grep for `<…/>` empty tags to spot interop-breaking serializations.
 
 use std::io::{self, BufRead, Write};
