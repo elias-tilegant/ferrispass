@@ -244,11 +244,11 @@ mod platform {
     use objc2::runtime::Bool;
     use objc2_foundation::{
         NSData, NSError, NSFileCoordinator, NSFileCoordinatorReadingOptions,
-        NSFileCoordinatorWritingOptions, NSFileManager, NSString, NSURLBookmarkCreationOptions,
-        NSURLBookmarkResolutionOptions, NSURL,
+        NSFileCoordinatorWritingOptions, NSFileManager, NSString, NSURL,
+        NSURLBookmarkCreationOptions, NSURLBookmarkResolutionOptions,
     };
 
-    use super::{revision, ICloudError};
+    use super::{ICloudError, revision};
 
     fn url(path: &Path) -> objc2::rc::Retained<NSURL> {
         NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))

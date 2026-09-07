@@ -210,7 +210,12 @@ fn header(snapshot: &ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement
                         .child(subtitle),
                 ),
         )
-        .child(bulk_button("conflict-all-local", "All local", Side::Local, cx))
+        .child(bulk_button(
+            "conflict-all-local",
+            "All local",
+            Side::Local,
+            cx,
+        ))
         .child(bulk_button(
             "conflict-all-remote",
             "All remote",

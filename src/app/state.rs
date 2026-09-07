@@ -4351,10 +4351,8 @@ impl AppState {
         let operation_gate = self.connect_operations.clone();
         let task_local_path = local_path.clone();
         let task = cx.background_spawn(async move {
-            let result = crate::sync::service::prepare_icloud_connect(
-                &remote_path,
-                &task_local_path,
-            )?;
+            let result =
+                crate::sync::service::prepare_icloud_connect(&remote_path, &task_local_path)?;
             let Some(persisted) = operation_gate.commit_if_current(generation, || {
                 crate::sync::service::persist_connect_picked(&result)
             }) else {
@@ -4400,11 +4398,7 @@ impl AppState {
 
     /// Copy the currently-open local vault to a new iCloud Drive location
     /// while retaining the local file as the canonical working copy.
-    pub fn publish_active_to_icloud(
-        &mut self,
-        remote_path: PathBuf,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn publish_active_to_icloud(&mut self, remote_path: PathBuf, cx: &mut Context<Self>) {
         let (local_path, session_id) = match (&self.vault, self.active_vault_session_id) {
             (VaultStatus::Open { path, .. }, Some(session_id)) if self.sync.is_none() => {
                 (path.clone(), session_id)
@@ -4434,11 +4428,7 @@ impl AppState {
                 crate::sync::service::ServiceError::LocalVault(error.to_string())
             })?;
             let Some(result) = operation_gate.commit_if_current(generation, || {
-                crate::sync::service::publish_icloud_binding(
-                    &task_local_path,
-                    &remote_path,
-                    &bytes,
-                )
+                crate::sync::service::publish_icloud_binding(&task_local_path, &remote_path, &bytes)
             }) else {
                 return Ok(None);
             };

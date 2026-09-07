@@ -1047,9 +1047,10 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let suggested_name = remote
-            .file_name()
-            .map_or_else(|| "vault.kdbx".to_string(), |name| name.to_string_lossy().into_owned());
+        let suggested_name = remote.file_name().map_or_else(
+            || "vault.kdbx".to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
         let initial_dir = std::env::var_os("HOME")
             .map(|home| PathBuf::from(home).join("Documents"))
             .unwrap_or_else(|| PathBuf::from("."));
@@ -1074,8 +1075,8 @@ impl AppShell {
             .unwrap_or_else(|| "vault.kdbx".into());
         let initial_dir = std::env::var_os("HOME")
             .map(|home| {
-                let cloud = PathBuf::from(&home)
-                    .join("Library/Mobile Documents/com~apple~CloudDocs");
+                let cloud =
+                    PathBuf::from(&home).join("Library/Mobile Documents/com~apple~CloudDocs");
                 if cloud.is_dir() {
                     cloud
                 } else {

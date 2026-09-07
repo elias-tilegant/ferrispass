@@ -113,14 +113,18 @@ mod tests {
 
     #[test]
     fn sharepoint_and_icloud_advertise_their_connect_modes() {
-        assert!(ProviderRegistry::get(SyncProvider::SharePoint)
-            .descriptor()
-            .capabilities
-            .contains(ProviderCapabilities::OPEN_REMOTE));
+        assert!(
+            ProviderRegistry::get(SyncProvider::SharePoint)
+                .descriptor()
+                .capabilities
+                .contains(ProviderCapabilities::OPEN_REMOTE)
+        );
         #[cfg(target_os = "macos")]
-        assert!(ProviderRegistry::get(SyncProvider::ICloudDrive)
-            .descriptor()
-            .capabilities
-            .contains(ProviderCapabilities::PUBLISH_LOCAL));
+        assert!(
+            ProviderRegistry::get(SyncProvider::ICloudDrive)
+                .descriptor()
+                .capabilities
+                .contains(ProviderCapabilities::PUBLISH_LOCAL)
+        );
     }
 }

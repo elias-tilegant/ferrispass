@@ -1,14 +1,15 @@
 use gpui::{
-    div, prelude::FluentBuilder as _, px, AnyElement, ClickEvent, Context, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
+    Sizable as _, WindowExt as _,
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputContentType},
     slider::Slider,
-    v_flex, Sizable as _, WindowExt as _,
+    v_flex,
 };
 
 use crate::domain::VaultGroup;

@@ -3,8 +3,8 @@
 //! adding opens a new local or cloud-backed vault.
 
 use gpui::{
-    div, px, AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gpui_component::{h_flex, v_flex};
 
@@ -12,7 +12,7 @@ use crate::app::actions::{AddSharePointVault, OpenVault};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::command_row::{command_row, RowTone};
+use crate::ui::widgets::command_row::{RowTone, command_row};
 
 pub fn render(cx: &mut Context<AppShell>) -> AnyElement {
     div()
