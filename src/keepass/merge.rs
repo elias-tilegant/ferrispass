@@ -598,6 +598,9 @@ enum MetaField {
     EntryTemplatesGroup,
     Settings,
     CustomData(String),
+    /// One custom icon's display name, by icon id. The image itself travels
+    /// with the reference to it; only the name can diverge on its own.
+    CustomIcon(String),
 }
 
 /// Every database setting the two copies disagree about, with the side the
@@ -843,6 +846,29 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         },
     );
 
+    // A custom icon's display name diverges on its own: the image decides
+    // nothing about it, and nothing else in this comparison looks at it.
+    for ours in local.iter_all_custom_icons() {
+        let Some(theirs) = remote.custom_icon(ours.id()) else {
+            continue;
+        };
+        if ours.data != theirs.data {
+            continue;
+        }
+        push(
+            &mut out,
+            MetaField::CustomIcon(ours.id().to_string()),
+            format!("Icon name ({})", image_fingerprint(&ours.data)).into(),
+            ours.name != theirs.name,
+            || {
+                (
+                    ours.name.clone().unwrap_or_default(),
+                    theirs.name.clone().unwrap_or_default(),
+                )
+            },
+        );
+    }
+
     let (ours, theirs) = (user_custom_data(a), user_custom_data(b));
     let mut keys: Vec<&String> = ours.keys().chain(theirs.keys()).copied().collect();
     keys.sort_unstable();
@@ -890,6 +916,10 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
                     theirs.and_then(|item| item.last_modification_time),
                 ),
             },
+            MetaField::CustomIcon(id) => rank(
+                custom_icon_with_id(local, id).and_then(|icon| icon.last_modification_time),
+                custom_icon_with_id(remote, id).and_then(|icon| icon.last_modification_time),
+            ),
         };
     }
     out
@@ -925,9 +955,22 @@ fn recycle_bin_winner(local: &Database, remote: &Database, ranked: Option<Side>)
     let Some(displaced) = normalised_group_uuid(loser.meta.recyclebin_uuid) else {
         return ranked;
     };
-    let ambiguous = normalised_group_uuid(winner.meta.recyclebin_uuid) != Some(displaced)
-        && group_with_uuid(winner, displaced).is_some_and(|group| holds_entries(winner, group));
-    if ambiguous { None } else { ranked }
+    if normalised_group_uuid(winner.meta.recyclebin_uuid) == Some(displaced) {
+        return ranked;
+    }
+    let Some(group) = group_with_uuid(winner, displaced) else {
+        // Never seen there, so it was made here on its own and there is
+        // nothing to interpret.
+        return ranked;
+    };
+    // Nothing is at stake when that group is empty, and none either when the
+    // deciding copy already has it inside its own bin: both copies call its
+    // contents deleted, which is the state an earlier reunion leaves behind.
+    let settled = !holds_entries(winner, group)
+        || normalised_group_uuid(winner.meta.recyclebin_uuid)
+            .and_then(|bin| group_with_uuid(winner, bin))
+            .is_some_and(|bin| crate::keepass::document::group_is_within(winner, group, bin));
+    if settled { ranked } else { None }
 }
 
 /// Whether anything sits at or below this group.
@@ -1109,7 +1152,11 @@ fn history_version_digest(version: &EntryRef<'_>) -> [u8; 32] {
         note(&[u8::from(attachment.protected)]);
         note(&attachment.data);
     }
-    note(format!("{:?}", version.icon()).as_bytes());
+    // Through the same normalisation every other comparison uses: our fork
+    // omits the element for the default icon while KeePassXC writes it out,
+    // and hashing the raw pair reported both sides ahead after an ordinary
+    // round trip through it.
+    note(format!("{:?}", normalised_icon(version.icon(), DEFAULT_ENTRY_ICON)).as_bytes());
     note(format!("{:?}", version.autotype).as_bytes());
     note(format!("{:?}", version.foreground_color).as_bytes());
     note(format!("{:?}", version.background_color).as_bytes());
@@ -1363,13 +1410,14 @@ const DEFAULT_ENTRY_ICON: usize = 0;
 const DEFAULT_GROUP_ICON: usize = 48;
 
 fn icons_equivalent(local: Option<&Icon>, remote: Option<&Icon>, default_index: usize) -> bool {
-    fn norm(icon: Option<&Icon>, default_index: usize) -> Option<&Icon> {
-        match icon {
-            Some(Icon::BuiltIn(index)) if *index == default_index => None,
-            other => other,
-        }
+    normalised_icon(local, default_index) == normalised_icon(remote, default_index)
+}
+
+fn normalised_icon(icon: Option<&Icon>, default_index: usize) -> Option<&Icon> {
+    match icon {
+        Some(Icon::BuiltIn(index)) if *index == default_index => None,
+        other => other,
     }
-    norm(local, default_index) == norm(remote, default_index)
 }
 
 /// Some KeePass clients serialize an absent `PreviousParentGroup` as the nil
@@ -1985,17 +2033,29 @@ fn force_metadata_winner(merged: &mut Database, source: &mut Database, winner: S
     }
     for field in &tied {
         if matches!(winner, Side::Remote) {
-            copy_meta_field(&mut merged.meta, &source.meta, field);
+            copy_meta_field(merged, source, field);
         }
         // The choice has to outrank both sides: for the merge that runs next,
         // and for the next merge against a third copy that still holds the
         // other value. Stamping the loser back to the epoch is what
         // `force_group_winner` does with the same problem.
-        stamp_meta_field(&mut merged.meta, &mut source.meta, field);
+        stamp_meta_field(merged, source, field);
     }
 }
 
-fn copy_meta_field(merged: &mut Meta, source: &Meta, field: &MetaField) {
+fn copy_meta_field(merged_db: &mut Database, source_db: &Database, field: &MetaField) {
+    // A tied custom icon name belongs to the icon table, not to the metadata
+    // block, and the borrows below are of the meta halves alone.
+    if let MetaField::CustomIcon(id) = field {
+        let name = custom_icon_with_id(source_db, id).and_then(|icon| icon.name.clone());
+        if let Some(id) = custom_icon_id_from(merged_db, id)
+            && let Some(mut icon) = merged_db.custom_icon_mut(id)
+        {
+            icon.name = name;
+        }
+        return;
+    }
+    let (merged, source) = (&mut merged_db.meta, &source_db.meta);
     match field {
         MetaField::Name => merged.database_name = source.database_name.clone(),
         MetaField::Description => {
@@ -2025,42 +2085,76 @@ fn copy_meta_field(merged: &mut Meta, source: &Meta, field: &MetaField) {
                 merged.custom_data.insert(key.clone(), item.clone());
             }
         }
+        MetaField::CustomIcon(_) => unreachable!("handled above, before the meta borrows"),
     }
 }
 
-fn stamp_meta_field(merged: &mut Meta, source: &mut Meta, field: &MetaField) {
-    let decided = resolution_time([
-        meta_clock_mut(merged, field).and_then(|clock| *clock),
-        meta_clock_mut(source, field).and_then(|clock| *clock),
-    ]);
-    if let Some(clock) = meta_clock_mut(merged, field) {
-        *clock = Some(decided);
-    }
-    if let Some(clock) = meta_clock_mut(source, field) {
-        *clock = Some(Times::epoch());
-    }
+fn stamp_meta_field(merged: &mut Database, source: &mut Database, field: &MetaField) {
+    let decided = resolution_time([meta_clock(merged, field), meta_clock(source, field)]);
+    set_meta_clock(merged, field, decided);
+    set_meta_clock(source, field, Times::epoch());
 }
 
-/// The change time KDBX keeps for one decision unit. `None` only for a custom
-/// data key the side does not carry.
-fn meta_clock_mut<'a>(
-    meta: &'a mut Meta,
-    field: &MetaField,
-) -> Option<&'a mut Option<NaiveDateTime>> {
-    Some(match field {
-        MetaField::Name => &mut meta.database_name_changed,
-        MetaField::Description => &mut meta.database_description_changed,
-        MetaField::DefaultUsername => &mut meta.default_username_changed,
-        MetaField::RecycleBin => &mut meta.recyclebin_changed,
-        MetaField::EntryTemplatesGroup => &mut meta.entry_templates_group_changed,
-        MetaField::Settings => &mut meta.settings_changed,
-        MetaField::CustomData(key) => {
-            return meta
-                .custom_data
-                .get_mut(key)
-                .map(|item| &mut item.last_modification_time);
+/// The change time KDBX keeps for one decision unit. `None` when the side
+/// does not carry that custom data key or that icon.
+fn meta_clock(database: &Database, field: &MetaField) -> Option<NaiveDateTime> {
+    let meta = &database.meta;
+    match field {
+        MetaField::Name => meta.database_name_changed,
+        MetaField::Description => meta.database_description_changed,
+        MetaField::DefaultUsername => meta.default_username_changed,
+        MetaField::RecycleBin => meta.recyclebin_changed,
+        MetaField::EntryTemplatesGroup => meta.entry_templates_group_changed,
+        MetaField::Settings => meta.settings_changed,
+        MetaField::CustomData(key) => meta
+            .custom_data
+            .get(key)
+            .and_then(|item| item.last_modification_time),
+        MetaField::CustomIcon(id) => {
+            custom_icon_with_id(database, id).and_then(|icon| icon.last_modification_time)
         }
-    })
+    }
+}
+
+fn set_meta_clock(database: &mut Database, field: &MetaField, at: NaiveDateTime) {
+    if let MetaField::CustomIcon(id) = field {
+        if let Some(id) = custom_icon_id_from(database, id)
+            && let Some(mut icon) = database.custom_icon_mut(id)
+        {
+            icon.last_modification_time = Some(at);
+        }
+        return;
+    }
+    let meta = &mut database.meta;
+    match field {
+        MetaField::Name => meta.database_name_changed = Some(at),
+        MetaField::Description => meta.database_description_changed = Some(at),
+        MetaField::DefaultUsername => meta.default_username_changed = Some(at),
+        MetaField::RecycleBin => meta.recyclebin_changed = Some(at),
+        MetaField::EntryTemplatesGroup => meta.entry_templates_group_changed = Some(at),
+        MetaField::Settings => meta.settings_changed = Some(at),
+        MetaField::CustomData(key) => {
+            if let Some(item) = meta.custom_data.get_mut(key) {
+                item.last_modification_time = Some(at);
+            }
+        }
+        MetaField::CustomIcon(_) => unreachable!("handled above, before the meta borrow"),
+    }
+}
+
+/// Custom icons are keyed by an opaque id the divergence carries as text.
+fn custom_icon_id_from(database: &Database, id: &str) -> Option<keepass::db::CustomIconId> {
+    database
+        .iter_all_custom_icons()
+        .map(|icon| icon.id())
+        .find(|candidate| candidate.to_string() == id)
+}
+
+fn custom_icon_with_id<'a>(
+    database: &'a Database,
+    id: &str,
+) -> Option<keepass::db::CustomIconRef<'a>> {
+    custom_icon_id_from(database, id).and_then(|id| database.custom_icon(id))
 }
 
 /// The user-authored half of a group, the same set `group_content_differs`
@@ -3990,6 +4084,99 @@ mod tests {
         );
     }
 
+    /// Icon timestamps have one-second precision, so two renames can tie. The
+    /// merge keeps this copy's name on a tie and the next upload wrote it
+    /// over theirs, which is the same silent loss as a tied database name.
+    #[test]
+    fn a_tied_custom_icon_name_is_asked_about() {
+        let tied = keepass::db::Times::now();
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let icon_id = {
+            let mut entry = local.entry_mut(id).unwrap();
+            let mut icon = entry.set_icon_custom_new(vec![0x89, b'P', b'N', b'G', 4]);
+            icon.name = Some("Ours".into());
+            icon.last_modification_time = Some(tied);
+            icon.id()
+        };
+        let mut remote = fork(&local);
+        {
+            let mut icon = remote.custom_icon_mut(icon_id).unwrap();
+            icon.name = Some("Theirs".into());
+            icon.last_modification_time = Some(tied);
+        }
+
+        let report = diff(&local, &remote);
+        let conflict = report
+            .metadata_conflict
+            .as_ref()
+            .expect("two names, one second: the user has to choose");
+        assert!(
+            conflict
+                .fields
+                .iter()
+                .any(|field| field.label.starts_with("Icon name")
+                    && field.local == "Ours"
+                    && field.remote == "Theirs"),
+            "and the row has to say what each side calls it: {:?}",
+            conflict.fields
+        );
+
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::new(),
+            metadata: Some(Side::Remote),
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(
+            merged
+                .custom_icon(icon_id)
+                .expect("the icon")
+                .name
+                .as_deref(),
+            Some("Theirs"),
+            "choosing theirs has to apply theirs"
+        );
+    }
+
+    /// The default icon has two spellings, and an archived version has to be
+    /// read through the same normalisation as a current one. Hashing the raw
+    /// pair reported both sides ahead after an ordinary KeePassXC round trip,
+    /// which uploads and downloads the same file forever.
+    #[test]
+    fn the_two_spellings_of_the_default_icon_are_one_history_version() {
+        let same_second = keepass::db::Times::now() - chrono::TimeDelta::minutes(10);
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let mut remote = fork(&local);
+
+        // Each side archives a version carrying its own spelling of the same
+        // default icon, then leaves the current entry identical, so only the
+        // archived versions differ.
+        for (db, written_out) in [(&mut local, false), (&mut remote, true)] {
+            if written_out {
+                db.entry_mut(id).expect("entry").set_icon_builtin(0);
+            }
+            let mut version = db.entry(id).expect("entry").deref().clone();
+            version.times.last_modification = Some(same_second);
+            version.history = None;
+            db.entry_mut(id)
+                .expect("entry")
+                .history
+                .get_or_insert_default()
+                .add_entry(version);
+            db.entry_mut(id).expect("entry").set_icon_none();
+        }
+
+        let report = diff(&local, &remote);
+
+        assert!(
+            !report.local_history_ahead,
+            "one icon, written two ways, is one version"
+        );
+        assert!(!report.has_local_contribution());
+    }
+
     /// Two archived versions written in the same second can differ by
     /// anything an entry carries, not just by a field value.
     ///
@@ -4328,6 +4515,57 @@ mod tests {
                 .metadata_conflict
                 .is_none(),
             "an empty group is not worth a prompt"
+        );
+    }
+
+    /// After an earlier reunion the two bins are nested, and a copy that has
+    /// not caught up still designates the inner one. Both copies call its
+    /// contents deleted, so there is nothing to decide and nothing to stop
+    /// the user for.
+    #[test]
+    fn a_bin_already_inside_the_other_one_is_not_asked_about() {
+        let start = keepass::db::Times::now() - chrono::TimeDelta::minutes(30);
+        let mut base = Database::new();
+        let trashed = add(&mut base, "Deleted", "secret");
+        let outer = {
+            let mut root = base.root_mut();
+            let mut group = root.add_group();
+            group.name = "Recycle Bin".to_string();
+            group.id()
+        };
+        let inner = {
+            let mut root = base.root_mut();
+            let mut group = root.add_group();
+            group.name = "Recycle Bin".to_string();
+            group.id()
+        };
+        base.meta.recyclebin_enabled = Some(true);
+        {
+            let mut entry = base.entry_mut(trashed).unwrap();
+            entry.move_to(inner).unwrap();
+            entry.times.last_modification = Some(start);
+            entry.times.location_changed = Some(start);
+        }
+
+        // The copy that has not caught up: the inner group is still its bin,
+        // and it sits at the root.
+        let mut local = fork(&base);
+        local.meta.recyclebin_uuid = Some(inner.uuid());
+        local.meta.recyclebin_changed = Some(start);
+
+        // The copy an earlier reunion already touched.
+        let mut remote = fork(&base);
+        remote.meta.recyclebin_uuid = Some(outer.uuid());
+        remote.meta.recyclebin_changed = Some(keepass::db::Times::now());
+        {
+            let mut group = remote.group_mut(inner).unwrap();
+            group.track_changes().move_to(outer).unwrap();
+            group.times.location_changed = Some(start + chrono::TimeDelta::minutes(10));
+        }
+
+        assert!(
+            diff(&local, &remote).metadata_conflict.is_none(),
+            "both copies already call those entries deleted"
         );
     }
 
