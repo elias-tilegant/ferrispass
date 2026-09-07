@@ -57,6 +57,16 @@ fn write_vault(path: &std::path::Path) {
         .expect("entry")
         .set_icon_custom_new(vec![0x89, b'P', b'N', b'G', 1, 2, 3]);
 
+    db.meta.database_name = Some("Round trip".into());
+    db.meta.history_max_items = Some(7);
+    db.meta.memory_protection = Some(keepass::db::MemoryProtection {
+        protect_title: false,
+        protect_username: false,
+        protect_password: true,
+        protect_url: false,
+        protect_notes: false,
+    });
+
     let mut file = std::fs::File::create(path).expect("create vault");
     db.save(&mut file, DatabaseKey::new().with_password(PASSWORD))
         .expect("write vault");
@@ -160,6 +170,20 @@ fn the_cli_binary_round_trips_a_vault_on_disk() {
         entry.custom_icon().expect("icon resolves").data,
         vec![0x89, b'P', b'N', b'G', 1, 2, 3],
         "and so does the custom icon"
+    );
+
+    // Database settings are merged now, so the writer dropping one would make
+    // two copies disagree forever and upload on every sync. Nothing else
+    // checks that they survive a save.
+    assert_eq!(reopened.meta.database_name.as_deref(), Some("Round trip"));
+    assert_eq!(reopened.meta.history_max_items, Some(7));
+    assert_eq!(
+        reopened
+            .meta
+            .memory_protection
+            .as_ref()
+            .map(|p| p.protect_password),
+        Some(true)
     );
 
     // Mutating through the CLI and reading it back exercises the save path,
