@@ -116,7 +116,12 @@ struct SyncResolutions {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SyncResolution {
-    entry_id: String,
+    /// Exactly one of these. A conflict is about an entry or about a group,
+    /// and the two are separate id spaces.
+    #[serde(default)]
+    entry_id: Option<String>,
+    #[serde(default)]
+    group_id: Option<String>,
     keep: ResolutionSide,
 }
 
@@ -577,6 +582,24 @@ fn execute_sync(
             json!({"entry_id":conflict.id,"fields":fields})
         })
         .collect();
+    let group_conflicts: Vec<Value> = report
+        .group_conflicts
+        .iter()
+        .map(|conflict| {
+            let fields: Vec<&str> = conflict
+                .fields
+                .iter()
+                .filter(|field| field.differs)
+                .map(|field| field.label)
+                .collect();
+            json!({
+                "group_id":conflict.id,
+                "name":conflict.name,
+                "path":conflict.path,
+                "fields":fields,
+            })
+        })
+        .collect();
     let plan_token = sync_plan_token(&local_bytes, &remote_etag, &report);
     let needs_upload = report.has_local_contribution();
     let remote_changes = report.remote_only.len()
@@ -586,13 +609,15 @@ fn execute_sync(
             .filter(|r| matches!(r.winner, crate::keepass::merge::Side::Remote))
             .count();
     if !args.commit {
+        let undecided = !conflicts.is_empty() || !group_conflicts.is_empty();
         return Ok(json!({
-            "status":if conflicts.is_empty(){"ready"}else{"conflict"},
+            "status":if undecided {"conflict"} else {"ready"},
             "committed":false,
             "plan_token":plan_token,
-            "would_upload":needs_upload || !report.conflicts.is_empty(),
+            "would_upload":needs_upload || undecided,
             "remote_changes":remote_changes,
-            "conflicts":conflicts
+            "conflicts":conflicts,
+            "group_conflicts":group_conflicts
         }));
     }
     let supplied = args
@@ -614,6 +639,7 @@ fn execute_sync(
     let needs_local_save = !report.remote_only.is_empty()
         || !report.auto_resolved.is_empty()
         || !report.conflicts.is_empty()
+        || !report.group_conflicts.is_empty()
         || report.structural_writeback_required
         // History the remote holds and this copy does not is a real change to
         // write: without it the merged versions were dropped on the floor.
@@ -629,7 +655,8 @@ fn execute_sync(
         local_bytes
     };
     config.last_etag = remote_etag;
-    let resolved_upload = needs_upload || !report.conflicts.is_empty();
+    let resolved_upload =
+        needs_upload || !report.conflicts.is_empty() || !report.group_conflicts.is_empty();
     if resolved_upload {
         match crate::sync::service::upload_after_save(&config, &token, &upload_bytes)
             .map_err(sync_error)?
@@ -648,7 +675,7 @@ fn execute_sync(
     }
     crate::sync::config::save(&config).map_err(sync_error)?;
     Ok(
-        json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":picks.len()}),
+        json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":picks.entries.len() + picks.groups.len()}),
     )
 }
 
@@ -680,42 +707,51 @@ fn sync_plan_token(
 fn validated_resolutions(
     fd: u32,
     report: &crate::keepass::merge::ConflictReport,
-) -> Result<std::collections::HashMap<String, crate::keepass::merge::Side>, CliError> {
-    if report.conflicts.is_empty() {
-        return Ok(std::collections::HashMap::new());
+) -> Result<crate::keepass::merge::Resolutions, CliError> {
+    if report.conflicts.is_empty() && report.group_conflicts.is_empty() {
+        return Ok(crate::keepass::merge::Resolutions::default());
     }
     let input: SyncResolutions = read_json_fd(fd)?;
-    let expected: std::collections::HashSet<String> =
+    let expected_entries: std::collections::HashSet<String> =
         report.conflicts.iter().map(|c| c.id.clone()).collect();
-    validate_resolution_input(input, &expected)
+    let expected_groups: std::collections::HashSet<String> = report
+        .group_conflicts
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    validate_resolution_input(input, &expected_entries, &expected_groups)
 }
 
 fn validate_resolution_input(
     input: SyncResolutions,
-    expected: &std::collections::HashSet<String>,
-) -> Result<std::collections::HashMap<String, crate::keepass::merge::Side>, CliError> {
-    let mut picks = std::collections::HashMap::new();
+    expected_entries: &std::collections::HashSet<String>,
+    expected_groups: &std::collections::HashSet<String>,
+) -> Result<crate::keepass::merge::Resolutions, CliError> {
+    let invalid = |message: &'static str| CliError::new("invalid_resolution", 6, message);
+    let mut picks = crate::keepass::merge::Resolutions::default();
     for resolution in input.resolutions {
-        if !expected.contains(&resolution.entry_id) {
-            return Err(CliError::new(
-                "invalid_resolution",
-                6,
-                "resolution contains an unknown entry UUID",
-            ));
-        }
         let side = match resolution.keep {
             ResolutionSide::Local => crate::keepass::merge::Side::Local,
             ResolutionSide::Remote => crate::keepass::merge::Side::Remote,
         };
-        if picks.insert(resolution.entry_id, side).is_some() {
-            return Err(CliError::new(
-                "invalid_resolution",
-                6,
-                "resolution contains a duplicate entry UUID",
-            ));
+        let (map, expected, id) = match (resolution.entry_id, resolution.group_id) {
+            (Some(id), None) => (&mut picks.entries, expected_entries, id),
+            (None, Some(id)) => (&mut picks.groups, expected_groups, id),
+            _ => {
+                return Err(invalid(
+                    "each resolution needs exactly one of entry_id or group_id",
+                ));
+            }
+        };
+        if !expected.contains(&id) {
+            return Err(invalid("resolution contains an unknown UUID"));
+        }
+        if map.insert(id, side).is_some() {
+            return Err(invalid("resolution contains a duplicate UUID"));
         }
     }
-    if picks.len() != expected.len() {
+    if picks.entries.len() != expected_entries.len() || picks.groups.len() != expected_groups.len()
+    {
         return Err(CliError::new(
             "incomplete_resolution",
             6,
@@ -1269,35 +1305,52 @@ mod tests {
 
     #[test]
     fn sync_resolutions_require_one_known_unique_choice_per_conflict() {
-        let expected = ["entry-a".to_owned(), "entry-b".to_owned()]
-            .into_iter()
-            .collect();
+        let entries: std::collections::HashSet<String> =
+            ["entry-a".to_owned(), "entry-b".to_owned()]
+                .into_iter()
+                .collect();
+        let groups: std::collections::HashSet<String> =
+            ["group-a".to_owned()].into_iter().collect();
         let valid: SyncResolutions = serde_json::from_str(
-            r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"entry-b","keep":"remote"}]}"#,
+            r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"entry-b","keep":"remote"},{"group_id":"group-a","keep":"remote"}]}"#,
         )
         .unwrap();
-        let picks = validate_resolution_input(valid, &expected).unwrap();
-        assert_eq!(picks.len(), 2);
-        assert_eq!(picks["entry-a"], crate::keepass::merge::Side::Local);
-        assert_eq!(picks["entry-b"], crate::keepass::merge::Side::Remote);
+        let picks = validate_resolution_input(valid, &entries, &groups).unwrap();
+        assert_eq!(picks.entries.len(), 2);
+        assert_eq!(picks.entries["entry-a"], crate::keepass::merge::Side::Local);
+        assert_eq!(
+            picks.entries["entry-b"],
+            crate::keepass::merge::Side::Remote
+        );
+        assert_eq!(picks.groups["group-a"], crate::keepass::merge::Side::Remote);
 
         for (json, code) in [
             (
-                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"}]}"#,
+                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"entry-b","keep":"remote"}]}"#,
                 "incomplete_resolution",
             ),
             (
-                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"entry-a","keep":"remote"}]}"#,
+                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"entry-a","keep":"remote"},{"group_id":"group-a","keep":"local"}]}"#,
                 "invalid_resolution",
             ),
             (
-                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"unknown","keep":"remote"}]}"#,
+                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"entry_id":"unknown","keep":"remote"},{"group_id":"group-a","keep":"local"}]}"#,
+                "invalid_resolution",
+            ),
+            // A group id offered where an entry is expected must not resolve
+            // an entry conflict, and vice versa.
+            (
+                r#"{"resolutions":[{"entry_id":"group-a","keep":"local"},{"entry_id":"entry-b","keep":"remote"},{"group_id":"group-a","keep":"local"}]}"#,
+                "invalid_resolution",
+            ),
+            (
+                r#"{"resolutions":[{"entry_id":"entry-a","keep":"local"},{"keep":"remote"},{"group_id":"group-a","keep":"local"}]}"#,
                 "invalid_resolution",
             ),
         ] {
             let input = serde_json::from_str(json).unwrap();
             assert_eq!(
-                validate_resolution_input(input, &expected)
+                validate_resolution_input(input, &entries, &groups)
                     .unwrap_err()
                     .code,
                 code

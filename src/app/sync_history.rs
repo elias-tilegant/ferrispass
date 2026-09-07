@@ -14,11 +14,9 @@
 //! because the log's value is operational ("what just happened?"),
 //! not auditable history.
 
-use std::collections::HashMap;
-
 use chrono::{DateTime, Local};
 
-use crate::keepass::merge::{ConflictReport, Side};
+use crate::keepass::merge::{ConflictReport, Resolutions, Side};
 
 /// Cap on retained entries. Older ones are dropped when this is exceeded -
 /// per-vault sessions don't realistically accumulate more than this
@@ -67,7 +65,7 @@ impl std::fmt::Debug for SyncHistoryEntry {
 /// appended. Pure function - no `AppState`, fully unit-testable.
 pub fn entries_from_report(
     report: &ConflictReport,
-    picks: &HashMap<String, Side>,
+    picks: &Resolutions,
     now: DateTime<Local>,
 ) -> Vec<SyncHistoryEntry> {
     let mut out: Vec<SyncHistoryEntry> = Vec::new();
@@ -101,7 +99,12 @@ pub fn entries_from_report(
         // Title comes from the *chosen* side: if the user kept remote
         // and remote had a different title, the log line should show
         // the title the entry actually has post-merge.
-        let (kind, entry_title) = match picks.get(&conflict.id).copied().unwrap_or(Side::Local) {
+        let (kind, entry_title) = match picks
+            .entries
+            .get(&conflict.id)
+            .copied()
+            .unwrap_or(Side::Local)
+        {
             Side::Remote => (
                 SyncChangeKind::ResolvedKeptRemote,
                 conflict.remote.title.clone(),
@@ -161,7 +164,7 @@ mod tests {
             notes: String::new(),
             modified: None,
             tags: Vec::new(),
-            custom_data: HashMap::new(),
+            custom_data: std::collections::HashMap::new(),
             custom_fields: Vec::new(),
             autotype: None,
             foreground_color: None,
@@ -195,7 +198,7 @@ mod tests {
             remote_only: vec![view("a", "Bank")],
             ..Default::default()
         };
-        let entries = entries_from_report(&report, &HashMap::new(), fixed_now());
+        let entries = entries_from_report(&report, &Resolutions::default(), fixed_now());
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].kind, SyncChangeKind::AddedFromRemote);
         assert_eq!(entries[0].entry_title, "Bank");
@@ -218,7 +221,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let entries = entries_from_report(&report, &HashMap::new(), fixed_now());
+        let entries = entries_from_report(&report, &Resolutions::default(), fixed_now());
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].kind, SyncChangeKind::UpdatedFromRemote);
         assert_eq!(entries[0].entry_title, "Email");
@@ -247,11 +250,11 @@ mod tests {
             ],
             ..Default::default()
         };
-        let picks = HashMap::from([
+        let picks = std::collections::HashMap::from([
             ("c1".to_string(), Side::Remote),
             ("c2".to_string(), Side::Local),
         ]);
-        let entries = entries_from_report(&report, &picks, fixed_now());
+        let entries = entries_from_report(&report, &Resolutions::for_entries(picks), fixed_now());
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].kind, SyncChangeKind::ResolvedKeptRemote);
         assert_eq!(entries[0].entry_title, "Alpha (remote)");
@@ -270,7 +273,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let entries = entries_from_report(&report, &HashMap::new(), fixed_now());
+        let entries = entries_from_report(&report, &Resolutions::default(), fixed_now());
         assert_eq!(entries[0].kind, SyncChangeKind::ResolvedKeptLocal);
     }
 

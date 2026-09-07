@@ -17,11 +17,11 @@ use gpui::{
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 
 use crate::app::SyncStatus;
-use crate::keepass::merge::{EntryConflict, EntryView, FieldDiff, Side};
+use crate::keepass::merge::{ConflictKind, EntryConflict, EntryView, FieldDiff, Side};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
-use crate::ui::widgets::atoms::{ChipTone, chip};
+use crate::ui::widgets::atoms::{ChipTone, chip, plural};
 use crate::ui::widgets::interaction::Interaction as _;
 
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
@@ -35,6 +35,7 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         SyncStatus::Conflict(state) => {
             let snapshot = ConflictSnapshot {
                 conflicts: state.report.conflicts.clone(),
+                group_conflicts: state.report.group_conflicts.clone(),
                 local_only_count: state.report.local_only.len(),
                 remote_only_count: state.report.remote_only.len(),
                 future_dated_count: state.report.future_dated.len(),
@@ -145,11 +146,17 @@ fn transitional_screen(
 }
 
 fn header(snapshot: &ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement {
-    let n = snapshot.conflicts.len();
-    let title = if n == 1 {
-        "Sync conflict on 1 entry".to_string()
-    } else {
-        format!("Sync conflict on {n} entries")
+    let entries = snapshot.conflicts.len();
+    let groups = snapshot.group_conflicts.len();
+    let title = match (entries, groups) {
+        (1, 0) => "Sync conflict on 1 entry".to_string(),
+        (n, 0) => format!("Sync conflict on {n} entries"),
+        (0, 1) => "Sync conflict on 1 group".to_string(),
+        (0, n) => format!("Sync conflict on {n} groups"),
+        (e, g) => format!(
+            "Sync conflict on {}",
+            [plural(e, "entry", "entries"), plural(g, "group", "groups")].join(" and ")
+        ),
     };
     let mut subtitle_parts = Vec::new();
     if snapshot.local_only_count > 0 {
@@ -251,7 +258,7 @@ fn header(snapshot: &ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement
 }
 
 fn body(snapshot: ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement {
-    if snapshot.conflicts.is_empty() {
+    if snapshot.conflicts.is_empty() && snapshot.group_conflicts.is_empty() {
         // Edge case: report is non-empty (remote_only > 0) but no per-entry
         // conflicts. Just show a "ready to merge" prompt + the auto-merge
         // counts. User clicks Apply to commit.
@@ -268,7 +275,7 @@ fn body(snapshot: ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement {
                     .border_color(palette::border())
                     .text_sm()
                     .text_color(palette::text())
-                    .child("No per-entry conflicts. Click Apply to push the auto-merged result."),
+                    .child("Nothing left to decide. Click Apply to push the auto-merged result."),
             )
             .into_any_element();
     }
@@ -281,9 +288,21 @@ fn body(snapshot: ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement {
         .gap_5()
         .p_6();
 
+    // Groups first: a group decides where entries live and what they are
+    // called, so resolving it changes how the entry rows below read.
+    for conflict in snapshot.group_conflicts {
+        let pick = snapshot
+            .picks
+            .groups
+            .get(&conflict.id)
+            .copied()
+            .unwrap_or(Side::Local);
+        col = col.child(group_conflict_block(conflict, pick, cx));
+    }
     for conflict in snapshot.conflicts {
         let pick = snapshot
             .picks
+            .entries
             .get(&conflict.id)
             .copied()
             .unwrap_or(Side::Local);
@@ -293,15 +312,109 @@ fn body(snapshot: ConflictSnapshot, cx: &mut Context<AppShell>) -> AnyElement {
     col.into_any_element()
 }
 
+/// One group's two columns. Same shape as an entry conflict, minus the
+/// password redaction it has no field for, plus the path, because two groups
+/// can share a name and the user has to know which one they are deciding.
+fn group_conflict_block(
+    conflict: crate::keepass::merge::GroupConflict,
+    pick: Side,
+    cx: &mut Context<AppShell>,
+) -> AnyElement {
+    let subtitle = if conflict.path.is_empty() {
+        conflict.name.clone()
+    } else {
+        format!("{} > {}", conflict.path.join(" > "), conflict.name)
+    };
+    let rows = |side: Side| -> Vec<ConflictRow> {
+        conflict
+            .fields
+            .iter()
+            .map(|field| ConflictRow {
+                label: field.label,
+                value: match side {
+                    Side::Local => field.local.clone(),
+                    Side::Remote => field.remote.clone(),
+                },
+                differs: field.differs,
+            })
+            .collect()
+    };
+    v_flex()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(palette::text_muted())
+                .child(format!("Group · {subtitle}")),
+        )
+        .child(
+            h_flex()
+                .gap_3p5()
+                .child(column(
+                    "This Mac",
+                    "Local",
+                    &rows(Side::Local),
+                    None,
+                    pick == Side::Local,
+                    ConflictKind::Group,
+                    conflict.id.clone(),
+                    Side::Local,
+                    cx,
+                ))
+                .child(column(
+                    "SharePoint",
+                    "Remote",
+                    &rows(Side::Remote),
+                    None,
+                    pick == Side::Remote,
+                    ConflictKind::Group,
+                    conflict.id.clone(),
+                    Side::Remote,
+                    cx,
+                )),
+        )
+        .into_any_element()
+}
+
+/// One labelled row of a conflict column, already reduced to the string the
+/// screen shows. Entry rows redact the password before it gets here.
+struct ConflictRow {
+    label: &'static str,
+    value: String,
+    differs: bool,
+}
+
 fn conflict_block(conflict: EntryConflict, pick: Side, cx: &mut Context<AppShell>) -> AnyElement {
+    // The value comes from the side being rendered, and the password is
+    // redacted from that side's own view, so each column is built separately.
+    let local_rows: Vec<ConflictRow> = conflict
+        .fields
+        .iter()
+        .map(|field| ConflictRow {
+            label: field.label,
+            value: conflict_field_value(&conflict.local, field, Side::Local).into_owned(),
+            differs: field.differs,
+        })
+        .collect();
+    let remote_rows: Vec<ConflictRow> = conflict
+        .fields
+        .iter()
+        .map(|field| ConflictRow {
+            label: field.label,
+            value: conflict_field_value(&conflict.remote, field, Side::Remote).into_owned(),
+            differs: field.differs,
+        })
+        .collect();
     h_flex()
         .gap_3p5()
         .child(column(
             "This Mac",
             "Local",
-            &conflict.local,
-            &conflict.fields,
+            &local_rows,
+            conflict.local.modified,
             pick == Side::Local,
+            ConflictKind::Entry,
             conflict.id.clone(),
             Side::Local,
             cx,
@@ -309,9 +422,10 @@ fn conflict_block(conflict: EntryConflict, pick: Side, cx: &mut Context<AppShell
         .child(column(
             "SharePoint",
             "Remote",
-            &conflict.remote,
-            &conflict.fields,
+            &remote_rows,
+            conflict.remote.modified,
             pick == Side::Remote,
+            ConflictKind::Entry,
             conflict.id.clone(),
             Side::Remote,
             cx,
@@ -323,9 +437,10 @@ fn conflict_block(conflict: EntryConflict, pick: Side, cx: &mut Context<AppShell
 fn column(
     title: &'static str,
     device: &'static str,
-    view: &EntryView,
-    fields: &[FieldDiff],
+    fields: &[ConflictRow],
+    modified: Option<chrono::NaiveDateTime>,
     selected: bool,
+    kind: ConflictKind,
     entry_id: String,
     side: Side,
     cx: &mut Context<AppShell>,
@@ -344,9 +459,8 @@ fn column(
     // near-white while the text on it is near-white too, which made the
     // differing fields, the entire point of this screen, unreadable.
     let highlight_bg = palette::orange_soft();
-    let modified = view
-        .modified
-        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+    let modified = modified
+        .map(|at| at.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "-".into());
     let entry_id_for_click = entry_id;
 
@@ -434,14 +548,14 @@ fn column(
         .on_click(
             cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
                 shell.state().clone().update(cx, |state, cx| {
-                    state.set_conflict_pick(&entry_id_for_click, side, cx);
+                    state.set_conflict_pick(kind, &entry_id_for_click, side, cx);
                 });
             }),
         );
 
     for (i, f) in fields.iter().enumerate() {
         let last = i == fields.len() - 1;
-        let value = conflict_field_value(view, f, side);
+        let value = f.value.as_str();
         let chip_el = if f.differs {
             Some(chip("Differs", ChipTone::Orange))
         } else if !value.is_empty() {
@@ -479,7 +593,7 @@ fn column(
                         } else {
                             "JetBrains Mono"
                         })
-                        .child(value.into_owned()),
+                        .child(value.to_owned()),
                 ),
         );
     }
@@ -609,13 +723,14 @@ fn cancel_button(cx: &mut Context<AppShell>) -> AnyElement {
 /// the `Context<AppShell>` we hand to button listeners.
 struct ConflictSnapshot {
     conflicts: Vec<EntryConflict>,
+    group_conflicts: Vec<crate::keepass::merge::GroupConflict>,
     local_only_count: usize,
     remote_only_count: usize,
     /// How many of these entries carry a modification time nobody could have
     /// written yet. Anyone who can write the shared file can set one, so the
     /// user has to be told why the decision landed here.
     future_dated_count: usize,
-    picks: std::collections::HashMap<String, Side>,
+    picks: crate::keepass::merge::Resolutions,
 }
 
 #[cfg(test)]

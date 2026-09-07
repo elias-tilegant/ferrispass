@@ -158,6 +158,43 @@ pub struct EntryConflict {
     pub fields: Vec<FieldDiff>,
 }
 
+/// A group whose user-authored content diverged in a way no timestamp can
+/// settle: both sides carry the same modification time, one carries none, or
+/// one carries a time nobody could have written yet.
+///
+/// Groups have no last-write-wins path of their own. The fork merges them by
+/// timestamp, which is exactly what a tie or a forged future date defeats, so
+/// these have to reach the user the same way entry conflicts do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupConflict {
+    pub id: String,
+    /// The local name, which is what the row is labelled with.
+    pub name: String,
+    /// Ancestor names, root first. Two groups can share a name, and the user
+    /// has to know which one they are deciding about.
+    pub path: Vec<String>,
+    pub fields: Vec<FieldDiff>,
+}
+
+/// The user's choices, by kind.
+///
+/// Two maps rather than one: entry and group ids are independent id spaces,
+/// and a lookup for one must never be answered by the other.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Resolutions {
+    pub entries: HashMap<String, Side>,
+    pub groups: HashMap<String, Side>,
+}
+
+impl Resolutions {
+    pub fn for_entries(entries: HashMap<String, Side>) -> Self {
+        Self {
+            entries,
+            groups: HashMap::new(),
+        }
+    }
+}
+
 /// One entry that diverged but was auto-resolved by `last_modification`
 /// timestamp - the side with the strictly newer timestamp wins, no UI
 /// prompt. `apply_picks` replays these alongside the user's manual picks
@@ -203,12 +240,9 @@ pub struct ConflictReport {
     /// result has something to write to disk even when no current field
     /// changed.
     pub remote_history_ahead: bool,
-    /// Names of groups that differ in user-authored content on both sides
-    /// with the same modification timestamp. Groups have no conflict overlay
-    /// and no timestamp to decide by, so there is no way to merge these
-    /// without discarding one side's edit. `apply_picks` refuses rather than
-    /// picking; the names are here so the refusal can say which group.
-    pub groups_tied_and_diverged: Vec<String>,
+    /// Groups the user must decide, for the same reason entries reach
+    /// `conflicts`: their content diverged and no timestamp can rank them.
+    pub group_conflicts: Vec<GroupConflict>,
 }
 
 impl ConflictReport {
@@ -227,6 +261,15 @@ impl ConflictReport {
             && !self.remote_history_ahead
         // `local_only` doesn't dirty the merge: those entries are already in
         // the local DB we'll start the merge from.
+    }
+
+    /// True when this merge cannot be applied without asking the user.
+    ///
+    /// Both kinds count. Applying a report with an unanswered conflict of
+    /// either kind takes the default side and uploads it, which is the
+    /// silent loss the conflict screen exists to prevent.
+    pub fn needs_a_decision(&self) -> bool {
+        !self.conflicts.is_empty() || !self.group_conflicts.is_empty()
     }
 
     /// True when applying this report changes the *remote* - i.e. the local
@@ -256,6 +299,14 @@ pub enum Side {
     Remote,
 }
 
+/// What a conflict row is about. Entry and group ids are separate spaces, so
+/// a pick has to say which one it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ConflictKind {
+    Entry,
+    Group,
+}
+
 /// A merge was refused because it could not be completed without either data
 /// loss or guessing. Callers should keep both original databases untouched and
 /// surface the error as a sync conflict/failure.
@@ -271,21 +322,8 @@ pub enum ApplyError {
     DatabaseMerge(String),
     #[error("keepass database merge completed with unresolved warnings: {0}")]
     DatabaseMergeWarnings(String),
-    #[error(
-        "group {names} changed on both machines with the same timestamp; \
-         rename or edit it here, then sync again"
-    )]
-    GroupTieDiverged { names: String },
-}
-
-impl ApplyError {
-    /// True when retrying the same two files cannot produce a different
-    /// result. Auto-sync's failure recovery re-uploads the whole vault every
-    /// tick, which for these costs a full upload and a full download to fail
-    /// in exactly the same way. Only a local change can resolve them.
-    pub fn needs_a_local_change(&self) -> bool {
-        matches!(self, ApplyError::GroupTieDiverged { .. })
-    }
+    #[error("{side:?} group {id} referenced by the conflict report no longer exists")]
+    GroupMissing { id: String, side: Side },
 }
 
 /// Build a `ConflictReport` between two unlocked databases.
@@ -336,7 +374,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         }
     }
 
-    let groups_tied_and_diverged = tied_group_content_divergences(local, remote);
+    let group_conflicts = group_conflicts(local, remote);
     let history = history_divergence(local, remote);
 
     let mut local_only: Vec<EntryView> = local_ids
@@ -367,7 +405,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
         structural_writeback_required: structural_state_differs(local, remote),
         local_history_ahead: history.local_ahead,
         remote_history_ahead: history.remote_ahead,
-        groups_tied_and_diverged,
+        group_conflicts,
     }
 }
 
@@ -614,23 +652,10 @@ fn resolution_time(candidates: [Option<NaiveDateTime>; 2]) -> NaiveDateTime {
 pub fn apply_picks(
     local: &Database,
     remote: &Database,
-    picks: &HashMap<String, Side>,
+    picks: &Resolutions,
     report: &ConflictReport,
 ) -> Result<Database, ApplyError> {
     preflight_fidelity(local, remote)?;
-    // No overlay, no timestamp, no way to keep both: merging here would
-    // overwrite the other machine's group name, notes, tags or settings on
-    // the next upload, and the user would never learn it happened.
-    if !report.groups_tied_and_diverged.is_empty() {
-        return Err(ApplyError::GroupTieDiverged {
-            names: report
-                .groups_tied_and_diverged
-                .iter()
-                .map(|name| format!("\"{name}\""))
-                .collect::<Vec<_>>()
-                .join(", "),
-        });
-    }
 
     let mut merged = local.clone();
     let mut source = remote.clone();
@@ -638,8 +663,23 @@ pub fn apply_picks(
     // Only genuinely ambiguous entries appear here. Timestamp-resolved rows
     // and one-sided additions are handled natively by Database::merge.
     for conflict in &report.conflicts {
-        let side = picks.get(&conflict.id).copied().unwrap_or(Side::Local);
+        let side = picks
+            .entries
+            .get(&conflict.id)
+            .copied()
+            .unwrap_or(Side::Local);
         force_manual_winner(&mut merged, &mut source, &conflict.id, side)?;
+    }
+    // Groups the same way. Without this the fork ranks them by timestamp,
+    // which is exactly what a tie or a future date defeats, and the losing
+    // side's name, notes, tags or settings are gone on the next upload.
+    for conflict in &report.group_conflicts {
+        let side = picks
+            .groups
+            .get(&conflict.id)
+            .copied()
+            .unwrap_or(Side::Local);
+        force_group_winner(&mut merged, &mut source, &conflict.id, side)?;
     }
     for resolved in &report.auto_resolved {
         preserve_auto_resolved_history(&mut merged, &mut source, resolved)?;
@@ -883,21 +923,106 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
 /// whose pre-0.7 saves stripped the field), otherwise the local (merged)
 /// representation wins. Pairs whose timestamps differ are left alone -
 /// the fork resolves those wholesale by the newer side.
-/// Groups whose user-authored content differs on both sides with the same
-/// modification timestamp. There is nothing to decide by, so the merge
-/// refuses instead of silently keeping one side.
-fn tied_group_content_divergences(local: &Database, remote: &Database) -> Vec<String> {
-    let mut names: Vec<String> = local
+/// Groups whose user-authored content diverged and whose timestamps cannot
+/// rank them: tied, missing, or implausibly far in the future.
+///
+/// The future case matters as much as the tie. Group content has no
+/// last-write-wins path in this module at all; the fork merges groups by
+/// timestamp, so anyone who can write the shared file could stamp a group
+/// rename with the year 2099 and have it replace everyone else's, with
+/// nothing shown to anyone. Ranked timestamps are left to the fork.
+fn group_conflicts(local: &Database, remote: &Database) -> Vec<GroupConflict> {
+    let mut conflicts: Vec<GroupConflict> = local
         .iter_all_groups()
         .filter_map(|local_group| {
             let remote_group = remote.group(local_group.id())?;
-            let tied = local_group.times.last_modification == remote_group.times.last_modification;
-            (tied && group_content_differs(&local_group, &remote_group))
-                .then(|| local_group.name.clone())
+            if !group_content_differs(&local_group, &remote_group) {
+                return None;
+            }
+            timestamp_winner(
+                local_group.times.last_modification,
+                remote_group.times.last_modification,
+            )
+            .is_none()
+            .then(|| GroupConflict {
+                id: local_group.id().to_string(),
+                name: local_group.name.clone(),
+                path: group_ancestry(local, local_group.id()),
+                fields: group_field_diffs(&local_group, &remote_group),
+            })
         })
         .collect();
-    names.sort();
-    names
+    conflicts.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    conflicts
+}
+
+/// Ancestor names from the root down, excluding the group itself. Two groups
+/// can share a name, and a conflict row that only says "Banking" does not
+/// tell the user which one they are deciding about.
+fn group_ancestry(db: &Database, id: GroupId) -> Vec<String> {
+    let mut path = Vec::new();
+    let mut next = db
+        .group(id)
+        .and_then(|group| group.parent().map(|p| p.id()));
+    while let Some(parent_id) = next {
+        let Some(parent) = db.group(parent_id) else {
+            break;
+        };
+        path.push(parent.name.clone());
+        next = parent.parent().map(|p| p.id());
+    }
+    path.reverse();
+    path
+}
+
+/// The rows the conflict screen shows for a group. Same shape as the entry
+/// rows so the overlay renders both through one path.
+fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDiff> {
+    fn row(label: &'static str, local: String, remote: String) -> FieldDiff {
+        FieldDiff {
+            differs: local != remote,
+            label,
+            local,
+            remote,
+        }
+    }
+    fn optional(value: Option<&String>) -> String {
+        value.cloned().unwrap_or_default()
+    }
+    fn tri_state(value: Option<bool>) -> String {
+        match value {
+            Some(true) => "Yes".into(),
+            Some(false) => "No".into(),
+            None => "Inherited".into(),
+        }
+    }
+    vec![
+        row("Name", local.name.clone(), remote.name.clone()),
+        row(
+            "Notes",
+            optional(local.notes.as_ref()),
+            optional(remote.notes.as_ref()),
+        ),
+        row("Tags", local.tags.join(", "), remote.tags.join(", ")),
+        row(
+            "Auto-Type sequence",
+            optional(local.default_autotype_sequence.as_ref()),
+            optional(remote.default_autotype_sequence.as_ref()),
+        ),
+        row(
+            "Auto-Type enabled",
+            tri_state(local.enable_autotype),
+            tri_state(remote.enable_autotype),
+        ),
+        row(
+            "Searchable",
+            tri_state(local.enable_searching),
+            tri_state(remote.enable_searching),
+        ),
+    ]
+    .into_iter()
+    .filter(|diff| diff.differs)
+    .collect()
 }
 
 /// Content the user authored, as opposed to view state a client may rewrite
@@ -1047,6 +1172,99 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
                 group.times.last_modification = Some(Times::epoch());
             }
         }
+    }
+}
+
+/// Settle one group conflict by copying the chosen content onto the merged
+/// database and demoting the other side, so the fork's timestamp-ranked merge
+/// cannot overrule the user's choice.
+///
+/// There is no history to preserve the loser in: KDBX archives entry versions,
+/// not group versions. The losing content is genuinely discarded, which is
+/// exactly why this is asked rather than decided.
+fn force_group_winner(
+    merged: &mut Database,
+    source: &mut Database,
+    raw_id: &str,
+    winner: Side,
+) -> Result<(), ApplyError> {
+    let group_id = find_group_id(merged, raw_id).ok_or_else(|| ApplyError::GroupMissing {
+        id: raw_id.to_string(),
+        side: Side::Local,
+    })?;
+    let source_id = find_group_id(source, raw_id).ok_or_else(|| ApplyError::GroupMissing {
+        id: raw_id.to_string(),
+        side: Side::Remote,
+    })?;
+
+    if matches!(winner, Side::Remote) {
+        let Some(chosen) = source.group(source_id) else {
+            return Err(ApplyError::GroupMissing {
+                id: raw_id.to_string(),
+                side: Side::Remote,
+            });
+        };
+        let content = GroupContent::of(&chosen);
+        let Some(mut target) = merged.group_mut(group_id) else {
+            return Err(ApplyError::GroupMissing {
+                id: raw_id.to_string(),
+                side: Side::Local,
+            });
+        };
+        content.write_to(&mut target);
+    }
+
+    let winner_time = resolution_time([
+        merged
+            .group(group_id)
+            .and_then(|group| group.times.last_modification),
+        source
+            .group(source_id)
+            .and_then(|group| group.times.last_modification),
+    ]);
+    if let Some(mut group) = merged.group_mut(group_id) {
+        group.times.last_modification = Some(winner_time);
+    }
+    if let Some(mut group) = source.group_mut(source_id) {
+        group.times.last_modification = Some(Times::epoch());
+    }
+    Ok(())
+}
+
+/// The user-authored half of a group, the same set `group_content_differs`
+/// compares. Kept as an owned snapshot so the read and the write can borrow
+/// two different databases in turn.
+struct GroupContent {
+    name: String,
+    notes: Option<String>,
+    custom_data: std::collections::HashMap<String, CustomDataItem>,
+    tags: Vec<String>,
+    default_autotype_sequence: Option<String>,
+    enable_autotype: Option<bool>,
+    enable_searching: Option<bool>,
+}
+
+impl GroupContent {
+    fn of(group: &GroupRef<'_>) -> Self {
+        Self {
+            name: group.name.clone(),
+            notes: group.notes.clone(),
+            custom_data: group.custom_data.clone(),
+            tags: group.tags.clone(),
+            default_autotype_sequence: group.default_autotype_sequence.clone(),
+            enable_autotype: group.enable_autotype,
+            enable_searching: group.enable_searching,
+        }
+    }
+
+    fn write_to(self, group: &mut keepass::db::GroupMut<'_>) {
+        group.name = self.name;
+        group.notes = self.notes;
+        group.custom_data = self.custom_data;
+        group.tags = self.tags;
+        group.default_autotype_sequence = self.default_autotype_sequence;
+        group.enable_autotype = self.enable_autotype;
+        group.enable_searching = self.enable_searching;
     }
 }
 
@@ -1545,7 +1763,7 @@ mod tests {
             .previous_parent_group = Some(remote_root);
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("previous-parent metadata must not block the merge");
         assert_eq!(
             merged
@@ -1569,7 +1787,7 @@ mod tests {
         remote.entry_mut(id).expect("remote entry").set_icon_none();
 
         let report = diff(&local, &remote);
-        apply_picks(&local, &remote, &HashMap::new(), &report)
+        apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("default-icon spelling must not block the merge");
     }
 
@@ -1595,7 +1813,7 @@ mod tests {
             .is_expanded = false;
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("tied group view-state divergence must not block the merge");
         assert!(
             merged.group(group_id).expect("merged group").is_expanded,
@@ -1797,7 +2015,7 @@ mod tests {
         assert_eq!(report.auto_resolved[0].winner, Side::Remote);
         assert!(!report.is_clean(), "auto-resolved still requires writeback");
 
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("newer remote should merge");
         let merged_notes = merged
             .iter_all_entries()
@@ -1836,7 +2054,7 @@ mod tests {
         assert_eq!(report.auto_resolved.len(), 1);
         assert_eq!(report.auto_resolved[0].winner, Side::Local);
 
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("newer local should merge");
         let merged_url = merged
             .iter_all_entries()
@@ -1918,7 +2136,7 @@ mod tests {
 
         let report = diff(&local, &remote);
         // No picks supplied → defaults to Local → password unchanged.
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("default local pick should merge");
         let entry = merged.entry(id).unwrap();
         assert_eq!(entry.get_password(), Some("local-pw"));
@@ -1938,8 +2156,8 @@ mod tests {
         let mut picks = HashMap::new();
         picks.insert(id.to_string(), Side::Remote);
 
-        let merged =
-            apply_picks(&local, &remote, &picks, &report).expect("remote pick should merge");
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
+            .expect("remote pick should merge");
         let entry = merged.entry(id).unwrap();
         assert_eq!(entry.get_password(), Some("remote-pw"));
     }
@@ -1951,7 +2169,7 @@ mod tests {
         let remote_id = add(&mut remote, "NewRemote", "remote-secret");
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("remote-only entry should merge");
 
         // UUID preservation regression test (bug fixed in v0.2.1): the
@@ -2006,8 +2224,8 @@ mod tests {
         // including the tags.
         let mut picks = HashMap::new();
         picks.insert(id.to_string(), Side::Remote);
-        let merged =
-            apply_picks(&local, &remote, &picks, &report).expect("remote tags should merge");
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
+            .expect("remote tags should merge");
 
         let entry = merged.entry(id).unwrap();
         assert_eq!(entry.get_password(), Some("remote-pw"));
@@ -2063,7 +2281,7 @@ mod tests {
         let report = diff(&local, &remote);
         let mut picks = HashMap::new();
         picks.insert(id.to_string(), Side::Remote);
-        let merged = apply_picks(&local, &remote, &picks, &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
             .expect("remote custom fields should merge");
         let entry = merged.entry(id).unwrap();
 
@@ -2110,8 +2328,8 @@ mod tests {
         assert!(!otp.remote.contains("REMOTE"));
 
         let picks = HashMap::from([(id.to_string(), Side::Remote)]);
-        let merged =
-            apply_picks(&local, &remote, &picks, &report).expect("OTP-aware merge should succeed");
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
+            .expect("OTP-aware merge should succeed");
         let entry = merged.entry(id).unwrap();
         let field = entry.fields.get(fields::OTP).unwrap();
         assert_eq!(field.get(), "otpauth://totp/GitHub:alice?secret=REMOTE");
@@ -2145,7 +2363,7 @@ mod tests {
         );
 
         let picks = HashMap::from([(id.to_string(), Side::Remote)]);
-        let merged = apply_picks(&local, &remote, &picks, &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
             .expect("protection-aware merge should succeed");
         let entry = merged.entry(id).unwrap();
         let field = entry.fields.get("API_TOKEN").unwrap();
@@ -2169,7 +2387,7 @@ mod tests {
         };
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("remote group tree should merge");
 
         assert_eq!(merged.group(group_id).unwrap().name, "Infrastructure");
@@ -2184,7 +2402,7 @@ mod tests {
         remote.entry_mut(id).unwrap().track_changes().remove();
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("tombstone-aware merge should succeed");
         assert!(merged.entry(id).is_none());
         assert!(merged.deleted_objects.contains_key(&id.uuid()));
@@ -2202,7 +2420,7 @@ mod tests {
             report.has_local_contribution(),
             "a local tombstone must force upload of the merged result"
         );
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("newer local tombstone should merge");
         assert!(merged.entry(id).is_none());
         assert!(merged.deleted_objects.contains_key(&id.uuid()));
@@ -2237,7 +2455,7 @@ mod tests {
             .set_protected(fields::PASSWORD, "remote-current");
         let report = diff(&local, &remote);
         let picks = HashMap::from([(id.to_string(), Side::Remote)]);
-        let merged = apply_picks(&local, &remote, &picks, &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
             .expect("history-aware merge should succeed");
 
         let entry = merged.entry(id).unwrap();
@@ -2266,7 +2484,7 @@ mod tests {
 
         let report = diff(&local, &remote);
         let picks = HashMap::from([(id.to_string(), Side::Local)]);
-        let merged = apply_picks(&local, &remote, &picks, &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
             .expect("the locally selected attachment must survive the merge");
 
         let entry = merged.entry(id).unwrap();
@@ -2301,7 +2519,7 @@ mod tests {
         );
 
         let picks = HashMap::from([(id.to_string(), Side::Remote)]);
-        let merged = apply_picks(&local, &remote, &picks, &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
             .expect("remote attachment bytes must be selectable");
         let entry = merged.entry(id).unwrap();
         let attachment = entry.attachment_by_name("secret.bin").unwrap();
@@ -2332,7 +2550,7 @@ mod tests {
         let report = diff(&local, &remote);
         assert_eq!(report.conflicts.len(), 1);
         let picks = HashMap::from([(id.to_string(), Side::Remote)]);
-        let merged = apply_picks(&local, &remote, &picks, &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
             .expect("attachment rename must be mergeable");
         let entry = merged.entry(id).unwrap();
         assert!(entry.attachment_by_name("old.bin").is_none());
@@ -2358,7 +2576,7 @@ mod tests {
 
         let report = diff(&local, &remote);
         let picks = HashMap::from([(id.to_string(), Side::Remote)]);
-        let merged = apply_picks(&local, &remote, &picks, &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
             .expect("identical attachment stores must not block conflict resolution");
 
         assert_eq!(merged.num_attachments(), 1);
@@ -2519,7 +2737,7 @@ mod tests {
         }));
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("resolved move and history must not make timestamp warning fatal");
         let entry = merged.entry(entry_id).unwrap();
         assert_eq!(entry.parent().id(), target_id);
@@ -2564,8 +2782,13 @@ mod tests {
             entry: entry_id,
         }));
 
-        let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
-            .expect_err("an unorderable move must remain fail-closed");
+        let error = apply_picks(
+            &local,
+            &remote,
+            &Resolutions::default(),
+            &diff(&local, &remote),
+        )
+        .expect_err("an unorderable move must remain fail-closed");
         assert!(matches!(
             error,
             ApplyError::DatabaseMergeWarnings(message)
@@ -2599,13 +2822,13 @@ mod tests {
         }));
 
         let report = diff(&local, &remote);
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("group membership must not make timestamp warning fatal");
         assert_eq!(merged.entry(child_id).unwrap().parent().id(), group_id);
     }
 
     #[test]
-    fn missing_group_timestamp_with_divergent_content_remains_fatal() {
+    fn missing_group_timestamp_with_divergent_content_is_a_question() {
         let mut local = Database::new();
         let group_id = {
             let mut root = local.root_mut();
@@ -2624,13 +2847,19 @@ mod tests {
             group: group_id,
         }));
 
-        let error = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
-            .expect_err("divergent current group content must stay fatal");
-        assert!(matches!(
-            error,
-            ApplyError::DatabaseMergeWarnings(message)
-                if message.contains(&group_id.to_string())
-        ));
+        // A missing timestamp cannot rank the two sides, so this is a
+        // question, not a wedge. It used to be fatal, which meant sync
+        // stopped for good against a vault some other client wrote without
+        // timestamps.
+        let report = diff(&local, &remote);
+        assert_eq!(report.group_conflicts.len(), 1);
+        let merged =
+            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
+        assert_eq!(
+            merged.group(group_id).expect("group").name,
+            "Local name",
+            "and the default keeps this machine's version"
+        );
 
         // An id neither side carries remains fail-closed as well: the
         // equivalence check cannot confirm anything about an object it
@@ -2670,8 +2899,13 @@ mod tests {
             .set_icon_custom_new(image.clone());
         remote.entry_mut(id).unwrap().times.last_modification = Some(newer);
 
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
-            .expect("a remote icon is merged, not refused");
+        let merged = apply_picks(
+            &local,
+            &remote,
+            &Resolutions::default(),
+            &diff(&local, &remote),
+        )
+        .expect("a remote icon is merged, not refused");
 
         let entry = merged.entry(id).expect("entry survives");
         assert_eq!(
@@ -2738,7 +2972,8 @@ mod tests {
         let report = diff(&local, &remote);
         assert_eq!(report.conflicts.len(), 1, "tied timestamps ask");
         let picks = HashMap::from([(id.to_string(), Side::Local)]);
-        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
+            .expect("resolvable");
 
         let resolved = merged
             .entry(id)
@@ -2776,7 +3011,8 @@ mod tests {
 
         let report = diff(&local, &remote);
         let picks = HashMap::from([(id.to_string(), Side::Local)]);
-        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        let merged = apply_picks(&local, &remote, &Resolutions::for_entries(picks), &report)
+            .expect("resolvable");
 
         let resolved = merged
             .entry(id)
@@ -2968,12 +3204,12 @@ mod tests {
         );
     }
 
-    /// A group renamed on both machines in the same second has no overlay and
-    /// no timestamp to decide by. The merge used to keep the local name and
-    /// bump its timestamp, so the next upload deleted the other user's rename
-    /// with only a line in a session-scoped log to show for it.
+    /// The silent auto-merge path runs when nothing needs deciding, and it
+    /// applies the default side. Letting a group conflict through there
+    /// would upload that default over the other machine's version with no
+    /// overlay and no log line.
     #[test]
-    fn a_tied_group_content_divergence_blocks_the_merge() {
+    fn a_group_conflict_alone_still_needs_a_decision() {
         let mut local = Database::new();
         let group_id = {
             let mut root = local.root_mut();
@@ -2983,31 +3219,25 @@ mod tests {
         };
         let tied = keepass::db::Times::now();
         local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
-
         let mut remote = fork(&local);
         remote.group_mut(group_id).unwrap().name = "Finance".to_string();
         remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
 
         let report = diff(&local, &remote);
-        assert_eq!(report.groups_tied_and_diverged, vec!["Banking".to_string()]);
 
-        let error = apply_picks(&local, &remote, &HashMap::new(), &report)
-            .expect_err("neither name may be discarded");
-        assert!(matches!(error, ApplyError::GroupTieDiverged { .. }));
+        assert!(report.conflicts.is_empty(), "no entry diverged");
         assert!(
-            error.to_string().contains("Banking"),
-            "the message names the group the user has to resolve: {error}"
-        );
-        assert!(
-            error.needs_a_local_change(),
-            "retrying the same two files fails identically"
+            report.needs_a_decision(),
+            "and the group still has to reach the user"
         );
     }
 
-    /// Breaking the tie is the user's way out, so an edit on either side has
-    /// to unblock the merge without further ceremony.
+    /// A group renamed on both machines in the same second has no timestamp
+    /// to decide by. The merge used to keep the local name and bump its
+    /// timestamp, so the next upload deleted the other user's rename with
+    /// only a line in a session-scoped log to show for it.
     #[test]
-    fn editing_the_group_locally_unblocks_the_merge() {
+    fn a_tied_group_content_divergence_is_a_conflict_the_user_decides() {
         let mut local = Database::new();
         let group_id = {
             let mut root = local.root_mut();
@@ -3022,15 +3252,128 @@ mod tests {
         remote.group_mut(group_id).unwrap().name = "Finance".to_string();
         remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
 
-        // What renaming the group in FerrisPass does: a newer timestamp.
-        local.group_mut(group_id).unwrap().times.last_modification =
-            Some(tied + chrono::TimeDelta::seconds(1));
+        let report = diff(&local, &remote);
+        assert_eq!(report.group_conflicts.len(), 1);
+        let conflict = &report.group_conflicts[0];
+        assert_eq!(conflict.name, "Banking");
+        assert!(
+            conflict.fields.iter().any(|field| field.label == "Name"
+                && field.local == "Banking"
+                && field.remote == "Finance"),
+            "the row shows what each side holds: {:?}",
+            conflict.fields
+        );
+
+        // Keeping the remote name applies it, and the result outranks both.
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::from([(conflict.id.clone(), Side::Remote)]),
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+        assert_eq!(merged.group(group_id).expect("group").name, "Finance");
+        assert!(
+            merged
+                .group(group_id)
+                .and_then(|group| group.times.last_modification)
+                .is_some_and(|at| at > tied),
+            "the resolution has to outrank the versions it replaces"
+        );
+    }
+
+    /// The default side is Local, matching the entry rows, and it has to
+    /// actually hold against the fork's timestamp-ranked group merge.
+    #[test]
+    fn an_unanswered_group_conflict_keeps_the_local_side() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        let tied = keepass::db::Times::now();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().name = "Finance".to_string();
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
 
         let report = diff(&local, &remote);
-        assert!(report.groups_tied_and_diverged.is_empty());
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
-            .expect("the newer side decides once there is one");
+        let merged =
+            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
+
         assert_eq!(merged.group(group_id).expect("group").name, "Banking");
+    }
+
+    /// Group content has no last-write-wins path of its own: the fork ranks
+    /// groups by timestamp, so anyone who can write the shared file could
+    /// stamp a rename with the year 2099 and have it replace everyone
+    /// else's, with nothing shown to anyone.
+    #[test]
+    fn a_group_timestamp_from_the_future_asks_instead_of_winning() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        local.group_mut(group_id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() - chrono::TimeDelta::hours(1));
+
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().name = "Attacker".to_string();
+        remote.group_mut(group_id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::days(365));
+
+        let report = diff(&local, &remote);
+        assert_eq!(
+            report.group_conflicts.len(),
+            1,
+            "an unbelievable timestamp must not decide a group either"
+        );
+
+        let merged =
+            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
+        assert_eq!(
+            merged.group(group_id).expect("group").name,
+            "Banking",
+            "and the default keeps this machine's version"
+        );
+        assert!(
+            merged
+                .group(group_id)
+                .and_then(|group| group.times.last_modification)
+                .is_some_and(|at| at <= keepass::db::Times::now() + MAX_CLOCK_SKEW),
+            "without adopting the timestamp it refused as evidence"
+        );
+    }
+
+    /// A group whose timestamps rank cleanly is the fork's business, not
+    /// ours. Prompting for those would make every ordinary rename a
+    /// question.
+    #[test]
+    fn a_group_with_a_newer_side_is_left_to_the_fork() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        local.group_mut(group_id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() - chrono::TimeDelta::hours(1));
+
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().name = "Finance".to_string();
+        remote.group_mut(group_id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() - chrono::TimeDelta::minutes(1));
+
+        let report = diff(&local, &remote);
+
+        assert!(report.group_conflicts.is_empty(), "the newer side decides");
+        let merged =
+            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
+        assert_eq!(merged.group(group_id).expect("group").name, "Finance");
     }
 
     /// A collapse toggle is written without bumping the modification time, so
@@ -3055,8 +3398,8 @@ mod tests {
 
         let report = diff(&local, &remote);
         assert!(
-            report.groups_tied_and_diverged.is_empty(),
-            "a collapse toggle is not somebody's edit and must not block sync"
+            report.group_conflicts.is_empty(),
+            "a collapse toggle is not somebody's edit and must not be a question"
         );
     }
 
@@ -3106,7 +3449,7 @@ mod tests {
         remote.entry_mut(id).unwrap().times.last_modification = None;
 
         let report = diff(&local, &remote);
-        apply_picks(&local, &remote, &HashMap::new(), &report)
+        apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("a missing timestamp on an otherwise identical entry is harmless");
 
         let warning = MergeWarning::MissingEntryTimestamp {
@@ -3136,8 +3479,13 @@ mod tests {
             .set_icon_custom_new(vec![1, 2, 3]);
         let remote = fork(&local);
 
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &diff(&local, &remote))
-            .expect("identical custom-icon stores are safe to retain");
+        let merged = apply_picks(
+            &local,
+            &remote,
+            &Resolutions::default(),
+            &diff(&local, &remote),
+        )
+        .expect("identical custom-icon stores are safe to retain");
         assert_eq!(merged.num_custom_icons(), 1);
         assert_eq!(
             merged.entry(id).unwrap().custom_icon().unwrap().data,
@@ -3166,7 +3514,7 @@ mod tests {
             1,
             "expected exactly one remote-only entry"
         );
-        let merged_fp = apply_picks(&local_fp, &cloud, &HashMap::new(), &report)
+        let merged_fp = apply_picks(&local_fp, &cloud, &Resolutions::default(), &report)
             .expect("round-trip merge should succeed");
         assert_eq!(
             merged_fp.iter_all_entries().count(),
@@ -3244,7 +3592,7 @@ mod tests {
 
         // Database::merge sees the same UUID on both sides and retains the
         // newer local location without adding another entry.
-        let merged = apply_picks(&local, &remote, &HashMap::new(), &report)
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
             .expect("recycle-bin collision should merge without resurrection");
         // Entry still exists exactly once - in the recycle bin.
         let live_count = merged

@@ -6,7 +6,7 @@ use crate::biometric::{
     NoopBiometricStore,
 };
 use crate::domain::{VaultEntry, VaultSnapshot};
-use crate::keepass::merge::{ConflictReport, Side};
+use crate::keepass::merge::{ConflictKind, ConflictReport, Side};
 use crate::keepass::{
     EntryDraft, MutationError, OtpDisplay, SavePayload, StrengthReport, VaultDocument,
 };
@@ -307,11 +307,6 @@ pub struct AppState {
     /// vault, so without this a throttled client hammered Graph on every
     /// tick and kept extending the throttle window it was reacting to.
     sync_backoff: HashMap<PathBuf, SyncBackoff>,
-    /// Vaults whose merge cannot succeed until the user changes something
-    /// here. The same failure-recovery branch would otherwise spend a full
-    /// upload and a full download every tick to fail identically. Cleared by
-    /// the next local save, which is exactly what resolves these.
-    sync_blocked: HashSet<PathBuf>,
 }
 
 /// When a throttled vault may be pushed again, and how many throttles it has
@@ -517,7 +512,6 @@ impl Default for AppState {
             saves_in_flight: HashMap::new(),
             syncs_in_flight: HashMap::new(),
             pushes_awaiting_restore: HashMap::new(),
-            sync_blocked: HashSet::new(),
             sync_backoff: HashMap::new(),
         }
     }
@@ -704,7 +698,7 @@ pub struct ConflictState {
     pub remote_db: Database,
     pub remote_etag: String,
     pub report: ConflictReport,
-    pub picks: HashMap<String, Side>,
+    pub picks: crate::keepass::merge::Resolutions,
     /// `VaultDocument::generation` at the moment `local_db` was cloned.
     /// `commit_merged_for` compares against the live document before
     /// installing the merged result - if the user edited while this
@@ -725,7 +719,8 @@ impl std::fmt::Debug for ConflictState {
             .field("local_only_count", &self.report.local_only.len())
             .field("remote_only_count", &self.report.remote_only.len())
             .field("auto_resolved_count", &self.report.auto_resolved.len())
-            .field("pick_count", &self.picks.len())
+            .field("entry_pick_count", &self.picks.entries.len())
+            .field("group_pick_count", &self.picks.groups.len())
             .field("base_generation", &self.base_generation)
             .field("session_id", &self.session_id)
             .finish()
@@ -2323,30 +2318,6 @@ impl AppState {
         self.sync_backoff.remove(target);
     }
 
-    /// Remember a merge failure the next attempt cannot fix. The automatic
-    /// retry is what makes this worth tracking: it re-uploads the whole vault
-    /// on every tick, and for these it downloads the remote again only to hit
-    /// the same wall.
-    fn note_merge_block(&mut self, target: &Path, error: &crate::keepass::merge::ApplyError) {
-        if error.needs_a_local_change() {
-            self.sync_blocked.insert(target.to_path_buf());
-        }
-    }
-
-    /// A local change is the way out of a blocked merge, so any save clears
-    /// the block and lets the next tick try again.
-    fn clear_merge_block(&mut self, target: &Path) {
-        self.sync_blocked.remove(target);
-    }
-
-    /// True while this vault's merge needs something to change before it can
-    /// succeed. Suppresses only the expensive automatic push retry: the cheap
-    /// pull check still runs, because the other machine can resolve the tie,
-    /// and explicit "Sync now" still goes through because the user asked.
-    fn merge_is_blocked(&self, target: &Path) -> bool {
-        self.sync_blocked.contains(target)
-    }
-
     /// Hold a push until this vault's binding restore lands.
     fn queue_push_awaiting_restore(&mut self, target: &Path, request: QueuedSyncRequest) {
         // Replacing this vault's own entry is the intended coalesce: the
@@ -2638,7 +2609,6 @@ impl AppState {
         self.reconnect_target = None;
         // Holds published vault ciphertext; it must not outlive the lock.
         self.pushes_awaiting_restore.clear();
-        self.sync_blocked.clear();
         self.auto_sync_in_flight.clear();
         self.syncs_in_flight.clear();
         self.clear_biometric_attempt();
@@ -2670,7 +2640,6 @@ impl AppState {
         self.reconnect_target = None;
         // Holds published vault ciphertext; it must not outlive the lock.
         self.pushes_awaiting_restore.clear();
-        self.sync_blocked.clear();
         // A run belonging to the vault being locked. Leaving it Running made
         // `start_favicon_download` early-return for the next vault opened.
         self.favicon_status = FaviconDownloadStatus::Idle;
@@ -3248,11 +3217,6 @@ impl AppState {
         if !self.save_session_is_retained(&target, session_id) {
             return;
         }
-        // The local change this vault was waiting for. Whether it breaks the
-        // tie is for the next merge to decide; what matters is that the
-        // automatic retry is allowed to find out.
-        self.clear_merge_block(&target);
-
         self.mark_vault_session_unpersisted(session_id);
 
         if let Some(queued) = self.saves_in_flight.get_mut(&target) {
@@ -5354,14 +5318,8 @@ impl AppState {
             if self.sync_is_backing_off(target) {
                 return;
             }
-            // A merge that needs a tie broken fails identically on every
-            // retry, so it does not get the expensive push. It still falls
-            // through to the cheap pull check below: the other machine can
-            // resolve the tie, and without this we would never notice.
-            if !self.merge_is_blocked(target) {
-                self.sync_now_for_path_inner(target, session_id, false, None, cx);
-                return;
-            }
+            self.sync_now_for_path_inner(target, session_id, false, None, cx);
+            return;
         }
         let Some((config, token)) = self.snapshot_sync_inputs_for_session(target, session_id)
         else {
@@ -5540,18 +5498,17 @@ impl AppState {
                     // leave phantom rows in the activity log.
                     let history_entries = sync_history::entries_from_report(
                         &report,
-                        &HashMap::new(),
+                        &crate::keepass::merge::Resolutions::default(),
                         chrono::Local::now(),
                     );
                     let merged = match crate::keepass::merge::apply_picks(
                         &local_db,
                         &remote_db,
-                        &HashMap::new(),
+                        &crate::keepass::merge::Resolutions::default(),
                         &report,
                     ) {
                         Ok(merged) => merged,
                         Err(error) => {
-                            self.note_merge_block(target, &error);
                             self.apply_sync_status_for_session(
                                 target,
                                 session_id,
@@ -5613,9 +5570,12 @@ impl AppState {
                     );
                     return;
                 }
-                let mut picks: HashMap<String, Side> = HashMap::new();
-                for c in &report.conflicts {
-                    picks.insert(c.id.clone(), Side::Local);
+                let mut picks = crate::keepass::merge::Resolutions::default();
+                for conflict in &report.conflicts {
+                    picks.entries.insert(conflict.id.clone(), Side::Local);
+                }
+                for conflict in &report.group_conflicts {
+                    picks.groups.insert(conflict.id.clone(), Side::Local);
                 }
                 let conflict = SyncStatus::Conflict(Box::new(ConflictState {
                     local_db,
@@ -5664,11 +5624,20 @@ impl AppState {
 
     /// Mutate one user pick. Called by the Conflict overlay when the user
     /// clicks "Keep this" on either side. Idempotent.
-    pub fn set_conflict_pick(&mut self, entry_id: &str, side: Side, cx: &mut Context<Self>) {
+    pub fn set_conflict_pick(
+        &mut self,
+        kind: ConflictKind,
+        id: &str,
+        side: Side,
+        cx: &mut Context<Self>,
+    ) {
         let SyncStatus::Conflict(state) = &mut self.sync_status else {
             return;
         };
-        state.picks.insert(entry_id.to_string(), side);
+        match kind {
+            ConflictKind::Entry => state.picks.entries.insert(id.to_string(), side),
+            ConflictKind::Group => state.picks.groups.insert(id.to_string(), side),
+        };
         cx.notify();
     }
 
@@ -5679,7 +5648,10 @@ impl AppState {
             return;
         };
         for conflict in &state.report.conflicts {
-            state.picks.insert(conflict.id.clone(), side);
+            state.picks.entries.insert(conflict.id.clone(), side);
+        }
+        for conflict in &state.report.group_conflicts {
+            state.picks.groups.insert(conflict.id.clone(), side);
         }
         cx.notify();
     }
@@ -5723,7 +5695,6 @@ impl AppState {
         let merged = match merge_result {
             Ok(merged) => merged,
             Err(error) => {
-                self.note_merge_block(&target, &error);
                 self.route_sync_status_for_session(
                     &target,
                     session_id,
@@ -6301,7 +6272,7 @@ mod park_tests {
             local_db,
             remote_etag: etag_secret.into(),
             report: ConflictReport::default(),
-            picks: HashMap::new(),
+            picks: crate::keepass::merge::Resolutions::default(),
             base_generation: 7,
             session_id: VaultSessionId::next(),
         };
@@ -6993,47 +6964,6 @@ mod park_tests {
             state.pushes_awaiting_restore.is_empty(),
             "and its ciphertext is not kept"
         );
-    }
-
-    /// A merge that needs the user to break a group-name tie fails the same
-    /// way on every retry, and the failure-recovery branch pays a full upload
-    /// and download for each one. It has to stop until something local
-    /// changes, which is also the only thing that can resolve it.
-    #[test]
-    fn a_merge_needing_a_local_change_stops_the_automatic_retry() {
-        let mut state = AppState::default();
-        let path = PathBuf::from("/tmp/tied.kdbx");
-
-        assert!(!state.merge_is_blocked(&path));
-
-        state.note_merge_block(
-            &path,
-            &crate::keepass::merge::ApplyError::GroupTieDiverged {
-                names: "\"Banking\"".into(),
-            },
-        );
-        assert!(state.merge_is_blocked(&path));
-
-        state.clear_merge_block(&path);
-        assert!(
-            !state.merge_is_blocked(&path),
-            "a local change lets the next tick try again"
-        );
-    }
-
-    /// Network failures and rate limits do heal on their own, so the block
-    /// must not swallow the retry those depend on.
-    #[test]
-    fn a_merge_that_can_heal_on_its_own_keeps_retrying() {
-        let mut state = AppState::default();
-        let path = PathBuf::from("/tmp/transient.kdbx");
-
-        state.note_merge_block(
-            &path,
-            &crate::keepass::merge::ApplyError::DatabaseMerge("connection reset".into()),
-        );
-
-        assert!(!state.merge_is_blocked(&path));
     }
 
     /// The auto-sync tick recovers from `Failed` by re-uploading the whole
