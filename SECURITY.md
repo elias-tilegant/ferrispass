@@ -60,6 +60,8 @@ The dual signing (Apple Developer ID *and* minisign) is intentional: each layer 
 | Password persisted to disk | **never** |
 | Password sent over the network | **never** - the cloud provider only sees ciphertext |
 | Password stored in Keychain | **only if you enable Touch ID for that vault** - see below |
+| Auto-lock timeout | configurable in Settings; default 4 minutes idle |
+| Clipboard auto-clear after copy | configurable; default 10 seconds |
 
 ### Touch ID and the login keychain
 
@@ -86,5 +88,3 @@ What that means, precisely:
   the keychain.
 
 The enrolment checkbox says this in one line where you decide.
-| Auto-lock timeout | configurable in Settings; default 4 minutes idle |
-| Clipboard auto-clear after copy | configurable; default 10 seconds |
