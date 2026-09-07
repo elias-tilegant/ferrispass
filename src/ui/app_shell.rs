@@ -196,6 +196,9 @@ pub struct AppShell {
     entry_form_baseline: Option<[u8; 32]>,
     /// Set by the first Escape on a dirty editor. The second one discards.
     entry_discard_armed: bool,
+    /// Validation or save failure for the entry editor, shown next to the
+    /// form rather than as a toast that floats away from the field it means.
+    entry_form_error: Option<String>,
     /// Wall-clock timestamp of the last user input event (mouse-move,
     /// click, key-down). Updated cheaply on every event without
     /// triggering a re-render - only the auto-lock checker reads it.
@@ -473,6 +476,35 @@ impl AppShell {
                 Self::on_auto_type_sequence_input_event,
             ),
             cx.subscribe_in(&new_group_name_input, window, Self::on_new_group_name_event),
+            // Enter submits the entry editor, the way it already did in the
+            // identically-shaped Add Group modal. Notes stays out: there
+            // Enter is a line break, and Cmd+Enter is not worth a second
+            // binding for a field people rarely finish on.
+            cx.subscribe_in(
+                &new_entry_title_input,
+                window,
+                Self::on_entry_form_input_event,
+            ),
+            cx.subscribe_in(
+                &new_entry_username_input,
+                window,
+                Self::on_entry_form_input_event,
+            ),
+            cx.subscribe_in(
+                &new_entry_password_input,
+                window,
+                Self::on_entry_form_input_event,
+            ),
+            cx.subscribe_in(
+                &new_entry_url_input,
+                window,
+                Self::on_entry_form_input_event,
+            ),
+            cx.subscribe_in(
+                &new_entry_otp_input,
+                window,
+                Self::on_entry_form_input_event,
+            ),
             // Re-render on slider drag so the "Length: N" label and the
             // strength preview update live alongside the thumb.
             cx.observe(&gen_length_state, |_shell: &mut AppShell, _, cx| {
@@ -543,6 +575,7 @@ impl AppShell {
             entry_editor_was_open,
             entry_form_baseline: None,
             entry_discard_armed: false,
+            entry_form_error: None,
             last_activity: SystemTime::now(),
             auto_lock_task: None,
             #[cfg(target_os = "macos")]
@@ -1219,6 +1252,90 @@ impl AppShell {
         }
     }
 
+    /// Save the entry editor, from the Save button or from Enter.
+    ///
+    /// It used to live inline in the render closure, which is why Enter did
+    /// nothing here while the identical Add Group modal submitted on Enter,
+    /// and why a missing title arrived as a toast rather than as a message
+    /// next to the field it is about.
+    pub(crate) fn submit_entry_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editing_id = match self.state.read(cx).overlay() {
+            Overlay::EditEntry { entry_id } => Some(entry_id.clone()),
+            _ => None,
+        };
+        let draft = self.collect_entry_draft(cx);
+        if draft.title.trim().is_empty() {
+            self.entry_form_error = Some("A title is required.".into());
+            cx.notify();
+            return;
+        }
+        let target_group_id = self.new_entry_target_group_id.clone().or_else(|| {
+            self.state
+                .read(cx)
+                .vault_browser()
+                .map(|browser| match browser.selection {
+                    crate::app::LibrarySelection::Group(id) => id,
+                    _ => browser.snapshot.root.id.clone(),
+                })
+        });
+
+        let state = self.state.clone();
+        let result = match editing_id.as_ref() {
+            Some(entry_id) => state.update(cx, |state, cx| state.update_entry(entry_id, draft, cx)),
+            None => {
+                let Some(group_id) = target_group_id else {
+                    self.entry_form_error = Some("Pick a group to save this entry in.".into());
+                    cx.notify();
+                    return;
+                };
+                state
+                    .update(cx, |state, cx| state.create_entry(&group_id, draft, cx))
+                    .map(|_id| ())
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.clear_entry_form(window, cx);
+                self.state.clone().update(cx, |state, cx| {
+                    let _ = state.close_overlay(cx);
+                });
+                window.push_notification(
+                    if editing_id.is_some() {
+                        "Changes saved."
+                    } else {
+                        "Entry saved."
+                    },
+                    cx,
+                );
+            }
+            Err(error) => {
+                self.entry_form_error = Some(errors::mutation_message(&error));
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn entry_form_error(&self) -> Option<&str> {
+        self.entry_form_error.as_deref()
+    }
+
+    fn on_entry_form_input_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A validation message is about what was in the field a moment ago.
+        if matches!(event, InputEvent::Change) && self.entry_form_error.is_some() {
+            self.entry_form_error = None;
+            cx.notify();
+        }
+        if matches!(event, InputEvent::PressEnter { .. }) {
+            self.submit_entry_form(window, cx);
+        }
+    }
+
     /// Fingerprint the editor's current contents. Hashing the same draft the
     /// save path builds means a field the save ignores cannot count as an
     /// unsaved change.
@@ -1369,6 +1486,7 @@ impl AppShell {
     pub fn clear_entry_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.entry_form_baseline = None;
         self.entry_discard_armed = false;
+        self.entry_form_error = None;
         for input in [
             &self.new_entry_title_input,
             &self.new_entry_username_input,
@@ -2064,6 +2182,11 @@ impl AppShell {
             self.mark_entry_form_pristine(cx);
             self.state
                 .update(cx, |state, cx| state.open_overlay(Overlay::AddEntry, cx));
+            // Otherwise the caret stays where it was, and after Cmd+F that is
+            // the search box behind the dimmed modal: the user types into an
+            // apparently empty form and re-filters the list underneath.
+            self.new_entry_title_input
+                .update(cx, |input, cx| input.focus(window, cx));
         }
     }
 
@@ -2157,6 +2280,8 @@ impl AppShell {
         self.state.clone().update(cx, |state, cx| {
             state.open_overlay(Overlay::RenameGroup { group_id }, cx)
         });
+        self.new_group_name_input
+            .update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn on_action_delete_group(
@@ -2200,6 +2325,8 @@ impl AppShell {
         self.state.clone().update(cx, |state, cx| {
             state.open_overlay(Overlay::AddGroup { parent_group_id }, cx)
         });
+        self.new_group_name_input
+            .update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// Snapshot the group-form input and dispatch to the right
@@ -2456,6 +2583,8 @@ impl AppShell {
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::EditEntry { entry_id: p.id }, cx);
         });
+        self.new_entry_title_input
+            .update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn on_password_input_event(

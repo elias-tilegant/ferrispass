@@ -24,6 +24,36 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, Root};
 
+/// The one `AppState`, reachable from app-level handlers that have no window.
+/// Closing the window locks the vault but keeps the process alive, so the
+/// Dock, the Window menu and the Auto-Type hotkey all need a way back to it.
+struct SharedAppState(Entity<AppState>);
+
+impl gpui::Global for SharedAppState {}
+
+/// Run `f` against the one `AppState`, if the app has finished booting.
+pub(crate) fn with_shared_state<R>(
+    cx: &mut App,
+    f: impl FnOnce(&mut AppState, &mut Context<AppState>) -> R,
+) -> Option<R> {
+    let state = cx.try_global::<SharedAppState>()?.0.clone();
+    Some(state.update(cx, f))
+}
+
+/// Bring the window back after Cmd+W hid it. Also what a Dock click does.
+/// The window survives the hide, so this only has to re-open one if something
+/// unexpected destroyed it.
+pub fn show_main_window(cx: &mut App) {
+    if cx.windows().is_empty()
+        && let Some(state) = cx
+            .try_global::<SharedAppState>()
+            .map(|shared| shared.0.clone())
+    {
+        open_main_window(cx, state, settings::load().window);
+    }
+    cx.activate(true);
+}
+
 const APP_NAME: &str = "FerrisPass";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -31,6 +61,10 @@ pub fn run() {
     let application = gpui_platform::application()
         .with_quit_mode(QuitMode::Explicit)
         .with_assets(assets::AppAssets::new());
+
+    // Cmd+W locks the vault and closes the window without ending the process,
+    // so clicking the Dock icon has to bring it back.
+    application.on_reopen(show_main_window);
 
     application.run(|cx| {
         let fonts = assets::font_bytes();
@@ -53,6 +87,9 @@ pub fn run() {
         });
 
         actions::init(cx);
+        // Held globally so a window closed with Cmd+W can be reopened from
+        // the Dock against the same state, rather than restarting the app.
+        cx.set_global(SharedAppState(app_state.clone()));
         open_main_window(cx, app_state, startup_settings.window);
     });
 }

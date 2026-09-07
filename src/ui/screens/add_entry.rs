@@ -4,7 +4,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Sizable as _, WindowExt as _,
+    Sizable as _,
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputContentType},
@@ -153,8 +153,6 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
             }),
         );
 
-    let save_target_group_id = target_group_id.clone();
-    let save_editing_id = editing_id.clone();
     let save_label = if is_edit {
         "Save changes"
     } else {
@@ -183,45 +181,8 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .child(save_label)
         .hover_press(palette::blue_hover())
         .on_click(
-            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                let draft = shell.collect_entry_draft(cx);
-                if draft.title.trim().is_empty() {
-                    window.push_notification("Title is required to save the entry.", cx);
-                    return;
-                }
-                let state = shell.state().clone();
-                let result: Result<(), String> = match save_editing_id.as_ref() {
-                    Some(entry_id) => state
-                        .update(cx, |state, cx| state.update_entry(entry_id, draft, cx))
-                        .map_err(|e| e.to_string()),
-                    None => {
-                        let Some(group_id) = save_target_group_id.clone() else {
-                            window.push_notification("No destination group is selected.", cx);
-                            return;
-                        };
-                        state
-                            .update(cx, |state, cx| state.create_entry(&group_id, draft, cx))
-                            .map(|_id| ())
-                            .map_err(|e| e.to_string())
-                    }
-                };
-                match result {
-                    Ok(()) => {
-                        shell.clear_entry_form(window, cx);
-                        shell.state().clone().update(cx, |state, cx| {
-                            let _ = state.close_overlay(cx);
-                        });
-                        let toast = if save_editing_id.is_some() {
-                            "Changes saved."
-                        } else {
-                            "Entry saved."
-                        };
-                        window.push_notification(toast, cx);
-                    }
-                    Err(error) => {
-                        window.push_notification(format!("Could not save entry: {error}"), cx);
-                    }
-                }
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.submit_entry_form(window, cx);
             }),
         );
 
@@ -311,7 +272,18 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                     v_flex()
                         .gap_2()
                         .child(label("Title"))
-                        .child(Input::new(&title_input)),
+                        .child(Input::new(&title_input))
+                        // Inline, under the field it is about. A toast for a
+                        // missing title floated away from the form and read
+                        // like the result of an async operation.
+                        .when_some(shell.entry_form_error(), |this, message| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(palette::red())
+                                    .child(message.to_string()),
+                            )
+                        }),
                 )
                 .child(
                     v_flex()

@@ -27,6 +27,12 @@ actions!(
         ForgetBiometric,
         CancelUnlock,
         LockVault,
+        /// Minimize the window. Bound to the macOS-standard Cmd+M, which the
+        /// app did not answer at all before.
+        MinimizeWindow,
+        /// Bring the window back after Cmd+W closed it. Also what the Dock
+        /// icon does.
+        ShowWindow,
         FocusSearch,
         CopyUsername,
         CopyUrl,
@@ -166,17 +172,36 @@ fn remember_window_geometry(window: &Window) {
     });
 }
 
+/// Closing the window locks the vault and leaves the app running, the way
+/// every other Mac password manager behaves: the Dock icon stays and clicking
+/// it brings the window back at the unlock screen. Quitting is Cmd+Q.
+///
+/// The window is hidden, not destroyed. The Auto-Type hotkey listener and the
+/// auto-sync timer live on the window's view; tearing it down would silently
+/// switch off a feature the user configured, and a global hotkey that stops
+/// working after Cmd+W is worse than no Cmd+W behaviour at all.
+///
 /// Native window-close callbacks run while that window is already on GPUI's
 /// update stack, so notify it directly instead of resolving `active_window`.
-/// The callback always vetoes the immediate Cocoa close: on the clean path the
-/// central quit request closes the sole application window asynchronously.
 pub(crate) fn request_window_close(window: &mut Window, cx: &mut App) -> bool {
-    if !block_lifecycle_action_while_saving(Some(window), cx) {
-        remember_window_geometry(window);
-        crate::launch::sweeper::purge_all();
-        cx.quit();
+    if block_lifecycle_action_while_saving(Some(window), cx) {
+        return false;
     }
+    remember_window_geometry(window);
+    // Locking is the point: a window that is not on screen must not leave a
+    // decrypted vault and a live clipboard behind it.
+    lock_all_vaults(cx);
+    crate::launch::sweeper::purge_all();
+    cx.hide();
+    // Always veto the platform close. The window stays alive behind the hide.
     false
+}
+
+/// Lock every unlocked vault before the window goes away.
+fn lock_all_vaults(cx: &mut App) {
+    super::with_shared_state(cx, |state, cx| {
+        let _ = state.lock_vault(cx);
+    });
 }
 
 pub fn init(cx: &mut App) {
@@ -190,7 +215,21 @@ pub fn init(cx: &mut App) {
     });
 
     cx.on_action(|_: &CloseWindow, cx: &mut App| {
-        request_quit(cx);
+        if let Some(handle) = cx.active_window() {
+            let _ = handle.update(cx, |_root, window, cx| {
+                request_window_close(window, cx);
+            });
+        }
+    });
+
+    cx.on_action(|_: &MinimizeWindow, cx: &mut App| {
+        if let Some(handle) = cx.active_window() {
+            let _ = handle.update(cx, |_root, window, _cx| window.minimize_window());
+        }
+    });
+
+    cx.on_action(|_: &ShowWindow, cx: &mut App| {
+        super::show_main_window(cx);
     });
 
     cx.on_action(|_: &RestartToUpdate, cx: &mut App| {
@@ -213,11 +252,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-f", FocusSearch, Some(APP_CONTEXT)),
         // The standard copy gesture copies the password of the currently
         // selected vault entry. Text inputs keep their own, more-specific
-        // native copy handling when they have focus.
+        // native copy handling when they have focus. `cmd-shift-p` used to be
+        // a second binding for the same action, which left the menu free to
+        // display either one.
         KeyBinding::new("cmd-c", CopyPassword, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-shift-u", CopyUsername, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-shift-l", CopyUrl, Some(APP_CONTEXT)),
-        KeyBinding::new("cmd-shift-p", CopyPassword, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-,", OpenSettings, Some(APP_CONTEXT)),
         // Power-shortcut: jump straight to the Sync tab. Same overlay,
         // pre-selected tab.
@@ -236,6 +276,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-t", PerformAutoTypeForSelected, Some(APP_CONTEXT)),
         // No context filter - cmd-q should always quit, even if focus is in
         // some weird state (e.g. inside a modal or before the shell is wired).
+        KeyBinding::new("cmd-m", MinimizeWindow, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
     ]);
@@ -269,7 +310,22 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Close Window", CloseWindow),
         ]),
+        // The standard editing commands work in every text field through
+        // gpui-component's own bindings, but without menu items macOS shows
+        // no shortcuts for them and VoiceOver cannot reach them at all.
         Menu::new("Edit").items([
+            MenuItem::os_action("Undo", gpui_component::input::Undo, gpui::OsAction::Undo),
+            MenuItem::os_action("Redo", gpui_component::input::Redo, gpui::OsAction::Redo),
+            MenuItem::separator(),
+            MenuItem::os_action("Cut", gpui_component::input::Cut, gpui::OsAction::Cut),
+            MenuItem::os_action("Copy", gpui_component::input::Copy, gpui::OsAction::Copy),
+            MenuItem::os_action("Paste", gpui_component::input::Paste, gpui::OsAction::Paste),
+            MenuItem::os_action(
+                "Select All",
+                gpui_component::input::SelectAll,
+                gpui::OsAction::SelectAll,
+            ),
+            MenuItem::separator(),
             MenuItem::action("New Entry", NewEntry),
             MenuItem::action("Edit Entry", EditEntry),
             MenuItem::action("Delete Entry", DeleteEntry),
@@ -277,10 +333,19 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::action("Copy Username", CopyUsername),
             MenuItem::action("Copy Password", CopyPassword),
             MenuItem::action("Copy URL", CopyUrl),
+            MenuItem::separator(),
+            MenuItem::action("Auto-Type Selected Entry", PerformAutoTypeForSelected),
         ]),
         Menu::new("View").items([
             MenuItem::action("Find in Vault", FocusSearch),
             MenuItem::action("Toggle Theme", ToggleTheme),
+            MenuItem::separator(),
+            MenuItem::action("Sync Settings…", OpenSyncSettings),
+        ]),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", MinimizeWindow),
+            MenuItem::separator(),
+            MenuItem::action("Show FerrisPass", ShowWindow),
         ]),
         Menu::new("Help").items([MenuItem::action("What's New", OpenWhatsNew)]),
     ]);
