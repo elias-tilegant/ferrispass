@@ -118,6 +118,10 @@ fn render_connected(
                 base
             }
         }
+        SyncStatus::Failed(msg) if is_graph_transfer_error(msg) => {
+            "Sync failed. Your vault is saved locally. Check your network or VPN, then retry."
+                .into()
+        }
         SyncStatus::Failed(msg) => format!("Last attempt failed: {msg}"),
         SyncStatus::Syncing => "Syncing now…".into(),
         SyncStatus::Connecting => "Connecting…".into(),
@@ -203,17 +207,24 @@ fn render_connected(
                         .child(
                             div()
                                 .flex_1()
+                                .min_w_0()
+                                .truncate()
                                 .text_xs()
                                 .text_color(palette::text_muted())
                                 .child(last_sync),
                         )
-                        .child(sync_now_button(cx)),
+                        .child(div().flex_shrink_0().child(sync_now_button(cx))),
                 ),
         )
         .when(!history.is_empty(), |this| {
             this.child(history_section(history, cx))
         })
         .into_any_element()
+}
+
+fn is_graph_transfer_error(message: &str) -> bool {
+    message
+        .starts_with("network error: error sending request for url (https://graph.microsoft.com/")
 }
 
 /// "Connected since 12 May 2026" from the stored interactive-sign-in
