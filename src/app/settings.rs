@@ -288,15 +288,18 @@ mod tests {
     /// cleanup (0) or invent a 24-hour window (huge value). The
     /// clamp() is the single defensive choke-point everyone reads
     /// through.
+    fn with_launch_cleanup(secs: u32) -> AppSettings {
+        AppSettings {
+            launch_cleanup_secs: secs,
+            ..AppSettings::default()
+        }
+    }
+
     #[test]
     fn launch_cleanup_secs_clamps_to_range() {
-        let mut s = AppSettings::default();
-        s.launch_cleanup_secs = 0;
-        assert_eq!(s.launch_cleanup_secs_clamped(), 10);
-        s.launch_cleanup_secs = 9999;
-        assert_eq!(s.launch_cleanup_secs_clamped(), 60);
-        s.launch_cleanup_secs = 30;
-        assert_eq!(s.launch_cleanup_secs_clamped(), 30);
+        assert_eq!(with_launch_cleanup(0).launch_cleanup_secs_clamped(), 10);
+        assert_eq!(with_launch_cleanup(9999).launch_cleanup_secs_clamped(), 60);
+        assert_eq!(with_launch_cleanup(30).launch_cleanup_secs_clamped(), 30);
     }
 
     #[test]
@@ -369,15 +372,24 @@ mod tests {
 
     /// A hand-edited or corrupt sub-floor interval must be clamped up to
     /// the 60 s floor, while `None` (= "Never") passes through untouched.
+    fn with_auto_sync(secs: Option<u64>) -> AppSettings {
+        AppSettings {
+            auto_sync_secs: secs,
+            ..AppSettings::default()
+        }
+    }
+
     #[test]
     fn auto_sync_secs_clamps_to_floor_but_keeps_none() {
-        let mut s = AppSettings::default();
-        s.auto_sync_secs = Some(1);
-        assert_eq!(s.auto_sync_secs_clamped(), Some(AUTO_SYNC_SECS_FLOOR));
-        s.auto_sync_secs = Some(1800);
-        assert_eq!(s.auto_sync_secs_clamped(), Some(1800));
-        s.auto_sync_secs = None;
-        assert_eq!(s.auto_sync_secs_clamped(), None);
+        assert_eq!(
+            with_auto_sync(Some(1)).auto_sync_secs_clamped(),
+            Some(AUTO_SYNC_SECS_FLOOR)
+        );
+        assert_eq!(
+            with_auto_sync(Some(1800)).auto_sync_secs_clamped(),
+            Some(1800)
+        );
+        assert_eq!(with_auto_sync(None).auto_sync_secs_clamped(), None);
     }
 
     #[test]

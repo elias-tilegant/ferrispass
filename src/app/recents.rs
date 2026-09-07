@@ -222,10 +222,11 @@ mod tests {
         assert_eq!(entries.len(), MAX_RECENTS);
         assert_eq!(entries[0].path, PathBuf::from("/tmp/new.kdbx"));
         // Oldest (index MAX_RECENTS - 1 before the push) got dropped.
+        let evicted = format!("/tmp/v{}.kdbx", MAX_RECENTS - 1);
         assert!(
             !entries
                 .iter()
-                .any(|e| e.path == PathBuf::from(format!("/tmp/v{}.kdbx", MAX_RECENTS - 1)))
+                .any(|e| e.path.as_path() == Path::new(&evicted))
         );
     }
 

@@ -15,8 +15,8 @@ use std::{
     io::{self, Write as _},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -734,6 +734,16 @@ fn now_unix() -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+/// Helper for the AppState side: read local bytes for upload, surfacing a
+/// typed io error so we don't have to thread `std::io::Error` through every
+/// caller. Keeps the upload entrypoint single-arg.
+pub fn read_local(path: &Path) -> Result<Vec<u8>, ServiceError> {
+    std::fs::read(path).map_err(|source| ServiceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{persist_downloaded_vault, sort_kdbx_files, stable_fallback_etag};
@@ -822,14 +832,4 @@ mod tests {
         }
         assert!(!target.exists());
     }
-}
-
-/// Helper for the AppState side: read local bytes for upload, surfacing a
-/// typed io error so we don't have to thread `std::io::Error` through every
-/// caller. Keeps the upload entrypoint single-arg.
-pub fn read_local(path: &Path) -> Result<Vec<u8>, ServiceError> {
-    std::fs::read(path).map_err(|source| ServiceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
 }

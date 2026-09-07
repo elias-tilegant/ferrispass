@@ -8,7 +8,7 @@ use std::{
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
@@ -1134,19 +1134,21 @@ mod tests {
 
     #[test]
     fn protected_custom_fields_are_redacted_from_entry_json() {
-        let mut entry = VaultEntry::default();
-        entry.custom_fields = vec![
-            CustomField {
-                key: "public".into(),
-                value: "shown".into(),
-                protected: false,
-            },
-            CustomField {
-                key: "private".into(),
-                value: "hidden".into(),
-                protected: true,
-            },
-        ];
+        let entry = VaultEntry {
+            custom_fields: vec![
+                CustomField {
+                    key: "public".into(),
+                    value: "shown".into(),
+                    protected: false,
+                },
+                CustomField {
+                    key: "private".into(),
+                    value: "hidden".into(),
+                    protected: true,
+                },
+            ],
+            ..VaultEntry::default()
+        };
         let value = entry_json(&entry);
         let rendered = value.to_string();
         assert!(rendered.contains("shown"));

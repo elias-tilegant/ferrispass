@@ -1883,13 +1883,13 @@ mod tests {
     #[test]
     fn history_is_trimmed_to_keepass_default_on_repeated_edits() {
         let mut db = Database::new();
-        let mut root = db.root_mut();
-        let mut entry = root.add_entry();
-        entry.set_unprotected(fields::TITLE, "Hot entry");
-        entry.set_protected(fields::PASSWORD, "pw-0");
-        let entry_id = entry.id().to_string();
-        drop(entry);
-        drop(root);
+        let entry_id = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::TITLE, "Hot entry");
+            entry.set_protected(fields::PASSWORD, "pw-0");
+            entry.id().to_string()
+        };
 
         let snapshot = VaultSnapshot::new(VaultGroup::default());
         let mut doc = VaultDocument::new(db, snapshot, "vault-pw".to_string(), None);
@@ -3121,19 +3121,13 @@ mod tests {
             let mut root = doc.database.root_mut();
             let mut group = root.add_group();
             group.name = "Work".into();
-            let id = group.id().to_string();
-            drop(group);
-            drop(root);
-            id
+            group.id().to_string()
         };
         let personal_id = {
             let mut root = doc.database.root_mut();
             let mut group = root.add_group();
             group.name = "Personal".into();
-            let id = group.id().to_string();
-            drop(group);
-            drop(root);
-            id
+            group.id().to_string()
         };
         doc.refresh_snapshot();
 
@@ -3656,10 +3650,12 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("aes.kdbx");
 
-        let mut config = DatabaseConfig::default();
-        // Modest rounds — enough to exercise the path without slowing the
+        // Modest rounds: enough to exercise the path without slowing the
         // test suite (real-world AES-KDF vaults use 60_000+).
-        config.kdf_config = KdfConfig::Aes { rounds: 1_000 };
+        let config = DatabaseConfig {
+            kdf_config: KdfConfig::Aes { rounds: 1_000 },
+            ..DatabaseConfig::default()
+        };
 
         let mut db = Database::with_config(config);
         let mut root = db.root_mut();

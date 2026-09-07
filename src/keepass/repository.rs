@@ -446,37 +446,35 @@ mod tests {
         ));
     }
 
+    /// Adds a titled entry. The entry borrow ends when this returns, so the
+    /// caller keeps using the group without scoping every single entry.
+    fn add_titled_entry(group: &mut keepass::db::GroupMut<'_>, title: &str) {
+        group.add_entry().set_unprotected(fields::TITLE, title);
+    }
+
     #[test]
     fn group_auto_type_tristate_inherits_and_child_override_wins() {
         let mut db = Database::new();
-        let mut root = db.root_mut();
-        let mut root_entry = root.add_entry();
-        root_entry.set_unprotected(keepass::db::fields::TITLE, "RootEntry");
-        drop(root_entry);
+        {
+            let mut root = db.root_mut();
+            add_titled_entry(&mut root, "RootEntry");
 
-        let mut disabled = root.add_group();
-        disabled.name = "Disabled".to_string();
-        disabled.enable_autotype = Some(false);
-        let mut disabled_entry = disabled.add_entry();
-        disabled_entry.set_unprotected(keepass::db::fields::TITLE, "DisabledEntry");
-        drop(disabled_entry);
+            let mut disabled = root.add_group();
+            disabled.name = "Disabled".to_string();
+            disabled.enable_autotype = Some(false);
+            add_titled_entry(&mut disabled, "DisabledEntry");
 
-        let mut reenabled = disabled.add_group();
-        reenabled.name = "Reenabled".to_string();
-        reenabled.enable_autotype = Some(true);
-        let mut reenabled_entry = reenabled.add_entry();
-        reenabled_entry.set_unprotected(keepass::db::fields::TITLE, "ReenabledEntry");
-        drop(reenabled_entry);
-        drop(reenabled);
+            {
+                let mut reenabled = disabled.add_group();
+                reenabled.name = "Reenabled".to_string();
+                reenabled.enable_autotype = Some(true);
+                add_titled_entry(&mut reenabled, "ReenabledEntry");
+            }
 
-        let mut inherits = disabled.add_group();
-        inherits.name = "Inherits".to_string();
-        let mut inherits_entry = inherits.add_entry();
-        inherits_entry.set_unprotected(keepass::db::fields::TITLE, "InheritsEntry");
-        drop(inherits_entry);
-        drop(inherits);
-        drop(disabled);
-        drop(root);
+            let mut inherits = disabled.add_group();
+            inherits.name = "Inherits".to_string();
+            add_titled_entry(&mut inherits, "InheritsEntry");
+        }
 
         let snapshot = snapshot_from_database(&db);
         let enabled_by_title: std::collections::HashMap<String, bool> = snapshot
