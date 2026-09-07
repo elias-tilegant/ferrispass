@@ -1469,11 +1469,18 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             Some(Icon::BuiltIn(index)) => format!("Built-in icon {index}"),
             // Naming the image matters: two different ones both read as
             // "Custom image", so the row compared equal and never appeared.
+            // The fingerprint is always there. Two pictures can carry the
+            // same name, or none, and either way the row has to tell the
+            // user that these are two different images rather than compare
+            // equal and disappear.
             Some(Icon::Custom(_)) => group.custom_icon().map_or_else(
                 || "Custom image".to_string(),
-                |icon| match icon.name.as_deref() {
-                    Some(name) => format!("Custom image \"{name}\""),
-                    None => format!("Custom image ({})", image_fingerprint(&icon.data)),
+                |icon| {
+                    let fingerprint = image_fingerprint(&icon.data);
+                    match icon.name.as_deref() {
+                        Some(name) => format!("Custom image \"{name}\" ({fingerprint})"),
+                        None => format!("Custom image ({fingerprint})"),
+                    }
                 },
             ),
             None => "Default icon".into(),
@@ -1718,7 +1725,7 @@ fn force_group_winner(
     })?;
 
     if matches!(winner, Side::Remote) {
-        let content = {
+        let mut content = {
             let Some(chosen) = source.group(source_id) else {
                 return Err(ApplyError::GroupMissing {
                     id: raw_id.to_string(),
@@ -1731,13 +1738,15 @@ fn force_group_winner(
         // `set_icon_custom` clears the object's current icon and only then
         // rejects an unknown id, so writing the reference first left the
         // group with no icon at all. The fork's merge adopts images too, but
-        // it runs after this.
-        if let Some(Icon::Custom(icon)) = content.icon
-            && !merged.adopt_custom_icon_from(source, icon)
-        {
-            return Err(ApplyError::CustomIconUnrecoverable {
-                id: icon.to_string(),
-            });
+        // it runs after this. The id can come back changed, because both
+        // files can use one id for two different pictures.
+        if let Some(Icon::Custom(icon)) = content.icon {
+            let Some(here) = merged.adopt_custom_icon_from(source, icon) else {
+                return Err(ApplyError::CustomIconUnrecoverable {
+                    id: icon.to_string(),
+                });
+            };
+            content.icon = Some(Icon::Custom(here));
         }
         let Some(mut target) = merged.group_mut(group_id) else {
             return Err(ApplyError::GroupMissing {
@@ -1784,25 +1793,64 @@ fn reunite_recycle_bins(merged: &mut Database, sides: [&Database; 2]) {
     let displaced: BTreeSet<uuid::Uuid> = sides
         .into_iter()
         .filter_map(|side| normalised_group_uuid(side.meta.recyclebin_uuid))
-        .filter(|id| *id != designated)
+        .filter(|id| *id != designated && !retired_on_purpose(sides, designated, *id))
         .collect();
     for id in displaced {
         let Some(group_id) = group_with_uuid(merged, id) else {
             continue;
         };
-        let previous_parent = merged
-            .group(group_id)
-            .and_then(|group| group.parent().map(|parent| parent.id()));
-        let Some(mut group) = merged.group_mut(group_id) else {
-            continue;
-        };
-        // `move_to` refuses only a cycle here, and a cycle means the winning
-        // bin already sits inside this one: its contents are deleted either
-        // way, so there is nothing to repair. `track_changes` dates the move,
-        // without which the next merge against a third copy undoes it.
-        if group.track_changes().move_to(bin).is_err() {
-            continue;
-        }
+        nest_into_bin(merged, group_id, bin);
+    }
+}
+
+/// Whether the side that decided the current bin also *has* this group.
+///
+/// It is the difference between two copies that each made their own bin and
+/// one copy that moved on: a group the deciding side knows and deliberately
+/// did not designate was retired there, perhaps as an ordinary archive full
+/// of entries the user still wants. Nesting that under the bin would delete
+/// all of them, which is the same loss in the other direction.
+fn retired_on_purpose(
+    sides: [&Database; 2],
+    designated: uuid::Uuid,
+    candidate: uuid::Uuid,
+) -> bool {
+    sides.into_iter().any(|side| {
+        normalised_group_uuid(side.meta.recyclebin_uuid) == Some(designated)
+            && group_with_uuid(side, candidate).is_some()
+    })
+}
+
+/// Move `group` under `bin`, dated so the next merge keeps it there.
+///
+/// When the bin already sits inside the group the plain move is a cycle. That
+/// happens once a previous merge nested them and a third copy then designates
+/// the outer one: the answer is to lift the bin out first, not to give up.
+/// Giving up left the outer group holding entries that stopped counting as
+/// deleted the moment it was no longer the bin.
+fn nest_into_bin(merged: &mut Database, group: GroupId, bin: GroupId) {
+    if crate::keepass::document::group_is_within(merged, bin, group)
+        && let Some(above) = parent_of(merged, group)
+    {
+        move_group(merged, bin, above);
+    }
+    move_group(merged, group, bin);
+}
+
+fn parent_of(merged: &Database, group: GroupId) -> Option<GroupId> {
+    merged
+        .group(group)
+        .and_then(|group| group.parent().map(|parent| parent.id()))
+}
+
+/// `track_changes` dates the move, without which the next merge against a
+/// third copy undoes it. A failure here is a cycle the caller already ruled
+/// out, so nothing is left to repair.
+fn move_group(merged: &mut Database, group: GroupId, target: GroupId) {
+    let previous_parent = parent_of(merged, group);
+    if let Some(mut group) = merged.group_mut(group)
+        && group.track_changes().move_to(target).is_ok()
+    {
         group.previous_parent_group = previous_parent;
     }
 }
@@ -3916,6 +3964,212 @@ mod tests {
                 .expect("and the image itself is here")
                 .data,
             vec![0x89, b'P', b'N', b'G', 2]
+        );
+    }
+
+    /// Two files can reach the same custom icon id for two different
+    /// pictures. Taking the id at face value handed the group back the
+    /// picture it already had, so keeping the remote group looked like it had
+    /// been ignored, and the fork then pruned the remote image away.
+    #[test]
+    fn a_colliding_icon_id_still_yields_the_remote_picture() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        let tied = keepass::db::Times::now();
+        let shared = local
+            .group_mut(group_id)
+            .unwrap()
+            .set_icon_custom_new(vec![0x89, b'P', b'N', b'G', 1])
+            .id();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        // The same id, a different picture, and the same name on both, which
+        // is what made the row compare equal and vanish.
+        let mut remote = fork(&local);
+        {
+            let mut icon = remote.custom_icon_mut(shared).expect("the id is here");
+            icon.data = vec![0x89, b'P', b'N', b'G', 2];
+            icon.name = Some("Vault".into());
+        }
+        local.custom_icon_mut(shared).unwrap().name = Some("Vault".into());
+        remote.group_mut(group_id).unwrap().notes = Some("edited there".into());
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let report = diff(&local, &remote);
+        let conflict = report.group_conflicts.first().expect("a tie on one second");
+        assert!(
+            conflict.fields.iter().any(|field| field.label == "Icon"),
+            "one name, two pictures: the row still has to appear: {:?}",
+            conflict.fields
+        );
+
+        let picks = Resolutions {
+            entries: HashMap::new(),
+            groups: HashMap::from([(group_id.to_string(), Side::Remote)]),
+            metadata: None,
+        };
+        let merged = apply_picks(&local, &remote, &picks, &report).expect("resolvable");
+
+        let Some(Icon::Custom(shown)) = merged.group(group_id).unwrap().icon().cloned() else {
+            panic!("the group still has a custom icon");
+        };
+        assert_eq!(
+            merged.custom_icon(shown).expect("its image is here").data,
+            vec![0x89, b'P', b'N', b'G', 2],
+            "keeping their group has to show their picture"
+        );
+    }
+
+    /// A bin the other copy knows and deliberately stopped using is not an
+    /// independently created one. Moving it under the current bin would mark
+    /// everything the user has since put in it as deleted, which is the same
+    /// loss as leaving two bins, pointed the other way.
+    #[test]
+    fn a_bin_the_other_copy_retired_on_purpose_stays_where_it_is() {
+        let mut base = Database::new();
+        let archived = add(&mut base, "Still needed", "secret");
+        let start = keepass::db::Times::now() - chrono::TimeDelta::minutes(30);
+        let old_bin = {
+            let mut root = base.root_mut();
+            let mut group = root.add_group();
+            group.name = "Recycle Bin".to_string();
+            group.id()
+        };
+        base.meta.recyclebin_uuid = Some(old_bin.uuid());
+        base.meta.recyclebin_enabled = Some(true);
+        base.meta.recyclebin_changed = Some(start);
+        {
+            let mut entry = base.entry_mut(archived).unwrap();
+            entry.move_to(old_bin).unwrap();
+            entry.times.last_modification = Some(start);
+            entry.times.location_changed = Some(start);
+        }
+
+        // This copy still calls that group the bin. The other made a new one
+        // and kept the old group as an ordinary archive.
+        let local = fork(&base);
+        let mut remote = fork(&base);
+        let new_bin = {
+            let mut root = remote.root_mut();
+            let mut group = root.add_group();
+            group.name = "Recycle Bin".to_string();
+            group.id()
+        };
+        remote.meta.recyclebin_uuid = Some(new_bin.uuid());
+        remote.meta.recyclebin_changed = Some(keepass::db::Times::now());
+        remote.group_mut(old_bin).unwrap().name = "Archive".into();
+        remote.group_mut(old_bin).unwrap().times.last_modification =
+            Some(keepass::db::Times::now());
+
+        let report = diff(&local, &remote);
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
+            .expect("a retired bin is not a reason to refuse the merge");
+
+        assert_eq!(
+            merged
+                .group(old_bin)
+                .expect("the archive is still there")
+                .parent()
+                .expect("it has a parent")
+                .id(),
+            merged.root().id(),
+            "the group they retired stays where they put it"
+        );
+        let live: Vec<String> = live_entries(&merged)
+            .into_values()
+            .map(|snapshot| snapshot.view.title)
+            .collect();
+        assert_eq!(
+            live,
+            vec!["Still needed".to_string()],
+            "and what they kept in it is not deleted behind their back"
+        );
+    }
+
+    /// Once one bin sits inside the other, a third copy can designate the
+    /// outer one. The move that would repair that is a cycle, and giving up
+    /// on it left the outer group holding entries that stopped counting as
+    /// deleted the moment it was no longer the bin.
+    #[test]
+    fn a_bin_nested_the_other_way_round_is_lifted_out_rather_than_skipped() {
+        let start = keepass::db::Times::now() - chrono::TimeDelta::minutes(30);
+        let mut base = Database::new();
+        let trashed = add(&mut base, "Deleted", "secret");
+        // The other copy's bin, which both sides know.
+        let inner = {
+            let mut root = base.root_mut();
+            let mut group = root.add_group();
+            group.name = "Recycle Bin".to_string();
+            group.times.location_changed = Some(start);
+            group.id()
+        };
+        base.entry_mut(trashed).unwrap().times.last_modification = Some(start);
+        base.entry_mut(trashed).unwrap().times.location_changed = Some(start);
+        base.meta.recyclebin_enabled = Some(true);
+
+        // This copy is the state a previous merge left behind: its own bin,
+        // with the other copy's nested inside it.
+        let mut local = fork(&base);
+        let outer = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Recycle Bin".to_string();
+            group.id()
+        };
+        local.meta.recyclebin_uuid = Some(outer.uuid());
+        local.meta.recyclebin_changed = Some(start);
+        let nested = start + chrono::TimeDelta::minutes(10);
+        for (group, entry) in [(Some(inner), None), (None, Some(trashed))] {
+            if let Some(group) = group {
+                let mut group = local.group_mut(group).unwrap();
+                group.track_changes().move_to(outer).unwrap();
+                group.times.location_changed = Some(nested);
+            }
+            if let Some(entry) = entry {
+                let mut entry = local.entry_mut(entry).unwrap();
+                entry.move_to(outer).unwrap();
+                entry.times.location_changed = Some(nested);
+                // A real delete dates the entry too, which is what lets the
+                // other side rank it rather than calling it a tie.
+                entry.times.last_modification = Some(nested);
+            }
+        }
+
+        // The other copy has never seen the outer group and has just made its
+        // own the bin again.
+        let mut remote = fork(&base);
+        remote.meta.recyclebin_uuid = Some(inner.uuid());
+        remote.meta.recyclebin_changed = Some(keepass::db::Times::now());
+
+        let report = diff(&local, &remote);
+        let merged =
+            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
+
+        assert_eq!(
+            merged.meta.recyclebin_uuid,
+            Some(inner.uuid()),
+            "the newer clock decides which group is the bin"
+        );
+        assert!(
+            crate::keepass::document::group_is_within(
+                &merged,
+                group_with_uuid(&merged, outer.uuid()).expect("the outer group survives"),
+                group_with_uuid(&merged, inner.uuid()).expect("and so does the bin"),
+            ),
+            "the bin was lifted out and now holds the other group"
+        );
+        let live: Vec<String> = live_entries(&merged)
+            .into_values()
+            .map(|snapshot| snapshot.view.title)
+            .collect();
+        assert!(
+            live.is_empty(),
+            "and what was thrown away stays thrown away: {live:?}"
         );
     }
 
