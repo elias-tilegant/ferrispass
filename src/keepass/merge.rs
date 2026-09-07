@@ -724,7 +724,15 @@ pub fn apply_picks(
     // change the other side made, and starting from our clone would have
     // reverted it on the next upload. Someone hardening the KDF in KeePassXC
     // would have watched it come back.
+    //
+    // The format version is the exception, and stays ours: this crate writes
+    // KDBX 4 only, so adopting a KDBX 3 remote would leave a merged database
+    // that cannot be saved at all. The parameters inside are safe to take
+    // because the remote file was just parsed with them, which is where
+    // `keepass::limits` refuses anything we are unwilling to open.
+    let version = merged.config.version.clone();
     merged.config = source.config.clone();
+    merged.config.version = version;
 
     // Only genuinely ambiguous entries appear here. Timestamp-resolved rows
     // and one-sided additions are handled natively by Database::merge.
@@ -3324,6 +3332,40 @@ mod tests {
             keepass::config::CompressionConfig::None,
             "their file-level setting survives our merge"
         );
+    }
+
+    /// This crate writes KDBX 4 only. Adopting an older remote's format would
+    /// leave a merged database that cannot be saved at all, which is worse
+    /// than the setting it was trying to preserve.
+    #[test]
+    fn an_older_remote_format_is_not_adopted() {
+        use keepass::config::DatabaseVersion;
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        let ours = local.config.version.clone();
+        assert!(matches!(ours, DatabaseVersion::KDB4(_)), "{ours:?}");
+
+        let mut remote = fork(&local);
+        remote.config.version = DatabaseVersion::KDB3(1);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_unprotected(fields::NOTES, "edited remotely");
+        remote.entry_mut(id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::minutes(1));
+
+        let report = diff(&local, &remote);
+        let merged =
+            apply_picks(&local, &remote, &Resolutions::default(), &report).expect("resolvable");
+
+        assert_eq!(merged.config.version, ours);
+        merged
+            .save(&mut std::io::Cursor::new(Vec::new()), test_key())
+            .expect("the merged result has to be writable");
+    }
+
+    fn test_key() -> keepass::DatabaseKey {
+        keepass::DatabaseKey::new().with_password("pw")
     }
 
     /// The fork gives a version with no timestamp the epoch and unions it
