@@ -6037,8 +6037,17 @@ impl AppState {
                     if !state.vault_session_is_current(&callback_path, session_id) {
                         return;
                     }
+                    let merged_revision = crate::sync::config::local_revision(&published_bytes);
                     state.with_sync_binding_mut_for_session(&callback_path, session_id, |b| {
                         b.config.last_etag = if_match.clone();
+                        // The file just changed without an upload, and every
+                        // save re-encrypts with a fresh seed, so its digest
+                        // will never match the last one we sent. Recording
+                        // the merged file as the baseline is what says "local
+                        // holds nothing the cloud lacks"; without it the next
+                        // tick reads the difference as an unsent edit and
+                        // uploads after every single pull.
+                        b.config.uploaded_local_revision = Some(merged_revision.clone());
                         let _ = crate::sync::config::save(&b.config);
                     });
                     state.apply_sync_status_for_session(
@@ -6991,6 +7000,37 @@ mod park_tests {
         assert!(
             AppState::local_is_ahead_of_the_cloud(&vault, &config),
             "the file moved and the upload did not"
+        );
+    }
+
+    /// A pull rewrites the local file, and every save re-encrypts with a
+    /// fresh seed, so the file's digest can never match the last one we sent.
+    /// Reading that difference as an unsent edit would upload after every
+    /// single pull, which is the loop the fast-forward path exists to avoid.
+    #[test]
+    fn a_fast_forward_does_not_look_like_an_unsent_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("pulled.kdbx");
+        let mut config = fake_binding_for("a@example.invalid", vault.clone(), "item").config;
+
+        std::fs::write(&vault, b"as uploaded").expect("write vault");
+        config.uploaded_local_revision = Some(crate::sync::config::local_revision(b"as uploaded"));
+        assert!(!AppState::local_is_ahead_of_the_cloud(&vault, &config));
+
+        // A pull merges and saves. Different bytes, same content as remote.
+        std::fs::write(&vault, b"re-encrypted after the pull").expect("write vault");
+        assert!(
+            AppState::local_is_ahead_of_the_cloud(&vault, &config),
+            "without recording the merged file, the tick sees an edit"
+        );
+
+        // Which is why the fast-forward branch records it.
+        config.uploaded_local_revision = Some(crate::sync::config::local_revision(
+            b"re-encrypted after the pull",
+        ));
+        assert!(
+            !AppState::local_is_ahead_of_the_cloud(&vault, &config),
+            "a pure pull leaves nothing to push"
         );
     }
 

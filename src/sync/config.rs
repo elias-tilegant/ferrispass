@@ -124,12 +124,15 @@ impl SyncConfig {
             site_id: String::new(),
             drive_id: String::new(),
             item_id: String::new(),
+            // iCloud's revision is the content digest, and the file that
+            // was just published is a copy of the local one, so what the
+            // remote holds and what we sent are the same value here.
+            uploaded_local_revision: Some(revision.clone()),
             last_etag: revision,
             local_path,
             remote_url: remote_path.display().to_string(),
             authenticated_at: now_unix(),
             remote_bookmark: Some(bookmark),
-            uploaded_local_revision: None,
         }
     }
 
