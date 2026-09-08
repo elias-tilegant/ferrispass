@@ -43,6 +43,29 @@ pub fn held<T>(wait: Duration, f: impl FnOnce() -> T) -> Option<T> {
     with_file(&path()?, wait, f)
 }
 
+/// How many times a background operation asks again before treating the lock
+/// as something to report. Contention is another process finishing its own
+/// file and keychain calls, so a few tries over a second is generous.
+pub const RETRIES: u32 = 4;
+
+/// Run `f`, and ask again while it says another process was in the way.
+///
+/// For background work that has nobody to tell: a disconnect's cleanup and a
+/// binding restore both run on a task, and "someone else was writing" is not
+/// something to surface, it is something to wait out.
+pub fn retrying<T, E>(
+    mut f: impl FnMut() -> Result<T, E>,
+    busy: impl Fn(&E) -> bool,
+) -> Result<T, E> {
+    for _ in 0..RETRIES {
+        match f() {
+            Err(error) if busy(&error) => std::thread::sleep(INTERACTIVE),
+            outcome => return outcome,
+        }
+    }
+    f()
+}
+
 /// The same, on a named file, so a test can hold it from the other side.
 fn with_file<T>(path: &std::path::Path, wait: Duration, f: impl FnOnce() -> T) -> Option<T> {
     let _guard = acquire(path, wait)?;
@@ -101,6 +124,39 @@ mod tests {
 
         assert!(result.is_none(), "it reports that it did not run");
         assert!(!ran, "and it did not");
+    }
+
+    /// Contention is another process finishing its own file and keychain
+    /// calls, so asking again is the whole remedy. Background work that
+    /// reported it instead told the user their sync had broken.
+    #[test]
+    fn retrying_asks_again_while_the_answer_is_busy() {
+        let mut attempts = 0;
+        let result: Result<&str, &str> = retrying(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err("busy")
+                } else {
+                    Ok("done")
+                }
+            },
+            |error| *error == "busy",
+        );
+        assert_eq!(result, Ok("done"));
+        assert_eq!(attempts, 3);
+
+        // Anything else is an answer, not a queue.
+        let mut attempts = 0;
+        let result: Result<&str, &str> = retrying(
+            || {
+                attempts += 1;
+                Err("no such file")
+            },
+            |error| *error == "busy",
+        );
+        assert_eq!(result, Err("no such file"));
+        assert_eq!(attempts, 1);
     }
 
     #[test]

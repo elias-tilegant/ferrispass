@@ -244,7 +244,18 @@ pub fn persist_connect_picked(result: &ConnectResult) -> Result<(), ServiceError
             &result.access_token.refresh_token,
         )?;
     }
-    config::save(&result.config)?;
+    // The token is in the keychain by now, and nothing points at it until
+    // this write lands. Leaving it there after a failure gave the user a
+    // credential no screen in the app can remove, so the failure takes it
+    // back out. A second failure there is worth reporting over the first:
+    // the vault is unbound either way, and the token is the part that
+    // outlives the attempt.
+    if let Err(error) = config::save(&result.config) {
+        if result.config.provider == SyncProvider::SharePoint {
+            tokens::delete(&result.config.account_email)?;
+        }
+        return Err(error.into());
+    }
     staged.commit();
     Ok(())
 }
@@ -563,6 +574,19 @@ impl ServiceError {
 /// On app launch: compare the cached etag to what's currently on the server.
 /// Cheap (one metadata fetch, no body download). Used to nudge the user
 /// when another device wrote since they last synced.
+impl ServiceError {
+    /// Whether this is another FerrisPass process holding the sync state
+    /// rather than anything wrong. Waiting and asking again is then the whole
+    /// remedy, and the caller should not tell the user their sync broke.
+    pub fn is_busy(&self) -> bool {
+        match self {
+            Self::Config(error) => error.is_busy(),
+            Self::Tokens(error) => error.is_busy(),
+            _ => false,
+        }
+    }
+}
+
 pub fn refresh_check(
     config: &SyncConfig,
     token: &AccessToken,

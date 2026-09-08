@@ -174,6 +174,15 @@ pub enum ConfigError {
     Busy,
 }
 
+impl ConfigError {
+    /// Whether waiting and asking again is the right response. Only the lock
+    /// is transient: a parse error or a missing home directory will say the
+    /// same thing next time.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy)
+    }
+}
+
 /// Resolve the directory holding sync-config JSON files, creating it
 /// (and parents) on demand. Idempotent.
 pub fn ensure_dir() -> Result<PathBuf, ConfigError> {

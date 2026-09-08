@@ -561,20 +561,29 @@ fn execute_sync(
 ) -> Result<Value, CliError> {
     let canonical =
         std::fs::canonicalize(vault).map_err(|e| CliError::new("io", 7, e.to_string()))?;
-    let mut config = crate::sync::config::load(&canonical)
-        .map_err(sync_error)?
-        .ok_or_else(|| {
-            CliError::new(
-                "sync_not_configured",
-                6,
-                "vault is not connected to a sync provider",
-            )
-        })?;
+    let mut config = crate::sync::lock::retrying(
+        || crate::sync::config::load(&canonical),
+        crate::sync::config::ConfigError::is_busy,
+    )
+    .map_err(|error| {
+        if error.is_busy() {
+            busy_error()
+        } else {
+            sync_error(error)
+        }
+    })?
+    .ok_or_else(|| {
+        CliError::new(
+            "sync_not_configured",
+            6,
+            "vault is not connected to a sync provider",
+        )
+    })?;
     // What the binding looked like before this command touched it.
     // `restore_provider` refreshes an iCloud bookmark in memory, so comparing
     // our own copy against the file later would report a change nobody made.
     let baseline = config.clone();
-    let token = crate::sync::service::restore_provider(&mut config).map_err(sync_error)?;
+    let token = crate::sync::service::restore_provider(&mut config).map_err(sync_service_error)?;
     let local_bytes = document
         .read_current_bytes()
         .map_err(|e| CliError::new("local_revision_changed", 5, e.to_string()))?;
@@ -869,6 +878,24 @@ fn validate_resolution_input(
 
 fn sync_error(error: impl std::fmt::Display) -> CliError {
     CliError::new("sync_failed", 7, error.to_string())
+}
+
+/// The same, but keeping `sync_busy` distinguishable: a script that meets
+/// another FerrisPass process should be able to wait and try again, and a
+/// generic failure code tells it to give up instead.
+fn sync_service_error(error: crate::sync::service::ServiceError) -> CliError {
+    if error.is_busy() {
+        return busy_error();
+    }
+    sync_error(error)
+}
+
+fn busy_error() -> CliError {
+    CliError::new(
+        "sync_busy",
+        5,
+        "another FerrisPass process is using the sync configuration; try again",
+    )
 }
 
 fn unlock_password(cli: &Cli) -> Result<Zeroizing<String>, CliError> {

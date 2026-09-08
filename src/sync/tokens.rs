@@ -28,6 +28,13 @@ pub enum TokenError {
     Busy,
 }
 
+impl TokenError {
+    /// See `ConfigError::is_busy`.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy)
+    }
+}
+
 /// Serialises this process's keychain access for these entries.
 ///
 /// The Keychain offers no compare-and-set, so [`replace`] has to read and

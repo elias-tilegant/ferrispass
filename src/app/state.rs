@@ -2267,10 +2267,20 @@ impl AppState {
             return;
         };
         // Bail when there's no config on disk for this path - the common
-        // case for local-only vaults.
-        let config = match crate::sync::config::load(&path) {
-            Ok(Some(c)) => c,
-            _ => return,
+        // case for local-only vaults. An error is not that: swallowing one
+        // turned a vault whose binding could not be read into a local-only
+        // vault for the rest of the session, silently, and the restore path
+        // has a Failed state with a Retry for exactly this.
+        let config = match crate::sync::lock::retrying(
+            || crate::sync::config::load(&path),
+            crate::sync::config::ConfigError::is_busy,
+        ) {
+            Ok(Some(config)) => config,
+            Ok(None) => return,
+            Err(error) => {
+                self.finish_sync_binding_restore(&path, session, Err(error.into()), cx);
+                return;
+            }
         };
 
         // Defensive: if Connect just established a binding (during the
@@ -4646,7 +4656,10 @@ impl AppState {
             let mut failure = None;
             operation_gate.run_reserved_cleanup(|| {
                 if let Some(config) = config
-                    && let Err(error) = crate::sync::service::disconnect(&config)
+                    && let Err(error) = crate::sync::lock::retrying(
+                        || crate::sync::service::disconnect(&config),
+                        crate::sync::service::ServiceError::is_busy,
+                    )
                 {
                     failure = Some(error.to_string());
                 }
