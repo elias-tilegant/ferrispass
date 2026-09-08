@@ -83,6 +83,17 @@ pub enum ServiceError {
     },
 }
 
+impl ServiceError {
+    /// Whether a failed connect left the local vault on disk.
+    ///
+    /// The caller has to keep such a vault discoverable even when the flow
+    /// it belonged to is gone: opening it is the only way to reach
+    /// Disconnect and clear what was left behind.
+    pub fn left_a_local_vault(&self) -> bool {
+        matches!(self, Self::ConnectLeftConfigured { .. })
+    }
+}
+
 /// Why a connect publication could not finish, and whether the local vault
 /// has to survive it.
 struct PublishFailure {
@@ -915,6 +926,24 @@ mod tests {
         let told = stuck.error.to_string();
         assert!(told.contains("a@b.test"), "it names the account: {told}");
         assert!(told.contains("Disconnect"), "and the way out: {told}");
+    }
+
+    /// The publication decides whether the vault survives, the connect
+    /// callback decides whether to keep it findable, and the two read the
+    /// same fact from different sides. They have to agree: a vault kept on
+    /// disk and left out of Recents is one the user cannot reach, and the
+    /// message telling them to open it goes to a screen that is gone.
+    #[test]
+    fn a_failure_that_keeps_the_vault_says_so_to_its_caller() {
+        let stuck = PublishFailure::after_token_failure(
+            "a@b.test",
+            TokenError::Busy,
+            Err(ConfigError::NoSupportDir("$HOME not set".into())),
+        );
+        assert_eq!(stuck.keep_vault, stuck.error.left_a_local_vault());
+
+        let removed = PublishFailure::after_token_failure("a@b.test", TokenError::Busy, Ok(()));
+        assert_eq!(removed.keep_vault, removed.error.left_a_local_vault());
     }
 
     fn search_hit(name: &str, last_modified: &str) -> DriveItemHit {

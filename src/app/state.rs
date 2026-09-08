@@ -5029,11 +5029,20 @@ impl AppState {
                     // retain its access token in AppState.
                     Ok(Some(_)) => state.push_recent(final_path, cx),
                     Ok(None) => {}
-                    Err(e) if is_current => {
-                        state.connect_flow = Some(ConnectFlow::Failed(e.to_string()));
-                        cx.notify();
+                    Err(error) => {
+                        // A publication that kept the vault kept it as the
+                        // only route to Disconnect. Leaving it out of
+                        // Recents hides the one file that leads there, and a
+                        // flow the user has already cancelled has no screen
+                        // left to say so on.
+                        if error.left_a_local_vault() {
+                            state.push_recent(final_path, cx);
+                        }
+                        if is_current {
+                            state.connect_flow = Some(ConnectFlow::Failed(error.to_string()));
+                            cx.notify();
+                        }
                     }
-                    Err(_) => {}
                 }
             });
         })
