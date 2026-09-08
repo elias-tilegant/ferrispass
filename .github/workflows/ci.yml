@@ -45,12 +45,19 @@ jobs:
         run: cargo test --locked --verbose
 
       # UI copy, comments and docs use plain hyphens, never em or en dashes.
-      # Examples and tests carry user-visible strings too, and the rule covers
-      # commit messages, which is where it was previously unenforced.
+      # Every tracked file, not a list of directories: the list left out
+      # scripts/, and two build scripts kept their dashes through a whole
+      # release cycle because of it. A rule that says "everywhere" is cheaper
+      # to enforce everywhere than to keep a list current.
       - name: Reject em and en dashes
         run: |
-          if grep -rnP '\x{2014}|\x{2013}' \
-              src/ docs/ examples/ tests/ README.md SECURITY.md; then
+          # Collected rather than tested by exit code: xargs may split the
+          # file list into several greps, and only the last one's status
+          # would survive the pipeline. -I keeps binary assets out, where
+          # the three bytes of an em dash can occur by chance.
+          found=$(git ls-files -z | xargs -0 grep -nIP '\x{2014}|\x{2013}' || true)
+          if [ -n "$found" ]; then
+            echo "$found"
             echo "::error::em or en dash found in a file; use a plain hyphen"
             exit 1
           fi

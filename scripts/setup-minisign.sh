@@ -57,15 +57,15 @@ echo "✓ Public key written to ${PUBKEY_FILE}"
 cat <<EOF
 
 ═══════════════════════════════════════════════════════════════════════
-NEXT STEPS — set GitHub Secrets so CI can sign releases:
+NEXT STEPS - set GitHub Secrets so CI can sign releases:
 
 1. Read the private key (you'll paste this into a GitHub Secret):
    cat ${PRIVKEY_FILE}
 
 2. In GitHub → Settings → Secrets and variables → Actions, create:
 
-   • MINISIGN_PRIVATE_KEY — the contents of ${PRIVKEY_FILE}
-   • MINISIGN_PASSWORD    — the passphrase you just set
+   • MINISIGN_PRIVATE_KEY - the contents of ${PRIVKEY_FILE}
+   • MINISIGN_PASSWORD    - the passphrase you just set
 
 3. Commit the new public key:
    git add bundle/minisign-pub.txt

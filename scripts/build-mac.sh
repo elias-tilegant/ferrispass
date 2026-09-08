@@ -2,7 +2,7 @@
 #
 # Builds a notarized, stapled FerrisPass.dmg from source.
 #
-# Apple Silicon (arm64) only. Intel Macs are not supported in v0.1.0 — adding
+# Apple Silicon (arm64) only. Intel Macs are not supported in v0.1.0 - adding
 # x86_64 requires removing `target-cpu=native` from .cargo/config.toml because
 # that flag mixes host CPU features into cross-compiles. Worth doing later if
 # there's demand; for now the simpler path wins.
@@ -261,7 +261,7 @@ if command -v create-dmg >/dev/null 2>&1; then
         "${DMG_PATH}" \
         "${APP_BUNDLE}" >/dev/null
 else
-    echo "    (tip: brew install create-dmg for a prettier window — falling back to hdiutil)"
+    echo "    (tip: brew install create-dmg for a prettier window - falling back to hdiutil)"
     hdiutil create -volname "${APP_NAME} ${VERSION}" -srcfolder "${APP_BUNDLE}" \
         -ov -format UDZO "${DMG_PATH}" >/dev/null
 fi
@@ -272,7 +272,7 @@ codesign --force --sign "${SIGNING_IDENTITY}" --timestamp "${DMG_PATH}"
 
 if [ "${SKIP_NOTARIZE}" = "true" ]; then
     echo ""
-    echo "✓ Local build complete (unnotarized — Gatekeeper will warn on first open)"
+    echo "✓ Local build complete (unnotarized - Gatekeeper will warn on first open)"
     echo "  ${DMG_PATH}"
     ls -lh "${DMG_PATH}"
     exit 0

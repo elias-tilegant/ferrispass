@@ -12,7 +12,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked                              # every test green
 cargo audit
 # House style: plain hyphens, no em or en dashes. Both scans must be empty.
-grep -rEn $'\u2014|\u2013' src/ docs/ examples/ tests/ README.md SECURITY.md
+git ls-files -z | xargs -0 grep -nIE $'\u2014|\u2013'
 git log --format='%B' origin/master..HEAD | grep -En $'\u2014|\u2013'
 git status                                       # working tree clean
 git pull --rebase origin master                  # in sync with remote
@@ -24,10 +24,13 @@ CI can tell you your working tree is dirty or your branch is behind.
 
 The dash rule covers commit messages as well as files, so it takes two scans:
 the first reads the working tree, the second reads the messages of the commits
-this release adds. macOS ships BSD grep, which has no `-P`, hence the `$'...'`
-escapes rather than a Perl pattern, and `-E`, because `\|` is a literal in a
-basic regular expression there: written as `$'\u2014\|\u2013'` the scan
-matched nothing at all and passed on files that were full of dashes. The test count is deliberately not written
+this release adds. The first scan asks git for the file list rather than
+naming directories: the list it used to carry left out `scripts/`, and two
+build scripts kept their dashes through a whole release cycle because of it.
+macOS ships BSD grep, which has no `-P`, hence the `$'...'` escapes rather
+than a Perl pattern, and `-E`, because `\|` is a literal in a basic regular
+expression there: written as `$'\u2014\|\u2013'` the scan matched nothing at
+all and passed on files that were full of dashes. The test count is deliberately not written
 down here: a number in a checklist is wrong by the next commit, and a stale
 one teaches the reader to ignore the line.
 
