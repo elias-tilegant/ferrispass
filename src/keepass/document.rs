@@ -1394,7 +1394,7 @@ impl SavePayload {
         let write_result = (|| {
             self.database
                 .save(&mut tmp, self.database_key)
-                .map_err(|error| SaveError::Encode(error.to_string()))?;
+                .map_err(encode_error)?;
             tmp.flush().map_err(SaveError::WriteTemp)?;
             sync_file(&tmp).map_err(SaveError::WriteTemp)?;
 
@@ -1932,6 +1932,27 @@ pub enum SaveError {
 
     #[error("could not encode database: {0}")]
     Encode(String),
+
+    /// The vault opened, and it cannot be written back.
+    ///
+    /// The library reads KDB 1.x and KDBX 3; this application writes KDBX 4
+    /// and nothing else. Reading an old vault is useful, so it is allowed,
+    /// but the first save has to explain itself rather than report an
+    /// encoding fault the user can do nothing about.
+    #[error(
+        "this vault is in an older KeePass format. FerrisPass can read it but writes KDBX 4 \
+         only. Convert the database in KeePassXC to save changes here."
+    )]
+    UnwritableFormat,
+}
+
+/// Translate the library's save failure, keeping the one case that is not a
+/// fault of the write apart from the rest.
+fn encode_error(error: keepass::error::DatabaseSaveError) -> SaveError {
+    match error {
+        keepass::error::DatabaseSaveError::UnsupportedVersion => SaveError::UnwritableFormat,
+        other => SaveError::Encode(other.to_string()),
+    }
 }
 
 impl fmt::Debug for VaultDocument {
@@ -1953,6 +1974,22 @@ mod tests {
     use keepass::{Database, db::fields};
     use tempfile::TempDir;
 
+    /// A vault the library reads and cannot write back is not a broken
+    /// write. Reporting it as one gave the user "could not encode database"
+    /// over and over, with nothing in it about the format or the way out.
+    #[test]
+    fn an_older_format_is_told_apart_from_a_failed_write() {
+        let old = encode_error(keepass::error::DatabaseSaveError::UnsupportedVersion);
+        assert!(matches!(old, SaveError::UnwritableFormat));
+        let told = old.to_string();
+        assert!(told.contains("KDBX 4"), "it names what it writes: {told}");
+        assert!(told.contains("KeePassXC"), "and the way out: {told}");
+
+        let broken = encode_error(keepass::error::DatabaseSaveError::Io(
+            std::io::Error::other("disk went away"),
+        ));
+        assert!(matches!(broken, SaveError::Encode(_)));
+    }
     #[test]
     fn history_is_trimmed_to_keepass_default_on_repeated_edits() {
         let mut db = Database::new();

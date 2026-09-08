@@ -40,8 +40,11 @@ pub fn open_message(error: &DatabaseOpenError) -> String {
         DatabaseOpenError::Key(_)
         | DatabaseOpenError::Cryptography(_)
         | DatabaseOpenError::Format(_) => "Wrong master password or key file.".to_string(),
+        // Not "cannot open KDBX 3": it can, and does. What it cannot open
+        // is the pre-release KeePass 2 format, and a header whose version
+        // will not parse at all.
         DatabaseOpenError::UnsupportedVersion | DatabaseOpenError::VersionParse(_) => {
-            "This file is not a KDBX 4 database. FerrisPass cannot open KDBX 3 or older."
+            "FerrisPass cannot read this KeePass format. Convert the database in KeePassXC."
                 .to_string()
         }
         DatabaseOpenError::UnexpectedEof => {
@@ -75,7 +78,7 @@ mod tests {
 
     #[test]
     fn an_old_format_says_which_format() {
-        assert!(open_message(&DatabaseOpenError::UnsupportedVersion).contains("KDBX 4"));
+        assert!(open_message(&DatabaseOpenError::UnsupportedVersion).contains("KeePassXC"));
     }
 
     #[test]
