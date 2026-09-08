@@ -7294,19 +7294,34 @@ mod park_tests {
             "nor report its upload as this one's"
         );
 
-        // And it says nothing about any other vault: a push in flight for one
-        // the user parked is not part of this relationship at all, and
-        // refusing it left that vault stuck on `Syncing` with automatic sync
-        // skipping it as busy.
-        let other = dir.path().join("parked.kdbx");
+        // And it says nothing about any other vault, in either direction. A
+        // push in flight for one the user is not looking at belongs to that
+        // vault's own relationship; refusing it removed its queue entry and
+        // left it on `Syncing` while automatic sync skipped it as busy.
+        let other = dir.path().join("other.kdbx");
         state.park_active();
         fresh_open(&mut state, other.clone(), "pw");
-        let elsewhere = sync_session(&state, &other);
+        let parked_session = sync_session(&state, &vault);
+        let active_session = sync_session(&state, &other);
+
         state.end_sync_relationship(Some(&vault));
         assert!(
-            state.sync_session_is_current(&other, elsewhere),
-            "ending one vault's relationship does not end another's"
+            state.sync_session_is_current(&other, active_session),
+            "disconnecting the parked vault does not end the active one's"
         );
+        assert!(
+            !state.sync_session_is_current(&vault, parked_session),
+            "while the parked one's is over"
+        );
+
+        let active_session = sync_session(&state, &other);
+        let parked_session = sync_session(&state, &vault);
+        state.end_sync_relationship(Some(&other));
+        assert!(
+            state.sync_session_is_current(&vault, parked_session),
+            "and disconnecting the active vault does not end the parked one's"
+        );
+        assert!(!state.sync_session_is_current(&other, active_session));
     }
 
     /// A successful upload has to record the bytes it sent, not just the
