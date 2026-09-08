@@ -238,20 +238,28 @@ pub(crate) fn load_in(dir: &Path, local_path: &Path) -> Result<Option<SyncConfig
 /// relationship are compared; the parts a sync legitimately updates, the etag
 /// and the uploaded revision, are not.
 pub fn same_relationship(left: &SyncConfig, right: &SyncConfig) -> bool {
+    // An iCloud binding leaves the Graph fields empty and names its file in
+    // `remote_url` and the bookmark instead, so comparing only the Graph ones
+    // called two different iCloud files the same relationship.
     left.provider == right.provider
         && left.account_email == right.account_email
         && left.site_id == right.site_id
         && left.drive_id == right.drive_id
         && left.item_id == right.item_id
         && left.local_path == right.local_path
+        && left.remote_url == right.remote_url
+        && left.remote_bookmark == right.remote_bookmark
 }
 
 pub(crate) fn save_in(dir: &Path, config: &SyncConfig) -> Result<(), ConfigError> {
     ensure_dir_in(dir)?;
     let target = dir.join(format!("{}.json", path_hash(&config.local_path)));
+    // Named per process: the app and the CLI write these, and one shared
+    // temp name meant each could truncate the other's half-written file and
+    // rename the result over the real one.
     let tmp = {
         let mut buf = target.as_os_str().to_owned();
-        buf.push(".tmp");
+        buf.push(format!(".{}.tmp", std::process::id()));
         PathBuf::from(buf)
     };
 
@@ -370,6 +378,39 @@ mod tests {
             remote_bookmark: None,
             uploaded_local_revision: None,
         }
+    }
+
+    /// An iCloud binding leaves every Graph field empty and names its file
+    /// in `remote_url` and the bookmark, so a guard that compared only the
+    /// Graph ones called two different iCloud vaults the same relationship
+    /// and let a stale write land on the wrong one.
+    #[test]
+    fn two_icloud_bindings_for_different_files_are_not_one_relationship() {
+        let base = SyncConfig {
+            schema_version: 2,
+            provider: SyncProvider::ICloudDrive,
+            account_email: String::new(),
+            site_id: String::new(),
+            drive_id: String::new(),
+            item_id: String::new(),
+            last_etag: "etag-1".into(),
+            local_path: PathBuf::from("/vaults/team.kdbx"),
+            remote_url: "/iCloud/team.kdbx".into(),
+            authenticated_at: None,
+            remote_bookmark: Some("bookmark-a".into()),
+            uploaded_local_revision: None,
+        };
+
+        let mut moved = base.clone();
+        moved.remote_url = "/iCloud/other.kdbx".into();
+        moved.remote_bookmark = Some("bookmark-b".into());
+        assert!(!same_relationship(&base, &moved));
+
+        // What a sync legitimately moves is not a different relationship.
+        let mut synced = base.clone();
+        synced.last_etag = "etag-2".into();
+        synced.uploaded_local_revision = Some("revision".into());
+        assert!(same_relationship(&base, &synced));
     }
 
     #[test]

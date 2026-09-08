@@ -77,11 +77,15 @@ pub fn delete(account_email: &str) -> Result<(), TokenError> {
 /// stale one.
 pub fn replace(account_email: &str, expected: &str, rotated: &str) -> Result<bool, TokenError> {
     let _guard = locked();
-    if read(account_email)?.as_deref() != Some(expected) {
-        return Ok(false);
-    }
-    write(account_email, rotated)?;
-    Ok(true)
+    // And across processes: the app and the CLI both write these, and the
+    // Keychain offers no compare-and-set of its own.
+    super::lock::held(|| {
+        if read(account_email)?.as_deref() != Some(expected) {
+            return Ok(false);
+        }
+        write(account_email, rotated)?;
+        Ok(true)
+    })
 }
 
 fn read(account_email: &str) -> Result<Option<String>, TokenError> {

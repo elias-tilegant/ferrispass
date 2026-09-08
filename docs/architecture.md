@@ -33,7 +33,7 @@ src/
 ├── update/     Auto-update system. Wraps cargo-packager-updater. Handles
 │               manifest fetch, version compare, download + verify + install.
 ├── cli.rs      Headless command tree, stable JSON envelope, secret-output
-│               policy and two-step SharePoint sync.
+│               policy and two-step sync for either provider.
 ├── cli_install.rs  macOS registration of the bundled CLI in /usr/local/bin.
 ├── favicon.rs  DuckDuckGo favicon fetcher (per-entry icon enrichment).
 ├── lib.rs      Module root.
@@ -158,10 +158,10 @@ Reference implementation: `try_restore_sync_binding` in `app/state.rs`, whose co
 │     Written only when the user enables Touch ID for a   │
 │     vault. See SECURITY.md for what guards it.          │
 └─────────────────────────────────────────────────────────┘
-              │ HTTPS / Microsoft Graph
+              │ HTTPS to Graph, or the local iCloud folder
               ▼
 ┌─────────────────────────────────────────────────────────┐
-│ Cloud (SharePoint via Microsoft Graph)                  │
+│ Cloud (SharePoint via Microsoft Graph, or iCloud Drive) │
 │   - .kdbx file (encrypted at rest by FerrisPass)        │
 │   - never sees the master password                      │
 └─────────────────────────────────────────────────────────┘

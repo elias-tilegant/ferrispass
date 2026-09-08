@@ -44,15 +44,17 @@ For transparency about the trust assumptions:
 | Surface | Algorithm | Key location |
 |---|---|---|
 | Vault file encryption | whatever the .kdbx header specifies; a vault FerrisPass writes keeps the cipher the file already had. New KeePassXC and KeePass2 files are AES-256 | derived from the master password by the KDF below |
-| Master-password KDF | whatever the .kdbx header specifies, Argon2d or Argon2id | parameters come from the file, so they are as strong as the client that wrote it. `keepass::limits` refuses a header asking for more memory than we will allocate, but nothing raises a weak one |
+| Master-password KDF | whatever the .kdbx header specifies: Argon2d, Argon2id, or the older AES-KDF that KDBX 3 files carry | parameters come from the file, so they are as strong as the client that wrote it. `keepass::limits` refuses a header asking for more memory than we will allocate, but nothing raises a weak one |
 | OAuth refresh tokens | none - opaque strings stored as-is | macOS Keychain, service `ferrispass-sync` |
 | Update bundle signing | minisign Ed25519 | public key embedded in binary at compile time, private key under maintainer custody |
 | Update bundle delivery | TLS via `reqwest` (rustls) | system root CAs |
 | Binary signing | Apple Developer ID + notarization | Apple PKI |
 
-The dual signing (Apple Developer ID *and* minisign) is intentional: each layer protects against a different compromise. For a download from the website, an attacker would need both Apple's signing infrastructure and our minisign private key.
+The two signatures cover different things and different routes. A DMG downloaded from the website carries the Apple signature and notarization, which is what Gatekeeper checks on first launch; it carries no minisign signature.
 
-For an update the running app installs, only minisign is verified: the archive's signature is checked before anything is unpacked, and the staged bundle is then checked for shape, not for an Apple signature. Gatekeeper checks the replacement on the next launch, so a bundle that is not properly signed fails then rather than at install time. Verifying it at install time is in the backlog.
+An update the running app installs is the other way round: the archive's minisign signature is checked before anything is unpacked, and the staged bundle is then checked for shape, not for an Apple signature. Gatekeeper checks the replacement on the next launch, so a bundle that is not properly signed fails then rather than at install time. Verifying it at install time is in the backlog.
+
+So an attacker needs the minisign key to push an update the app installs, and Apple's signing infrastructure to get past Gatekeeper afterwards. Neither key alone gets a malicious build both installed and running.
 
 ## Master-password handling - what FerrisPass does and doesn't do
 

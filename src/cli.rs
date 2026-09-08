@@ -686,6 +686,29 @@ fn execute_sync(
     // is what we sent.
     config.uploaded_local_revision = Some(crate::sync::config::local_revision(&upload_bytes));
     let resolved_upload = needs_upload || report.needs_a_decision();
+    // Before the upload, not after it. The app is a second process holding
+    // this binding, and this command has been running for as long as a key
+    // derivation plus two network calls: if it disconnected or bound this
+    // vault somewhere else meanwhile, the write belongs to a relationship
+    // that is over. The merged file is already on disk, which is what the
+    // next sync from either process picks up.
+    let still_bound = crate::sync::lock::held(|| {
+        crate::sync::config::load(&canonical).map(|current| {
+            current.is_some_and(|current| crate::sync::config::same_relationship(&current, &config))
+        })
+    })
+    .map_err(sync_error)?;
+    match still_bound {
+        true => {}
+        false => {
+            return Err(CliError::new(
+                "sync_binding_changed",
+                5,
+                "the vault's sync binding changed while this command ran; the \
+                 merge is saved locally, rerun sync to send it",
+            ));
+        }
+    }
     if resolved_upload {
         match crate::sync::service::upload_after_save(&config, &token, &upload_bytes)
             .map_err(sync_error)?
@@ -702,22 +725,18 @@ fn execute_sync(
             }
         }
     }
-    // The app is a second process holding this file, and this command has
-    // been running for as long as a KDF plus two network calls. If it
-    // disconnected or bound this vault somewhere else meanwhile, writing our
-    // copy back would resurrect the relationship it ended.
-    match crate::sync::config::load(&canonical).map_err(sync_error)? {
-        Some(current) if crate::sync::config::same_relationship(&current, &config) => {
-            crate::sync::config::save(&config).map_err(sync_error)?;
+    // Once more, and this time as one operation: the check and the write have
+    // to be indivisible from the app's point of view, or it could disconnect
+    // between them and have its own removal written back over.
+    crate::sync::lock::held(|| {
+        let current = crate::sync::config::load(&canonical)?;
+        if current.is_some_and(|current| crate::sync::config::same_relationship(&current, &config))
+        {
+            crate::sync::config::save(&config)?;
         }
-        _ => {
-            return Err(CliError::new(
-                "sync_binding_changed",
-                5,
-                "the vault's sync binding changed while this command ran; rerun sync",
-            ));
-        }
-    }
+        Ok::<_, crate::sync::config::ConfigError>(())
+    })
+    .map_err(sync_error)?;
     let resolved = picks.entries.len() + picks.groups.len() + usize::from(picks.metadata.is_some());
     Ok(
         json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":resolved}),

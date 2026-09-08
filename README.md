@@ -55,7 +55,8 @@ src/
   cli_install.rs  macOS CLI registration and removal
   domain/     UI-safe vault snapshot types, decrypted for display
   keepass/    keepass-rs adapter, document, password generator, two-file merge
-  sync/       SharePoint device-code auth, Graph API, sync service, keychain tokens
+  sync/       SharePoint device-code auth and Graph API, iCloud Drive adapter,
+              sync service, keychain tokens
   ui/         GPUI views, screens, widgets, palette, theme
 examples/
   dump_xml.rs interop diagnostic - prints the decoded KDBX inner XML
@@ -93,7 +94,7 @@ ferrispass-cli --touch-id --allow-device-passcode \
 Use `--format json` for scripts and agents. Secret fields are redacted unless a
 specific entry, field and `--reveal` are requested. Mutations are dry runs until
 `--commit` is supplied. See the [CLI guide](./docs/cli.md) for the complete
-command overview, safe password input and SharePoint sync flow.
+command overview, safe password input and the two-step sync flow.
 
 ## Auto-updates
 
@@ -116,7 +117,7 @@ cargo clippy --all-targets -- -D warnings
 cargo run
 ```
 
-Tested on macOS only. Linux builds but the SharePoint sync expects the Apple Keychain.
+Tested on macOS only. Linux builds, but SharePoint sync expects the Apple Keychain and iCloud Drive is macOS-only by nature.
 
 CPU-specific codegen speeds up Argon2 and AES noticeably, but it must not be
 committed: a binary built with it crashes on any Mac older than the build

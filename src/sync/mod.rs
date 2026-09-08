@@ -22,6 +22,7 @@ pub mod config;
 pub mod graph;
 pub mod http;
 pub mod icloud;
+pub mod lock;
 pub mod provider;
 pub mod service;
 pub mod tokens;
