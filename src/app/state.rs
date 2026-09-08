@@ -169,10 +169,13 @@ pub struct AppState {
     /// vault is open; `None` while in Welcome / unlocked-but-not-synced state.
     /// Holds the in-memory access token alongside the persisted SyncConfig.
     sync: Option<SyncBinding>,
-    /// Which sync relationship the bindings above belong to. Bumped when the
-    /// user ends one, so an answer still in flight from the provider they
-    /// just left cannot be applied to the one they moved to.
-    sync_binding_generation: u64,
+    /// Which sync relationship each vault's binding belongs to, by path.
+    /// Bumped when the user ends one, so an answer still in flight from the
+    /// provider they just left cannot be applied to the one they moved to.
+    /// Per vault, because ending one vault's relationship says nothing about
+    /// another's: a shared counter stranded a parked vault's push as
+    /// `Syncing` forever, and automatic sync then skipped it as busy.
+    sync_binding_generations: HashMap<PathBuf, u64>,
     /// User-facing sync state. Drives the status pill, the SyncSettings card
     /// content, and whether the Conflict overlay opens.
     sync_status: SyncStatus,
@@ -549,7 +552,7 @@ impl Default for AppState {
             vault_selection_error: None,
             save_status: SaveStatus::default(),
             sync: None,
-            sync_binding_generation: 0,
+            sync_binding_generations: HashMap::new(),
             sync_status: SyncStatus::default(),
             sync_history: Vec::new(),
             connect_flow: None,
@@ -1372,12 +1375,25 @@ impl AppState {
     /// part that matters for anything still in flight, and the part a test
     /// can drive. What is in flight belongs to the relationship that just
     /// ended, whatever the user binds this vault to next.
-    fn end_sync_relationship(&mut self) {
+    fn end_sync_relationship(&mut self, target: Option<&Path>) {
         self.connect_flow = None;
         self.reconnect_target = None;
         self.sync = None;
-        self.sync_binding_generation = self.sync_binding_generation.wrapping_add(1);
+        if let Some(target) = target {
+            let generation = self
+                .sync_binding_generations
+                .entry(target.to_path_buf())
+                .or_insert(0);
+            *generation = generation.wrapping_add(1);
+        }
         self.sync_status = SyncStatus::Disconnected;
+    }
+
+    fn sync_binding_generation_for(&self, target: &Path) -> u64 {
+        self.sync_binding_generations
+            .get(target)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The sync relationship a callback started now belongs to. `None` when
@@ -1387,13 +1403,13 @@ impl AppState {
             .or_else(|| self.parked.get(target).map(|session| session.session_id))
             .map(|vault| SyncSession {
                 vault,
-                binding: self.sync_binding_generation,
+                binding: self.sync_binding_generation_for(target),
             })
     }
 
     /// Whether that relationship is still the one this vault has.
     fn sync_session_is_current(&self, target: &Path, session: SyncSession) -> bool {
-        session.binding == self.sync_binding_generation
+        session.binding == self.sync_binding_generation_for(target)
             && self.vault_session_is_current(target, session.vault)
     }
 
@@ -4594,7 +4610,7 @@ impl AppState {
                     .as_deref()
                     .and_then(|path| crate::sync::config::load(path).ok().flatten())
             });
-        self.end_sync_relationship();
+        self.end_sync_relationship(current_path.as_deref());
         // Activity log is tied to the connected sync - once the user
         // disconnects, the events refer to a relationship that no
         // longer exists. Clearing avoids stale "Updated from remote"
@@ -5056,7 +5072,7 @@ impl AppState {
                 path.clone(),
                 SyncSession {
                     vault,
-                    binding: self.sync_binding_generation,
+                    binding: self.sync_binding_generation_for(path),
                 },
             ),
             _ => return,
@@ -6211,6 +6227,20 @@ impl AppState {
                 return;
             }
 
+            // Asked before the write, not after it. The merge itself had to
+            // land: those bytes are already on disk, and refusing to install
+            // them in memory would leave the two disagreeing. Sending them is
+            // a different matter, and the relationship they belong to may
+            // have ended while the save was running.
+            let still_bound = this
+                .update(cx, |state, _| {
+                    state.sync_session_is_current(&callback_path, session)
+                })
+                .unwrap_or(false);
+            if !still_bound {
+                return;
+            }
+
             // Phase 2: token refresh + upload. If anything in here fails,
             // the in-memory state is already aligned with disk (from phase
             // 1), so the user can dismiss the Failed status and keep
@@ -7229,7 +7259,7 @@ mod park_tests {
         let in_flight = sync_session(&state, &vault);
         assert!(state.sync_session_is_current(&vault, in_flight));
 
-        state.end_sync_relationship();
+        state.end_sync_relationship(Some(&vault));
         state.sync = Some(fake_binding_for(
             "b@example.invalid",
             vault.clone(),
@@ -7262,6 +7292,20 @@ mod park_tests {
                 .record_upload_baseline(&vault, in_flight, "etag-a".into(), "rev-a".into())
                 .is_none(),
             "nor report its upload as this one's"
+        );
+
+        // And it says nothing about any other vault: a push in flight for one
+        // the user parked is not part of this relationship at all, and
+        // refusing it left that vault stuck on `Syncing` with automatic sync
+        // skipping it as busy.
+        let other = dir.path().join("parked.kdbx");
+        state.park_active();
+        fresh_open(&mut state, other.clone(), "pw");
+        let elsewhere = sync_session(&state, &other);
+        state.end_sync_relationship(Some(&vault));
+        assert!(
+            state.sync_session_is_current(&other, elsewhere),
+            "ending one vault's relationship does not end another's"
         );
     }
 
