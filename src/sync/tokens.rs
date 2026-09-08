@@ -34,6 +34,22 @@ pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError>
 /// Read the refresh token for the given account. Returns `Ok(None)` when
 /// no entry exists - common case before first connect or after disconnect,
 /// not worth typing as an error.
+/// Replace the stored refresh token, but only while the one we started from
+/// is still the one stored.
+///
+/// A refresh runs on a background task and can finish after the user has
+/// disconnected, which deletes the entry, or after they have connected the
+/// same account again, which writes a newer one. A blind write then recreated
+/// an entry for a relationship that is over, or replaced a live token with a
+/// stale one. Returns whether it wrote.
+pub fn replace(account_email: &str, expected: &str, rotated: &str) -> Result<bool, TokenError> {
+    if load(account_email)?.as_deref() != Some(expected) {
+        return Ok(false);
+    }
+    store(account_email, rotated)?;
+    Ok(true)
+}
+
 pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
     let entry = Entry::new(SERVICE, account_email)?;
     match entry.get_password() {
@@ -67,6 +83,39 @@ mod tests {
     //! `target_os = "macos"` keeps that noise away.
 
     use super::*;
+
+    /// A refresh that finishes after the user disconnected, or after they
+    /// reconnected the same account, must not write. Blind stores recreated
+    /// an entry for a relationship that was over, or replaced a live token
+    /// with a stale one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "touches real macOS Keychain - run explicitly with --ignored"]
+    fn replace_only_writes_over_the_token_it_started_from() {
+        let account = format!("replace-{}@ferrispass.invalid", std::process::id());
+        let _ = delete(&account);
+
+        // Nothing stored: a disconnect got there first.
+        assert!(!replace(&account, "old", "rotated").expect("keychain"));
+        assert_eq!(load(&account).expect("keychain"), None);
+
+        store(&account, "old").expect("keychain");
+        assert!(replace(&account, "old", "rotated").expect("keychain"));
+        assert_eq!(
+            load(&account).expect("keychain").as_deref(),
+            Some("rotated")
+        );
+
+        // Something newer is stored: a reconnect got there first.
+        store(&account, "from-a-newer-connection").expect("keychain");
+        assert!(!replace(&account, "old", "rotated").expect("keychain"));
+        assert_eq!(
+            load(&account).expect("keychain").as_deref(),
+            Some("from-a-newer-connection")
+        );
+
+        delete(&account).expect("keychain");
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

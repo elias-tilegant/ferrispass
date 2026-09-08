@@ -85,13 +85,15 @@ User submits password (Unlock screen)
 
 `AppState` (in `src/app/state.rs`) holds *all* mutable application state in a single `gpui::Entity`. Status is encoded in enums per concern:
 
-- `VaultStatus` - Welcome, AwaitingPassword, Open, Error
+- `VaultStatus` - Empty, AwaitingPassword, Opening, Open
 - `SaveStatus` - Idle, Saving, Saved, Failed
-- `SyncStatus` - Disconnected, Idle, Connecting, Synced, Conflict, Failed, Reconnect.
-  `Conflict` carries both kinds: entries whose fields diverged, and groups
-  whose content diverged without a timestamp that can rank them. Groups reach
-  the screen because the fork ranks them by timestamp alone, which a tie, a
-  missing timestamp or a forged future date all defeat
+- `SyncStatus` - Disconnected, Idle, Connecting, Restoring, Syncing, Synced,
+  Conflict, Failed, Reconnect.
+  `Conflict` carries three kinds: entries whose fields, placement or expiry
+  diverged, groups whose content or placement diverged, and the database's own
+  settings. Each is decided on the clock KDBX keeps for it, and each reaches
+  the screen when that clock cannot rank the two sides, because it ties, is
+  missing, or claims a time nobody could have written yet
 - `UpdateStatus` - Idle, Checking, Available, Downloading, ReadyToRestart, Failed
 - `FaviconDownloadStatus` - Idle, Running, Finished
 - `Overlay` - None, Connect, Settings, AddEntry, EditEntry, Conflict, VaultSwitcher

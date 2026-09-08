@@ -669,9 +669,13 @@ pub fn refresh_access_token(account_email: &str) -> Result<AccessToken, ServiceE
         )))
     })?;
     let token = auth::refresh(&refresh)?;
-    // Microsoft sometimes rotates the refresh token; persist whatever came back.
+    // Microsoft sometimes rotates the refresh token; persist whatever came
+    // back, but only while the one we refreshed from is still the one stored.
+    // This runs on a background task and can finish after the user has
+    // disconnected, which deleted the entry, or after they have connected the
+    // same account again, which wrote a newer one.
     if token.refresh_token != refresh {
-        tokens::store(account_email, &token.refresh_token)?;
+        tokens::replace(account_email, &refresh, &token.refresh_token)?;
     }
     Ok(token)
 }

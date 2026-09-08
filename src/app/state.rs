@@ -297,6 +297,13 @@ pub struct AppState {
     /// racy status writes. We insert before spawning and remove on
     /// completion; the auto-sync tick skips any path already present.
     auto_sync_in_flight: HashSet<PathBuf>,
+    /// Vaults whose conflict is waiting for the user rather than for the
+    /// network. A deferred conflict reports itself as failed, and a failed
+    /// sync is retried with a full push, so without this every tick pushed
+    /// the same bytes, took the same 412, downloaded the same remote and
+    /// deferred again. Cleared as soon as either side moves or the user gets
+    /// to answer.
+    deferred_conflicts: HashSet<PathBuf>,
     /// Disk-save serialization per vault path. A key being present means a
     /// background `save_to` is running for that path; the value records
     /// whether another save was requested in the meantime. Only one writer
@@ -577,6 +584,7 @@ impl Default for AppState {
             biometric_attempt: BiometricAttempt::default(),
             biometric_generation: 0,
             auto_sync_in_flight: HashSet::new(),
+            deferred_conflicts: HashSet::new(),
             saves_in_flight: HashMap::new(),
             syncs_in_flight: HashMap::new(),
             pushes_awaiting_restore: HashMap::new(),
@@ -1671,6 +1679,13 @@ impl AppState {
         // sites is the only way it cannot be forgotten at one of them.
         if matches!(status, SyncStatus::Synced { .. } | SyncStatus::Idle) {
             self.clear_sync_backoff(target);
+        }
+        // Same reasoning, same place: anything that is not the deferred
+        // conflict itself ends the wait, including the overlay finally
+        // opening. Doing it here is the only way it cannot be forgotten at
+        // one of the sites that set a status.
+        if !matches!(status, SyncStatus::Failed(_)) {
+            self.deferred_conflicts.remove(target);
         }
         if self.is_active_vault(target) {
             self.sync_status = status;
@@ -5532,7 +5547,13 @@ impl AppState {
         // pull-check below would miss those because the remote ETag hasn't
         // moved. `interactive: false` so a background retry of a *conflict*
         // never pops the overlay unattended.
-        if activity == Some(SyncActivity::Failed) {
+        // A conflict waiting for the user is not a failure to retry. It
+        // reports itself as failed so the pill says something, but pushing
+        // again only earns the same 412 and defers again, so the cheap checks
+        // below decide instead: they push when this copy has moved, look when
+        // the remote may have, and otherwise leave it alone until the user
+        // answers.
+        if activity == Some(SyncActivity::Failed) && !self.deferred_conflicts.contains(target) {
             // A throttled vault waits. Retrying a full upload every tick is
             // what provoked the limit, and the recovery push is the most
             // expensive request this app makes.
@@ -5772,6 +5793,7 @@ impl AppState {
                     } else {
                         "Remote conflict - switch back to this vault to resolve."
                     };
+                    self.deferred_conflicts.insert(target.to_path_buf());
                     self.apply_sync_status_for_session(
                         target,
                         session,
@@ -5780,6 +5802,7 @@ impl AppState {
                     );
                     return;
                 }
+                self.deferred_conflicts.remove(target);
 
                 let mut picks = crate::keepass::merge::Resolutions::default();
                 for conflict in &report.conflicts {
@@ -7236,6 +7259,45 @@ mod park_tests {
             AppState::local_is_ahead_of_the_cloud(&vault, &config),
             "the file moved and the upload did not"
         );
+    }
+
+    /// A conflict the user has not answered yet reports itself as failed, and
+    /// a failed sync is retried with a full push. Every tick therefore sent
+    /// the same bytes, took the same 412, downloaded the same remote and
+    /// deferred again: the most expensive request this app makes, on a timer,
+    /// for as long as the user did not look.
+    #[test]
+    fn a_deferred_conflict_does_not_retry_itself_every_tick() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("deferred.kdbx");
+        let mut state = AppState::default();
+        fresh_open(&mut state, vault.clone(), "pw");
+
+        state.deferred_conflicts.insert(vault.clone());
+        state.route_sync_status(&vault, SyncStatus::Failed("Remote conflict".into()));
+        assert!(
+            state.deferred_conflicts.contains(&vault),
+            "the wait survives the status that describes it"
+        );
+
+        // Anything else means the wait is over: the overlay opened, the sync
+        // succeeded, or the user disconnected.
+        for status in [
+            SyncStatus::Syncing,
+            SyncStatus::Idle,
+            SyncStatus::Synced {
+                at: chrono::Local::now(),
+                auto_merged: 0,
+            },
+            SyncStatus::Disconnected,
+        ] {
+            state.deferred_conflicts.insert(vault.clone());
+            state.route_sync_status(&vault, status);
+            assert!(
+                !state.deferred_conflicts.contains(&vault),
+                "and ends with anything that is not that status"
+            );
+        }
     }
 
     /// Disconnecting one provider and connecting another keeps the vault

@@ -392,9 +392,15 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
     ) {
         return sync_status(vault);
     }
-    let password = unlock_password(cli)?;
-    let mut document = KeePassRepository::open(vault, &password, cli.key_file.as_deref())
-        .map_err(|e| CliError::new("unlock_failed", 3, e.to_string()))?;
+    // Scoped, so it is wiped as soon as the vault is open rather than living
+    // through the rest of the command: a `launch` waits ten seconds for the
+    // target app, and a `sync` makes network calls. The GUI does the same,
+    // and SECURITY.md says so for both.
+    let mut document = {
+        let password = unlock_password(cli)?;
+        KeePassRepository::open(vault, &password, cli.key_file.as_deref())
+            .map_err(|e| CliError::new("unlock_failed", 3, e.to_string()))?
+    };
     match &cli.command {
         Command::Vault {
             command: VaultCommand::Info,
@@ -404,13 +410,7 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         Command::Launch { command } => execute_launch(command, &document),
         Command::Sync {
             command: SyncCommand::Now(args),
-        } => execute_sync(
-            args,
-            &mut document,
-            vault,
-            &password,
-            cli.key_file.as_deref(),
-        ),
+        } => execute_sync(args, &mut document, vault),
         Command::Sync {
             command: SyncCommand::Status,
         } => unreachable!(),
@@ -558,8 +558,6 @@ fn execute_sync(
     args: &SyncNow,
     document: &mut VaultDocument,
     vault: &Path,
-    password: &str,
-    key_file: Option<&Path>,
 ) -> Result<Value, CliError> {
     let canonical =
         std::fs::canonicalize(vault).map_err(|e| CliError::new("io", 7, e.to_string()))?;
@@ -578,9 +576,13 @@ fn execute_sync(
         .map_err(|e| CliError::new("local_revision_changed", 5, e.to_string()))?;
     let (remote_bytes, remote_etag) =
         crate::sync::service::download_remote(&config, &token).map_err(sync_error)?;
-    let remote = KeePassRepository::open_bytes(&remote_bytes, password, key_file)
-        .map_err(|e| CliError::new("remote_unlock_failed", 3, e.to_string()))?;
-    let report = crate::keepass::merge::diff(document.database(), remote.database());
+    // Through the key the open vault already holds, not the password: that
+    // is what the GUI does, and it is what lets the password itself be wiped
+    // as soon as the vault is open rather than kept for the whole command.
+    let remote =
+        crate::keepass::repository::parse_database_bytes(&remote_bytes, document.database_key())
+            .map_err(|e| CliError::new("remote_unlock_failed", 3, e.to_string()))?;
+    let report = crate::keepass::merge::diff(document.database(), &remote);
     let conflicts: Vec<Value> = report
         .conflicts
         .iter()
@@ -656,9 +658,8 @@ fn execute_sync(
     }
     let picks = validated_resolutions(args.input_fd, &report)?;
     let merged_count = report.remote_only.len() + report.auto_resolved.len();
-    let merged =
-        crate::keepass::merge::apply_picks(document.database(), remote.database(), &picks, &report)
-            .map_err(|e| CliError::new("merge_failed", 5, e.to_string()))?;
+    let merged = crate::keepass::merge::apply_picks(document.database(), &remote, &picks, &report)
+        .map_err(|e| CliError::new("merge_failed", 5, e.to_string()))?;
     // Ask the merged result, not the report that predicted it. Every
     // predicate here is a claim about what `apply_picks` will do, and a claim
     // that falls short means writing the pre-merge bytes over a remote that
