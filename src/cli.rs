@@ -699,59 +699,79 @@ fn execute_sync(
     // is what we sent.
     config.uploaded_local_revision = Some(crate::sync::config::local_revision(&upload_bytes));
     let resolved_upload = needs_upload || report.needs_a_decision();
-    // The check, the upload and the write are one operation as far as the
-    // app is concerned. Holding this lock across a network call is
-    // deliberate, here and only here: the alternative is a window between
-    // deciding the binding is still ours and writing to it, and the app's own
-    // wait for the lock is bounded, so the worst case is that it proceeds
-    // exactly as it would have without the lock at all.
+    // Nothing left to send to a relationship that has ended. Asked here so a
+    // binding the user disconnected while the merge ran costs no transfer,
+    // and asked again below, because only the second answer is adjacent to
+    // the write it guards.
     //
     // The comparison is against the binding as it was when this command
     // started, not against our copy: `restore_provider` refreshes an iCloud
     // bookmark in memory, and comparing that would report a change nobody
     // else made.
-    crate::sync::lock::held(crate::sync::lock::BATCH, || {
-        let current = crate::sync::config::load_unlocked(&canonical).map_err(sync_error)?;
-        if !current
-            .is_some_and(|current| crate::sync::config::same_relationship(&current, &baseline))
+    locked_briefly(|| binding_is_still(&canonical, &baseline))?;
+    if resolved_upload {
+        match crate::sync::service::upload_after_save(&config, &token, &upload_bytes)
+            .map_err(sync_error)?
         {
-            return Err(CliError::new(
-                "sync_binding_changed",
-                5,
-                "the vault's sync binding changed while this command ran; the \
-                 merge is saved locally, rerun sync to send it",
-            ));
-        }
-        if resolved_upload {
-            match crate::sync::service::upload_after_save(&config, &token, &upload_bytes)
-                .map_err(sync_error)?
-            {
-                crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
-                    config.last_etag = new_etag;
-                }
-                crate::sync::service::UploadAfterSave::Conflict { .. } => {
-                    return Err(CliError::new(
-                        "remote_changed_during_sync",
-                        5,
-                        "remote vault changed again; rerun sync",
-                    ));
-                }
+            crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
+                config.last_etag = new_etag;
+            }
+            crate::sync::service::UploadAfterSave::Conflict { .. } => {
+                return Err(CliError::new(
+                    "remote_changed_during_sync",
+                    5,
+                    "remote vault changed again; rerun sync",
+                ));
             }
         }
+    }
+    // The re-check and the write are one operation: between them is the only
+    // window where the app could bind this vault elsewhere and have this
+    // command write over it. The upload deliberately sits outside, because
+    // the app waits this lock out on a fixed budget and a transfer can
+    // outlast any budget worth giving it.
+    locked_briefly(|| {
+        binding_is_still(&canonical, &baseline)?;
         crate::sync::config::save_unlocked(&config).map_err(sync_error)
-    })
-    .ok_or_else(|| {
-        CliError::new(
-            "sync_busy",
-            5,
-            "another FerrisPass process is using the sync configuration; the \
-             merge is saved locally, rerun sync to send it",
-        )
-    })??;
+    })?;
     let resolved = picks.entries.len() + picks.groups.len() + usize::from(picks.metadata.is_some());
     Ok(
         json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":resolved}),
     )
+}
+
+/// Take the cross-process sync lock for one read or one write, and report a
+/// failure to take it as itself: a script that met another FerrisPass process
+/// can wait and rerun, and one that met a broken lock file cannot.
+fn locked_briefly<T>(f: impl FnOnce() -> Result<T, CliError>) -> Result<T, CliError> {
+    match crate::sync::lock::held(crate::sync::lock::BATCH, f) {
+        Ok(outcome) => outcome,
+        Err(crate::sync::lock::Unavailable::Contended) => Err(CliError::new(
+            "sync_busy",
+            5,
+            "another FerrisPass process is using the sync configuration; the \
+             merge is saved locally, rerun sync to send it",
+        )),
+        Err(crate::sync::lock::Unavailable::Broken(error)) => Err(sync_error(error)),
+    }
+}
+
+/// Whether the vault is still bound to the relationship this command started
+/// from. Reads without the lock, so every caller is already holding it.
+fn binding_is_still(
+    canonical: &Path,
+    baseline: &crate::sync::config::SyncConfig,
+) -> Result<(), CliError> {
+    let current = crate::sync::config::load_unlocked(canonical).map_err(sync_error)?;
+    if current.is_some_and(|current| crate::sync::config::same_relationship(&current, baseline)) {
+        return Ok(());
+    }
+    Err(CliError::new(
+        "sync_binding_changed",
+        5,
+        "the vault's sync binding changed while this command ran; the merge \
+         is saved locally, rerun sync to send it",
+    ))
 }
 
 fn sync_plan_token(

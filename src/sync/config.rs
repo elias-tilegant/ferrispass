@@ -172,6 +172,21 @@ pub enum ConfigError {
     /// exactly the moment contention proved it was needed.
     #[error("another FerrisPass process is using the sync configuration")]
     Busy,
+
+    /// The lock file could not be reached at all. Its own error, because a
+    /// caller that waits out `Busy` would otherwise wait out a fault that
+    /// answers the same way every time.
+    #[error("could not take the sync lock: {0}")]
+    Lock(#[source] io::Error),
+}
+
+impl From<super::lock::Unavailable> for ConfigError {
+    fn from(reason: super::lock::Unavailable) -> Self {
+        match reason {
+            super::lock::Unavailable::Contended => Self::Busy,
+            super::lock::Unavailable::Broken(error) => Self::Lock(error),
+        }
+    }
 }
 
 impl ConfigError {
@@ -201,7 +216,7 @@ pub fn config_path_for(local_path: &Path) -> Result<PathBuf, ConfigError> {
 /// first launch and not worth error-typing.
 pub fn load(local_path: &Path) -> Result<Option<SyncConfig>, ConfigError> {
     super::lock::held(super::lock::INTERACTIVE, || load_unlocked(local_path))
-        .unwrap_or(Err(ConfigError::Busy))
+        .unwrap_or_else(|reason| Err(reason.into()))
 }
 
 /// The same read without taking the cross-process lock, for a caller already
@@ -215,7 +230,7 @@ pub fn load_unlocked(local_path: &Path) -> Result<Option<SyncConfig>, ConfigErro
 /// fsync, rename over the target. Same pattern as `keepass::document::save_to`.
 pub fn save(config: &SyncConfig) -> Result<(), ConfigError> {
     super::lock::held(super::lock::INTERACTIVE, || save_unlocked(config))
-        .unwrap_or(Err(ConfigError::Busy))
+        .unwrap_or_else(|reason| Err(reason.into()))
 }
 
 /// See [`load_unlocked`].
@@ -231,7 +246,7 @@ pub fn delete(local_path: &Path) -> Result<(), ConfigError> {
     super::lock::held(super::lock::INTERACTIVE, || {
         delete_in(&sync_dir()?, local_path)
     })
-    .unwrap_or(Err(ConfigError::Busy))
+    .unwrap_or_else(|reason| Err(reason.into()))
 }
 
 /// Whether another vault still relies on the account-level refresh token.
@@ -393,6 +408,20 @@ pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Background callers wait out `Busy` and report everything else. A lock
+    /// file that cannot be reached answers the same way every time, so
+    /// classing it as contention spent the whole retry budget first and then
+    /// blamed a process that was never running.
+    #[test]
+    fn a_lock_that_cannot_be_reached_is_not_something_to_wait_out() {
+        let contended: ConfigError = super::super::lock::Unavailable::Contended.into();
+        assert!(contended.is_busy());
+
+        let broken: ConfigError =
+            super::super::lock::Unavailable::Broken(io::Error::other("no such directory")).into();
+        assert!(!broken.is_busy(), "waiting cannot make the lock appear");
+    }
     use tempfile::TempDir;
 
     fn fixture(local_path: &str) -> SyncConfig {

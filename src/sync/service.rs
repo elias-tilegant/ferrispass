@@ -238,22 +238,30 @@ pub fn persist_connect_picked(result: &ConnectResult) -> Result<(), ServiceError
     }
     let mut staged = StagedVault::new(&result.config.local_path, &result.remote_bytes)?;
     staged.publish()?;
-    if result.config.provider == SyncProvider::SharePoint {
-        tokens::store(
+    // The config first, then the token, so that what a failure has to undo
+    // is the thing it is safe to undo.
+    //
+    // The other order left a credential in the keychain that nothing pointed
+    // at when the config write failed, and no screen in the app can remove
+    // one. Taking that credential back out is worse: a refresh token is
+    // account-scoped, so deleting it signs out every other vault bound to
+    // the same account. A config belongs to this one vault.
+    config::save(&result.config)?;
+    if result.config.provider == SyncProvider::SharePoint
+        && let Err(error) = tokens::store(
             &result.config.account_email,
             &result.access_token.refresh_token,
-        )?;
-    }
-    // The token is in the keychain by now, and nothing points at it until
-    // this write lands. Leaving it there after a failure gave the user a
-    // credential no screen in the app can remove, so the failure takes it
-    // back out. A second failure there is worth reporting over the first:
-    // the vault is unbound either way, and the token is the part that
-    // outlives the attempt.
-    if let Err(error) = config::save(&result.config) {
-        if result.config.provider == SyncProvider::SharePoint {
-            tokens::delete(&result.config.account_email)?;
-        }
+        )
+    {
+        // A config with no token is not a state to leave behind: the next
+        // attempt meets the "already configured" guard above and cannot get
+        // past it. If the removal itself will not go, the token failure is
+        // still the cause worth reporting, and the leftover config says so
+        // in its own words on the retry.
+        let _ = super::lock::retrying(
+            || config::delete(&result.config.local_path),
+            config::ConfigError::is_busy,
+        );
         return Err(error.into());
     }
     staged.commit();

@@ -26,6 +26,20 @@ pub enum TokenError {
     /// See `ConfigError::Busy`: the same lock, the same reasoning.
     #[error("another FerrisPass process is using the stored tokens")]
     Busy,
+
+    /// See `ConfigError::Lock`: a lock that cannot be reached is not a lock
+    /// somebody else is holding.
+    #[error("could not take the sync lock: {0}")]
+    Lock(#[source] std::io::Error),
+}
+
+impl From<super::lock::Unavailable> for TokenError {
+    fn from(reason: super::lock::Unavailable) -> Self {
+        match reason {
+            super::lock::Unavailable::Contended => Self::Busy,
+            super::lock::Unavailable::Broken(error) => Self::Lock(error),
+        }
+    }
 }
 
 impl TokenError {
@@ -58,7 +72,7 @@ pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError>
     super::lock::held(super::lock::INTERACTIVE, || {
         write(account_email, refresh_token)
     })
-    .unwrap_or(Err(TokenError::Busy))
+    .unwrap_or_else(|reason| Err(reason.into()))
 }
 
 /// Read the refresh token for the given account. Returns `Ok(None)` when
@@ -67,7 +81,7 @@ pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError>
 pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
     let _guard = locked();
     super::lock::held(super::lock::INTERACTIVE, || read(account_email))
-        .unwrap_or(Err(TokenError::Busy))
+        .unwrap_or_else(|reason| Err(reason.into()))
 }
 
 /// Remove the refresh token for the given account. No-op when the entry
@@ -82,7 +96,7 @@ pub fn delete(account_email: &str) -> Result<(), TokenError> {
             Err(e) => Err(e.into()),
         }
     })
-    .unwrap_or(Err(TokenError::Busy))
+    .unwrap_or_else(|reason| Err(reason.into()))
 }
 
 /// Replace the stored refresh token, but only while the one we started from
@@ -104,7 +118,7 @@ pub fn replace(account_email: &str, expected: &str, rotated: &str) -> Result<boo
         write(account_email, rotated)?;
         Ok(true)
     })
-    .unwrap_or(Err(TokenError::Busy))
+    .unwrap_or_else(|reason| Err(reason.into()))
 }
 
 fn read(account_email: &str) -> Result<Option<String>, TokenError> {
@@ -135,6 +149,18 @@ mod tests {
     //! `target_os = "macos"` keeps that noise away.
 
     use super::*;
+
+    /// See the matching test in `config`: the same two answers, told apart
+    /// for the same reason. This one needs no keychain.
+    #[test]
+    fn a_lock_that_cannot_be_reached_is_not_something_to_wait_out() {
+        let contended: TokenError = super::super::lock::Unavailable::Contended.into();
+        assert!(contended.is_busy());
+
+        let broken: TokenError =
+            super::super::lock::Unavailable::Broken(std::io::Error::other("gone")).into();
+        assert!(!broken.is_busy(), "waiting cannot make the lock appear");
+    }
 
     /// A refresh that finishes after the user disconnected, or after they
     /// reconnected the same account, must not write. Blind stores recreated

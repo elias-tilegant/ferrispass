@@ -2266,41 +2266,61 @@ impl AppState {
         let Some(session) = self.sync_session_for(&path) else {
             return;
         };
-        // Bail when there's no config on disk for this path - the common
-        // case for local-only vaults. An error is not that: swallowing one
-        // turned a vault whose binding could not be read into a local-only
-        // vault for the rest of the session, silently, and the restore path
-        // has a Failed state with a Retry for exactly this.
-        let config = match crate::sync::lock::retrying(
-            || crate::sync::config::load(&path),
-            crate::sync::config::ConfigError::is_busy,
-        ) {
-            Ok(Some(config)) => config,
-            Ok(None) => return,
-            Err(error) => {
-                self.finish_sync_binding_restore(&path, session, Err(error.into()), cx);
-                return;
-            }
-        };
-
         // Defensive: if Connect just established a binding (during the
         // pick_kdbx_file → request_password → unlock flow), don't trash it.
         if self.sync.is_some() {
             return;
         }
+        // Bail on the common case, a local-only vault, without waiting for
+        // anything. Only whether to show "Restoring" rests on this answer:
+        // the read that follows takes the lock and decides for real, and a
+        // file that goes away in between lands on the `Ok(None)` arm below.
+        if !crate::sync::config::config_path_for(&path).is_ok_and(|path| path.exists()) {
+            return;
+        }
 
         self.apply_sync_status_for_session(&path, session, SyncStatus::Restoring, cx);
 
+        let read_path = path.clone();
         let task = cx.background_spawn(async move {
-            let mut config = config;
+            // Waiting out a busy lock belongs here and not on the UI thread:
+            // the wait is a second of sleeping, and the caller is a vault
+            // that has just been unlocked.
+            //
+            // An unreadable config is not a local-only vault. Swallowing the
+            // error turned one into the other for the rest of the session,
+            // silently, and the restore path has a Failed state with a Retry
+            // for exactly this.
+            let config = crate::sync::lock::retrying(
+                || crate::sync::config::load(&read_path),
+                crate::sync::config::ConfigError::is_busy,
+            )?;
+            let Some(mut config) = config else {
+                return Ok(None);
+            };
             let token = crate::sync::service::restore_provider(&mut config)?;
             let _ = crate::sync::config::save(&config);
-            Ok::<_, crate::sync::service::ServiceError>((config, token))
+            Ok::<_, crate::sync::service::ServiceError>(Some((config, token)))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |state, cx| {
-                state.finish_sync_binding_restore(&path, session, result, cx);
+            let _ = this.update(cx, |state, cx| match result {
+                // The config was there when we looked and gone when we read
+                // it: nothing to restore, and nothing to report either.
+                Ok(None) => {
+                    state.apply_sync_status_for_session(
+                        &path,
+                        session,
+                        SyncStatus::Disconnected,
+                        cx,
+                    );
+                }
+                Ok(Some(restored)) => {
+                    state.finish_sync_binding_restore(&path, session, Ok(restored), cx);
+                }
+                Err(error) => {
+                    state.finish_sync_binding_restore(&path, session, Err(error), cx);
+                }
             });
         })
         .detach();

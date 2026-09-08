@@ -10,13 +10,12 @@
 //! them one, the same device `keepass::document` already uses to coordinate
 //! two FerrisPass processes saving one vault.
 //!
-//! One place holds it across a network request, the CLI's commit, because
-//! the check that the binding is still ours has to be adjacent to the write
-//! that follows it. The app never waits on that for longer than a quarter of
-//! a second: its own writes are best effort, and skipping one costs a
-//! re-detection on the next tick.
+//! Nothing holds it across a network request. Every hold is file and keychain
+//! calls, so the longest one is milliseconds, and that is what lets a
+//! background caller wait a contended lock out instead of reporting it.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io;
 use std::time::{Duration, Instant};
 
 use super::config;
@@ -26,21 +25,36 @@ use super::config;
 /// work it guards is file and keychain calls, which take milliseconds.
 pub const INTERACTIVE: Duration = Duration::from_millis(250);
 
-/// What a CLI command waits. It has no interface to freeze, and the operation
-/// it guards contains an upload.
+/// What a CLI command waits. It has no interface to freeze, so it can afford
+/// to outlast any hold rather than fail a scripted run over one.
 pub const BATCH: Duration = Duration::from_secs(30);
 
 const POLL: Duration = Duration::from_millis(25);
 
+/// Why the work did not run.
+///
+/// The two are worth telling apart because the answer to them differs.
+/// Contention passes on its own, so waiting is the remedy; a lock file that
+/// cannot be opened at all will say the same thing after every wait, and
+/// reporting it as another process both hides the real fault and spends the
+/// caller's whole retry budget first.
+#[derive(Debug)]
+pub enum Unavailable {
+    /// Another FerrisPass process held the lock for longer than the wait.
+    Contended,
+    /// The lock itself could not be reached.
+    Broken(io::Error),
+}
+
 /// Run `f` while no other FerrisPass process is inside this same call, or
-/// return `None` without running it.
+/// return why it did not run.
 ///
 /// Never both: proceeding without the lock is what the lock exists to stop,
 /// and it fails at exactly the moment contention proves it was needed. Every
 /// caller here is a write, and not writing is recoverable, while writing over
 /// somebody else's decision is not.
-pub fn held<T>(wait: Duration, f: impl FnOnce() -> T) -> Option<T> {
-    with_file(&path()?, wait, f)
+pub fn held<T>(wait: Duration, f: impl FnOnce() -> T) -> Result<T, Unavailable> {
+    with_file(&path().map_err(Unavailable::Broken)?, wait, f)
 }
 
 /// How many times a background operation asks again before treating the lock
@@ -67,34 +81,41 @@ pub fn retrying<T, E>(
 }
 
 /// The same, on a named file, so a test can hold it from the other side.
-fn with_file<T>(path: &std::path::Path, wait: Duration, f: impl FnOnce() -> T) -> Option<T> {
+fn with_file<T>(
+    path: &std::path::Path,
+    wait: Duration,
+    f: impl FnOnce() -> T,
+) -> Result<T, Unavailable> {
     let _guard = acquire(path, wait)?;
-    Some(f())
+    Ok(f())
 }
 
-fn acquire(path: &std::path::Path, wait: Duration) -> Option<File> {
-    let file = open(path)?;
+fn acquire(path: &std::path::Path, wait: Duration) -> Result<File, Unavailable> {
+    let file = open(path).map_err(Unavailable::Broken)?;
     let deadline = Instant::now() + wait;
     loop {
         match file.try_lock() {
             // Released when the handle is dropped, which is the caller's
             // return.
-            Ok(()) => return Some(file),
-            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                 std::thread::sleep(POLL);
             }
-            _ => return None,
+            Err(TryLockError::WouldBlock) => return Err(Unavailable::Contended),
+            Err(TryLockError::Error(error)) => return Err(Unavailable::Broken(error)),
         }
     }
 }
 
-fn path() -> Option<std::path::PathBuf> {
-    let dir = config::app_support_dir().ok()?.join("sync");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join(".lock"))
+fn path() -> io::Result<std::path::PathBuf> {
+    let dir = config::app_support_dir()
+        .map_err(io::Error::other)?
+        .join("sync");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(".lock"))
 }
 
-fn open(path: &std::path::Path) -> Option<File> {
+fn open(path: &std::path::Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -102,7 +123,7 @@ fn open(path: &std::path::Path) -> Option<File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    options.open(path).ok()
+    options.open(path)
 }
 
 #[cfg(test)]
@@ -122,8 +143,31 @@ mod tests {
         let mut ran = false;
         let result = with_file(&path, Duration::from_millis(30), || ran = true);
 
-        assert!(result.is_none(), "it reports that it did not run");
-        assert!(!ran, "and it did not");
+        assert!(
+            matches!(result, Err(Unavailable::Contended)),
+            "it names the other process"
+        );
+        assert!(!ran, "and it did not run");
+    }
+
+    /// A lock that cannot be opened is not a lock somebody else is holding.
+    /// Calling it contention sent every caller through its full retry budget
+    /// and then blamed a process that was never there, while the real fault,
+    /// here a directory in the way of the lock file, went unmentioned.
+    #[test]
+    fn a_lock_that_cannot_be_opened_is_not_reported_as_contention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".lock");
+        std::fs::create_dir(&path).expect("occupy the name");
+
+        let mut ran = false;
+        let result = with_file(&path, Duration::from_millis(30), || ran = true);
+
+        assert!(
+            matches!(result, Err(Unavailable::Broken(_))),
+            "it reports the open failure, not contention"
+        );
+        assert!(!ran, "and it did not run");
     }
 
     /// Contention is another process finishing its own file and keychain
@@ -167,7 +211,7 @@ mod tests {
         let mut runs = 0;
         let result = with_file(&path, Duration::from_millis(30), || runs += 1);
 
-        assert_eq!(result, Some(()));
+        assert!(result.is_ok());
         assert_eq!(runs, 1);
     }
 }
