@@ -25,12 +25,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # `manual` builds the crate so the extractor sees a real compilation
-          # database. Buildless extraction misses everything behind cfg gates,
-          # which on this codebase is the entire macOS keychain, clipboard and
-          # auto-type surface.
+          # `none` is the only mode the Rust extractor accepts; it refuses
+          # `manual` outright ("Rust does not support the manual build mode").
+          # So extraction is buildless, and the macOS runner stays, because
+          # the baseline it calculates is per platform and this app's keychain,
+          # clipboard and auto-type surface only exists there.
           - language: rust
-            build-mode: manual
+            build-mode: none
             runner: macos-latest
           # Workflow analysis needs no compilation and can use a Linux runner.
           - language: actions
@@ -41,7 +42,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # The Rust extractor needs a toolchain for the manual build below.
+      # Buildless Rust extraction still needs rustup and cargo on the runner.
       - name: Set up Rust
         if: matrix.language == 'rust'
         uses: dtolnay/rust-toolchain@stable
@@ -52,10 +53,6 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
-
-      - name: Build for extraction
-        if: matrix.language == 'rust'
-        run: cargo build --locked --all-targets
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
