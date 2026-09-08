@@ -134,20 +134,6 @@ struct AttachmentFingerprint {
     data: Vec<u8>,
 }
 
-/// Redacted by hand: an attachment holds whatever the user put in the vault,
-/// and this reaches a conflict row through `diff_row`'s fingerprint. The name
-/// and a digest are enough to tell two sets apart, and neither is the file.
-impl fmt::Debug for AttachmentFingerprint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AttachmentFingerprint")
-            .field("name", &self.name)
-            .field("protected", &self.protected)
-            .field("bytes", &byte_fingerprint(&self.data))
-            .finish()
-    }
-}
-
 /// One field's local-vs-remote comparison. `local` and `remote` are the
 /// strings the UI should render directly - for the Password row those are
 /// pre-redacted; for the rest they're the cleartext field values.
@@ -681,9 +667,7 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
             _ => None,
         }
     }
-    fn text(value: Option<&String>) -> String {
-        value.cloned().unwrap_or_default()
-    }
+
     fn number<T: fmt::Display>(value: Option<T>) -> String {
         value.map(|value| value.to_string()).unwrap_or_default()
     }
@@ -705,11 +689,7 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         // Two copies can each have made their own bin, and both are called
         // "Recycle Bin". Without the id the row showed two identical cells.
         match normalised_group_uuid(database.meta.recyclebin_uuid) {
-            Some(id) => format!(
-                "{state}, {} ({})",
-                group_name(database, Some(id)),
-                &id.to_string()[..8]
-            ),
+            Some(id) => format!("{state}, {} ({id})", group_name(database, Some(id))),
             None => format!("{state}, no group"),
         }
     }
@@ -742,16 +722,27 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         differs: bool,
         values: impl FnOnce() -> (String, String),
     ) {
-        if differs {
-            let (local, remote) = values();
-            out.push(MetaDivergence {
-                field,
-                label,
-                local,
-                remote,
-                winner: None,
-            });
+        if !differs {
+            return;
         }
+        let (local, remote) = values();
+        // The same last resort the entry and group rows use: a settings row
+        // that differs must not show the same text twice.
+        let (local, remote) = if local == remote {
+            (
+                format!("{local} (this copy)"),
+                format!("{remote} (other copy)"),
+            )
+        } else {
+            (local, remote)
+        };
+        out.push(MetaDivergence {
+            field,
+            label,
+            local,
+            remote,
+            winner: None,
+        });
     }
 
     let (a, b) = (&local.meta, &remote.meta);
@@ -764,8 +755,8 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         a.database_name != b.database_name,
         || {
             (
-                text(a.database_name.as_ref()),
-                text(b.database_name.as_ref()),
+                unset_or(a.database_name.as_ref()),
+                unset_or(b.database_name.as_ref()),
             )
         },
     );
@@ -776,8 +767,8 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         a.database_description != b.database_description,
         || {
             (
-                text(a.database_description.as_ref()),
-                text(b.database_description.as_ref()),
+                unset_or(a.database_description.as_ref()),
+                unset_or(b.database_description.as_ref()),
             )
         },
     );
@@ -788,8 +779,8 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         a.default_username != b.default_username,
         || {
             (
-                text(a.default_username.as_ref()),
-                text(b.default_username.as_ref()),
+                unset_or(a.default_username.as_ref()),
+                unset_or(b.default_username.as_ref()),
             )
         },
     );
@@ -910,14 +901,12 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         push(
             &mut out,
             MetaField::CustomIcon(ours.id().to_string()),
-            format!("Icon name ({})", byte_fingerprint(&ours.data)).into(),
+            // The id, which the file already carries, rather than anything
+            // derived from the image: a digest of vault content on screen is
+            // an oracle against that content.
+            format!("Icon name ({})", ours.id()).into(),
             ours.name != theirs.name,
-            || {
-                (
-                    ours.name.clone().unwrap_or_default(),
-                    theirs.name.clone().unwrap_or_default(),
-                )
-            },
+            || (unset_or(ours.name.as_ref()), unset_or(theirs.name.as_ref())),
         );
     }
 
@@ -983,11 +972,9 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
 fn custom_data_value(item: Option<&&CustomDataItem>) -> String {
     match item.and_then(|item| item.value.as_ref()) {
         Some(CustomDataValue::String(value)) => value.clone(),
-        Some(CustomDataValue::Binary(bytes)) => format!(
-            "{} bytes of binary data ({})",
-            bytes.len(),
-            byte_fingerprint(bytes)
-        ),
+        Some(CustomDataValue::Binary(bytes)) => {
+            format!("{} bytes of binary data", bytes.len())
+        }
         None => String::new(),
     }
 }
@@ -1687,7 +1674,7 @@ fn named_pair(
         return (here, there);
     }
     let tagged = |name: String, id: Option<uuid::Uuid>| match id {
-        Some(id) => format!("{name} ({})", &id.to_string()[..8]),
+        Some(id) => format!("{name} ({id})"),
         None => name,
     };
     (tagged(here, ours), tagged(there, theirs))
@@ -1710,8 +1697,9 @@ fn location_pair(
     if here != there {
         return (here, there);
     }
-    let tagged =
-        |location: String, id: GroupId| format!("{location} ({})", &id.uuid().to_string()[..8]);
+    // The whole uuid: a prefix is short enough that two groups could be made
+    // to share one, and this row exists to tell two places apart.
+    let tagged = |location: String, id: GroupId| format!("{location} ({})", id.uuid());
     (tagged(here, ours), tagged(there, theirs))
 }
 
@@ -1727,7 +1715,7 @@ fn group_location_of(db: &Database, id: GroupId) -> String {
     // A group can carry no name, and two of them then read the same. The row
     // exists so a person can tell one place from another, so an id stands in.
     let name = if group.name.is_empty() {
-        format!("Unnamed group ({})", &id.uuid().to_string()[..8])
+        format!("Unnamed group ({})", id.uuid())
     } else {
         group.name.clone()
     };
@@ -1803,12 +1791,9 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             // equal and disappear.
             Some(Icon::Custom(_)) => group.custom_icon().map_or_else(
                 || "Custom image".to_string(),
-                |icon| {
-                    let fingerprint = byte_fingerprint(&icon.data);
-                    match icon.name.as_deref() {
-                        Some(name) => format!("Custom image \"{name}\" ({fingerprint})"),
-                        None => format!("Custom image ({fingerprint})"),
-                    }
+                |icon| match icon.name.as_deref() {
+                    Some(name) => format!("Custom image \"{name}\""),
+                    None => "Custom image".to_string(),
                 },
             ),
             None => "Default icon".into(),
@@ -1821,13 +1806,20 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
         // usual normalisation, so the two spellings of the default are one
         // icon, plus the image behind it, because one id can mean two
         // pictures until the merge separates them.
-        diff_row(
-            "Icon",
-            &icon_identity(local),
-            &icon_identity(remote),
-            |_| String::new(),
-        )
-        .with_values(icon_row(local), icon_row(remote)),
+        {
+            let (ours, theirs) = (local.custom_icon(), remote.custom_icon());
+            FieldDiff {
+                differs: !icons_equivalent(local.icon(), remote.icon(), DEFAULT_GROUP_ICON)
+                    || ours.as_ref().map(|icon| icon.data.as_slice())
+                        != theirs.as_ref().map(|icon| icon.data.as_slice())
+                    || ours.as_ref().map(|icon| &icon.name)
+                        != theirs.as_ref().map(|icon| &icon.name),
+                label: "Icon".into(),
+                local: String::new(),
+                remote: String::new(),
+            }
+            .with_values(icon_row(local), icon_row(remote))
+        },
         diff_row(
             "Expires",
             &in_force_expiry(&local.times),
@@ -1877,17 +1869,10 @@ fn group_with_uuid(database: &Database, id: uuid::Uuid) -> Option<GroupId> {
         .find(|group_id| group_id.uuid() == id)
 }
 
-/// What a group's icon actually is: the reference, normalised so the two
-/// spellings of the default agree, and the image behind it, because one id
-/// can still mean two different pictures until a merge separates them.
-fn icon_identity(group: &GroupRef<'_>) -> (Option<Icon>, Option<Vec<u8>>, Option<String>) {
-    let icon = normalised_icon(group.icon(), DEFAULT_GROUP_ICON).cloned();
-    let image = group.custom_icon();
-    (
-        icon,
-        image.as_ref().map(|image| image.data.clone()),
-        image.and_then(|image| image.name.clone()),
-    )
+/// An unset value and an empty one are two different things, and a row that
+/// renders both as nothing stops saying which one is being chosen.
+fn unset_or(value: Option<&String>) -> String {
+    value.cloned().unwrap_or_else(|| "(not set)".to_string())
 }
 
 /// An expiry date only counts while it is in force, here as everywhere.
@@ -1928,56 +1913,51 @@ fn ordered_custom_data(
 ///
 /// `T` must have a stable `Debug`, so pass an ordered view of a map rather
 /// than the map.
-fn diff_row<T: PartialEq + fmt::Debug>(
+fn diff_row<T: PartialEq>(
     label: impl Into<Cow<'static, str>>,
     local: &T,
     remote: &T,
     render: impl Fn(&T) -> String,
 ) -> FieldDiff {
-    let differs = local != remote;
-    let (mut here, mut there) = (render(local), render(remote));
-    if differs && here == there {
-        here = format!("{here} [{}]", value_fingerprint(local));
-        there = format!("{there} [{}]", value_fingerprint(remote));
-    }
     FieldDiff {
-        differs,
+        differs: local != remote,
         label: label.into(),
-        local: here,
-        remote: there,
+        local: render(local),
+        remote: render(remote),
     }
+    .with_sides_told_apart()
 }
 
 impl FieldDiff {
     /// Keep the decision, replace the rendering. For a row whose two sides
     /// are compared on one value but shown as two different things.
     fn with_values(self, local: String, remote: String) -> Self {
-        let (local, remote) = if self.differs && local == remote {
-            (format!("{local} [local]"), format!("{remote} [remote]"))
-        } else {
-            (local, remote)
-        };
         Self {
             local,
             remote,
             ..self
         }
+        .with_sides_told_apart()
     }
-}
 
-fn value_fingerprint<T: fmt::Debug>(value: &T) -> String {
-    byte_fingerprint(format!("{value:?}").as_bytes())
-}
-
-/// A short, stable name for bytes nobody can read on a conflict row, so it
-/// can say "these two are different" without rendering either.
-fn byte_fingerprint(data: &[u8]) -> String {
-    use sha2::{Digest as _, Sha256};
-    Sha256::digest(data)
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    /// The last resort when a rendering cannot show what the difference is.
+    ///
+    /// Deriving the marker from the value was the obvious idea and the wrong
+    /// one: a digest of a password or an attachment, shown on screen, is an
+    /// offline oracle against exactly the content the row is refusing to
+    /// display. The marker says nothing about the value. The row is already
+    /// flagged as differing, so naming the sides is enough to stop it asking
+    /// a question it has not shown.
+    fn with_sides_told_apart(self) -> Self {
+        if !self.differs || self.local != self.remote {
+            return self;
+        }
+        Self {
+            local: format!("{} (this copy)", self.local),
+            remote: format!("{} (other copy)", self.remote),
+            ..self
+        }
+    }
 }
 
 /// Plugin data as one line, sorted so two sides that hold the same keys read
@@ -1992,11 +1972,9 @@ fn custom_data_summary(items: &BTreeMap<&String, &CustomDataItem>) -> String {
         .map(|(key, item)| match &item.value {
             None => format!("{key:?} (not set)"),
             Some(CustomDataValue::String(value)) => format!("{key:?} = {value:?}"),
-            Some(CustomDataValue::Binary(bytes)) => format!(
-                "{key:?} = {} bytes of binary data ({})",
-                bytes.len(),
-                byte_fingerprint(bytes)
-            ),
+            Some(CustomDataValue::Binary(bytes)) => {
+                format!("{key:?} = {} bytes of binary data", bytes.len())
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -2816,6 +2794,9 @@ fn entry_field_diff(
         // `Value` equality includes both the cleartext and its protected bit.
         differs: local_value != remote_value,
     }
+    // Two passwords of one length redact to the same string, and the row then
+    // asked the user to choose between two identical cells.
+    .with_sides_told_apart()
 }
 
 fn render_field(value: Option<&Value<String>>, always_redact: bool) -> String {
@@ -4756,6 +4737,21 @@ mod tests {
         );
     }
 
+    /// The digest a conflict row must never carry, in the shortest form one
+    /// could plausibly be shown in.
+    fn byte_digest(value: &str) -> String {
+        byte_digest_bytes(value.as_bytes())
+    }
+
+    fn byte_digest_bytes(data: &[u8]) -> String {
+        use sha2::{Digest as _, Sha256};
+        Sha256::digest(data)
+            .iter()
+            .take(4)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     /// The rule, rather than the cases: a row that differs never shows the
     /// same text on both sides. Deciding a row on the string it renders, or
     /// rendering two different values the same way, is how a conflict screen
@@ -4797,6 +4793,8 @@ mod tests {
             // Attachments are shown as a count on purpose, so this is the
             // row that has nothing but the fallback to tell the sides apart.
             entry.add_attachment("file.bin", Value::unprotected(vec![1, 2, 3]));
+            // Two secrets of one length redact to one string.
+            entry.set_protected(fields::PASSWORD, "aaaaaaaa");
         }
         local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
         local.group_mut(group_id).unwrap().tags = vec!["x, y".to_string()];
@@ -4807,7 +4805,14 @@ mod tests {
             .insert("p".into(), blob(vec![1, 2, 3, 4]));
         local.group_mut(group_id).unwrap().notes = Some(String::new());
 
+        // A name that spells what an unset one is rendered as: the last case
+        // where a settings row can still read the same on both sides.
+        local.meta.database_name = Some("(not set)".into());
+        local.meta.database_name_changed = Some(tied);
+
         let mut remote = fork(&local);
+        remote.meta.database_name = None;
+        remote.meta.database_name_changed = Some(tied);
         {
             let mut entry = remote.entry_mut(id).unwrap();
             entry.times.expiry =
@@ -4815,6 +4820,7 @@ mod tests {
             entry.tags = vec!["a".to_string(), "b".to_string()];
             entry.custom_data.insert("k".into(), text("two"));
             entry.add_attachment("file.bin", Value::unprotected(vec![4, 5, 6]));
+            entry.set_protected(fields::PASSWORD, "bbbbbbbb");
             entry.fields.remove(fields::NOTES);
             entry.times.last_modification = Some(tied);
         }
@@ -4841,6 +4847,23 @@ mod tests {
             "the row has to name the key: {}",
             settings.local
         );
+        // Nothing on a row may be derived from the content it is refusing to
+        // show: a digest of a password or an attachment, on screen, is an
+        // offline oracle against exactly that.
+        for row in report
+            .conflicts
+            .iter()
+            .flat_map(|conflict| &conflict.fields)
+        {
+            assert!(
+                !row.local.contains(&byte_digest("aaaaaaaa"))
+                    && !row.remote.contains(&byte_digest("bbbbbbbb"))
+                    && !row.local.contains(&byte_digest_bytes(&[1, 2, 3]))
+                    && !row.remote.contains(&byte_digest_bytes(&[4, 5, 6])),
+                "row {:?} carries a digest of what it hides",
+                row.label
+            );
+        }
         let rows = report
             .conflicts
             .iter()
@@ -4871,6 +4894,8 @@ mod tests {
         // Named rather than counted: a row that quietly stopped firing would
         // otherwise satisfy the loop above by not being in it.
         for expected in [
+            "Database name",
+            "Password",
             "Notes",
             "Tags",
             "Attachments",
