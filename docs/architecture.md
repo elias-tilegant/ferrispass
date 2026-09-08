@@ -85,7 +85,8 @@ User submits password (Unlock screen)
 
 `AppState` (in `src/app/state.rs`) holds *all* mutable application state in a single `gpui::Entity`. Status is encoded in enums per concern:
 
-- `VaultStatus` - Empty, AwaitingPassword, Opening, Open
+- `VaultStatus` - Empty, AwaitingPassword, Opening, Open, LockedPendingSave,
+  Error
 - `SaveStatus` - Idle, Saving, Saved, Failed
 - `SyncStatus` - Disconnected, Idle, Connecting, Restoring, Syncing, Synced,
   Conflict, Failed, Reconnect.
@@ -96,7 +97,8 @@ User submits password (Unlock screen)
   missing, or claims a time nobody could have written yet
 - `UpdateStatus` - Idle, Checking, Available, Downloading, ReadyToRestart, Failed
 - `FaviconDownloadStatus` - Idle, Running, Finished
-- `Overlay` - None, Connect, Settings, AddEntry, EditEntry, Conflict, VaultSwitcher
+- `Overlay` - None, Connect, Settings, AddEntry, EditEntry, AddGroup,
+  RenameGroup, Conflict, VaultSwitcher, AddVault, WhatsNew, About
 
 Mutations always flow through `AppState` methods. The pattern is:
 

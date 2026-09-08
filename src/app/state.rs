@@ -1388,6 +1388,9 @@ impl AppState {
         self.reconnect_target = None;
         self.sync = None;
         if let Some(target) = target {
+            self.deferred_conflicts.remove(target);
+        }
+        if let Some(target) = target {
             let generation = self
                 .sync_binding_generations
                 .entry(target.to_path_buf())
@@ -2831,6 +2834,7 @@ impl AppState {
         self.overlay = Overlay::None;
         self.sync = None;
         self.sync_status = SyncStatus::Disconnected;
+        self.deferred_conflicts.clear();
         self.sync_history.clear();
         self.connect_operations.advance();
         self.connect_flow = None;
@@ -2857,6 +2861,9 @@ impl AppState {
         debug_assert!(!self.has_unpersisted_save_work());
         self.rotate_auto_type_context();
         self.discard_deferred_armed = false;
+        // Nothing is waiting for an answer once there is nothing to answer
+        // about: the next unlock starts from whatever the file says then.
+        self.deferred_conflicts.clear();
         self.vault = VaultStatus::Empty;
         self.active_vault_session_id = None;
         self.overlay = Overlay::None;
@@ -5617,13 +5624,27 @@ impl AppState {
                         });
                         // Only act on the pull result from a healthy resting
                         // state. If a manual sync moved us to Syncing, or a
-                        // conflict/reconnect arrived, this background result
-                        // is stale - drop it; the next tick re-checks. (The
-                        // token write above is always safe and worth keeping.)
-                        if state.sync_activity_for(&callback_path) != Some(SyncActivity::Resting) {
+                        // reconnect arrived, this background result is stale -
+                        // drop it; the next tick re-checks. (The token write
+                        // above is always safe and worth keeping.)
+                        //
+                        // A vault waiting for the user is the exception, and
+                        // the one that matters: it reports itself as failed,
+                        // so dropping the result here meant a remote that had
+                        // moved was fetched and thrown away on every tick,
+                        // and the user was never told there was more to it.
+                        let waiting_for_the_user =
+                            state.deferred_conflicts.contains(&callback_path);
+                        if !waiting_for_the_user
+                            && state.sync_activity_for(&callback_path)
+                                != Some(SyncActivity::Resting)
+                        {
                             return;
                         }
                         match pulled {
+                            // Nothing new, and a conflict is still waiting: it
+                            // is not synced, whatever the keep-alive says.
+                            None if waiting_for_the_user => {}
                             None => {
                                 // Up to date - stamp "synced just now" so the
                                 // UI shows the keep-alive ran.
@@ -7279,6 +7300,17 @@ mod park_tests {
             state.deferred_conflicts.contains(&vault),
             "the wait survives the status that describes it"
         );
+
+        // Locking and disconnecting assign a status directly rather than
+        // routing one, so they clear it themselves.
+        state.deferred_conflicts.insert(vault.clone());
+        state.end_sync_relationship(Some(&vault));
+        assert!(!state.deferred_conflicts.contains(&vault));
+        state.deferred_conflicts.insert(vault.clone());
+        state.lock_vault_now();
+        assert!(state.deferred_conflicts.is_empty());
+
+        fresh_open(&mut state, vault.clone(), "pw");
 
         // Anything else means the wait is over: the overlay opened, the sync
         // succeeded, or the user disconnected.

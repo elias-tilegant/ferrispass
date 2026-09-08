@@ -11,6 +11,8 @@
 //! removes the entry. Access tokens are *not* stored here; they live in
 //! memory inside `SyncBinding` and are short-lived (~1 h) anyway.
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use keyring::Entry;
 use thiserror::Error;
 
@@ -22,35 +24,67 @@ pub enum TokenError {
     Backend(#[from] keyring::Error),
 }
 
+/// Serialises this process's keychain access for these entries.
+///
+/// The Keychain offers no compare-and-set, so [`replace`] has to read and
+/// then write, and the two things it races with, a disconnect's delete and a
+/// reconnect's store, both run in this process on background tasks. One lock
+/// across each operation is what makes "only while it is still the one
+/// stored" true rather than merely likely.
+static LOCK: Mutex<()> = Mutex::new(());
+
+fn locked() -> MutexGuard<'static, ()> {
+    // A panic while holding this leaves no invariant broken: the guard exists
+    // to order calls, not to protect a value.
+    LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Save the refresh token for the given account, overwriting any existing
 /// secret. Idempotent (re-saving the same value is a no-op from the user's
 /// perspective).
 pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError> {
-    let entry = Entry::new(SERVICE, account_email)?;
-    entry.set_password(refresh_token)?;
-    Ok(())
+    let _guard = locked();
+    write(account_email, refresh_token)
 }
 
 /// Read the refresh token for the given account. Returns `Ok(None)` when
 /// no entry exists - common case before first connect or after disconnect,
 /// not worth typing as an error.
+pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
+    let _guard = locked();
+    read(account_email)
+}
+
+/// Remove the refresh token for the given account. No-op when the entry
+/// already doesn't exist (Disconnect should be safe to retry).
+pub fn delete(account_email: &str) -> Result<(), TokenError> {
+    let _guard = locked();
+    let entry = Entry::new(SERVICE, account_email)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Replace the stored refresh token, but only while the one we started from
-/// is still the one stored.
+/// is still the one stored. Returns whether it wrote.
 ///
 /// A refresh runs on a background task and can finish after the user has
 /// disconnected, which deletes the entry, or after they have connected the
 /// same account again, which writes a newer one. A blind write then recreated
 /// an entry for a relationship that is over, or replaced a live token with a
-/// stale one. Returns whether it wrote.
+/// stale one.
 pub fn replace(account_email: &str, expected: &str, rotated: &str) -> Result<bool, TokenError> {
-    if load(account_email)?.as_deref() != Some(expected) {
+    let _guard = locked();
+    if read(account_email)?.as_deref() != Some(expected) {
         return Ok(false);
     }
-    store(account_email, rotated)?;
+    write(account_email, rotated)?;
     Ok(true)
 }
 
-pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
+fn read(account_email: &str) -> Result<Option<String>, TokenError> {
     let entry = Entry::new(SERVICE, account_email)?;
     match entry.get_password() {
         Ok(secret) => Ok(Some(secret)),
@@ -59,15 +93,10 @@ pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
     }
 }
 
-/// Remove the refresh token for the given account. No-op when the entry
-/// already doesn't exist (Disconnect should be safe to retry).
-pub fn delete(account_email: &str) -> Result<(), TokenError> {
+fn write(account_email: &str, refresh_token: &str) -> Result<(), TokenError> {
     let entry = Entry::new(SERVICE, account_email)?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    entry.set_password(refresh_token)?;
+    Ok(())
 }
 
 #[cfg(test)]
