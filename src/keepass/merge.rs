@@ -1,4 +1,4 @@
-//! Pure-data diff and three-way merge over keepass `Database`s, used by the
+//! Pure-data diff and merge over two keepass `Database`s, used by the
 //! sync conflict resolution flow. No GPUI dependencies - fully unit-testable.
 //!
 //! Fidelity policy:
@@ -830,18 +830,24 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
             )
         },
     );
+    // Through the same reading the rest of the module uses, so a file that
+    // leaves a limit to the format and one that writes the format's own value
+    // are not asked about: KeePassXC writes both out, and comparing the raw
+    // options made a round trip through it a prompt with nothing at stake.
     push(
         &mut out,
         MetaField::Settings,
         "History entries kept".into(),
-        a.history_max_items != b.history_max_items,
+        crate::keepass::document::history_cap(local)
+            != crate::keepass::document::history_cap(remote),
         || (number(a.history_max_items), number(b.history_max_items)),
     );
     push(
         &mut out,
         MetaField::Settings,
         "History size kept".into(),
-        a.history_max_size != b.history_max_size,
+        crate::keepass::document::history_size_cap(local)
+            != crate::keepass::document::history_size_cap(remote),
         || (number(a.history_max_size), number(b.history_max_size)),
     );
     push(
@@ -1874,6 +1880,16 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
     fn optional(value: &Option<String>) -> String {
         value.clone().unwrap_or_else(|| "(not set)".to_string())
     }
+    /// An Auto-Type sequence is free text and can hold a literal the user
+    /// typed in, which on this screen is a credential in front of whoever is
+    /// looking at it. The placeholders stay: they are the part that says what
+    /// the sequence does, and they hold nothing.
+    fn sequence(value: &Option<String>) -> String {
+        value.as_deref().map_or_else(
+            || "(not set)".to_string(),
+            crate::autotype::sequence::redact_sequence_literals,
+        )
+    }
     fn tri_state(value: &Option<bool>) -> String {
         match value {
             Some(true) => "Yes".into(),
@@ -1939,7 +1955,7 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             "Auto-Type sequence",
             &local.default_autotype_sequence,
             &remote.default_autotype_sequence,
-            optional,
+            sequence,
         ),
         diff_row(
             "Auto-Type enabled",
@@ -2960,6 +2976,35 @@ struct MetadataDifference {
     remote: String,
 }
 
+/// An entry's Auto-Type settings, with every literal taken out of the
+/// sequences. See `redact_sequence_literals`.
+fn describe_autotype(autotype: Option<&AutoType>) -> String {
+    let Some(autotype) = autotype else {
+        return "no Auto-Type".to_string();
+    };
+    let default = autotype.default_sequence.as_deref().map_or_else(
+        String::new,
+        crate::autotype::sequence::redact_sequence_literals,
+    );
+    let windows: Vec<String> = autotype
+        .associations
+        .iter()
+        .map(|association| {
+            format!(
+                "{} -> {}",
+                association.window,
+                crate::autotype::sequence::redact_sequence_literals(&association.sequence)
+            )
+        })
+        .collect();
+    format!(
+        "Auto-Type enabled {:?}, sequence {default:?}, {} windows [{}]",
+        autotype.enabled,
+        windows.len(),
+        windows.join(", ")
+    )
+}
+
 fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<MetadataDifference> {
     fn describe<T: std::fmt::Debug>(label: &str, value: &Option<T>) -> String {
         match value {
@@ -2977,9 +3022,12 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<Me
     };
 
     if local.view.autotype != remote.view.autotype {
+        // Described, not dumped: a sequence is free text and can hold a
+        // literal the user typed in, which is a credential on a screen whose
+        // whole point is that it does not show them.
         note(
-            describe("Auto-Type", &local.view.autotype),
-            describe("Auto-Type", &remote.view.autotype),
+            describe_autotype(local.view.autotype.as_ref()),
+            describe_autotype(remote.view.autotype.as_ref()),
         );
     }
     if local.view.custom_data != remote.view.custom_data {
@@ -5247,6 +5295,87 @@ mod tests {
             row.local, row.remote,
             "one key is not two keys that spell the same line"
         );
+    }
+
+    /// A file that leaves a history limit to the format and one that writes
+    /// the format's own value for it say the same thing. KeePassXC writes
+    /// both out, so comparing the raw options made a round trip through it a
+    /// question with nothing at stake.
+    #[test]
+    fn the_two_spellings_of_a_history_limit_are_not_a_question() {
+        let mut local = Database::new();
+        add(&mut local, "GitHub", "secret");
+        local.meta.history_max_items = None;
+        local.meta.history_max_size = None;
+        let mut remote = fork(&local);
+        remote.meta.history_max_items = Some(10);
+        remote.meta.history_max_size = Some(6 * 1024 * 1024);
+
+        assert!(
+            diff(&local, &remote).metadata_conflict.is_none(),
+            "the format's default is the format's default"
+        );
+
+        // A limit the user actually changed is still asked about.
+        remote.meta.history_max_items = Some(25);
+        let conflict = diff(&local, &remote)
+            .metadata_conflict
+            .expect("twenty five is not ten");
+        assert!(
+            conflict
+                .fields
+                .iter()
+                .any(|field| field.label == "History entries kept"),
+            "{:?}",
+            conflict.fields
+        );
+    }
+
+    /// An Auto-Type sequence is free text, and people put credentials in one:
+    /// the token type keeps its literals out of `Debug` for that reason. A
+    /// conflict row that printed the sequence put them on screen instead.
+    #[test]
+    fn an_auto_type_sequence_does_not_show_its_literals() {
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        let tied = keepass::db::Times::now();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        local.group_mut(group_id).unwrap().default_autotype_sequence =
+            Some("{USERNAME}{TAB}hunter2{ENTER}".into());
+
+        let mut remote = fork(&local);
+        remote
+            .group_mut(group_id)
+            .unwrap()
+            .default_autotype_sequence = Some("{USERNAME}{TAB}swordfish{ENTER}".into());
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let conflict = diff(&local, &remote)
+            .group_conflicts
+            .into_iter()
+            .next()
+            .expect("two sequences, one second");
+        let row = conflict
+            .fields
+            .iter()
+            .find(|field| field.label == "Auto-Type sequence")
+            .expect("the row is there");
+
+        assert!(
+            !row.local.contains("hunter2") && !row.remote.contains("swordfish"),
+            "the literal is not shown: {row:?}"
+        );
+        assert!(
+            row.local.contains("{USERNAME}") && row.local.contains("{TAB}"),
+            "while the part that says what it does stays: {}",
+            row.local
+        );
+        assert_ne!(row.local, row.remote, "and the two still read apart");
     }
 
     /// A move the clock can rank is not a question. Adding the location to the

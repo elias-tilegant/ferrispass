@@ -129,6 +129,30 @@ pub struct RenderContext {
 /// strict: `{{` is the documented escape for a literal `{`, but
 /// production templates almost never need it - we'd rather surface a
 /// real typo than swallow it.
+/// A sequence with every literal replaced by its length.
+///
+/// `Token::Literal` is kept out of `Debug` for a reason: a sequence is free
+/// text, and people put credentials in one. Anywhere a sequence is shown
+/// rather than executed, the placeholders are the part that says what it does
+/// and they hold nothing, so they stay and the literals do not.
+pub fn redact_sequence_literals(template: &str) -> String {
+    let Ok(tokens) = parse(template) else {
+        // Unparseable, so there is no saying which part of it is a literal.
+        return format!("••• ({} chars)", template.chars().count());
+    };
+    tokens
+        .iter()
+        .map(|token| match token {
+            Token::Literal(text) => format!("•••({} chars)", text.chars().count()),
+            Token::Username => "{USERNAME}".to_string(),
+            Token::Password => "{PASSWORD}".to_string(),
+            Token::Tab => "{TAB}".to_string(),
+            Token::Return => "{ENTER}".to_string(),
+            Token::Delay(ms) => format!("{{DELAY {ms}}}"),
+        })
+        .collect()
+}
+
 pub fn parse(template: &str) -> Result<Vec<Token>, ParseError> {
     let mut out = Vec::new();
     let mut literal = String::new();

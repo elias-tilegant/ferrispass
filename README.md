@@ -39,7 +39,7 @@ FerrisPass is still young, so this matrix is intentionally honest about what is 
 | Browser or OS AutoFill | Not yet | Browser extension | iOS/macOS AutoFill | iOS/macOS AutoFill and browser extensions |
 | Auto-Type | Yes, global hotkey | Yes | Not a primary feature | Not a primary feature |
 | Cloud sync | SharePoint, iCloud Drive | File-based / bring your own sync | Broad Files app and direct cloud support | Broad cloud, WebDAV, SFTP support |
-| Conflict handling / merge | Three-way merge for SharePoint | KeeShare / database tools | Merge support | Advanced sync and merge |
+| Conflict handling / merge | Two-file merge for SharePoint and iCloud | KeeShare / database tools | Merge support | Advanced sync and merge |
 | Passkeys | Not yet | Yes | Yes | Yes |
 | Hardware keys | Not yet | YubiKey / OnlyKey challenge-response | YubiKey | YubiKey |
 | Password auditing | Not yet | Yes | Premium leak audit | Yes |
@@ -54,7 +54,7 @@ src/
   cli.rs      headless command tree, JSON contract and sync planning
   cli_install.rs  macOS CLI registration and removal
   domain/     UI-safe vault snapshot types, decrypted for display
-  keepass/    keepass-rs adapter, document, password generator, three-way merge
+  keepass/    keepass-rs adapter, document, password generator, two-file merge
   sync/       SharePoint device-code auth, Graph API, sync service, keychain tokens
   ui/         GPUI views, screens, widgets, palette, theme
 examples/

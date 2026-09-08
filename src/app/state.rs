@@ -942,7 +942,7 @@ pub enum Overlay {
     /// Rename an existing group. Carries the id so the Save handler
     /// knows which document method to call.
     RenameGroup { group_id: String },
-    /// Three-way conflict resolution.
+    /// Conflict resolution between this copy and the cloud one.
     Conflict,
     /// Quick vault picker - recents list + filter + "Browse other…" row.
     /// Universal like `Settings`: reachable from any vault state, including

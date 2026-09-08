@@ -112,9 +112,15 @@ FerrisPass uses HTTP ETags for optimistic-concurrency. If a save would overwrite
 
 1. Downloads the remote version
 2. Decrypts it with your master password
-3. Performs an **entry-level three-way merge** - you see a Conflict overlay listing every entry that diverged
-4. You pick the winner per entry, or accept "keep both" (suffix added)
+3. Merges the two files - you see a Conflict overlay listing every entry, group and setting that diverged
+4. You pick the winner for each one
 5. The merged file is re-uploaded with the fresh ETag
+
+There is no common ancestor to compare against: FerrisPass has your copy and
+the cloud copy, and nothing else. Where a modification time can rank the two,
+it does. Where it cannot, because the two agree to the second or one of them
+claims a time nobody could have written yet, you are asked rather than one
+side being picked for you.
 
 No data is silently lost. If the conflict resolver scares you, the safer path is to lock the vault on machine A before editing on machine B.
 

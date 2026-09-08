@@ -22,7 +22,7 @@ src/
 │               field's value is cleartext here, same trust zone as the
 │               entry password. Debug impls redact; the data does not.
 ├── keepass/    Adapter over the forked keepass-rs crate. Document open/save,
-│               three-way merge for conflicts, password generator, snapshot
+│               two-file merge for conflicts, password generator, snapshot
 │               extraction (Database → VaultSnapshot).
 ├── sync/       Provider-neutral cloud sync. Registry, bindings, SharePoint
 │               Graph adapter, and Apple iCloud Drive file adapter.
