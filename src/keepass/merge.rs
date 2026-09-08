@@ -22,7 +22,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     ops::{Deref, Not},
 };
@@ -132,6 +132,20 @@ struct AttachmentFingerprint {
     name: String,
     protected: bool,
     data: Vec<u8>,
+}
+
+/// Redacted by hand: an attachment holds whatever the user put in the vault,
+/// and this reaches a conflict row through `diff_row`'s fingerprint. The name
+/// and a digest are enough to tell two sets apart, and neither is the file.
+impl fmt::Debug for AttachmentFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AttachmentFingerprint")
+            .field("name", &self.name)
+            .field("protected", &self.protected)
+            .field("bytes", &byte_fingerprint(&self.data))
+            .finish()
+    }
 }
 
 /// One field's local-vs-remote comparison. `local` and `remote` are the
@@ -413,11 +427,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
             future_dated.push((*id).clone());
         }
         if moved {
-            // Each side's own database, because a group can exist in only one
-            // of them, and the pair so two same-named siblings still read
-            // apart.
-            let (here, _) = distinct_locations(local, l.parent, r.parent);
-            let (_, there) = distinct_locations(remote, l.parent, r.parent);
+            let (here, there) = location_pair(local, remote, l.parent, r.parent);
             fields.insert(
                 0,
                 FieldDiff {
@@ -801,9 +811,12 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         "Entry templates group".into(),
         !group_uuids_equivalent(a.entry_templates_group, b.entry_templates_group),
         || {
-            (
+            // Two groups can share a name, on one side or across the two.
+            named_pair(
                 group_name(local, a.entry_templates_group),
                 group_name(remote, b.entry_templates_group),
+                a.entry_templates_group,
+                b.entry_templates_group,
             )
         },
     );
@@ -1634,10 +1647,7 @@ fn group_conflicts(local: &Database, remote: &Database) -> Vec<GroupConflict> {
                 let ours = local_group.parent().map(|parent| parent.id());
                 let theirs = remote_group.parent().map(|parent| parent.id());
                 let (here, there) = match (ours, theirs) {
-                    (Some(ours), Some(theirs)) => (
-                        distinct_locations(local, ours, theirs).0,
-                        distinct_locations(remote, ours, theirs).1,
-                    ),
+                    (Some(ours), Some(theirs)) => location_pair(local, remote, ours, theirs),
                     _ => (
                         group_location(local, local_group.id()),
                         group_location(remote, remote_group.id()),
@@ -1665,11 +1675,38 @@ fn group_conflicts(local: &Database, remote: &Database) -> Vec<GroupConflict> {
     conflicts
 }
 
-/// Two locations, told apart. Sibling groups can share a name, so a row about
-/// a move could show the same text twice and say nothing about the choice it
-/// was asking for. The id is added only when it is needed.
-fn distinct_locations(db: &Database, ours: GroupId, theirs: GroupId) -> (String, String) {
-    let (here, there) = (group_location_of(db, ours), group_location_of(db, theirs));
+/// Two names that may be the same word for two different objects. The id is
+/// added only when the names alone would not tell them apart.
+fn named_pair(
+    here: String,
+    there: String,
+    ours: Option<uuid::Uuid>,
+    theirs: Option<uuid::Uuid>,
+) -> (String, String) {
+    if here != there {
+        return (here, there);
+    }
+    let tagged = |name: String, id: Option<uuid::Uuid>| match id {
+        Some(id) => format!("{name} ({})", &id.to_string()[..8]),
+        None => name,
+    };
+    (tagged(here, ours), tagged(there, theirs))
+}
+
+/// The two places a row is asking about, told apart.
+///
+/// Each side is read from its own database, because a group can exist in only
+/// one of them. Two groups can then share a name, on one side or across the
+/// two, and the row would show the same text twice and say nothing about the
+/// choice it was asking for. The id is added only when it is needed.
+fn location_pair(
+    local: &Database,
+    remote: &Database,
+    ours: GroupId,
+    theirs: GroupId,
+) -> (String, String) {
+    let here = group_location_of(local, ours);
+    let there = group_location_of(remote, theirs);
     if here != there {
         return (here, there);
     }
@@ -1736,23 +1773,24 @@ fn group_ancestry(db: &Database, id: GroupId) -> Vec<String> {
 /// The rows the conflict screen shows for a group. Same shape as the entry
 /// rows so the overlay renders both through one path.
 fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDiff> {
-    fn row(label: &'static str, local: String, remote: String) -> FieldDiff {
-        FieldDiff {
-            differs: local != remote,
-            label: label.into(),
-            local,
-            remote,
-        }
+    // An unset value and an empty one are two different things, and quoting
+    // is what keeps them, and a value that contains the separators, apart.
+    fn optional(value: &Option<String>) -> String {
+        value.clone().unwrap_or_else(|| "(not set)".to_string())
     }
-    fn optional(value: Option<&String>) -> String {
-        value.cloned().unwrap_or_default()
-    }
-    fn tri_state(value: Option<bool>) -> String {
+    fn tri_state(value: &Option<bool>) -> String {
         match value {
             Some(true) => "Yes".into(),
             Some(false) => "No".into(),
             None => "Inherited".into(),
         }
+    }
+    #[allow(clippy::ptr_arg)] // the closure is handed a &Vec by `diff_row`
+    fn tags(tags: &Vec<String>) -> String {
+        tags.iter()
+            .map(|tag| format!("{tag:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
     fn icon_row(group: &GroupRef<'_>) -> String {
         match group.icon() {
@@ -1776,59 +1814,56 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             None => "Default icon".into(),
         }
     }
-    fn expiry_row(times: &Times) -> String {
-        match (times.expires.unwrap_or(false), times.expiry) {
-            // To the second: that is what the format stores and what the
-            // comparison uses, and two dates a minute apart read alike
-            // without it.
-            (true, Some(at)) => at.format("%Y-%m-%d %H:%M:%S").to_string(),
-            _ => "Never".into(),
-        }
-    }
+
     vec![
-        row("Name", local.name.clone(), remote.name.clone()),
-        row("Icon", icon_row(local), icon_row(remote)),
-        row(
+        diff_row("Name", &local.name, &remote.name, Clone::clone),
+        // Compared on what the icon actually is: the reference through the
+        // usual normalisation, so the two spellings of the default are one
+        // icon, plus the image behind it, because one id can mean two
+        // pictures until the merge separates them.
+        diff_row(
+            "Icon",
+            &icon_identity(local),
+            &icon_identity(remote),
+            |_| String::new(),
+        )
+        .with_values(icon_row(local), icon_row(remote)),
+        diff_row(
             "Expires",
-            expiry_row(&local.times),
-            expiry_row(&remote.times),
+            &in_force_expiry(&local.times),
+            &in_force_expiry(&remote.times),
+            |at| expiry_row(*at),
         ),
-        row(
-            "Notes",
-            optional(local.notes.as_ref()),
-            optional(remote.notes.as_ref()),
-        ),
-        row("Tags", local.tags.join(", "), remote.tags.join(", ")),
-        row(
+        diff_row("Notes", &local.notes, &remote.notes, optional),
+        diff_row("Tags", &local.tags, &remote.tags, tags),
+        diff_row(
             "Auto-Type sequence",
-            optional(local.default_autotype_sequence.as_ref()),
-            optional(remote.default_autotype_sequence.as_ref()),
+            &local.default_autotype_sequence,
+            &remote.default_autotype_sequence,
+            optional,
         ),
-        row(
+        diff_row(
             "Auto-Type enabled",
-            tri_state(local.enable_autotype),
-            tri_state(remote.enable_autotype),
+            &local.enable_autotype,
+            &remote.enable_autotype,
+            tri_state,
         ),
-        row(
+        diff_row(
             "Searchable",
-            tri_state(local.enable_searching),
-            tri_state(remote.enable_searching),
+            &local.enable_searching,
+            &remote.enable_searching,
+            tri_state,
         ),
         // Plugin data counts as content, so a difference here can be the only
         // reason a group is asked about. Without a row the screen showed an
         // empty list and the answer discarded the other side's keys for good:
         // a group keeps no history to recover them from.
-        //
-        // Whether it differs is decided on the maps themselves. Deciding it
-        // on the rendered line would have dropped the row whenever two
-        // different values happened to read alike, which is the same silent
-        // discard one level down.
-        FieldDiff {
-            differs: local.custom_data != remote.custom_data,
-            label: "Plugin data".into(),
-            local: custom_data_summary(&local.custom_data),
-            remote: custom_data_summary(&remote.custom_data),
-        },
+        diff_row(
+            "Plugin data",
+            &ordered_custom_data(&local.custom_data),
+            &ordered_custom_data(&remote.custom_data),
+            |items| custom_data_summary(items),
+        ),
     ]
     .into_iter()
     .filter(|diff| diff.differs)
@@ -1842,13 +1877,105 @@ fn group_with_uuid(database: &Database, id: uuid::Uuid) -> Option<GroupId> {
         .find(|group_id| group_id.uuid() == id)
 }
 
+/// What a group's icon actually is: the reference, normalised so the two
+/// spellings of the default agree, and the image behind it, because one id
+/// can still mean two different pictures until a merge separates them.
+fn icon_identity(group: &GroupRef<'_>) -> (Option<Icon>, Option<Vec<u8>>, Option<String>) {
+    let icon = normalised_icon(group.icon(), DEFAULT_GROUP_ICON).cloned();
+    let image = group.custom_icon();
+    (
+        icon,
+        image.as_ref().map(|image| image.data.clone()),
+        image.and_then(|image| image.name.clone()),
+    )
+}
+
+/// An expiry date only counts while it is in force, here as everywhere.
+fn in_force_expiry(times: &Times) -> Option<NaiveDateTime> {
+    times
+        .expires
+        .unwrap_or(false)
+        .then_some(times.expiry)
+        .flatten()
+}
+
+/// To the second: that is what KDBX stores and what the comparison uses, and
+/// two dates inside one minute read alike without it.
+fn expiry_row(at: Option<NaiveDateTime>) -> String {
+    at.map_or_else(
+        || "Never".to_string(),
+        |at| at.format("%Y-%m-%d %H:%M:%S").to_string(),
+    )
+}
+
+/// Plugin data in a fixed order, so its `Debug` is stable and two sides that
+/// hold the same keys read the same.
+fn ordered_custom_data(
+    items: &std::collections::HashMap<String, CustomDataItem>,
+) -> BTreeMap<&String, &CustomDataItem> {
+    items.iter().collect()
+}
+
+/// One conflict row, decided on the values and rendered for a person.
+///
+/// Two rules, and enforcing them in one place is why this exists at all.
+/// Whether the row differs is decided on the values, never on the text: a
+/// rendering that maps two different values onto one string would otherwise
+/// drop the row, and the answer would then discard one of them in silence.
+/// And when they do differ, the two cells must not read alike, or the screen
+/// asks a question without showing it. Where the rendering cannot tell them
+/// apart, a fingerprint of the value itself does.
+///
+/// `T` must have a stable `Debug`, so pass an ordered view of a map rather
+/// than the map.
+fn diff_row<T: PartialEq + fmt::Debug>(
+    label: impl Into<Cow<'static, str>>,
+    local: &T,
+    remote: &T,
+    render: impl Fn(&T) -> String,
+) -> FieldDiff {
+    let differs = local != remote;
+    let (mut here, mut there) = (render(local), render(remote));
+    if differs && here == there {
+        here = format!("{here} [{}]", value_fingerprint(local));
+        there = format!("{there} [{}]", value_fingerprint(remote));
+    }
+    FieldDiff {
+        differs,
+        label: label.into(),
+        local: here,
+        remote: there,
+    }
+}
+
+impl FieldDiff {
+    /// Keep the decision, replace the rendering. For a row whose two sides
+    /// are compared on one value but shown as two different things.
+    fn with_values(self, local: String, remote: String) -> Self {
+        let (local, remote) = if self.differs && local == remote {
+            (format!("{local} [local]"), format!("{remote} [remote]"))
+        } else {
+            (local, remote)
+        };
+        Self {
+            local,
+            remote,
+            ..self
+        }
+    }
+}
+
+fn value_fingerprint<T: fmt::Debug>(value: &T) -> String {
+    byte_fingerprint(format!("{value:?}").as_bytes())
+}
+
 /// A short, stable name for bytes nobody can read on a conflict row, so it
 /// can say "these two are different" without rendering either.
 fn byte_fingerprint(data: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
     Sha256::digest(data)
         .iter()
-        .take(4)
+        .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
@@ -1856,19 +1983,20 @@ fn byte_fingerprint(data: &[u8]) -> String {
 /// Plugin data as one line, sorted so two sides that hold the same keys read
 /// the same. Values are described rather than dumped: they are opaque to this
 /// application, and the row exists to tell two sets apart.
-fn custom_data_summary(items: &std::collections::HashMap<String, CustomDataItem>) -> String {
-    let mut keys: Vec<&String> = items.keys().collect();
-    keys.sort_unstable();
+fn custom_data_summary(items: &BTreeMap<&String, &CustomDataItem>) -> String {
     // Quoted, because a key or a value may contain the separators. Without
     // that, one key called `a = 1, b` reads exactly like two keys `a` and
     // `b`, and the row stops telling the two sides apart.
-    keys.into_iter()
-        .map(|key| {
-            let value = items.get(key).map(|item| custom_data_value(Some(&item)));
-            match value.as_deref() {
-                Some("") | None => format!("{key:?}"),
-                Some(value) => format!("{key:?} = {value:?}"),
-            }
+    items
+        .iter()
+        .map(|(key, item)| match &item.value {
+            None => format!("{key:?} (not set)"),
+            Some(CustomDataValue::String(value)) => format!("{key:?} = {value:?}"),
+            Some(CustomDataValue::Binary(bytes)) => format!(
+                "{key:?} = {} bytes of binary data ({})",
+                bytes.len(),
+                byte_fingerprint(bytes)
+            ),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -2601,45 +2729,39 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
     let local_additional = additional_fields(&local.fields);
     let remote_additional = additional_fields(&remote.fields);
     if !local_additional.is_empty() || !remote_additional.is_empty() {
-        diffs.push(FieldDiff {
-            label: "Additional fields".into(),
-            local: render_additional_fields(&local_additional),
-            remote: render_additional_fields(&remote_additional),
-            differs: local_additional != remote_additional,
-        });
+        diffs.push(diff_row(
+            "Additional fields",
+            &local_additional,
+            &remote_additional,
+            |fields| render_additional_fields(fields),
+        ));
     }
 
-    diffs.push(FieldDiff {
-        label: "Attachments".into(),
-        local: attachment_summary(local.attachments.len()),
-        remote: attachment_summary(remote.attachments.len()),
-        differs: local.attachments != remote.attachments,
-    });
+    // A count, because attachment names and bytes are not a conflict row's
+    // business, but decided on the attachments themselves: two different
+    // sets of the same size read alike, and the row then vanished.
+    diffs.push(diff_row(
+        "Attachments",
+        &local.attachments,
+        &remote.attachments,
+        |attachments| attachment_summary(attachments.len()),
+    ));
 
     let local_protected = protected_field_names(&local.fields);
     let remote_protected = protected_field_names(&remote.fields);
     if !local_protected.is_empty() || !remote_protected.is_empty() {
-        diffs.push(FieldDiff {
-            label: "Protected fields".into(),
-            local: local_protected.join(", "),
-            remote: remote_protected.join(", "),
-            differs: local_protected != remote_protected,
-        });
+        diffs.push(diff_row(
+            "Protected fields",
+            &local_protected,
+            &remote_protected,
+            |names| names.join(", "),
+        ));
     }
 
     if local.expiry != remote.expiry {
-        fn expiry_row(at: Option<NaiveDateTime>) -> String {
-            at.map_or_else(
-                || "Never".to_string(),
-                |at| at.format("%Y-%m-%d %H:%M:%S").to_string(),
-            )
-        }
-        diffs.push(FieldDiff {
-            label: "Expires".into(),
-            local: expiry_row(local.expiry),
-            remote: expiry_row(remote.expiry),
-            differs: true,
-        });
+        diffs.push(diff_row("Expires", &local.expiry, &remote.expiry, |at| {
+            expiry_row(*at)
+        }));
     }
 
     let metadata = metadata_differences(local, remote);
@@ -2647,20 +2769,25 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
         // Per-side values, not a shared change list. The row is flagged as
         // differing, so rendering the same string in both columns asked the
         // user to choose between two identical cells.
-        diffs.push(FieldDiff {
-            label: "Entry settings".into(),
-            local: metadata
+        let render = |side: fn(&MetadataDifference) -> &String| {
+            metadata
                 .iter()
-                .map(|difference| difference.local.as_str())
+                .map(|difference| side(difference).as_str())
                 .collect::<Vec<_>>()
-                .join(", "),
-            remote: metadata
-                .iter()
-                .map(|difference| difference.remote.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            differs: true,
-        });
+                .join(", ")
+        };
+        diffs.push(
+            FieldDiff {
+                label: "Entry settings".into(),
+                local: String::new(),
+                remote: String::new(),
+                differs: true,
+            }
+            .with_values(
+                render(|difference| &difference.local),
+                render(|difference| &difference.remote),
+            ),
+        );
     }
 
     diffs
@@ -2692,8 +2819,11 @@ fn entry_field_diff(
 }
 
 fn render_field(value: Option<&Value<String>>, always_redact: bool) -> String {
+    // Not the empty string: a field nobody set and a field set to nothing are
+    // two different things, and a row that renders both the same way stops
+    // saying which one the user is choosing.
     let Some(value) = value else {
-        return String::new();
+        return "(not set)".to_string();
     };
     if always_redact || value.is_protected() {
         redact(value.get())
@@ -2762,9 +2892,11 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<Me
         );
     }
     if local.view.custom_data != remote.view.custom_data {
+        // Named, not counted: two different sets of the same size read alike,
+        // and the user was then asked to choose between two identical cells.
         note(
-            format!("{} custom values", local.view.custom_data.len()),
-            format!("{} custom values", remote.view.custom_data.len()),
+            custom_data_summary(&ordered_custom_data(&local.view.custom_data)),
+            custom_data_summary(&ordered_custom_data(&remote.view.custom_data)),
         );
     }
     if !icons_equivalent(
@@ -2817,10 +2949,18 @@ fn tags_diff(local: &[String], remote: &[String]) -> FieldDiff {
     // mental model, but in the file they're a Vec<String> and clients
     // (including ours) preserve write order. Treating reorder as a diff
     // is the simpler + safer behaviour.
+    // Quoted, because a tag may contain the separator: one tag `a, b` reads
+    // exactly like two tags `a` and `b` without it.
+    fn rendered(tags: &[String]) -> String {
+        tags.iter()
+            .map(|tag| format!("{tag:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
     FieldDiff {
         label: "Tags".into(),
-        local: local.join(", "),
-        remote: remote.join(", "),
+        local: rendered(local),
+        remote: rendered(remote),
         differs: local != remote,
     }
 }
@@ -3409,8 +3549,9 @@ mod tests {
             .find(|f| f.label == "Tags")
             .expect("Tags must be one of the field-diff rows");
         assert!(tag_field.differs, "tag-diff should fire when sets differ");
-        assert_eq!(tag_field.local, "personal");
-        assert_eq!(tag_field.remote, "work, shared");
+        // Quoted, so one tag containing the separator cannot read as two.
+        assert_eq!(tag_field.local, "\"personal\"");
+        assert_eq!(tag_field.remote, "\"work\", \"shared\"");
 
         // User picks Remote → all remote fields land on the merged entry,
         // including the tags.
@@ -4613,6 +4754,135 @@ mod tests {
             Some(true),
             "choosing theirs has to apply theirs"
         );
+    }
+
+    /// The rule, rather than the cases: a row that differs never shows the
+    /// same text on both sides. Deciding a row on the string it renders, or
+    /// rendering two different values the same way, is how a conflict screen
+    /// asks a question it has not shown, and the answer then discards one
+    /// side in silence.
+    #[test]
+    fn no_conflict_row_that_differs_reads_the_same_on_both_sides() {
+        use keepass::db::{CustomDataItem, CustomDataValue};
+
+        let tied = keepass::db::Times::now();
+        let text = |value: &str| CustomDataItem {
+            value: Some(CustomDataValue::String(value.into())),
+            last_modification_time: None,
+        };
+        let blob = |bytes: Vec<u8>| CustomDataItem {
+            value: Some(CustomDataValue::Binary(bytes)),
+            last_modification_time: None,
+        };
+
+        // Every shape whose rendering used to lose the difference: unset
+        // against empty, one tag against two that spell the same line, sets
+        // of one size holding different things, dates inside a minute.
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        {
+            let mut entry = local.entry_mut(id).unwrap();
+            entry.times.last_modification = Some(tied);
+            entry.times.expires = Some(true);
+            entry.times.expiry = Some(tied + chrono::TimeDelta::days(30));
+            entry.tags = vec!["a, b".to_string()];
+            entry.custom_data.insert("k".into(), text("one"));
+            entry.set_unprotected(fields::NOTES, "");
+            // Attachments are shown as a count on purpose, so this is the
+            // row that has nothing but the fallback to tell the sides apart.
+            entry.add_attachment("file.bin", Value::unprotected(vec![1, 2, 3]));
+        }
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        local.group_mut(group_id).unwrap().tags = vec!["x, y".to_string()];
+        local
+            .group_mut(group_id)
+            .unwrap()
+            .custom_data
+            .insert("p".into(), blob(vec![1, 2, 3, 4]));
+        local.group_mut(group_id).unwrap().notes = Some(String::new());
+
+        let mut remote = fork(&local);
+        {
+            let mut entry = remote.entry_mut(id).unwrap();
+            entry.times.expiry =
+                Some(tied + chrono::TimeDelta::days(30) + chrono::TimeDelta::seconds(20));
+            entry.tags = vec!["a".to_string(), "b".to_string()];
+            entry.custom_data.insert("k".into(), text("two"));
+            entry.add_attachment("file.bin", Value::unprotected(vec![4, 5, 6]));
+            entry.fields.remove(fields::NOTES);
+            entry.times.last_modification = Some(tied);
+        }
+        {
+            let mut group = remote.group_mut(group_id).unwrap();
+            group.tags = vec!["x".to_string(), "y".to_string()];
+            group.custom_data.insert("p".into(), blob(vec![5, 6, 7, 8]));
+            group.notes = None;
+            group.times.last_modification = Some(tied);
+        }
+
+        let report = diff(&local, &remote);
+        // Named, not counted, wherever the values can be named at all: the
+        // fallback below keeps the two sides apart, but it says nothing about
+        // what the user is choosing between.
+        let settings = report
+            .conflicts
+            .iter()
+            .flat_map(|conflict| &conflict.fields)
+            .find(|field| field.label == "Entry settings")
+            .expect("the entry's plugin data differs");
+        assert!(
+            settings.local.contains("\"k\""),
+            "the row has to name the key: {}",
+            settings.local
+        );
+        let rows = report
+            .conflicts
+            .iter()
+            .flat_map(|conflict| &conflict.fields)
+            .chain(
+                report
+                    .group_conflicts
+                    .iter()
+                    .flat_map(|conflict| &conflict.fields),
+            )
+            .chain(
+                report
+                    .metadata_conflict
+                    .iter()
+                    .flat_map(|conflict| &conflict.fields),
+            );
+        let mut differing = Vec::new();
+        for row in rows {
+            if row.differs {
+                differing.push(row.label.to_string());
+                assert_ne!(
+                    row.local, row.remote,
+                    "row {:?} differs but reads the same on both sides",
+                    row.label
+                );
+            }
+        }
+        // Named rather than counted: a row that quietly stopped firing would
+        // otherwise satisfy the loop above by not being in it.
+        for expected in [
+            "Notes",
+            "Tags",
+            "Attachments",
+            "Expires",
+            "Entry settings",
+            "Plugin data",
+        ] {
+            assert!(
+                differing.iter().any(|label| label == expected),
+                "the fixture has to produce a {expected} row, got {differing:?}"
+            );
+        }
     }
 
     /// Every one of these rows once decided whether it existed by comparing
