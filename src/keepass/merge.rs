@@ -1162,10 +1162,13 @@ fn holds_a_version_the_other_side_never_saw(
     // those versions: we sent them again, it dropped them again, on every
     // sync.
     let held: usize = theirs.iter().map(|version| version.bytes).sum();
+    // A client trims when the history goes *over* its budget, so one sitting
+    // exactly on it is not full: they are full when the smallest version they
+    // lack would not have fitted.
     let they_are_full = their_cap.items.is_some_and(|cap| theirs.len() >= cap)
         || their_cap
             .bytes
-            .is_some_and(|cap| held >= cap.saturating_sub(smallest_missing(mine, theirs)));
+            .is_some_and(|cap| held.saturating_add(smallest_missing(mine, theirs)) > cap);
     let trim_horizon = match (they_are_full, theirs.first()) {
         // Full, so anything older than the oldest they kept is something they
         // dropped.
@@ -1232,7 +1235,32 @@ fn history_version_bytes(version: &EntryRef<'_>) -> usize {
         .named_attachments()
         .map(|(name, attachment)| name.len() + attachment.data.get().len())
         .sum();
-    fields + attachments
+    // Everything else a version serializes and a client counts. Leaving these
+    // out meant a history trimmed because of them still read as one that had
+    // never seen those versions.
+    let custom_data: usize = version
+        .custom_data
+        .iter()
+        .map(|(key, item)| {
+            key.len()
+                + match &item.value {
+                    Some(CustomDataValue::String(value)) => value.len(),
+                    Some(CustomDataValue::Binary(bytes)) => bytes.len(),
+                    None => 0,
+                }
+        })
+        .sum();
+    let tags: usize = version.tags.iter().map(String::len).sum();
+    let autotype = version.autotype.as_ref().map_or(0, |autotype| {
+        autotype.default_sequence.as_ref().map_or(0, String::len)
+            + autotype
+                .associations
+                .iter()
+                .map(|association| association.window.len() + association.sequence.len())
+                .sum::<usize>()
+    });
+    let override_url = version.override_url.as_ref().map_or(0, String::len);
+    fields + attachments + custom_data + tags + autotype + override_url
 }
 
 /// A digest over everything an archived version carries, matching what
@@ -4736,15 +4764,54 @@ mod tests {
             "and sending it again would only have it dropped again"
         );
 
-        // With room in the budget they kept everything they were given, so a
-        // version they lack is one they never saw.
-        let mut roomy_local = fork(&local);
-        roomy_local.meta.history_max_size = Some(1_000_000);
-        let mut roomy_remote = fork(&remote);
-        roomy_remote.meta.history_max_size = Some(1_000_000);
+        // The boundary, taken from the estimate itself rather than guessed:
+        // a client trims when the history goes over its budget, so one that
+        // fits exactly still had room.
+        let versions = |db: &Database| history_versions(&db.entry(id).expect("entry"));
+        let held: usize = versions(&remote).iter().map(|version| version.bytes).sum();
+        let missing = versions(&local)
+            .difference(&versions(&remote))
+            .map(|version| version.bytes)
+            .min()
+            .expect("one version they lack");
+
+        for (budget, expected) in [
+            (held + missing, true),
+            (held + missing - 1, false),
+            (1_000_000, true),
+            // A budget of nothing is a budget, not the absence of one.
+            (0, false),
+        ] {
+            let mut ours = fork(&local);
+            ours.meta.history_max_size = Some(budget as isize);
+            let mut theirs = fork(&remote);
+            theirs.meta.history_max_size = Some(budget as isize);
+            assert_eq!(
+                diff(&ours, &theirs).local_history_ahead,
+                expected,
+                "budget {budget} against {held} held and {missing} missing"
+            );
+        }
+
+        // And what a version costs is more than its field map: a history
+        // trimmed because of tags or an override url was trimmed all the same.
+        let plain = {
+            let mut db = Database::new();
+            let entry = add(&mut db, "Extra", "secret");
+            add_history_at(&mut db, entry, "note", newer);
+            history_version_bytes(&db.entry(entry).unwrap().historical(0).expect("a version"))
+        };
+        let richer = {
+            let mut db = Database::new();
+            let entry = add(&mut db, "Extra", "secret");
+            db.entry_mut(entry).unwrap().tags = vec!["t".repeat(64)];
+            db.entry_mut(entry).unwrap().override_url = Some("u".repeat(32));
+            add_history_at(&mut db, entry, "note", newer);
+            history_version_bytes(&db.entry(entry).unwrap().historical(0).expect("a version"))
+        };
         assert!(
-            diff(&roomy_local, &roomy_remote).local_history_ahead,
-            "with room to spare, nothing was trimmed"
+            richer >= plain + 96,
+            "tags and an override url count too: {richer} against {plain}"
         );
     }
 
