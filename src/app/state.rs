@@ -2272,10 +2272,8 @@ impl AppState {
             return;
         }
         // Bail on the common case, a local-only vault, without waiting for
-        // anything. Only whether to show "Restoring" rests on this answer:
-        // the read that follows takes the lock and decides for real, and a
-        // file that goes away in between lands on the `Ok(None)` arm below.
-        if !crate::sync::config::config_path_for(&path).is_ok_and(|path| path.exists()) {
+        // anything.
+        if known_to_have_no_sync_config(crate::sync::config::config_path_for(&path)) {
             return;
         }
 
@@ -6551,6 +6549,20 @@ fn sync_status_label(status: &SyncStatus) -> Option<String> {
 /// header in lockstep with `sync_status_label` (which produces the text):
 /// green when healthy, blue while working, orange when the user needs to
 /// act, muted when there's no sync at all.
+/// Whether there is known to be no sync config for this vault, asked
+/// cheaply enough for the UI thread.
+///
+/// Only a plain "no file" counts. A path that will not resolve and a
+/// directory that will not answer are questions for the locked read on the
+/// task, which has a Failed state with a Retry to put them in; calling
+/// either of them "no config" would present a bound vault as local-only and
+/// say nothing about why.
+fn known_to_have_no_sync_config(
+    config_path: Result<PathBuf, crate::sync::config::ConfigError>,
+) -> bool {
+    config_path.is_ok_and(|config| matches!(config.try_exists(), Ok(false)))
+}
+
 fn sync_status_tone(status: &SyncStatus) -> SyncTone {
     match status {
         SyncStatus::Idle | SyncStatus::Synced { .. } => SyncTone::Synced,
@@ -6561,6 +6573,32 @@ fn sync_status_tone(status: &SyncStatus) -> SyncTone {
             SyncTone::Attention
         }
         SyncStatus::Disconnected => SyncTone::Neutral,
+    }
+}
+
+#[cfg(test)]
+mod sync_config_probe_tests {
+    use super::*;
+
+    /// The probe decides only whether to skip the restore entirely, so
+    /// anything short of "the file is not there" has to fall through to the
+    /// read that can report a problem. Treating an unresolvable path as an
+    /// absent config turned a bound vault into a local-only one for the rest
+    /// of the session, without a word.
+    #[test]
+    fn only_a_definite_missing_file_counts_as_no_sync_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let absent = dir.path().join("absent.json");
+        assert!(known_to_have_no_sync_config(Ok(absent)));
+
+        let present = dir.path().join("present.json");
+        std::fs::write(&present, "{}").expect("write");
+        assert!(!known_to_have_no_sync_config(Ok(present)));
+
+        assert!(!known_to_have_no_sync_config(Err(
+            crate::sync::config::ConfigError::NoSupportDir("$HOME not set".into())
+        )));
     }
 }
 

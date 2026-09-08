@@ -56,6 +56,11 @@ impl TokenError {
 /// reconnect's store, both run in this process on background tasks. One lock
 /// across each operation is what makes "only while it is still the one
 /// stored" true rather than merely likely.
+///
+/// Always taken *inside* the cross-process lock, never around it. A caller
+/// that already holds the file lock reaches these entries through the
+/// `*_unlocked` functions, and holding the two in one order everywhere is
+/// what keeps that from meeting a thread holding them in the other.
 static LOCK: Mutex<()> = Mutex::new(());
 
 fn locked() -> MutexGuard<'static, ()> {
@@ -68,27 +73,36 @@ fn locked() -> MutexGuard<'static, ()> {
 /// secret. Idempotent (re-saving the same value is a no-op from the user's
 /// perspective).
 pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError> {
-    let _guard = locked();
     super::lock::held(super::lock::INTERACTIVE, || {
-        write(account_email, refresh_token)
+        store_unlocked(account_email, refresh_token)
     })
     .unwrap_or_else(|reason| Err(reason.into()))
+}
+
+/// The same write without taking the cross-process lock, for a caller that
+/// already holds it because the token and something else have to land as one
+/// operation. See `config::save_unlocked`.
+pub(super) fn store_unlocked(account_email: &str, refresh_token: &str) -> Result<(), TokenError> {
+    let _guard = locked();
+    write(account_email, refresh_token)
 }
 
 /// Read the refresh token for the given account. Returns `Ok(None)` when
 /// no entry exists - common case before first connect or after disconnect,
 /// not worth typing as an error.
 pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
-    let _guard = locked();
-    super::lock::held(super::lock::INTERACTIVE, || read(account_email))
-        .unwrap_or_else(|reason| Err(reason.into()))
+    super::lock::held(super::lock::INTERACTIVE, || {
+        let _guard = locked();
+        read(account_email)
+    })
+    .unwrap_or_else(|reason| Err(reason.into()))
 }
 
 /// Remove the refresh token for the given account. No-op when the entry
 /// already doesn't exist (Disconnect should be safe to retry).
 pub fn delete(account_email: &str) -> Result<(), TokenError> {
-    let _guard = locked();
     super::lock::held(super::lock::INTERACTIVE, || {
+        let _guard = locked();
         let entry = Entry::new(SERVICE, account_email)?;
         match entry.delete_credential() {
             Ok(()) => Ok(()),
@@ -108,10 +122,10 @@ pub fn delete(account_email: &str) -> Result<(), TokenError> {
 /// an entry for a relationship that is over, or replaced a live token with a
 /// stale one.
 pub fn replace(account_email: &str, expected: &str, rotated: &str) -> Result<bool, TokenError> {
-    let _guard = locked();
     // And across processes: the app and the CLI both write these, and the
     // Keychain offers no compare-and-set of its own.
     super::lock::held(super::lock::INTERACTIVE, || {
+        let _guard = locked();
         if read(account_email)?.as_deref() != Some(expected) {
             return Ok(false);
         }

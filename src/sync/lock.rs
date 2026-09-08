@@ -170,6 +170,26 @@ mod tests {
         assert!(!ran, "and it did not run");
     }
 
+    /// Two handles on one file are two holders even inside one program, so
+    /// a caller already holding this lock must reach the keychain and the
+    /// configs through their `*_unlocked` functions rather than the locking
+    /// ones. Pinned here because that is an assumption about the platform,
+    /// and everything that takes the keychain mutex inside this lock rests
+    /// on it.
+    #[test]
+    fn the_lock_excludes_a_second_holder_in_this_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".lock");
+
+        let mut inner_ran = false;
+        let outcome = with_file(&path, Duration::from_millis(30), || {
+            with_file(&path, Duration::from_millis(30), || inner_ran = true)
+        });
+
+        assert!(matches!(outcome, Ok(Err(Unavailable::Contended))));
+        assert!(!inner_ran, "the second hold did not get in");
+    }
+
     /// Contention is another process finishing its own file and keychain
     /// calls, so asking again is the whole remedy. Background work that
     /// reported it instead told the user their sync had broken.

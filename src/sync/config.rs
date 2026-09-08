@@ -243,10 +243,14 @@ pub fn save_unlocked(config: &SyncConfig) -> Result<(), ConfigError> {
 /// the file already doesn't exist - disconnect should be idempotent so a
 /// retry after a partial failure can finish the cleanup.
 pub fn delete(local_path: &Path) -> Result<(), ConfigError> {
-    super::lock::held(super::lock::INTERACTIVE, || {
-        delete_in(&sync_dir()?, local_path)
-    })
-    .unwrap_or_else(|reason| Err(reason.into()))
+    super::lock::held(super::lock::INTERACTIVE, || delete_unlocked(local_path))
+        .unwrap_or_else(|reason| Err(reason.into()))
+}
+
+/// See [`load_unlocked`]. Used to take a config back inside the same hold
+/// that wrote it, so the removal cannot fail for lock reasons.
+pub(super) fn delete_unlocked(local_path: &Path) -> Result<(), ConfigError> {
+    delete_in(&sync_dir()?, local_path)
 }
 
 /// Whether another vault still relies on the account-level refresh token.

@@ -65,6 +65,68 @@ pub enum ServiceError {
     LocalVault(String),
     #[error("remote vault changed repeatedly while it was being downloaded")]
     UnstableRemoteDownload,
+    /// The sign-in would not go into the keychain and the config written for
+    /// it would not come back out. Its own error because the vault is left
+    /// connected without a credential, and the way out is a button rather
+    /// than a folder in Application Support.
+    #[error(
+        "could not save the sign-in for {account} ({source}), and the sync \
+         configuration written for it could not be removed either ({removal}). \
+         The vault is connected without a credential: open it and use \
+         Disconnect to clear it."
+    )]
+    ConnectLeftConfigured {
+        account: String,
+        #[source]
+        source: TokenError,
+        removal: ConfigError,
+    },
+}
+
+/// Why a connect publication could not finish, and whether the local vault
+/// has to survive it.
+struct PublishFailure {
+    error: ServiceError,
+    /// Set when a config was written that could not be taken back. The vault
+    /// then has to stay: a leftover config with no vault to open is a state
+    /// Disconnect cannot be reached from.
+    keep_vault: bool,
+}
+
+impl PublishFailure {
+    /// Nothing of this connect survives, so rolling the staged vault back is
+    /// the whole cleanup and retrying is the whole remedy.
+    fn rolled_back(error: impl Into<ServiceError>) -> Self {
+        Self {
+            error: error.into(),
+            keep_vault: false,
+        }
+    }
+
+    /// What a token that would not store leaves behind, once the config
+    /// written for it has been asked to go.
+    ///
+    /// If it went, nothing survives and retrying is the remedy. If it did
+    /// not, the local vault has to stay: Disconnect is reached by opening
+    /// the vault, so a leftover config with no vault to open is a state the
+    /// app leads nowhere out of.
+    fn after_token_failure(
+        account: &str,
+        error: TokenError,
+        removal: Result<(), ConfigError>,
+    ) -> Self {
+        match removal {
+            Ok(()) => Self::rolled_back(error),
+            Err(removal) => Self {
+                error: ServiceError::ConnectLeftConfigured {
+                    account: account.to_string(),
+                    source: error,
+                    removal,
+                },
+                keep_vault: true,
+            },
+        }
+    }
 }
 
 /// Prepared Connect result: enough to publish the encrypted local file and
@@ -228,44 +290,76 @@ pub fn publish_icloud_binding(
 /// rolls back the local file on error or completes as a discoverable vault.
 pub fn persist_connect_picked(result: &ConnectResult) -> Result<(), ServiceError> {
     if config::load(&result.config.local_path)?.is_some() {
-        return Err(io_error(
-            &result.config.local_path,
-            io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "sync configuration already exists for this local vault",
-            ),
-        ));
+        return Err(already_configured(&result.config.local_path));
     }
     let mut staged = StagedVault::new(&result.config.local_path, &result.remote_bytes)?;
     staged.publish()?;
-    // The config first, then the token, so that what a failure has to undo
-    // is the thing it is safe to undo.
-    //
-    // The other order left a credential in the keychain that nothing pointed
-    // at when the config write failed, and no screen in the app can remove
-    // one. Taking that credential back out is worse: a refresh token is
-    // account-scoped, so deleting it signs out every other vault bound to
-    // the same account. A config belongs to this one vault.
-    config::save(&result.config)?;
-    if result.config.provider == SyncProvider::SharePoint
-        && let Err(error) = tokens::store(
-            &result.config.account_email,
-            &result.access_token.refresh_token,
-        )
-    {
-        // A config with no token is not a state to leave behind: the next
-        // attempt meets the "already configured" guard above and cannot get
-        // past it. If the removal itself will not go, the token failure is
-        // still the cause worth reporting, and the leftover config says so
-        // in its own words on the retry.
-        let _ = super::lock::retrying(
-            || config::delete(&result.config.local_path),
-            config::ConfigError::is_busy,
-        );
-        return Err(error.into());
+    // The config and the token are one write as far as anyone else is
+    // concerned. Two holds let another process disconnect the vault in
+    // between and left this connect reporting success over a binding that
+    // had already been removed, and they left the rollback able to fail for
+    // lock reasons, which is the one way it must not fail.
+    match super::lock::held(super::lock::INTERACTIVE, || publish_binding(result)) {
+        Ok(Ok(())) => {}
+        Ok(Err(failure)) => {
+            if failure.keep_vault {
+                staged.commit();
+            }
+            return Err(failure.error);
+        }
+        Err(reason) => return Err(ConfigError::from(reason).into()),
     }
     staged.commit();
     Ok(())
+}
+
+/// Write the binding: the config, then the token that belongs to it. Runs
+/// inside the cross-process lock, so every read and write here is unlocked.
+///
+/// The config goes first because it is the half that can be taken back. A
+/// refresh token is account-scoped, so removing one signs out every other
+/// vault bound to the same account; a config belongs to this vault alone.
+fn publish_binding(result: &ConnectResult) -> Result<(), PublishFailure> {
+    // The guard from the caller, asked again where it means something: two
+    // processes that both passed the unlocked check must not both write.
+    match config::load_unlocked(&result.config.local_path) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return Err(PublishFailure::rolled_back(already_configured(
+                &result.config.local_path,
+            )));
+        }
+        Err(error) => return Err(PublishFailure::rolled_back(error)),
+    }
+    if let Err(error) = config::save_unlocked(&result.config) {
+        return Err(PublishFailure::rolled_back(error));
+    }
+    if result.config.provider != SyncProvider::SharePoint {
+        return Ok(());
+    }
+    let Err(error) = tokens::store_unlocked(
+        &result.config.account_email,
+        &result.access_token.refresh_token,
+    ) else {
+        return Ok(());
+    };
+    // A config with no token is not a state to leave behind: the next
+    // attempt meets the guard above and cannot get past it.
+    Err(PublishFailure::after_token_failure(
+        &result.config.account_email,
+        error,
+        config::delete_unlocked(&result.config.local_path),
+    ))
+}
+
+fn already_configured(local_path: &Path) -> ServiceError {
+    io_error(
+        local_path,
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "sync configuration already exists for this local vault",
+        ),
+    )
 }
 
 /// Prepare re-authentication for a vault whose refresh token expired. Takes
@@ -794,8 +888,34 @@ pub fn read_local(path: &Path) -> Result<Vec<u8>, ServiceError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{persist_downloaded_vault, sort_kdbx_files, stable_fallback_etag};
+    use super::{
+        ConfigError, PublishFailure, TokenError, persist_downloaded_vault, sort_kdbx_files,
+        stable_fallback_etag,
+    };
     use crate::sync::graph::DriveItemHit;
+
+    /// Disconnect is reached by opening the vault, so a config that would not
+    /// go has to keep the vault that leads to it. Rolling the vault back
+    /// there left the leftover config reachable only through Application
+    /// Support, and the next Connect refusing with "already configured".
+    #[test]
+    fn a_config_that_will_not_go_keeps_the_vault_that_reaches_disconnect() {
+        let removed = PublishFailure::after_token_failure("a@b.test", TokenError::Busy, Ok(()));
+        assert!(
+            !removed.keep_vault,
+            "a connect that left nothing behind leaves no vault either"
+        );
+
+        let stuck = PublishFailure::after_token_failure(
+            "a@b.test",
+            TokenError::Busy,
+            Err(ConfigError::NoSupportDir("$HOME not set".into())),
+        );
+        assert!(stuck.keep_vault);
+        let told = stuck.error.to_string();
+        assert!(told.contains("a@b.test"), "it names the account: {told}");
+        assert!(told.contains("Disconnect"), "and the way out: {told}");
+    }
 
     fn search_hit(name: &str, last_modified: &str) -> DriveItemHit {
         DriveItemHit {
