@@ -7,7 +7,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
     px,
 };
-use gpui_component::{Sizable as _, h_flex, scroll::ScrollableElement as _, v_flex};
+use gpui_component::{Sizable as _, h_flex, v_flex};
 
 use crate::app::Overlay;
 use crate::ui::app_shell::AppShell;
@@ -55,10 +55,26 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(header(&info, cx))
                 .child(
+                    // Built like the vault switcher's list, which sits in the
+                    // same kind of panel: one that has a `max_h` and no
+                    // height, because the backdrop centres it rather than
+                    // stretching it. Its own `max_h` is what bounds this pane,
+                    // since a percentage or a share of the parent has no
+                    // definite height to resolve against here. `flex_1` and
+                    // `min_h` decide how it shares what is left when the notes
+                    // are shorter than that.
+                    //
+                    // This pane used to ask gpui-component for a scrollbar,
+                    // which sizes its viewport `size_full` against that same
+                    // parent: the percentage fell back to the content height,
+                    // so the viewport was never shorter than what it held and
+                    // the panel's `overflow_hidden` simply cut the rest off.
                     v_flex()
                         .id("whats-new-body")
+                        .flex_1()
+                        .min_h(px(0.))
                         .max_h(px(470.))
-                        .overflow_y_scrollbar()
+                        .overflow_y_scroll()
                         .p_5()
                         .gap_1p5()
                         .child(notes_body),
