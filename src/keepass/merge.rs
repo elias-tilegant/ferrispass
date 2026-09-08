@@ -118,9 +118,10 @@ struct EntrySnapshot {
     icon: Option<Icon>,
     quality_check: Option<bool>,
     /// Where the entry sits, and when it was put there. Neither is in the
-    /// field map, and both are decided on their own clock.
+    /// field map, and both are decided on their own clock. The readable form
+    /// is built at the conflict, where both sides are known and two places
+    /// that read alike can be told apart.
     parent: GroupId,
-    location: String,
     location_changed: Option<NaiveDateTime>,
     /// Only a date in force. One that is not says nothing, here as everywhere.
     expiry: Option<NaiveDateTime>,
@@ -412,12 +413,17 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
             future_dated.push((*id).clone());
         }
         if moved {
+            // Each side's own database, because a group can exist in only one
+            // of them, and the pair so two same-named siblings still read
+            // apart.
+            let (here, _) = distinct_locations(local, l.parent, r.parent);
+            let (_, there) = distinct_locations(remote, l.parent, r.parent);
             fields.insert(
                 0,
                 FieldDiff {
                     label: "Location".into(),
-                    local: l.location.clone(),
-                    remote: r.location.clone(),
+                    local: here,
+                    remote: there,
                     differs: true,
                 },
             );
@@ -891,7 +897,7 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
         push(
             &mut out,
             MetaField::CustomIcon(ours.id().to_string()),
-            format!("Icon name ({})", image_fingerprint(&ours.data)).into(),
+            format!("Icon name ({})", byte_fingerprint(&ours.data)).into(),
             ours.name != theirs.name,
             || {
                 (
@@ -964,7 +970,11 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
 fn custom_data_value(item: Option<&&CustomDataItem>) -> String {
     match item.and_then(|item| item.value.as_ref()) {
         Some(CustomDataValue::String(value)) => value.clone(),
-        Some(CustomDataValue::Binary(bytes)) => format!("{} bytes of binary data", bytes.len()),
+        Some(CustomDataValue::Binary(bytes)) => format!(
+            "{} bytes of binary data ({})",
+            bytes.len(),
+            byte_fingerprint(bytes)
+        ),
         None => String::new(),
     }
 }
@@ -1621,13 +1631,25 @@ fn group_conflicts(local: &Database, remote: &Database) -> Vec<GroupConflict> {
             }
             let mut fields = group_field_diffs(&local_group, &remote_group);
             if moved {
+                let ours = local_group.parent().map(|parent| parent.id());
+                let theirs = remote_group.parent().map(|parent| parent.id());
+                let (here, there) = match (ours, theirs) {
+                    (Some(ours), Some(theirs)) => (
+                        distinct_locations(local, ours, theirs).0,
+                        distinct_locations(remote, ours, theirs).1,
+                    ),
+                    _ => (
+                        group_location(local, local_group.id()),
+                        group_location(remote, remote_group.id()),
+                    ),
+                };
                 fields.insert(
                     0,
                     FieldDiff {
                         differs: true,
                         label: "Location".into(),
-                        local: group_location(local, local_group.id()),
-                        remote: group_location(remote, remote_group.id()),
+                        local: here,
+                        remote: there,
                     },
                 );
             }
@@ -1641,6 +1663,19 @@ fn group_conflicts(local: &Database, remote: &Database) -> Vec<GroupConflict> {
         .collect();
     conflicts.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     conflicts
+}
+
+/// Two locations, told apart. Sibling groups can share a name, so a row about
+/// a move could show the same text twice and say nothing about the choice it
+/// was asking for. The id is added only when it is needed.
+fn distinct_locations(db: &Database, ours: GroupId, theirs: GroupId) -> (String, String) {
+    let (here, there) = (group_location_of(db, ours), group_location_of(db, theirs));
+    if here != there {
+        return (here, there);
+    }
+    let tagged =
+        |location: String, id: GroupId| format!("{location} ({})", &id.uuid().to_string()[..8]);
+    (tagged(here, ours), tagged(there, theirs))
 }
 
 /// Where an object sits when that object is inside `id`, as a person reads
@@ -1731,7 +1766,7 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             Some(Icon::Custom(_)) => group.custom_icon().map_or_else(
                 || "Custom image".to_string(),
                 |icon| {
-                    let fingerprint = image_fingerprint(&icon.data);
+                    let fingerprint = byte_fingerprint(&icon.data);
                     match icon.name.as_deref() {
                         Some(name) => format!("Custom image \"{name}\" ({fingerprint})"),
                         None => format!("Custom image ({fingerprint})"),
@@ -1743,7 +1778,10 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
     }
     fn expiry_row(times: &Times) -> String {
         match (times.expires.unwrap_or(false), times.expiry) {
-            (true, Some(at)) => at.format("%Y-%m-%d %H:%M").to_string(),
+            // To the second: that is what the format stores and what the
+            // comparison uses, and two dates a minute apart read alike
+            // without it.
+            (true, Some(at)) => at.format("%Y-%m-%d %H:%M:%S").to_string(),
             _ => "Never".into(),
         }
     }
@@ -1780,11 +1818,17 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
         // reason a group is asked about. Without a row the screen showed an
         // empty list and the answer discarded the other side's keys for good:
         // a group keeps no history to recover them from.
-        row(
-            "Plugin data",
-            custom_data_summary(&local.custom_data),
-            custom_data_summary(&remote.custom_data),
-        ),
+        //
+        // Whether it differs is decided on the maps themselves. Deciding it
+        // on the rendered line would have dropped the row whenever two
+        // different values happened to read alike, which is the same silent
+        // discard one level down.
+        FieldDiff {
+            differs: local.custom_data != remote.custom_data,
+            label: "Plugin data".into(),
+            local: custom_data_summary(&local.custom_data),
+            remote: custom_data_summary(&remote.custom_data),
+        },
     ]
     .into_iter()
     .filter(|diff| diff.differs)
@@ -1798,9 +1842,9 @@ fn group_with_uuid(database: &Database, id: uuid::Uuid) -> Option<GroupId> {
         .find(|group_id| group_id.uuid() == id)
 }
 
-/// A short, stable name for an image nobody gave a name to, so the conflict
-/// row can say "these are two different pictures" without rendering either.
-fn image_fingerprint(data: &[u8]) -> String {
+/// A short, stable name for bytes nobody can read on a conflict row, so it
+/// can say "these two are different" without rendering either.
+fn byte_fingerprint(data: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
     Sha256::digest(data)
         .iter()
@@ -1815,12 +1859,15 @@ fn image_fingerprint(data: &[u8]) -> String {
 fn custom_data_summary(items: &std::collections::HashMap<String, CustomDataItem>) -> String {
     let mut keys: Vec<&String> = items.keys().collect();
     keys.sort_unstable();
+    // Quoted, because a key or a value may contain the separators. Without
+    // that, one key called `a = 1, b` reads exactly like two keys `a` and
+    // `b`, and the row stops telling the two sides apart.
     keys.into_iter()
         .map(|key| {
             let value = items.get(key).map(|item| custom_data_value(Some(&item)));
             match value.as_deref() {
-                Some("") | None => key.clone(),
-                Some(value) => format!("{key} = {value}"),
+                Some("") | None => format!("{key:?}"),
+                Some(value) => format!("{key:?} = {value:?}"),
             }
         })
         .collect::<Vec<_>>()
@@ -2498,13 +2545,13 @@ fn live_entries(db: &Database) -> HashMap<String, EntrySnapshot> {
                 .is_none_or(|bin| !super::document::group_is_within(db, e.parent().id(), bin))
         })
         .map(|e| {
-            let snapshot = entry_to_snapshot(db, &e);
+            let snapshot = entry_to_snapshot(&e);
             (snapshot.view.id.clone(), snapshot)
         })
         .collect()
 }
 
-fn entry_to_snapshot(db: &Database, e: &EntryRef<'_>) -> EntrySnapshot {
+fn entry_to_snapshot(e: &EntryRef<'_>) -> EntrySnapshot {
     EntrySnapshot {
         view: EntryView {
             id: e.id().to_string(),
@@ -2527,7 +2574,6 @@ fn entry_to_snapshot(db: &Database, e: &EntryRef<'_>) -> EntrySnapshot {
         icon: e.icon().cloned(),
         quality_check: e.quality_check,
         parent: e.parent().id(),
-        location: group_location_of(db, e.parent().id()),
         location_changed: e.times.location_changed,
         expiry: e
             .times
@@ -2585,7 +2631,7 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
         fn expiry_row(at: Option<NaiveDateTime>) -> String {
             at.map_or_else(
                 || "Never".to_string(),
-                |at| at.format("%Y-%m-%d %H:%M").to_string(),
+                |at| at.format("%Y-%m-%d %H:%M:%S").to_string(),
             )
         }
         diffs.push(FieldDiff {
@@ -4569,6 +4615,149 @@ mod tests {
         );
     }
 
+    /// Every one of these rows once decided whether it existed by comparing
+    /// its own rendered text, so two different values that happened to read
+    /// alike dropped the row and the answer discarded one of them in silence.
+    #[test]
+    fn a_row_that_reads_alike_still_says_the_two_sides_differ() {
+        use keepass::db::{CustomDataItem, CustomDataValue};
+
+        // Two different blobs of the same length.
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        let tied = keepass::db::Times::now();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        let blob = |bytes: Vec<u8>| CustomDataItem {
+            value: Some(CustomDataValue::Binary(bytes)),
+            last_modification_time: None,
+        };
+        local
+            .group_mut(group_id)
+            .unwrap()
+            .custom_data
+            .insert("Plugin".into(), blob(vec![1, 2, 3, 4]));
+        let mut remote = fork(&local);
+        remote
+            .group_mut(group_id)
+            .unwrap()
+            .custom_data
+            .insert("Plugin".into(), blob(vec![5, 6, 7, 8]));
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let conflict = diff(&local, &remote)
+            .group_conflicts
+            .into_iter()
+            .next()
+            .expect("two different values are a tie");
+        let row = conflict
+            .fields
+            .iter()
+            .find(|field| field.label == "Plugin data")
+            .expect("and the row is there");
+        assert_ne!(row.local, row.remote, "four bytes are not four other bytes");
+
+        // Two expiry dates inside one minute.
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        let at = tied + chrono::TimeDelta::days(30);
+        {
+            let mut entry = local.entry_mut(id).unwrap();
+            entry.times.last_modification = Some(tied);
+            entry.times.expires = Some(true);
+            entry.times.expiry = Some(at);
+        }
+        let mut remote = fork(&local);
+        {
+            let mut entry = remote.entry_mut(id).unwrap();
+            entry.times.expiry = Some(at + chrono::TimeDelta::seconds(20));
+            entry.times.last_modification = Some(tied);
+        }
+        let conflict = diff(&local, &remote)
+            .conflicts
+            .into_iter()
+            .next()
+            .expect("twenty seconds apart is still apart");
+        let row = conflict
+            .fields
+            .iter()
+            .find(|field| field.label == "Expires")
+            .expect("and the row is there");
+        assert_ne!(row.local, row.remote, "and the row has to show it");
+
+        // Two sibling groups with one name.
+        let mut local = Database::new();
+        let id = add(&mut local, "Bank", "secret");
+        let (here, there) = {
+            let mut root = local.root_mut();
+            (root.add_group().id(), root.add_group().id())
+        };
+        for group in [here, there] {
+            local.group_mut(group).unwrap().name = "Archive".into();
+        }
+        let mut remote = fork(&local);
+        for (db, target) in [(&mut local, here), (&mut remote, there)] {
+            let mut entry = db.entry_mut(id).unwrap();
+            entry.move_to(target).unwrap();
+            entry.times.location_changed = Some(tied);
+        }
+        let conflict = diff(&local, &remote)
+            .conflicts
+            .into_iter()
+            .next()
+            .expect("a tied move");
+        let row = conflict
+            .fields
+            .iter()
+            .find(|field| field.label == "Location")
+            .expect("and the row is there");
+        assert_ne!(
+            row.local, row.remote,
+            "two groups called Archive are two places"
+        );
+
+        // One key whose name contains the separators, against two keys that
+        // spell the same line. Only quoting keeps them apart.
+        let mut local = Database::new();
+        let group_id = local.root_mut().add_group().id();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        let text = |value: &str| CustomDataItem {
+            value: Some(CustomDataValue::String(value.into())),
+            last_modification_time: None,
+        };
+        let mut remote = fork(&local);
+        local
+            .group_mut(group_id)
+            .unwrap()
+            .custom_data
+            .insert("a = 1, b".into(), text(""));
+        {
+            let mut group = remote.group_mut(group_id).unwrap();
+            group.custom_data.insert("a".into(), text("1"));
+            group.custom_data.insert("b".into(), text(""));
+            group.times.last_modification = Some(tied);
+        }
+
+        let conflict = diff(&local, &remote)
+            .group_conflicts
+            .into_iter()
+            .next()
+            .expect("two different maps are a tie");
+        let row = conflict
+            .fields
+            .iter()
+            .find(|field| field.label == "Plugin data")
+            .expect("and the row is there");
+        assert_ne!(
+            row.local, row.remote,
+            "one key is not two keys that spell the same line"
+        );
+    }
+
     /// A move the clock can rank is not a question. Adding the location to the
     /// comparison must not turn every ordinary move into a prompt.
     #[test]
@@ -4650,8 +4839,8 @@ mod tests {
                 .fields
                 .iter()
                 .any(|field| field.label == "Plugin data"
-                    && field.local == "Plugin = ours"
-                    && field.remote == "Plugin = theirs"),
+                    && field.local == "\"Plugin\" = \"ours\""
+                    && field.remote == "\"Plugin\" = \"theirs\""),
             "the user has to see what they are choosing between: {:?}",
             conflict.fields
         );
