@@ -988,12 +988,18 @@ fn meta_divergences(local: &Database, remote: &Database) -> Vec<MetaDivergence> 
 /// A custom data value as one line. Binary plugin data is described rather
 /// than rendered: it is not text, and the row exists so a person can tell two
 /// values apart.
+/// Redacted like a password, because that is what it may be.
+///
+/// Plugin data is opaque to this application: a browser integration keeps key
+/// associations there, and anything else a plugin wants to keep. Rendering it
+/// verbatim on a conflict screen put whatever that is in front of whoever is
+/// looking at it, and this screen is the one place that already shows two
+/// vaults side by side. The size is shown for the same reason it is for a
+/// password: it is enough to see that the two sides hold something different.
 fn custom_data_value(item: Option<&&CustomDataItem>) -> String {
     match item.and_then(|item| item.value.as_ref()) {
-        Some(CustomDataValue::String(value)) => value.clone(),
-        Some(CustomDataValue::Binary(bytes)) => {
-            format!("{} bytes of binary data", bytes.len())
-        }
+        Some(CustomDataValue::String(value)) => redact(value),
+        Some(CustomDataValue::Binary(bytes)) => format!("••• ({} bytes)", bytes.len()),
         None => String::new(),
     }
 }
@@ -1069,6 +1075,24 @@ fn user_custom_data(meta: &Meta) -> HashMap<&String, &CustomDataItem> {
         .collect()
 }
 
+/// What a vault asks its histories to stay inside. Both limits are KeePass's,
+/// and either can be the one that trimmed a version away.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HistoryLimits {
+    items: Option<usize>,
+    bytes: Option<usize>,
+}
+
+/// The smallest version the other side lacks, as a size. Their history counts
+/// as full when it could not take even that one.
+fn smallest_missing(mine: &BTreeSet<HistoryVersion>, theirs: &BTreeSet<HistoryVersion>) -> usize {
+    mine.iter()
+        .filter(|version| !theirs.contains(version))
+        .map(|version| version.bytes)
+        .min()
+        .unwrap_or(0)
+}
+
 /// Which side holds entry history versions the other does not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct HistoryDivergence {
@@ -1090,8 +1114,11 @@ struct HistoryDivergence {
 /// entry edited and then reverted looked identical to the remote copy and its
 /// intermediate version was never uploaded.
 fn history_divergence(local: &Database, remote: &Database) -> HistoryDivergence {
-    let local_cap = crate::keepass::document::history_cap(local);
-    let remote_cap = crate::keepass::document::history_cap(remote);
+    let limits = |db| HistoryLimits {
+        items: crate::keepass::document::history_cap(db),
+        bytes: crate::keepass::document::history_size_cap(db),
+    };
+    let (local_cap, remote_cap) = (limits(local), limits(remote));
     let mut divergence = HistoryDivergence::default();
     for local_entry in local.iter_all_entries() {
         let Some(remote_entry) = remote.entry(local_entry.id()) else {
@@ -1127,9 +1154,18 @@ fn history_divergence(local: &Database, remote: &Database) -> HistoryDivergence 
 fn holds_a_version_the_other_side_never_saw(
     mine: &BTreeSet<HistoryVersion>,
     theirs: &BTreeSet<HistoryVersion>,
-    their_cap: Option<usize>,
+    their_cap: HistoryLimits,
 ) -> bool {
-    let they_are_full = their_cap.is_some_and(|cap| theirs.len() >= cap);
+    // Either limit can be the one that filled up. KeePass trims by both, and
+    // reading only the item count meant a copy that had trimmed by size,
+    // while still under its item limit, looked like one that had never seen
+    // those versions: we sent them again, it dropped them again, on every
+    // sync.
+    let held: usize = theirs.iter().map(|version| version.bytes).sum();
+    let they_are_full = their_cap.items.is_some_and(|cap| theirs.len() >= cap)
+        || their_cap
+            .bytes
+            .is_some_and(|cap| held >= cap.saturating_sub(smallest_missing(mine, theirs)));
     let trim_horizon = match (they_are_full, theirs.first()) {
         // Full, so anything older than the oldest they kept is something they
         // dropped.
@@ -1156,6 +1192,11 @@ fn holds_a_version_the_other_side_never_saw(
 struct HistoryVersion {
     at: NaiveDateTime,
     content: [u8; 32],
+    /// Roughly what this version costs in the file. Not part of its identity
+    /// in any meaningful sense: `content` already digests everything the
+    /// version holds, so two versions that agree there agree here too. It
+    /// rides along because the trimming question needs it.
+    bytes: usize,
 }
 
 fn history_versions(entry: &EntryRef<'_>) -> BTreeSet<HistoryVersion> {
@@ -1171,8 +1212,27 @@ fn history_versions(entry: &EntryRef<'_>) -> BTreeSet<HistoryVersion> {
             // that trusted the report wrote without it.
             at: version.times.last_modification.unwrap_or_else(Times::epoch),
             content: history_version_digest(&version),
+            bytes: history_version_bytes(&version),
         })
         .collect()
+}
+
+/// Roughly what an archived version costs in the file: its field values and
+/// its attachments. KeePass measures the serialized XML, which nothing here
+/// reproduces exactly, so this is an estimate and is only ever used to ask
+/// whether the other copy could still be holding a version, never to drop
+/// one.
+fn history_version_bytes(version: &EntryRef<'_>) -> usize {
+    let fields: usize = version
+        .fields
+        .iter()
+        .map(|(key, value)| key.len() + value.get().len())
+        .sum();
+    let attachments: usize = version
+        .named_attachments()
+        .map(|(name, attachment)| name.len() + attachment.data.get().len())
+        .sum();
+    fields + attachments
 }
 
 /// A digest over everything an archived version carries, matching what
@@ -1989,9 +2049,11 @@ fn custom_data_summary(items: &BTreeMap<&String, &CustomDataItem>) -> String {
         .iter()
         .map(|(key, item)| match &item.value {
             None => format!("{key:?} (not set)"),
-            Some(CustomDataValue::String(value)) => format!("{key:?} = {value:?}"),
+            // Redacted, not shown: see `custom_data_value`. Two values of one
+            // size then read alike, and the row names its sides instead.
+            Some(CustomDataValue::String(value)) => format!("{key:?} = {}", redact(value)),
             Some(CustomDataValue::Binary(bytes)) => {
-                format!("{key:?} = {} bytes of binary data", bytes.len())
+                format!("{key:?} = ••• ({} bytes)", bytes.len())
             }
         })
         .collect::<Vec<_>>()
@@ -4640,6 +4702,52 @@ mod tests {
         assert!(report.has_local_contribution());
     }
 
+    /// KeePass trims a history by two limits, and reading only the item count
+    /// meant a copy that had trimmed by size, while still well under its item
+    /// limit, looked like one that had never seen those versions. We sent
+    /// them again, it dropped them again, on every single sync.
+    #[test]
+    fn a_history_the_remote_trimmed_by_size_does_not_force_an_upload() {
+        let oldest = keepass::db::Times::now() - chrono::TimeDelta::minutes(30);
+        let newer = keepass::db::Times::now() - chrono::TimeDelta::minutes(10);
+        let mut local = Database::new();
+        let id = add(&mut local, "GitHub", "secret");
+        let bulky = "x".repeat(4096);
+        add_history_at(&mut local, id, &bulky, oldest);
+        add_history_at(&mut local, id, &format!("{bulky}!"), newer);
+
+        // Room for ten versions on both sides, but a byte budget that only
+        // one of these fits into.
+        local.meta.history_max_items = Some(10);
+        local.meta.history_max_size = Some(5000);
+        let mut remote = fork(&local);
+        remote.entry_mut(id).unwrap().history = None;
+        add_history_at(&mut remote, id, &format!("{bulky}!"), newer);
+
+        let report = diff(&local, &remote);
+
+        assert!(report.conflicts.is_empty(), "no current field differs");
+        assert!(
+            !report.local_history_ahead,
+            "their budget is full, so the version they lack is one they dropped"
+        );
+        assert!(
+            !report.has_local_contribution(),
+            "and sending it again would only have it dropped again"
+        );
+
+        // With room in the budget they kept everything they were given, so a
+        // version they lack is one they never saw.
+        let mut roomy_local = fork(&local);
+        roomy_local.meta.history_max_size = Some(1_000_000);
+        let mut roomy_remote = fork(&remote);
+        roomy_remote.meta.history_max_size = Some(1_000_000);
+        assert!(
+            diff(&roomy_local, &roomy_remote).local_history_ahead,
+            "with room to spare, nothing was trimmed"
+        );
+    }
+
     /// The same shape, but the other side is nowhere near its limit, so it
     /// cannot have trimmed anything: it simply never received this version.
     /// Reading that as trimming meant the only copy stayed on one machine
@@ -5155,10 +5263,18 @@ mod tests {
                 .fields
                 .iter()
                 .any(|field| field.label == "Plugin data"
-                    && field.local == "\"Plugin\" = \"ours\""
-                    && field.remote == "\"Plugin\" = \"theirs\""),
-            "the user has to see what they are choosing between: {:?}",
+                    && field.local == "\"Plugin\" = ••• (4 chars)"
+                    && field.remote == "\"Plugin\" = ••• (6 chars)"),
+            "the user has to see that they differ, without being shown what \
+             a plugin keeps there: {:?}",
             conflict.fields
+        );
+        assert!(
+            !conflict
+                .fields
+                .iter()
+                .any(|field| field.local.contains("ours") || field.remote.contains("theirs")),
+            "and never the value itself"
         );
     }
 

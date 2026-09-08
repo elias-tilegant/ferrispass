@@ -223,6 +223,11 @@ pub fn persist_window_bounds(bounds: WindowBoundsSetting) {
         return;
     }
     settings.window = Some(bounds);
+    // Best effort, and the only such write here that says nothing to anybody:
+    // this runs on every window move and resize, so a toast would fire in a
+    // stream, and the cost of losing it is that the window opens where it did
+    // last time rather than where it was left. Every setting the user changes
+    // deliberately reports its failure instead.
     let _ = save(&settings);
 }
 

@@ -908,6 +908,17 @@ impl VaultDocument {
 /// KeePass's `Meta/HistoryMaxItems` default (KeePass 2.x and KeePassXC).
 const HISTORY_MAX_ITEMS_DEFAULT: usize = 10;
 
+/// The byte budget the vault asks a history to stay inside: absent or
+/// negative means it asks for none. KeePass measures the serialized XML,
+/// which nothing here reproduces exactly, so this is only ever used to answer
+/// "could the other copy still be holding this?", never to drop anything.
+pub(crate) fn history_size_cap(db: &Database) -> Option<usize> {
+    match db.meta.history_max_size {
+        Some(n) if n > 0 => Some(n as usize),
+        _ => None,
+    }
+}
+
 /// The per-entry history cap the vault asks for: absent → KeePass default,
 /// negative → unlimited (KeePass's -1 convention).
 pub(crate) fn history_cap(db: &Database) -> Option<usize> {
