@@ -22,6 +22,10 @@ const SERVICE: &str = "ferrispass-sync";
 pub enum TokenError {
     #[error("keychain error: {0}")]
     Backend(#[from] keyring::Error),
+
+    /// See `ConfigError::Busy`: the same lock, the same reasoning.
+    #[error("another FerrisPass process is using the stored tokens")]
+    Busy,
 }
 
 /// Serialises this process's keychain access for these entries.
@@ -44,7 +48,10 @@ fn locked() -> MutexGuard<'static, ()> {
 /// perspective).
 pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError> {
     let _guard = locked();
-    super::lock::held(|| write(account_email, refresh_token))
+    super::lock::held(super::lock::INTERACTIVE, || {
+        write(account_email, refresh_token)
+    })
+    .unwrap_or(Err(TokenError::Busy))
 }
 
 /// Read the refresh token for the given account. Returns `Ok(None)` when
@@ -52,14 +59,15 @@ pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError>
 /// not worth typing as an error.
 pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
     let _guard = locked();
-    super::lock::held(|| read(account_email))
+    super::lock::held(super::lock::INTERACTIVE, || read(account_email))
+        .unwrap_or(Err(TokenError::Busy))
 }
 
 /// Remove the refresh token for the given account. No-op when the entry
 /// already doesn't exist (Disconnect should be safe to retry).
 pub fn delete(account_email: &str) -> Result<(), TokenError> {
     let _guard = locked();
-    super::lock::held(|| {
+    super::lock::held(super::lock::INTERACTIVE, || {
         let entry = Entry::new(SERVICE, account_email)?;
         match entry.delete_credential() {
             Ok(()) => Ok(()),
@@ -67,6 +75,7 @@ pub fn delete(account_email: &str) -> Result<(), TokenError> {
             Err(e) => Err(e.into()),
         }
     })
+    .unwrap_or(Err(TokenError::Busy))
 }
 
 /// Replace the stored refresh token, but only while the one we started from
@@ -81,13 +90,14 @@ pub fn replace(account_email: &str, expected: &str, rotated: &str) -> Result<boo
     let _guard = locked();
     // And across processes: the app and the CLI both write these, and the
     // Keychain offers no compare-and-set of its own.
-    super::lock::held(|| {
+    super::lock::held(super::lock::INTERACTIVE, || {
         if read(account_email)?.as_deref() != Some(expected) {
             return Ok(false);
         }
         write(account_email, rotated)?;
         Ok(true)
     })
+    .unwrap_or(Err(TokenError::Busy))
 }
 
 fn read(account_email: &str) -> Result<Option<String>, TokenError> {

@@ -701,7 +701,7 @@ fn execute_sync(
     // started, not against our copy: `restore_provider` refreshes an iCloud
     // bookmark in memory, and comparing that would report a change nobody
     // else made.
-    crate::sync::lock::held(|| {
+    crate::sync::lock::held(crate::sync::lock::BATCH, || {
         let current = crate::sync::config::load_unlocked(&canonical).map_err(sync_error)?;
         if !current
             .is_some_and(|current| crate::sync::config::same_relationship(&current, &baseline))
@@ -730,7 +730,15 @@ fn execute_sync(
             }
         }
         crate::sync::config::save_unlocked(&config).map_err(sync_error)
-    })?;
+    })
+    .ok_or_else(|| {
+        CliError::new(
+            "sync_busy",
+            5,
+            "another FerrisPass process is using the sync configuration; the \
+             merge is saved locally, rerun sync to send it",
+        )
+    })??;
     let resolved = picks.entries.len() + picks.groups.len() + usize::from(picks.metadata.is_some());
     Ok(
         json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":resolved}),

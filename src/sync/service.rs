@@ -572,8 +572,11 @@ pub fn refresh_check(
             .remote_bookmark
             .as_deref()
             .ok_or_else(|| ICloudError::Bookmark("binding has no bookmark".into()))?;
-        return if icloud::probe(bookmark, &config.last_etag)? {
-            let remote = icloud::read(bookmark)?;
+        // One read, not a probe and then a read: `probe` reads the whole file
+        // to compute the revision it compares, so asking it first meant
+        // reading the vault twice on every tick that found a change.
+        let remote = icloud::read(bookmark)?;
+        return if remote.revision != config.last_etag {
             Ok(RefreshCheck::RemoteAhead {
                 remote_etag: remote.revision,
                 item: DriveItem {

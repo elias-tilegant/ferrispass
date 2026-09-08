@@ -10,35 +10,48 @@
 //! them one, the same device `keepass::document` already uses to coordinate
 //! two FerrisPass processes saving one vault.
 //!
-//! The critical sections are file and keychain calls only. Nothing holds this
-//! across a network request: the app would then sit behind a CLI sync for as
-//! long as an upload takes.
+//! One place holds it across a network request, the CLI's commit, because
+//! the check that the binding is still ours has to be adjacent to the write
+//! that follows it. The app never waits on that for longer than a quarter of
+//! a second: its own writes are best effort, and skipping one costs a
+//! re-detection on the next tick.
 
 use std::fs::{File, OpenOptions};
 use std::time::{Duration, Instant};
 
 use super::config;
 
-/// Give up rather than hang. Whoever holds this is doing file and keychain
-/// calls, so a second is already long; ten means something is wrong, and
-/// proceeding is what this code did before the lock existed.
-const WAIT: Duration = Duration::from_secs(10);
-const POLL: Duration = Duration::from_millis(50);
+/// What the app waits. Its config writes happen inside update callbacks on
+/// the UI thread, so this is the length of a freeze the user would feel; the
+/// work it guards is file and keychain calls, which take milliseconds.
+pub const INTERACTIVE: Duration = Duration::from_millis(250);
 
-/// Run `f` while no other FerrisPass process is inside this same call.
+/// What a CLI command waits. It has no interface to freeze, and the operation
+/// it guards contains an upload.
+pub const BATCH: Duration = Duration::from_secs(30);
+
+const POLL: Duration = Duration::from_millis(25);
+
+/// Run `f` while no other FerrisPass process is inside this same call, or
+/// return `None` without running it.
 ///
-/// A lock that cannot be taken is not a reason to refuse the work: that would
-/// turn a missing directory, a read-only home or a stuck peer into a failure
-/// to sync at all. The result is then exactly the behaviour without it, which
-/// is a race nobody has reported rather than a certainty.
-pub fn held<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = acquire();
-    f()
+/// Never both: proceeding without the lock is what the lock exists to stop,
+/// and it fails at exactly the moment contention proves it was needed. Every
+/// caller here is a write, and not writing is recoverable, while writing over
+/// somebody else's decision is not.
+pub fn held<T>(wait: Duration, f: impl FnOnce() -> T) -> Option<T> {
+    with_file(&path()?, wait, f)
 }
 
-fn acquire() -> Option<File> {
-    let file = open()?;
-    let deadline = Instant::now() + WAIT;
+/// The same, on a named file, so a test can hold it from the other side.
+fn with_file<T>(path: &std::path::Path, wait: Duration, f: impl FnOnce() -> T) -> Option<T> {
+    let _guard = acquire(path, wait)?;
+    Some(f())
+}
+
+fn acquire(path: &std::path::Path, wait: Duration) -> Option<File> {
+    let file = open(path)?;
+    let deadline = Instant::now() + wait;
     loop {
         match file.try_lock() {
             // Released when the handle is dropped, which is the caller's
@@ -52,9 +65,13 @@ fn acquire() -> Option<File> {
     }
 }
 
-fn open() -> Option<File> {
+fn path() -> Option<std::path::PathBuf> {
     let dir = config::app_support_dir().ok()?.join("sync");
     std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(".lock"))
+}
+
+fn open(path: &std::path::Path) -> Option<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -62,5 +79,39 @@ fn open() -> Option<File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    options.open(dir.join(".lock")).ok()
+    options.open(path).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point: it never runs the work without the lock. Proceeding
+    /// anyway is what the lock exists to prevent, and it would give way at
+    /// exactly the moment contention proved it was needed.
+    #[test]
+    fn a_lock_that_cannot_be_taken_does_not_run_the_work() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".lock");
+        let held = File::create(&path).expect("create");
+        held.lock().expect("hold it");
+
+        let mut ran = false;
+        let result = with_file(&path, Duration::from_millis(30), || ran = true);
+
+        assert!(result.is_none(), "it reports that it did not run");
+        assert!(!ran, "and it did not");
+    }
+
+    #[test]
+    fn an_uncontended_lock_runs_the_work_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".lock");
+
+        let mut runs = 0;
+        let result = with_file(&path, Duration::from_millis(30), || runs += 1);
+
+        assert_eq!(result, Some(()));
+        assert_eq!(runs, 1);
+    }
 }

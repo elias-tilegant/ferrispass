@@ -165,6 +165,13 @@ pub enum ConfigError {
 
     #[error("could not parse config at {0}: {1}")]
     Parse(PathBuf, #[source] serde_json::Error),
+
+    /// Another FerrisPass process is inside the sync state and did not come
+    /// out in time. Reported rather than worked around: proceeding without
+    /// the lock is the thing the lock exists to prevent, and it would fail at
+    /// exactly the moment contention proved it was needed.
+    #[error("another FerrisPass process is using the sync configuration")]
+    Busy,
 }
 
 /// Resolve the directory holding sync-config JSON files, creating it
@@ -184,7 +191,8 @@ pub fn config_path_for(local_path: &Path) -> Result<PathBuf, ConfigError> {
 /// no config exists (new / unsynced vault) - that's the common case on
 /// first launch and not worth error-typing.
 pub fn load(local_path: &Path) -> Result<Option<SyncConfig>, ConfigError> {
-    super::lock::held(|| load_unlocked(local_path))
+    super::lock::held(super::lock::INTERACTIVE, || load_unlocked(local_path))
+        .unwrap_or(Err(ConfigError::Busy))
 }
 
 /// The same read without taking the cross-process lock, for a caller already
@@ -197,7 +205,8 @@ pub fn load_unlocked(local_path: &Path) -> Result<Option<SyncConfig>, ConfigErro
 /// Atomically write a sync config to disk: temp file in the same directory,
 /// fsync, rename over the target. Same pattern as `keepass::document::save_to`.
 pub fn save(config: &SyncConfig) -> Result<(), ConfigError> {
-    super::lock::held(|| save_unlocked(config))
+    super::lock::held(super::lock::INTERACTIVE, || save_unlocked(config))
+        .unwrap_or(Err(ConfigError::Busy))
 }
 
 /// See [`load_unlocked`].
@@ -210,7 +219,10 @@ pub fn save_unlocked(config: &SyncConfig) -> Result<(), ConfigError> {
 /// the file already doesn't exist - disconnect should be idempotent so a
 /// retry after a partial failure can finish the cleanup.
 pub fn delete(local_path: &Path) -> Result<(), ConfigError> {
-    super::lock::held(|| delete_in(&sync_dir()?, local_path))
+    super::lock::held(super::lock::INTERACTIVE, || {
+        delete_in(&sync_dir()?, local_path)
+    })
+    .unwrap_or(Err(ConfigError::Busy))
 }
 
 /// Whether another vault still relies on the account-level refresh token.

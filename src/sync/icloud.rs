@@ -159,10 +159,6 @@ pub fn read(bookmark: &str) -> Result<ICloudRead, ICloudError> {
     })
 }
 
-pub fn probe(bookmark: &str, expected_revision: &str) -> Result<bool, ICloudError> {
-    Ok(read(bookmark)?.revision != expected_revision)
-}
-
 pub fn publish(
     bookmark: &str,
     expected_revision: &str,
