@@ -138,10 +138,15 @@ ferrispass-cli --vault team.kdbx --format json sync now \
 ```
 
 The plan reports three kinds of conflict: `conflicts` for entries,
-`group_conflicts` for groups whose name, notes, tags or settings diverged
-without a timestamp that can rank them, and `metadata_conflict` for the
-database's own settings, which is one decision for the whole file and so has
-no UUID. Pass exactly one choice for every reported UUID on stdin (or a
+`group_conflicts` for groups, and `metadata_conflict` for the database's own
+settings, which is one decision for the whole file and so has no UUID.
+
+An entry or a group is reported when the two copies disagree about something
+and no clock can rank them. Two clocks decide that, one per question: what the
+object holds is ranked by its modification time, and where it sits by its
+location time, so a name, an icon, an expiry date, a tag, plugin data or a
+move can each be the reason on its own. The `fields` list names which of them
+differ. Pass exactly one choice for every reported UUID on stdin (or a
 dedicated `--input-fd`), naming `entry_id` or `group_id` to say which, and a
 top-level `metadata` when the plan carries one. Unknown, duplicate, missing
 and wrong-kind UUIDs fail closed, as does an answer to a question the plan did

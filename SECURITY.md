@@ -29,7 +29,7 @@ Out of scope (will be acknowledged but won't be patched as security issues):
 
 - Risks from a compromised host OS - we trust macOS to be honest about which app is asking for Keychain items
 - Hardware key-loggers, screen recorders, evil-maid attacks on a laptop the attacker has physical access to
-- Memory-dump attacks on a running unlocked vault - the decrypted entries and the composite key are unavoidably in process memory while you're using the app. The master password itself is not: it is reduced to its SHA-256 at unlock, which is the only form KDBX uses, so a dump yields something an attacker has to brute-force rather than a password they can try elsewhere. The exception is the login keychain when you enable Touch ID
+- Memory-dump attacks on a running unlocked vault - the decrypted entries and the composite key are unavoidably in process memory while you're using the app. The master password itself is not: it is reduced to its SHA-256 at unlock, which is the only form KDBX uses. That hash still opens this vault, so the gain is narrow and worth stating plainly: what a dump does not yield is the password itself, which is the thing people reuse elsewhere. The exception is the login keychain when you enable Touch ID
 - Brute-force against weak master passwords - this is a user-side issue, not a FerrisPass bug
 - Denial of service against the update endpoint (GitHub's problem)
 
@@ -43,14 +43,16 @@ For transparency about the trust assumptions:
 
 | Surface | Algorithm | Key location |
 |---|---|---|
-| Vault file encryption | AES-256-CBC + HMAC-SHA-256 (KDBX 4 standard) | derived from master password via Argon2id |
+| Vault file encryption | whatever the .kdbx header specifies; a vault FerrisPass writes keeps the cipher the file already had. New KeePassXC and KeePass2 files are AES-256 | derived from the master password by the KDF below |
 | Master-password KDF | whatever the .kdbx header specifies, Argon2d or Argon2id | parameters come from the file, so they are as strong as the client that wrote it. `keepass::limits` refuses a header asking for more memory than we will allocate, but nothing raises a weak one |
 | OAuth refresh tokens | none - opaque strings stored as-is | macOS Keychain, service `ferrispass-sync` |
 | Update bundle signing | minisign Ed25519 | public key embedded in binary at compile time, private key under maintainer custody |
 | Update bundle delivery | TLS via `reqwest` (rustls) | system root CAs |
 | Binary signing | Apple Developer ID + notarization | Apple PKI |
 
-The dual signing (Apple Developer ID *and* minisign) is intentional: each layer protects against a different compromise. An attacker would need to steal both Apple's signing infrastructure AND our minisign private key to push a malicious update that the running app accepts.
+The dual signing (Apple Developer ID *and* minisign) is intentional: each layer protects against a different compromise. For a download from the website, an attacker would need both Apple's signing infrastructure and our minisign private key.
+
+For an update the running app installs, only minisign is verified: the archive's signature is checked before anything is unpacked, and the staged bundle is then checked for shape, not for an Apple signature. Gatekeeper checks the replacement on the next launch, so a bundle that is not properly signed fails then rather than at install time. Verifying it at install time is in the backlog.
 
 ## Master-password handling - what FerrisPass does and doesn't do
 

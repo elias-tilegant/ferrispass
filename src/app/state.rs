@@ -302,8 +302,10 @@ pub struct AppState {
     /// sync is retried with a full push, so without this every tick pushed
     /// the same bytes, took the same 412, downloaded the same remote and
     /// deferred again. Cleared as soon as either side moves or the user gets
-    /// to answer.
-    deferred_conflicts: HashSet<PathBuf>,
+    /// to answer. The value is the remote revision it was deferred against,
+    /// so the tick that follows can tell "still the same disagreement" from
+    /// "something new to say" without paying for the whole file again.
+    deferred_conflicts: HashMap<PathBuf, String>,
     /// Disk-save serialization per vault path. A key being present means a
     /// background `save_to` is running for that path; the value records
     /// whether another save was requested in the meantime. Only one writer
@@ -584,7 +586,7 @@ impl Default for AppState {
             biometric_attempt: BiometricAttempt::default(),
             biometric_generation: 0,
             auto_sync_in_flight: HashSet::new(),
-            deferred_conflicts: HashSet::new(),
+            deferred_conflicts: HashMap::new(),
             saves_in_flight: HashMap::new(),
             syncs_in_flight: HashMap::new(),
             pushes_awaiting_restore: HashMap::new(),
@@ -5560,7 +5562,7 @@ impl AppState {
         // below decide instead: they push when this copy has moved, look when
         // the remote may have, and otherwise leave it alone until the user
         // answers.
-        if activity == Some(SyncActivity::Failed) && !self.deferred_conflicts.contains(target) {
+        if activity == Some(SyncActivity::Failed) && !self.deferred_conflicts.contains_key(target) {
             // A throttled vault waits. Retrying a full upload every tick is
             // what provoked the limit, and the recovery push is the most
             // expensive request this app makes.
@@ -5634,17 +5636,27 @@ impl AppState {
                         // moved was fetched and thrown away on every tick,
                         // and the user was never told there was more to it.
                         let waiting_for_the_user =
-                            state.deferred_conflicts.contains(&callback_path);
-                        if !waiting_for_the_user
+                            state.deferred_conflicts.get(&callback_path).cloned();
+                        if waiting_for_the_user.is_none()
                             && state.sync_activity_for(&callback_path)
                                 != Some(SyncActivity::Resting)
+                        {
+                            return;
+                        }
+                        // The same remote this conflict was deferred against
+                        // is not news. Re-diffing it every interval cost a
+                        // download and a key derivation for as long as the
+                        // user put off answering.
+                        if let (Some(deferred), Some((_, etag))) =
+                            (waiting_for_the_user.as_deref(), pulled.as_ref())
+                            && deferred == etag
                         {
                             return;
                         }
                         match pulled {
                             // Nothing new, and a conflict is still waiting: it
                             // is not synced, whatever the keep-alive says.
-                            None if waiting_for_the_user => {}
+                            None if waiting_for_the_user.is_some() => {}
                             None => {
                                 // Up to date - stamp "synced just now" so the
                                 // UI shows the keep-alive ran.
@@ -5814,7 +5826,8 @@ impl AppState {
                     } else {
                         "Remote conflict - switch back to this vault to resolve."
                     };
-                    self.deferred_conflicts.insert(target.to_path_buf());
+                    self.deferred_conflicts
+                        .insert(target.to_path_buf(), remote_etag.clone());
                     self.apply_sync_status_for_session(
                         target,
                         session,
@@ -7294,19 +7307,25 @@ mod park_tests {
         let mut state = AppState::default();
         fresh_open(&mut state, vault.clone(), "pw");
 
-        state.deferred_conflicts.insert(vault.clone());
+        state
+            .deferred_conflicts
+            .insert(vault.clone(), "etag-at-defer".into());
         state.route_sync_status(&vault, SyncStatus::Failed("Remote conflict".into()));
         assert!(
-            state.deferred_conflicts.contains(&vault),
+            state.deferred_conflicts.contains_key(&vault),
             "the wait survives the status that describes it"
         );
 
         // Locking and disconnecting assign a status directly rather than
         // routing one, so they clear it themselves.
-        state.deferred_conflicts.insert(vault.clone());
+        state
+            .deferred_conflicts
+            .insert(vault.clone(), "etag-at-defer".into());
         state.end_sync_relationship(Some(&vault));
-        assert!(!state.deferred_conflicts.contains(&vault));
-        state.deferred_conflicts.insert(vault.clone());
+        assert!(!state.deferred_conflicts.contains_key(&vault));
+        state
+            .deferred_conflicts
+            .insert(vault.clone(), "etag-at-defer".into());
         state.lock_vault_now();
         assert!(state.deferred_conflicts.is_empty());
 
@@ -7323,10 +7342,12 @@ mod park_tests {
             },
             SyncStatus::Disconnected,
         ] {
-            state.deferred_conflicts.insert(vault.clone());
+            state
+                .deferred_conflicts
+                .insert(vault.clone(), "etag-at-defer".into());
             state.route_sync_status(&vault, status);
             assert!(
-                !state.deferred_conflicts.contains(&vault),
+                !state.deferred_conflicts.contains_key(&vault),
                 "and ends with anything that is not that status"
             );
         }

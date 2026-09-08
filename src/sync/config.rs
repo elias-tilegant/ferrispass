@@ -229,6 +229,23 @@ pub(crate) fn load_in(dir: &Path, local_path: &Path) -> Result<Option<SyncConfig
     }
 }
 
+/// Which sync relationship a persisted binding describes.
+///
+/// Two processes hold these: the app and the CLI. A CLI sync that started
+/// before the app disconnected, or before the user connected somewhere else,
+/// would otherwise write its own copy back and resurrect the relationship
+/// that ended, along with the account it names. The parts that identify the
+/// relationship are compared; the parts a sync legitimately updates, the etag
+/// and the uploaded revision, are not.
+pub fn same_relationship(left: &SyncConfig, right: &SyncConfig) -> bool {
+    left.provider == right.provider
+        && left.account_email == right.account_email
+        && left.site_id == right.site_id
+        && left.drive_id == right.drive_id
+        && left.item_id == right.item_id
+        && left.local_path == right.local_path
+}
+
 pub(crate) fn save_in(dir: &Path, config: &SyncConfig) -> Result<(), ConfigError> {
     ensure_dir_in(dir)?;
     let target = dir.join(format!("{}.json", path_hash(&config.local_path)));

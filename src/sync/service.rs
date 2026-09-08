@@ -675,7 +675,11 @@ pub fn refresh_access_token(account_email: &str) -> Result<AccessToken, ServiceE
     // disconnected, which deleted the entry, or after they have connected the
     // same account again, which wrote a newer one.
     if token.refresh_token != refresh {
-        tokens::replace(account_email, &refresh, &token.refresh_token)?;
+        // A `false` here means something else already wrote a newer token for
+        // this account: another vault on the same account refreshing at the
+        // same moment, or a reconnect. Theirs is the one to keep, and ours
+        // has served its purpose, so this is not an error to report.
+        let _stored = tokens::replace(account_email, &refresh, &token.refresh_token)?;
     }
     Ok(token)
 }

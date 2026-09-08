@@ -4,7 +4,7 @@
 
 A native macOS, KeePass-compatible client built in Rust on top of [GPUI](https://github.com/zed-industries/zed).
 
-Reads and writes KDBX 4 files (AES-256 + Argon2id), interoperable with KeePassXC and KeePass2.
+Reads and writes KDBX 4 files, interoperable with KeePassXC and KeePass2. Cipher and key derivation come from the file itself, so a vault keeps the settings the client that wrote it chose.
 
 For headless and agent-oriented workflows, see the [FerrisPass CLI](docs/cli.md).
 
@@ -21,7 +21,7 @@ For headless and agent-oriented workflows, see the [FerrisPass CLI](docs/cli.md)
 - **Resume**: most-recently-opened vault auto-loads at startup; Recents list on the welcome screen
 - **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, merge on conflict) and iCloud Drive - see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) and [Getting Started: iCloud Drive](./docs/getting-started-icloud.md)
 - **Appearance**: light, dark, or follow macOS (⌘⇧D cycles); the window remembers where you left it
-- **CLI**: headless vault access for scripts and local AI agents, with JSON output, explicit secret reads, dry-run writes, Touch ID and two-step SharePoint sync
+- **CLI**: headless vault access for scripts and local AI agents, with JSON output, explicit secret reads, dry-run writes, Touch ID and two-step sync for SharePoint and iCloud Drive
 
 ## Feature matrix
 

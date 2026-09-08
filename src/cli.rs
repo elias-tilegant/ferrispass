@@ -702,7 +702,22 @@ fn execute_sync(
             }
         }
     }
-    crate::sync::config::save(&config).map_err(sync_error)?;
+    // The app is a second process holding this file, and this command has
+    // been running for as long as a KDF plus two network calls. If it
+    // disconnected or bound this vault somewhere else meanwhile, writing our
+    // copy back would resurrect the relationship it ended.
+    match crate::sync::config::load(&canonical).map_err(sync_error)? {
+        Some(current) if crate::sync::config::same_relationship(&current, &config) => {
+            crate::sync::config::save(&config).map_err(sync_error)?;
+        }
+        _ => {
+            return Err(CliError::new(
+                "sync_binding_changed",
+                5,
+                "the vault's sync binding changed while this command ran; rerun sync",
+            ));
+        }
+    }
     let resolved = picks.entries.len() + picks.groups.len() + usize::from(picks.metadata.is_some());
     Ok(
         json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":resolved}),

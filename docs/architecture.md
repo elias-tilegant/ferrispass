@@ -186,9 +186,11 @@ never contains passwords, TOTP seeds or protected custom values. An explicit
 entry UUID, field name and `--reveal` are required to read one secret.
 
 CLI mutations are applied in memory first and only reach disk with `--commit`.
-SharePoint sync adds another guard: a read-only plan binds the local ciphertext
-hash and remote ETag into a token, and the commit invocation revalidates both
-revisions before saving or uploading.
+Sync adds another guard, for either provider: a read-only plan binds the local
+ciphertext hash and the remote revision into a token, and the commit
+invocation revalidates both before saving or uploading, then checks that the
+vault's binding still describes the same relationship before it writes the
+config back. The app is a second process holding that file.
 
 ## Why a forked keepass-rs
 
