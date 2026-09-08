@@ -7,7 +7,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
     px,
 };
-use gpui_component::{Sizable as _, h_flex, scroll::ScrollableElement as _, v_flex};
+use gpui_component::{Sizable as _, h_flex, v_flex};
 
 use crate::app::Overlay;
 use crate::ui::app_shell::AppShell;
@@ -55,10 +55,20 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(header(&info, cx))
                 .child(
+                    // The house pattern for a scroll area between a pinned
+                    // header and footer, and `min_h` is the load-bearing half:
+                    // a flex child defaults to `min-height: auto`, so it never
+                    // shrinks below its content and overflow never engages.
+                    // This pane used to ask gpui-component for a scrollbar
+                    // instead, which sizes its viewport `h_full` against a
+                    // panel that has only a `max_h`. That resolves back to the
+                    // content height, so long notes were clipped by the
+                    // panel's `overflow_hidden` with no way to reach the rest.
                     v_flex()
                         .id("whats-new-body")
-                        .max_h(px(470.))
-                        .overflow_y_scrollbar()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .overflow_y_scroll()
                         .p_5()
                         .gap_1p5()
                         .child(notes_body),
