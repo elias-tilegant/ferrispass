@@ -1374,6 +1374,7 @@ mod tests {
         let mut with_metadata = report.clone();
         with_metadata.metadata_conflict = Some(crate::keepass::merge::MetadataConflict {
             fields: vec![crate::keepass::merge::FieldDiff {
+                sides_read_alike: false,
                 label: "Database name".into(),
                 local: "Ours".into(),
                 remote: "Theirs".into(),

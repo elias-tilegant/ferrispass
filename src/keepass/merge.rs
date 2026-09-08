@@ -139,6 +139,11 @@ struct AttachmentFingerprint {
 /// pre-redacted; for the rest they're the cleartext field values.
 #[derive(Clone, PartialEq, Eq)]
 pub struct FieldDiff {
+    /// Set when the two sides differ and their rendered values were equal, so
+    /// the row had to name the sides to tell them apart. A renderer that
+    /// builds its own text for this row, as the overlay does for passwords,
+    /// has to do the same or it shows one string for two different values.
+    pub sides_read_alike: bool,
     /// Owned where it has to be: a custom data key is part of the row's
     /// identity and is not known at compile time.
     pub label: Cow<'static, str>,
@@ -330,6 +335,18 @@ pub enum Side {
     Remote,
 }
 
+impl Side {
+    /// How a row names this side when nothing else can tell the two apart.
+    /// Deliberately free of anything derived from the value: a digest of what
+    /// the row is hiding would be an oracle against exactly that.
+    pub fn own_words(self) -> &'static str {
+        match self {
+            Self::Local => "this copy",
+            Self::Remote => "other copy",
+        }
+    }
+}
+
 /// What a conflict row is about. Entry and group ids are separate spaces, so
 /// a pick has to say which one it means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -417,6 +434,7 @@ pub fn diff(local: &Database, remote: &Database) -> ConflictReport {
             fields.insert(
                 0,
                 FieldDiff {
+                    sides_read_alike: false,
                     label: "Location".into(),
                     local: here,
                     remote: there,
@@ -485,6 +503,7 @@ fn metadata_conflict(local: &Database, remote: &Database) -> Option<MetadataConf
         .into_iter()
         .filter(|divergence| divergence.winner.is_none())
         .map(|divergence| FieldDiff {
+            sides_read_alike: false,
             differs: true,
             label: divergence.label,
             local: divergence.local,
@@ -1643,6 +1662,7 @@ fn group_conflicts(local: &Database, remote: &Database) -> Vec<GroupConflict> {
                 fields.insert(
                     0,
                     FieldDiff {
+                        sides_read_alike: false,
                         differs: true,
                         label: "Location".into(),
                         local: here,
@@ -1785,10 +1805,8 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
             Some(Icon::BuiltIn(index)) => format!("Built-in icon {index}"),
             // Naming the image matters: two different ones both read as
             // "Custom image", so the row compared equal and never appeared.
-            // The fingerprint is always there. Two pictures can carry the
-            // same name, or none, and either way the row has to tell the
-            // user that these are two different images rather than compare
-            // equal and disappear.
+            // Two pictures can also share a name, or have none, and the row
+            // then falls back to naming the sides.
             Some(Icon::Custom(_)) => group.custom_icon().map_or_else(
                 || "Custom image".to_string(),
                 |icon| match icon.name.as_deref() {
@@ -1809,6 +1827,7 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
         {
             let (ours, theirs) = (local.custom_icon(), remote.custom_icon());
             FieldDiff {
+                sides_read_alike: false,
                 differs: !icons_equivalent(local.icon(), remote.icon(), DEFAULT_GROUP_ICON)
                     || ours.as_ref().map(|icon| icon.data.as_slice())
                         != theirs.as_ref().map(|icon| icon.data.as_slice())
@@ -1909,10 +1928,7 @@ fn ordered_custom_data(
 /// drop the row, and the answer would then discard one of them in silence.
 /// And when they do differ, the two cells must not read alike, or the screen
 /// asks a question without showing it. Where the rendering cannot tell them
-/// apart, a fingerprint of the value itself does.
-///
-/// `T` must have a stable `Debug`, so pass an ordered view of a map rather
-/// than the map.
+/// apart, [`FieldDiff::with_sides_told_apart`] names the sides.
 fn diff_row<T: PartialEq>(
     label: impl Into<Cow<'static, str>>,
     local: &T,
@@ -1920,6 +1936,7 @@ fn diff_row<T: PartialEq>(
     render: impl Fn(&T) -> String,
 ) -> FieldDiff {
     FieldDiff {
+        sides_read_alike: false,
         differs: local != remote,
         label: label.into(),
         local: render(local),
@@ -1953,8 +1970,9 @@ impl FieldDiff {
             return self;
         }
         Self {
-            local: format!("{} (this copy)", self.local),
-            remote: format!("{} (other copy)", self.remote),
+            local: format!("{} ({})", self.local, Side::Local.own_words()),
+            remote: format!("{} ({})", self.remote, Side::Remote.own_words()),
+            sides_read_alike: true,
             ..self
         }
     }
@@ -2756,6 +2774,7 @@ fn field_diffs(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<FieldDiff> 
         };
         diffs.push(
             FieldDiff {
+                sides_read_alike: false,
                 label: "Entry settings".into(),
                 local: String::new(),
                 remote: String::new(),
@@ -2788,6 +2807,7 @@ fn entry_field_diff(
     let local_value = local.fields.get(key);
     let remote_value = remote.fields.get(key);
     FieldDiff {
+        sides_read_alike: false,
         label: label.into(),
         local: render_field(local_value, always_redact),
         remote: render_field(remote_value, always_redact),
@@ -2939,6 +2959,7 @@ fn tags_diff(local: &[String], remote: &[String]) -> FieldDiff {
             .join(", ")
     }
     FieldDiff {
+        sides_read_alike: false,
         label: "Tags".into(),
         local: rendered(local),
         remote: rendered(remote),

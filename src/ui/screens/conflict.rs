@@ -687,8 +687,18 @@ fn column(
 /// `FieldDiff` is the protection-aware display source for every ordinary
 /// field. Passwords keep an additional boundary check here so a future merge
 /// refactor cannot pass their cleartext through to the GPUI element tree.
+///
+/// Building the password's text here rather than taking the row's own is what
+/// makes that guard real, so this has to repeat the row's other rule too: two
+/// secrets of one length redact to one string, and a screen that shows it
+/// twice is asking the user to choose between two cells it never told apart.
 fn conflict_field_value<'a>(view: &'a EntryView, field: &'a FieldDiff, side: Side) -> Cow<'a, str> {
     match field.label.as_ref() {
+        "Password" if field.sides_read_alike => Cow::Owned(format!(
+            "{} ({})",
+            redact_password(&view.password),
+            side.own_words()
+        )),
         "Password" => Cow::Owned(redact_password(&view.password)),
         _ => match side {
             Side::Local => Cow::Borrowed(&field.local),
@@ -859,6 +869,7 @@ mod tests {
     fn conflict_screen_ignores_cleartext_password_from_field_diff() {
         let view = entry_view("screen-secret");
         let unsafe_diff = FieldDiff {
+            sides_read_alike: false,
             label: "Password".into(),
             local: "must-not-render".into(),
             remote: "must-not-render".into(),
@@ -871,11 +882,37 @@ mod tests {
         assert!(!rendered.contains("must-not-render"));
     }
 
+    /// Two secrets of one length redact to one string, and the screen builds
+    /// the password cell itself rather than taking the row's, so the row's
+    /// own disambiguation never reached it: both columns read `••• (8 chars)`
+    /// while the user was being asked to choose between them.
+    #[test]
+    fn two_passwords_of_one_length_do_not_render_the_same_cell() {
+        let mut local = entry_view("");
+        local.password = "aaaaaaaa".to_string().into();
+        let mut remote = entry_view("");
+        remote.password = "bbbbbbbb".to_string().into();
+        let field = FieldDiff {
+            sides_read_alike: true,
+            label: "Password".into(),
+            local: "••• (8 chars) (this copy)".into(),
+            remote: "••• (8 chars) (other copy)".into(),
+            differs: true,
+        };
+
+        let here = conflict_field_value(&local, &field, Side::Local);
+        let there = conflict_field_value(&remote, &field, Side::Remote);
+
+        assert_ne!(here, there, "the screen has to tell the two sides apart");
+        assert!(!here.contains("aaaaaaaa") && !there.contains("bbbbbbbb"));
+    }
+
     #[test]
     fn protected_standard_fields_use_the_redacted_diff_value() {
         let mut view = entry_view("");
         view.title = "protected-title".into();
         let field = FieldDiff {
+            sides_read_alike: false,
             label: "Title".into(),
             local: "••• (15 chars)".into(),
             remote: "••• (12 chars)".into(),
@@ -903,6 +940,7 @@ mod tests {
             ),
         ] {
             let field = FieldDiff {
+                sides_read_alike: false,
                 label: label.into(),
                 local: local.into(),
                 remote: remote.into(),
