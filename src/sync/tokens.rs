@@ -44,7 +44,7 @@ fn locked() -> MutexGuard<'static, ()> {
 /// perspective).
 pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError> {
     let _guard = locked();
-    write(account_email, refresh_token)
+    super::lock::held(|| write(account_email, refresh_token))
 }
 
 /// Read the refresh token for the given account. Returns `Ok(None)` when
@@ -52,19 +52,21 @@ pub fn store(account_email: &str, refresh_token: &str) -> Result<(), TokenError>
 /// not worth typing as an error.
 pub fn load(account_email: &str) -> Result<Option<String>, TokenError> {
     let _guard = locked();
-    read(account_email)
+    super::lock::held(|| read(account_email))
 }
 
 /// Remove the refresh token for the given account. No-op when the entry
 /// already doesn't exist (Disconnect should be safe to retry).
 pub fn delete(account_email: &str) -> Result<(), TokenError> {
     let _guard = locked();
-    let entry = Entry::new(SERVICE, account_email)?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    super::lock::held(|| {
+        let entry = Entry::new(SERVICE, account_email)?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    })
 }
 
 /// Replace the stored refresh token, but only while the one we started from

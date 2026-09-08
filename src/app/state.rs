@@ -5589,10 +5589,20 @@ impl AppState {
 
         self.auto_sync_in_flight.insert(target.to_path_buf());
         let task_config = config;
+        // The revision a conflict on this vault is waiting to be answered
+        // about. The check below already names the remote's, so recognising
+        // the same one costs nothing and saves fetching the whole file again
+        // on every interval for as long as the user puts off answering.
+        let deferred = self.deferred_conflicts.get(target).cloned();
         let task = cx.background_spawn(async move {
             let token = crate::sync::service::ensure_provider_ready(&task_config, token)?;
             let pulled = match crate::sync::service::refresh_check(&task_config, &token)? {
                 crate::sync::service::RefreshCheck::Same => None,
+                crate::sync::service::RefreshCheck::RemoteAhead { remote_etag, .. }
+                    if deferred.as_deref() == Some(remote_etag.as_str()) =>
+                {
+                    None
+                }
                 crate::sync::service::RefreshCheck::RemoteAhead { .. } => {
                     Some(crate::sync::service::download_remote(&task_config, &token)?)
                 }
@@ -5640,16 +5650,6 @@ impl AppState {
                         if waiting_for_the_user.is_none()
                             && state.sync_activity_for(&callback_path)
                                 != Some(SyncActivity::Resting)
-                        {
-                            return;
-                        }
-                        // The same remote this conflict was deferred against
-                        // is not news. Re-diffing it every interval cost a
-                        // download and a key derivation for as long as the
-                        // user put off answering.
-                        if let (Some(deferred), Some((_, etag))) =
-                            (waiting_for_the_user.as_deref(), pulled.as_ref())
-                            && deferred == etag
                         {
                             return;
                         }

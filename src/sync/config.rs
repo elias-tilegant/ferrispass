@@ -184,12 +184,24 @@ pub fn config_path_for(local_path: &Path) -> Result<PathBuf, ConfigError> {
 /// no config exists (new / unsynced vault) - that's the common case on
 /// first launch and not worth error-typing.
 pub fn load(local_path: &Path) -> Result<Option<SyncConfig>, ConfigError> {
+    super::lock::held(|| load_unlocked(local_path))
+}
+
+/// The same read without taking the cross-process lock, for a caller already
+/// inside [`super::lock::held`] because it is doing a read and a write that
+/// have to be one operation.
+pub fn load_unlocked(local_path: &Path) -> Result<Option<SyncConfig>, ConfigError> {
     load_in(&sync_dir()?, local_path)
 }
 
 /// Atomically write a sync config to disk: temp file in the same directory,
 /// fsync, rename over the target. Same pattern as `keepass::document::save_to`.
 pub fn save(config: &SyncConfig) -> Result<(), ConfigError> {
+    super::lock::held(|| save_unlocked(config))
+}
+
+/// See [`load_unlocked`].
+pub fn save_unlocked(config: &SyncConfig) -> Result<(), ConfigError> {
     let dir = ensure_dir()?;
     save_in(&dir, config)
 }
@@ -198,7 +210,7 @@ pub fn save(config: &SyncConfig) -> Result<(), ConfigError> {
 /// the file already doesn't exist - disconnect should be idempotent so a
 /// retry after a partial failure can finish the cleanup.
 pub fn delete(local_path: &Path) -> Result<(), ConfigError> {
-    delete_in(&sync_dir()?, local_path)
+    super::lock::held(|| delete_in(&sync_dir()?, local_path))
 }
 
 /// Whether another vault still relies on the account-level refresh token.

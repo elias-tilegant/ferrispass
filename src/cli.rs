@@ -570,6 +570,10 @@ fn execute_sync(
                 "vault is not connected to a sync provider",
             )
         })?;
+    // What the binding looked like before this command touched it.
+    // `restore_provider` refreshes an iCloud bookmark in memory, so comparing
+    // our own copy against the file later would report a change nobody made.
+    let baseline = config.clone();
     let token = crate::sync::service::restore_provider(&mut config).map_err(sync_error)?;
     let local_bytes = document
         .read_current_bytes()
@@ -686,21 +690,22 @@ fn execute_sync(
     // is what we sent.
     config.uploaded_local_revision = Some(crate::sync::config::local_revision(&upload_bytes));
     let resolved_upload = needs_upload || report.needs_a_decision();
-    // Before the upload, not after it. The app is a second process holding
-    // this binding, and this command has been running for as long as a key
-    // derivation plus two network calls: if it disconnected or bound this
-    // vault somewhere else meanwhile, the write belongs to a relationship
-    // that is over. The merged file is already on disk, which is what the
-    // next sync from either process picks up.
-    let still_bound = crate::sync::lock::held(|| {
-        crate::sync::config::load(&canonical).map(|current| {
-            current.is_some_and(|current| crate::sync::config::same_relationship(&current, &config))
-        })
-    })
-    .map_err(sync_error)?;
-    match still_bound {
-        true => {}
-        false => {
+    // The check, the upload and the write are one operation as far as the
+    // app is concerned. Holding this lock across a network call is
+    // deliberate, here and only here: the alternative is a window between
+    // deciding the binding is still ours and writing to it, and the app's own
+    // wait for the lock is bounded, so the worst case is that it proceeds
+    // exactly as it would have without the lock at all.
+    //
+    // The comparison is against the binding as it was when this command
+    // started, not against our copy: `restore_provider` refreshes an iCloud
+    // bookmark in memory, and comparing that would report a change nobody
+    // else made.
+    crate::sync::lock::held(|| {
+        let current = crate::sync::config::load_unlocked(&canonical).map_err(sync_error)?;
+        if !current
+            .is_some_and(|current| crate::sync::config::same_relationship(&current, &baseline))
+        {
             return Err(CliError::new(
                 "sync_binding_changed",
                 5,
@@ -708,35 +713,24 @@ fn execute_sync(
                  merge is saved locally, rerun sync to send it",
             ));
         }
-    }
-    if resolved_upload {
-        match crate::sync::service::upload_after_save(&config, &token, &upload_bytes)
-            .map_err(sync_error)?
-        {
-            crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
-                config.last_etag = new_etag
-            }
-            crate::sync::service::UploadAfterSave::Conflict { .. } => {
-                return Err(CliError::new(
-                    "remote_changed_during_sync",
-                    5,
-                    "remote vault changed again; rerun sync",
-                ));
+        if resolved_upload {
+            match crate::sync::service::upload_after_save(&config, &token, &upload_bytes)
+                .map_err(sync_error)?
+            {
+                crate::sync::service::UploadAfterSave::Synced { new_etag, .. } => {
+                    config.last_etag = new_etag;
+                }
+                crate::sync::service::UploadAfterSave::Conflict { .. } => {
+                    return Err(CliError::new(
+                        "remote_changed_during_sync",
+                        5,
+                        "remote vault changed again; rerun sync",
+                    ));
+                }
             }
         }
-    }
-    // Once more, and this time as one operation: the check and the write have
-    // to be indivisible from the app's point of view, or it could disconnect
-    // between them and have its own removal written back over.
-    crate::sync::lock::held(|| {
-        let current = crate::sync::config::load(&canonical)?;
-        if current.is_some_and(|current| crate::sync::config::same_relationship(&current, &config))
-        {
-            crate::sync::config::save(&config)?;
-        }
-        Ok::<_, crate::sync::config::ConfigError>(())
-    })
-    .map_err(sync_error)?;
+        crate::sync::config::save_unlocked(&config).map_err(sync_error)
+    })?;
     let resolved = picks.entries.len() + picks.groups.len() + usize::from(picks.metadata.is_some());
     Ok(
         json!({"status":"synced","committed":true,"uploaded":resolved_upload,"merged":merged_count,"resolved":resolved}),
