@@ -4716,6 +4716,57 @@ mod tests {
         assert!(!report.has_local_contribution());
     }
 
+    /// The same version, and the merge has to end with one of it.
+    ///
+    /// This module can align the reference on a current entry before handing
+    /// the two files to the fork, but an archived version is inside the entry
+    /// the fork merges, out of reach. The fork ranked those by their raw
+    /// reference, kept both and warned, so a vault with favicons grew a
+    /// duplicate version per entry per round trip until the history cap
+    /// trimmed real versions away to make room.
+    #[test]
+    fn an_archived_version_seen_on_both_sides_survives_the_merge_once() {
+        use chrono::NaiveDate;
+        let at = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let picture = vec![0x89, b'P', b'N', b'G', 12];
+
+        let mut local = Database::new();
+        let id = add(&mut local, "AdWords", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone());
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone());
+        add_history_at(&mut local, id, "archived", at);
+        add_history_at(&mut remote, id, "archived", at);
+
+        let merged = apply_picks(
+            &local,
+            &remote,
+            &Resolutions::default(),
+            &diff(&local, &remote),
+        )
+        .expect("one picture on both sides is not a divergence");
+
+        assert_eq!(
+            merged
+                .entry(id)
+                .expect("entry survives")
+                .history
+                .as_ref()
+                .map_or(0, |history| history.get_entries().len()),
+            1,
+            "one version, not one per copy"
+        );
+    }
+
     /// Last-write-wins is decided by a number inside the shared file. Anyone
     /// who can write that file could stamp a far-future
     /// `LastModificationTime` and have their version silently replace

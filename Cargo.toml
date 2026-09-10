@@ -22,10 +22,11 @@ incremental = false
 # write-path interop fixes (AES-KDF UUID, omit-None-Option XML fields, base64
 # timestamps) without which the upstream `save_kdbx4` path produces files
 # KeePass2 and KeePassXC cannot read, plus the attachment-aware and
-# custom-icon-aware merge this app relies on. Re-evaluate the pin if those
-# land upstream; bump it deliberately and re-run the interop round trip
+# custom-icon-aware merge this app relies on, which compares icons by the
+# picture behind the reference rather than by its id. Re-evaluate the pin if
+# those land upstream; bump it deliberately and re-run the interop round trip
 # against KeePassXC first.
-keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "82890e1", features = ["save_kdbx4", "totp", "_merge"] }
+keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "b1093d2", features = ["save_kdbx4", "totp", "_merge"] }
 # Deliberately without a `rev`. gpui-component's manifest references Zed
 # without one, and Cargo treats `git+url` and `git+url?rev=X` as two distinct
 # sources: adding a rev here compiles two incompatible `gpui::App` types and
