@@ -29,8 +29,9 @@ use std::{
 
 use chrono::NaiveDateTime;
 use keepass::db::{
-    AutoType, Color, CustomDataItem, CustomDataValue, Database, Entry, EntryId, EntryRef, GroupId,
-    GroupRef, Icon, MemoryProtection, MergeWarning, Meta, Times, Value, fields,
+    AutoType, Color, CustomDataItem, CustomDataValue, CustomIcon, CustomIconId, Database, Entry,
+    EntryId, EntryRef, GroupId, GroupRef, Icon, MemoryProtection, MergeWarning, Meta, Times, Value,
+    fields,
 };
 
 use zeroize::Zeroizing;
@@ -115,7 +116,7 @@ struct EntrySnapshot {
     view: EntryView,
     fields: HashMap<String, Value<String>>,
     attachments: Vec<AttachmentFingerprint>,
-    icon: Option<Icon>,
+    icon: IconShown<'static>,
     quality_check: Option<bool>,
     /// Where the entry sits, and when it was put there. Neither is in the
     /// field map, and both are decided on their own clock. The readable form
@@ -537,7 +538,7 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
             != remote_group.parent().map(|parent| parent.id())
             || local_group.name != remote_group.name
             || local_group.notes != remote_group.notes
-            || !icons_equivalent(local_group.icon(), remote_group.icon(), DEFAULT_GROUP_ICON)
+            || !group_icons_equivalent(&local_group, &remote_group)
             || local_group.custom_data != remote_group.custom_data
             || local_group.is_expanded != remote_group.is_expanded
             || local_group.default_autotype_sequence != remote_group.default_autotype_sequence
@@ -1308,11 +1309,22 @@ fn history_version_digest(version: &EntryRef<'_>) -> [u8; 32] {
         note(&[u8::from(attachment.protected)]);
         note(&attachment.data);
     }
-    // Through the same normalisation every other comparison uses: our fork
-    // omits the element for the default icon while KeePassXC writes it out,
-    // and hashing the raw pair reported both sides ahead after an ordinary
-    // round trip through it.
-    note(format!("{:?}", normalised_icon(version.icon(), DEFAULT_ENTRY_ICON)).as_bytes());
+    // Through the same comparison a current version gets: the fork omits the
+    // element for the default icon while KeePassXC writes it out, and a merge
+    // retargets an archived version's custom icon to whichever id the picture
+    // already has here. Hashing the raw reference reported both sides ahead
+    // after an ordinary round trip.
+    match IconShown::of(
+        version.icon(),
+        version.custom_icon().as_deref(),
+        DEFAULT_ENTRY_ICON,
+    ) {
+        IconShown::Picture(picture) => {
+            note(b"picture");
+            note(&picture);
+        }
+        other => note(format!("{other:?}").as_bytes()),
+    }
     note(format!("{:?}", version.autotype).as_bytes());
     note(format!("{:?}", version.foreground_color).as_bytes());
     note(format!("{:?}", version.background_color).as_bytes());
@@ -1463,7 +1475,7 @@ pub fn apply_picks(
     for resolved in &report.auto_resolved {
         preserve_auto_resolved_history(&mut merged, &mut source, resolved)?;
     }
-    reconcile_unsurfaced_metadata(&mut merged, &mut source);
+    reconcile_unsurfaced_metadata(&mut merged, &mut source)?;
 
     let log = merged
         .merge(&source)
@@ -1565,15 +1577,58 @@ fn entries_equivalent_for_timestamp_warning(local: &Database, remote: &Database,
 const DEFAULT_ENTRY_ICON: usize = 0;
 const DEFAULT_GROUP_ICON: usize = 48;
 
-fn icons_equivalent(local: Option<&Icon>, remote: Option<&Icon>, default_index: usize) -> bool {
-    normalised_icon(local, default_index) == normalised_icon(remote, default_index)
+/// What an icon reference shows, which is what two copies of one object
+/// are compared on.
+///
+/// The id behind a custom icon is bookkeeping. The merge lets a reference
+/// share a picture the other copy already holds under its own id, so one
+/// round trip leaves both copies showing the same favicon under two ids,
+/// with the object's clock untouched. Compared by id, that asked about
+/// every entry with a favicon, and either answer changed nothing on
+/// screen. Two spellings of the default icon are one icon the same way:
+/// KeePass writes the index out, the fork omits it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum IconShown<'a> {
+    Default,
+    BuiltIn(usize),
+    Picture(Cow<'a, [u8]>),
+    /// A custom icon whose picture this file does not hold, so the id is
+    /// all there is to compare.
+    Unresolved(CustomIconId),
 }
 
-fn normalised_icon(icon: Option<&Icon>, default_index: usize) -> Option<&Icon> {
-    match icon {
-        Some(Icon::BuiltIn(index)) if *index == default_index => None,
-        other => other,
+impl<'a> IconShown<'a> {
+    fn of(icon: Option<&Icon>, custom: Option<&'a CustomIcon>, default_index: usize) -> Self {
+        match icon {
+            None => Self::Default,
+            Some(Icon::BuiltIn(index)) if *index == default_index => Self::Default,
+            Some(Icon::BuiltIn(index)) => Self::BuiltIn(*index),
+            Some(Icon::Custom(id)) => custom.map_or(Self::Unresolved(*id), |icon| {
+                Self::Picture(Cow::Borrowed(icon.data.as_slice()))
+            }),
+        }
     }
+
+    fn into_owned(self) -> IconShown<'static> {
+        match self {
+            Self::Picture(picture) => IconShown::Picture(Cow::Owned(picture.into_owned())),
+            Self::Default => IconShown::Default,
+            Self::BuiltIn(index) => IconShown::BuiltIn(index),
+            Self::Unresolved(id) => IconShown::Unresolved(id),
+        }
+    }
+}
+
+fn entry_icons_equivalent(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
+    let (ours, theirs) = (local.custom_icon(), remote.custom_icon());
+    IconShown::of(local.icon(), ours.as_deref(), DEFAULT_ENTRY_ICON)
+        == IconShown::of(remote.icon(), theirs.as_deref(), DEFAULT_ENTRY_ICON)
+}
+
+fn group_icons_equivalent(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> bool {
+    let (ours, theirs) = (local.custom_icon(), remote.custom_icon());
+    IconShown::of(local.icon(), ours.as_deref(), DEFAULT_GROUP_ICON)
+        == IconShown::of(remote.icon(), theirs.as_deref(), DEFAULT_GROUP_ICON)
 }
 
 /// Some KeePass clients serialize an absent `PreviousParentGroup` as the nil
@@ -1607,7 +1662,7 @@ fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
         && local.autotype == remote.autotype
         && local.tags == remote.tags
         && local.custom_data == remote.custom_data
-        && icons_equivalent(local.icon(), remote.icon(), DEFAULT_ENTRY_ICON)
+        && entry_icons_equivalent(local, remote)
         && local.foreground_color == remote.foreground_color
         && local.background_color == remote.background_color
         && local.override_url == remote.override_url
@@ -1651,7 +1706,7 @@ fn group_content_eq(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> bool {
     group_location_is_resolved(local, remote)
         && local.name == remote.name
         && local.notes == remote.notes
-        && icons_equivalent(local.icon(), remote.icon(), DEFAULT_GROUP_ICON)
+        && group_icons_equivalent(local, remote)
         && local.custom_data == remote.custom_data
         && local.is_expanded == remote.is_expanded
         && local.default_autotype_sequence == remote.default_autotype_sequence
@@ -1924,17 +1979,14 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
 
     vec![
         diff_row("Name", &local.name, &remote.name, Clone::clone),
-        // Compared on what the icon actually is: the reference through the
-        // usual normalisation, so the two spellings of the default are one
-        // icon, plus the image behind it, because one id can mean two
-        // pictures until the merge separates them.
+        // Compared on the picture, as everywhere: one id can mean two
+        // pictures until the merge separates them, and two ids one picture
+        // once it has. The name is this row's alone.
         {
             let (ours, theirs) = (local.custom_icon(), remote.custom_icon());
             FieldDiff {
                 sides_read_alike: false,
-                differs: !icons_equivalent(local.icon(), remote.icon(), DEFAULT_GROUP_ICON)
-                    || ours.as_ref().map(|icon| icon.data.as_slice())
-                        != theirs.as_ref().map(|icon| icon.data.as_slice())
+                differs: !group_icons_equivalent(local, remote)
                     || ours.as_ref().map(|icon| &icon.name)
                         != theirs.as_ref().map(|icon| &icon.name),
                 label: "Icon".into(),
@@ -2122,11 +2174,93 @@ fn group_content_differs(a: &GroupRef<'_>, b: &GroupRef<'_>) -> bool {
         // the other one. Each is compared through the same normalisation the
         // rest of the module uses: two spellings of the default icon are one
         // icon, and a date that is not in force is not a date.
-        || !icons_equivalent(a.icon(), b.icon(), DEFAULT_GROUP_ICON)
+        || !group_icons_equivalent(a, b)
         || !expiry_equivalent(&a.times, &b.times)
 }
 
-fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
+/// An entry and a group carry an icon the same way. Addressed by id rather
+/// than by handle, so one alignment can write to both databases in turn.
+trait HasIcon: Copy {
+    fn write_icon(self, db: &mut Database, icon: Option<&Icon>) -> Result<(), ApplyError>;
+}
+
+impl HasIcon for EntryId {
+    fn write_icon(self, db: &mut Database, icon: Option<&Icon>) -> Result<(), ApplyError> {
+        let Some(mut entry) = db.entry_mut(self) else {
+            return Ok(());
+        };
+        match icon {
+            Some(Icon::BuiltIn(index)) => entry.set_icon_builtin(*index),
+            Some(Icon::Custom(id)) => entry.set_icon_custom(*id).map_err(|_| unrecoverable(*id))?,
+            None => entry.set_icon_none(),
+        }
+        Ok(())
+    }
+}
+
+impl HasIcon for GroupId {
+    fn write_icon(self, db: &mut Database, icon: Option<&Icon>) -> Result<(), ApplyError> {
+        let Some(mut group) = db.group_mut(self) else {
+            return Ok(());
+        };
+        match icon {
+            Some(Icon::BuiltIn(index)) => group.set_icon_builtin(*index),
+            Some(Icon::Custom(id)) => group.set_icon_custom(*id).map_err(|_| unrecoverable(*id))?,
+            None => group.set_icon_none(),
+        }
+        Ok(())
+    }
+}
+
+fn unrecoverable(icon: CustomIconId) -> ApplyError {
+    ApplyError::CustomIconUnrecoverable {
+        id: icon.to_string(),
+    }
+}
+
+/// Give both copies of `id` one reference for a picture they already show,
+/// so the fork's tie check sees one icon.
+///
+/// The source copy takes the merged copy's reference. The id comes back
+/// changed when the source keeps a different picture under it: the picture
+/// then went in under a fresh id, and the merged copy follows, so both hold
+/// it under an id neither used before.
+fn share_icon(
+    merged: &mut Database,
+    source: &mut Database,
+    id: impl HasIcon,
+    shown: Option<&Icon>,
+) -> Result<(), ApplyError> {
+    let shared = reference_to_share(source, merged, shown)?;
+    id.write_icon(source, shared.as_ref())?;
+    if shared.as_ref() != shown {
+        let followed = reference_to_share(merged, source, shared.as_ref())?;
+        id.write_icon(merged, followed.as_ref())?;
+    }
+    Ok(())
+}
+
+/// The reference `target` can write for what `from` shows as `shown`. A
+/// custom icon's picture has to be in `target`'s table first: `set_icon_custom`
+/// clears the current icon and only then rejects an id it does not hold.
+fn reference_to_share(
+    target: &mut Database,
+    from: &Database,
+    shown: Option<&Icon>,
+) -> Result<Option<Icon>, ApplyError> {
+    match shown {
+        Some(Icon::Custom(icon)) => target
+            .adopt_custom_icon_from(from, *icon)
+            .map(|adopted| Some(Icon::Custom(adopted)))
+            .ok_or_else(|| unrecoverable(*icon)),
+        other => Ok(other.cloned()),
+    }
+}
+
+fn reconcile_unsurfaced_metadata(
+    merged: &mut Database,
+    source: &mut Database,
+) -> Result<(), ApplyError> {
     fn canonical_previous_parent(
         merged_value: Option<GroupId>,
         source_value: Option<GroupId>,
@@ -2148,7 +2282,8 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
             continue;
         }
         let merged_icon = merged_entry.icon().cloned();
-        let source_icon = source_entry.icon().cloned();
+        let references_differ = merged_entry.icon() != source_entry.icon();
+        let icons_agree = entry_icons_equivalent(&merged_entry, &source_entry);
         let merged_prev = merged_entry.previous_parent_group;
         let source_prev = source_entry.previous_parent_group;
 
@@ -2164,20 +2299,8 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
             entry.previous_parent_group = canonical_prev;
         }
 
-        if merged_icon != source_icon
-            && icons_equivalent(
-                merged_icon.as_ref(),
-                source_icon.as_ref(),
-                DEFAULT_ENTRY_ICON,
-            )
-            && let Some(mut entry) = source.entry_mut(id)
-        {
-            match merged_icon {
-                Some(Icon::BuiltIn(index)) => entry.set_icon_builtin(index),
-                None => entry.set_icon_none(),
-                // Equivalent-but-different never involves custom icons.
-                Some(Icon::Custom(_)) => {}
-            }
+        if references_differ && icons_agree {
+            share_icon(merged, source, id, merged_icon.as_ref())?;
         }
     }
 
@@ -2193,7 +2316,8 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
             continue;
         }
         let merged_icon = merged_group.icon().cloned();
-        let source_icon = source_group.icon().cloned();
+        let references_differ = merged_group.icon() != source_group.icon();
+        let icons_agree = group_icons_equivalent(&merged_group, &source_group);
         let merged_prev = merged_group.previous_parent_group;
         let source_prev = source_group.previous_parent_group;
 
@@ -2209,19 +2333,8 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
             group.previous_parent_group = canonical_prev;
         }
 
-        if merged_icon != source_icon
-            && icons_equivalent(
-                merged_icon.as_ref(),
-                source_icon.as_ref(),
-                DEFAULT_GROUP_ICON,
-            )
-            && let Some(mut group) = source.group_mut(id)
-        {
-            match merged_icon {
-                Some(Icon::BuiltIn(index)) => group.set_icon_builtin(index),
-                None => group.set_icon_none(),
-                Some(Icon::Custom(_)) => {}
-            }
+        if references_differ && icons_agree {
+            share_icon(merged, source, id, merged_icon.as_ref())?;
         }
 
         // View state only. A KeePassXC IsExpanded toggle, an icon respelling
@@ -2259,6 +2372,7 @@ fn reconcile_unsurfaced_metadata(merged: &mut Database, source: &mut Database) {
             }
         }
     }
+    Ok(())
 }
 
 /// Settle one group conflict by copying the chosen content onto the merged
@@ -2576,7 +2690,7 @@ fn set_meta_clock(database: &mut Database, field: &MetaField, at: NaiveDateTime)
 }
 
 /// Custom icons are keyed by an opaque id the divergence carries as text.
-fn custom_icon_id_from(database: &Database, id: &str) -> Option<keepass::db::CustomIconId> {
+fn custom_icon_id_from(database: &Database, id: &str) -> Option<CustomIconId> {
     database
         .iter_all_custom_icons()
         .map(|icon| icon.id())
@@ -2801,7 +2915,7 @@ fn entry_to_snapshot(e: &EntryRef<'_>) -> EntrySnapshot {
         },
         fields: e.fields.clone(),
         attachments: attachment_fingerprint(e),
-        icon: e.icon().cloned(),
+        icon: IconShown::of(e.icon(), e.custom_icon().as_deref(), DEFAULT_ENTRY_ICON).into_owned(),
         quality_check: e.quality_check,
         parent: e.parent().id(),
         location_changed: e.times.location_changed,
@@ -3038,15 +3152,8 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<Me
             custom_data_summary(&ordered_custom_data(&remote.view.custom_data)),
         );
     }
-    if !icons_equivalent(
-        local.icon.as_ref(),
-        remote.icon.as_ref(),
-        DEFAULT_ENTRY_ICON,
-    ) {
-        note(
-            icon_label(local.icon.as_ref()),
-            icon_label(remote.icon.as_ref()),
-        );
+    if local.icon != remote.icon {
+        note(icon_label(&local.icon), icon_label(&remote.icon));
     }
     if local.view.foreground_color != remote.view.foreground_color {
         note(
@@ -3075,11 +3182,11 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<Me
     changed
 }
 
-fn icon_label(icon: Option<&Icon>) -> String {
+fn icon_label(icon: &IconShown<'_>) -> String {
     match icon {
-        Some(Icon::BuiltIn(index)) => format!("built-in icon {index}"),
-        Some(Icon::Custom(_)) => "custom icon".to_string(),
-        None => "default icon".to_string(),
+        IconShown::BuiltIn(index) => format!("built-in icon {index}"),
+        IconShown::Picture(_) | IconShown::Unresolved(_) => "custom icon".to_string(),
+        IconShown::Default => "default icon".to_string(),
     }
 }
 
@@ -4403,6 +4510,210 @@ mod tests {
             image,
             "the image travelled with the reference"
         );
+    }
+
+    /// The merge lets a reference share a picture the other copy already
+    /// holds under its own id, so one round trip leaves both copies showing
+    /// the same favicon under two ids, with the entry's clock untouched.
+    /// Compared by id, that asked about every entry with a favicon, and
+    /// either answer changed nothing on screen.
+    #[test]
+    fn the_same_picture_under_two_ids_is_one_entry_icon() {
+        let tied = keepass::db::Times::now();
+        let picture = vec![0x89, b'P', b'N', b'G', 7];
+
+        let mut local = Database::new();
+        let id = add(&mut local, "AdWords", "pw");
+        let ours = local
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone())
+            .id();
+        local.entry_mut(id).unwrap().times.last_modification = Some(tied);
+
+        let mut remote = fork(&local);
+        let theirs = remote
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone())
+            .id();
+        remote.entry_mut(id).unwrap().times.last_modification = Some(tied);
+        assert_ne!(ours, theirs, "one picture, two ids");
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.conflicts.is_empty(),
+            "nothing to ask: {:?}",
+            report.conflicts
+        );
+        assert!(
+            !report.has_local_contribution(),
+            "and nothing to send back either"
+        );
+
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
+            .expect("the fork's tie check sees one icon");
+        let entry = merged.entry(id).expect("entry survives");
+        assert_eq!(
+            entry.icon(),
+            Some(&Icon::Custom(ours)),
+            "this copy keeps its own reference"
+        );
+        assert_eq!(entry.custom_icon().expect("which resolves").data, picture);
+    }
+
+    /// The same for a group, which has its own comparison, its own
+    /// conflict list and its own alignment before the fork's merge.
+    #[test]
+    fn the_same_picture_under_two_ids_is_one_group_icon() {
+        let tied = keepass::db::Times::now();
+        let picture = vec![0x89, b'P', b'N', b'G', 8];
+
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        let ours = local
+            .group_mut(group_id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone())
+            .id();
+        local.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+
+        let mut remote = fork(&local);
+        let theirs = remote
+            .group_mut(group_id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone())
+            .id();
+        remote.group_mut(group_id).unwrap().times.last_modification = Some(tied);
+        assert_ne!(ours, theirs, "one picture, two ids");
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.group_conflicts.is_empty(),
+            "nothing to ask: {:?}",
+            report.group_conflicts
+        );
+        assert!(
+            !report.has_local_contribution(),
+            "a reference is not a contribution"
+        );
+
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
+            .expect("the fork's tie check sees one icon");
+        let group = merged.group(group_id).expect("group survives");
+        assert_eq!(
+            group.icon(),
+            Some(&Icon::Custom(ours)),
+            "this copy keeps its own reference"
+        );
+        assert_eq!(group.custom_icon().expect("which resolves").data, picture);
+    }
+
+    /// The other copy can keep a different picture under this copy's id
+    /// while showing this picture under its own. Adopting the picture then
+    /// minted a fresh id on that side alone, the two references still
+    /// differed, and the fork refused the tie. Both sides now follow the
+    /// fresh id.
+    #[test]
+    fn a_picture_whose_id_is_taken_on_the_other_side_is_shared_under_a_fresh_one() {
+        let tied = keepass::db::Times::now();
+        let picture = vec![0x89, b'P', b'N', b'G', 10];
+        let other = vec![0x89, b'P', b'N', b'G', 11];
+
+        let mut local = Database::new();
+        let id = add(&mut local, "AdWords", "pw");
+        let ours = local
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone())
+            .id();
+        local.entry_mut(id).unwrap().times.last_modification = Some(tied);
+
+        let mut remote = fork(&local);
+        // Something there keeps our id alive, then repaints it.
+        let bystander = add(&mut remote, "Analytics", "pw");
+        remote
+            .entry_mut(bystander)
+            .unwrap()
+            .set_icon_custom(ours)
+            .expect("the id is here");
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone());
+        remote.entry_mut(id).unwrap().times.last_modification = Some(tied);
+        remote.custom_icon_mut(ours).expect("still referenced").data = other.clone();
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.conflicts.is_empty(),
+            "the entry shows one picture on both sides: {:?}",
+            report.conflicts
+        );
+
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
+            .expect("shared under a fresh id");
+        assert_eq!(
+            merged
+                .entry(id)
+                .unwrap()
+                .custom_icon()
+                .expect("resolves")
+                .data,
+            picture
+        );
+        assert_eq!(
+            merged
+                .entry(bystander)
+                .unwrap()
+                .custom_icon()
+                .expect("resolves")
+                .data,
+            other,
+            "and the other picture arrived with its entry"
+        );
+    }
+
+    /// A merge retargets an archived version's custom icon too, to whichever
+    /// id the picture already has on the receiving side, so after one round
+    /// trip one version references two ids on the two copies. Digested by
+    /// reference, each side looked to hold a version the other had never
+    /// seen, and both uploaded on every sync.
+    #[test]
+    fn an_archived_version_showing_the_same_picture_under_another_id_is_the_same_version() {
+        use chrono::NaiveDate;
+        let at = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let picture = vec![0x89, b'P', b'N', b'G', 9];
+
+        let mut local = Database::new();
+        let id = add(&mut local, "AdWords", "pw");
+        local
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone());
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .set_icon_custom_new(picture.clone());
+        // The same version on both sides, each carrying its copy's id.
+        add_history_at(&mut local, id, "archived", at);
+        add_history_at(&mut remote, id, "archived", at);
+
+        let report = diff(&local, &remote);
+        assert!(
+            !report.local_history_ahead,
+            "the other copy has this version, under its own id"
+        );
+        assert!(!report.has_local_contribution());
     }
 
     /// Last-write-wins is decided by a number inside the shared file. Anyone
