@@ -2337,40 +2337,18 @@ fn reconcile_unsurfaced_metadata(
             share_icon(merged, source, id, merged_icon.as_ref())?;
         }
 
-        // View state only. A KeePassXC IsExpanded toggle, an icon respelling
-        // or a previous-parent normalisation is written without bumping the
-        // modification time, so ties on those are routine, carry no user
-        // intent, and would still trip the fork's fail-closed divergence
-        // check. Break those in local's favour; the bumped timestamp also
-        // carries fork-private view state (LastTopVisibleEntry) past the
-        // check.
+        // Nothing is stamped as modified here any more. A tied group reaching
+        // this point can only differ on bookkeeping: its icon reference was
+        // just aligned above, its previous parent normalised, and the fork
+        // ignores `IsExpanded` and `LastTopVisibleEntry` itself. A tie on the
+        // name, notes, tags or settings never gets here, because a group
+        // conflict is settled in `apply_picks` and that demotes the losing
+        // side's clock.
         //
-        // A tie on the name, notes, tags or settings is somebody's real edit
-        // and is never resolved here: `apply_picks` has already refused the
-        // whole merge, because keeping one side would delete the other on the
-        // next upload with nothing shown to either user.
-        let still_diverged = match (merged.group(id), source.group(id)) {
-            (Some(merged_group), Some(source_group)) => {
-                merged_group.icon() != source_group.icon()
-                    || merged_group.is_expanded != source_group.is_expanded
-                    || merged_group.previous_parent_group != source_group.previous_parent_group
-            }
-            _ => false,
-        };
-        if still_diverged {
-            let winner_time = resolution_time([
-                merged
-                    .group(id)
-                    .and_then(|group| group.times.last_modification),
-                None,
-            ]);
-            if let Some(mut group) = merged.group_mut(id) {
-                group.times.last_modification = Some(winner_time);
-            }
-            if let Some(mut group) = source.group_mut(id) {
-                group.times.last_modification = Some(Times::epoch());
-            }
-        }
+        // Buying past the fork's check with a fresh modification time cost
+        // more than it bought: the stamp outlived the merge, and the next
+        // sync read a collapsed twisty as an edit newer than somebody's
+        // rename.
     }
     Ok(())
 }
@@ -4714,6 +4692,58 @@ mod tests {
             "the other copy has this version, under its own id"
         );
         assert!(!report.has_local_contribution());
+    }
+
+    /// Expanding a group in KeePassXC writes `IsExpanded` without touching
+    /// the modification time, so two copies routinely disagree on it while
+    /// their clocks tie.
+    ///
+    /// That used to trip the fork's fail-closed check, and this module bought
+    /// its way past it by stamping the group as modified now. The stamp
+    /// outlives the merge: the next sync reads it as a real edit and lets it
+    /// win last-write-wins against somebody's actual rename. The fork ignores
+    /// view state itself now, so there is nothing left to buy off.
+    #[test]
+    fn a_group_that_differs_only_in_view_state_keeps_its_modification_time() {
+        use chrono::NaiveDate;
+        let at = NaiveDate::from_ymd_opt(2026, 5, 7)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+
+        let mut local = Database::new();
+        let group_id = {
+            let mut root = local.root_mut();
+            let mut group = root.add_group();
+            group.name = "Banking".to_string();
+            group.id()
+        };
+        local.group_mut(group_id).unwrap().is_expanded = true;
+        local.group_mut(group_id).unwrap().times.last_modification = Some(at);
+
+        // Collapsed there, and nothing else about it differs.
+        let mut remote = fork(&local);
+        remote.group_mut(group_id).unwrap().is_expanded = false;
+
+        let report = diff(&local, &remote);
+        assert!(
+            report.group_conflicts.is_empty(),
+            "view state is nobody's edit: {:?}",
+            report.group_conflicts
+        );
+
+        let merged = apply_picks(&local, &remote, &Resolutions::default(), &report)
+            .expect("view state is not a divergence");
+
+        assert_eq!(
+            merged
+                .group(group_id)
+                .expect("group survives")
+                .times
+                .last_modification,
+            Some(at),
+            "a collapsed twisty is not an edit to stamp"
+        );
     }
 
     /// The same version, and the merge has to end with one of it.
