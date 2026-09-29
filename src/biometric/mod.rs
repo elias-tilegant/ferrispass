@@ -100,6 +100,12 @@ pub enum BiometricError {
     Unsupported,
     /// User dismissed the OS prompt without authenticating.
     UserCancelled,
+    /// macOS withdrew the prompt, not the user: the app lost focus while it
+    /// was up (`SystemCancel`), cancelled it itself (`AppCancel`), or was
+    /// not allowed to show one at all from the background
+    /// (`NotInteractive`). Not an answer, so the automatic attempt may run
+    /// again once the window is back in front.
+    Interrupted,
     /// Biometric mismatch or lockout. Caller should fall back to the
     /// password input rather than retry the prompt.
     AuthFailed,
@@ -126,6 +132,7 @@ impl fmt::Display for BiometricError {
         match self {
             BiometricError::Unsupported => write!(f, "Biometric unlock is not available"),
             BiometricError::UserCancelled => write!(f, "Touch ID cancelled"),
+            BiometricError::Interrupted => write!(f, "Touch ID was interrupted"),
             BiometricError::AuthFailed => write!(f, "Touch ID did not recognise you"),
             BiometricError::Invalidated => {
                 write!(

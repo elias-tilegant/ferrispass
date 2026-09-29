@@ -245,6 +245,7 @@ pub(crate) fn map_keychain_error(err: security_framework::base::Error) -> Biomet
     match err.code() {
         c if c == ERR_SEC_ITEM_NOT_FOUND => BiometricError::NotFound,
         c if c == ERR_SEC_USER_CANCELED => BiometricError::UserCancelled,
+        c if c == ERR_SEC_INTERACTION_NOT_ALLOWED => BiometricError::Interrupted,
         c if c == ERR_SEC_AUTH_FAILED => BiometricError::AuthFailed,
         code => BiometricError::Backend(format!("Keychain OSStatus {code}")),
     }
@@ -259,8 +260,10 @@ pub(crate) fn map_la_error(code: i64) -> BiometricError {
 
     if is(E::AuthenticationFailed) || is(E::PasscodeNotSet) || is(E::BiometryLockout) {
         BiometricError::AuthFailed
-    } else if is(E::UserCancel) || is(E::UserFallback) || is(E::SystemCancel) || is(E::AppCancel) {
+    } else if is(E::UserCancel) || is(E::UserFallback) {
         BiometricError::UserCancelled
+    } else if is(E::SystemCancel) || is(E::AppCancel) || is(E::NotInteractive) {
+        BiometricError::Interrupted
     } else if is(E::BiometryNotAvailable) || is(E::BiometryNotEnrolled) {
         BiometricError::Unsupported
     } else {
@@ -273,6 +276,9 @@ pub(crate) fn map_la_error(code: i64) -> BiometricError {
 // across macOS versions.
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 const ERR_SEC_USER_CANCELED: i32 = -128;
+/// The keychain refused to prompt, typically because the app was not in
+/// front. Like `LAError::NotInteractive`, not the user's answer.
+const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 const ERR_SEC_AUTH_FAILED: i32 = -25293;
 
 #[cfg(test)]
@@ -307,6 +313,19 @@ mod tests {
             map_la_error(LAError::UserCancel.0 as i64),
             BiometricError::UserCancelled
         );
+    }
+
+    /// The system withdrawing the prompt is not the user saying no: the
+    /// automatic attempt must be allowed to run again.
+    #[test]
+    fn a_withdrawn_prompt_maps_to_interrupted_not_cancelled() {
+        for code in [
+            LAError::SystemCancel,
+            LAError::AppCancel,
+            LAError::NotInteractive,
+        ] {
+            assert_eq!(map_la_error(code.0 as i64), BiometricError::Interrupted);
+        }
     }
 
     #[test]

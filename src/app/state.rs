@@ -4350,6 +4350,14 @@ impl AppState {
             self.biometric_registry.remove(&path);
             let _ = crate::biometric::registry::save(&self.biometric_registry);
         }
+        // macOS took the prompt away (the window lost focus): nothing to
+        // report, the user never answered. The shell tries again once the
+        // window is in front.
+        if error == BiometricError::Interrupted {
+            self.biometric_attempt = BiometricAttempt::Idle;
+            cx.notify();
+            return;
+        }
         self.biometric_attempt = BiometricAttempt::Error {
             path,
             message: error.to_string(),

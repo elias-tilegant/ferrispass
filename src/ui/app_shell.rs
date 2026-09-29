@@ -296,6 +296,14 @@ pub struct AppShell {
     /// automatic Touch ID prompt. Cleared after leaving AwaitingPassword so
     /// a later lock can auto-prompt again without looping after cancellation.
     automatic_biometric_attempted_for: Option<PathBuf>,
+    /// macOS withdrew the last Touch ID prompt because the window lost
+    /// focus. The next activation clears `automatic_biometric_attempted_for`
+    /// so the automatic prompt runs again, once, when the user is back.
+    automatic_biometric_interrupted: bool,
+    /// An interruption that arrived with the window already back in front
+    /// re-runs the automatic prompt at once, but only once per return to
+    /// the window, so a prompt macOS keeps withdrawing cannot loop.
+    automatic_biometric_rearmed: bool,
     /// Vault whose header pre-check (`pending_kdf_confirmation`) has been
     /// started for the current stay on the unlock screen. Cleared when the
     /// unlock screen goes away, so coming back to it checks again.
@@ -527,6 +535,19 @@ impl AppShell {
             cx.observe(&gen_length_state, |_shell: &mut AppShell, _, cx| {
                 cx.notify();
             }),
+            // The automatic Touch ID prompt only runs with the window in
+            // front (see `schedule_automatic_biometric_unlock`), so coming
+            // back to it is when a held-back or interrupted prompt runs.
+            cx.observe_window_activation(window, |shell: &mut AppShell, window, cx| {
+                if !window.is_window_active() {
+                    return;
+                }
+                shell.automatic_biometric_rearmed = false;
+                if std::mem::take(&mut shell.automatic_biometric_interrupted) {
+                    shell.automatic_biometric_attempted_for = None;
+                }
+                shell.schedule_automatic_biometric_unlock(window, cx);
+            }),
         ];
 
         // Sweep launch payloads orphaned by a previous crash. We only
@@ -614,6 +635,8 @@ impl AppShell {
             auto_type_sequence_error: None,
             auto_type_hotkey_error: None,
             automatic_biometric_attempted_for: None,
+            automatic_biometric_interrupted: false,
+            automatic_biometric_rearmed: false,
             kdf_check_started_for: None,
             window_handle: window.window_handle(),
             _subscriptions,
@@ -629,6 +652,14 @@ impl AppShell {
         shell.sync_auto_type_listener(cx);
         #[cfg(target_os = "macos")]
         shell.start_session_lock_task(cx);
+        // A launch that resumes the last vault is already on the unlock
+        // screen before this shell exists, and the state observer only runs
+        // on the next change, which may never come. Without this pass the
+        // automatic Touch ID prompt fired at launch only by luck.
+        cx.defer_in(window, |shell, window, cx| {
+            shell.sync_kdf_check(cx);
+            shell.schedule_automatic_biometric_unlock(window, cx);
+        });
         shell
     }
 
@@ -3088,7 +3119,7 @@ impl AppShell {
         // A click (or the shortcut) is the user's answer to a cost notice,
         // like "Allow and unlock" is.
         self.confirm_pending_kdf_cost(cx);
-        self.start_biometric_unlock(cx);
+        self.start_biometric_unlock(false, cx);
     }
 
     /// The Touch ID prompt the unlock screen raises on its own. Never an
@@ -3100,10 +3131,13 @@ impl AppShell {
         {
             return;
         }
-        self.start_biometric_unlock(cx);
+        self.start_biometric_unlock(true, cx);
     }
 
-    fn start_biometric_unlock(&mut self, cx: &mut Context<Self>) {
+    /// `automatic`: raised by the unlock screen itself rather than by a
+    /// click. Only such an attempt is re-run when macOS withdraws it; a
+    /// withdrawn click is left for the user to click again.
+    fn start_biometric_unlock(&mut self, automatic: bool, cx: &mut Context<Self>) {
         let Some(launch) = self
             .state
             .update(cx, |state, cx| state.begin_biometric_unlock(cx))
@@ -3151,8 +3185,23 @@ impl AppShell {
             }
         });
 
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let outcome = retrieve_task.await;
+            // Decided before the state update below, which clears the
+            // attempt and with it the generation this compares against.
+            let interrupted = automatic
+                && match &outcome {
+                    BiometricUnlockOutcome::Failed {
+                        err: crate::biometric::BiometricError::Interrupted,
+                        generation,
+                        ..
+                    } => state
+                        .read_with(cx, |state, _| {
+                            state.biometric_unlock_is_current(*generation)
+                        })
+                        .unwrap_or(false),
+                    _ => false,
+                };
             let _ = state.update(cx, |state, cx| match outcome {
                 BiometricUnlockOutcome::Open {
                     path,
@@ -3182,8 +3231,33 @@ impl AppShell {
                     state.fail_biometric_unlock(path, generation, err, cx);
                 }
             });
+            if interrupted {
+                let _ = this.update_in(cx, |shell, window, cx| {
+                    shell.note_automatic_biometric_interruption(window, cx);
+                });
+            }
         })
         .detach();
+    }
+
+    /// macOS withdrew the automatic prompt. With the window in the
+    /// background, the next activation re-runs it. With the window already
+    /// back in front, that activation has come and gone before this report,
+    /// so re-run it now, once.
+    fn note_automatic_biometric_interruption(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !window.is_window_active() {
+            self.automatic_biometric_interrupted = true;
+            return;
+        }
+        if std::mem::replace(&mut self.automatic_biometric_rearmed, true) {
+            return;
+        }
+        self.automatic_biometric_attempted_for = None;
+        self.schedule_automatic_biometric_unlock(window, cx);
     }
 
     fn schedule_automatic_biometric_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3207,8 +3281,13 @@ impl AppShell {
         };
 
         match path {
+            // Only with the window in front. From the background macOS
+            // either refuses the prompt or shows it over whatever the user
+            // is doing; both used to spend the one automatic attempt, so
+            // after an auto-lock Touch ID never came up on its own.
             Some(path)
                 if !overlay_active
+                    && window.is_window_active()
                     && self.automatic_biometric_attempted_for.as_ref() != Some(&path) =>
             {
                 self.automatic_biometric_attempted_for = Some(path);
@@ -3224,6 +3303,8 @@ impl AppShell {
             }
             None if !awaiting_password => {
                 self.automatic_biometric_attempted_for = None;
+                self.automatic_biometric_interrupted = false;
+                self.automatic_biometric_rearmed = false;
             }
             _ => {}
         }
