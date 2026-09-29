@@ -1,4 +1,9 @@
+use std::fmt;
 use std::io::{self, ErrorKind};
+use std::sync::{PoisonError, RwLock};
+
+use keepass::db::DatabaseOpenError;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const MAX_KDBX_BYTES: u64 = 250_000_000;
 
@@ -29,12 +34,127 @@ const KDF_ARGON2ID: [u8; 16] = [
 // malicious *remote* KDBX pulled by sync: 1 GiB covers the heaviest
 // settings KeePassXC users realistically configure without letting a
 // hostile header OOM a small Mac. Legitimate vaults above the cap get a
-// clear limit message (not a bogus wrong-password error).
+// clear limit message (not a bogus wrong-password error). The memory cap
+// cannot be confirmed away: once Argon2 has allocated, a "yes" is too late.
 const MAX_AES_ROUNDS: u64 = 1_000_000_000;
 const MAX_ARGON2_MEMORY: u64 = 1024 * 1024 * 1024;
-const MAX_ARGON2_ITERATIONS: u64 = 100;
 const MAX_ARGON2_PARALLELISM: u32 = 64;
+// Argon2 time is bounded by memory x iterations, in two tiers. Up to
+// `MAX_ARGON2_WORK` (about 5 s on an Apple Silicon Mac) a vault opens without
+// a question; that covers KeePassXC's default 1 s benchmark with room to
+// spare. Above it, up to `MAX_CONFIRMED_ARGON2_WORK` (about 80 s), the
+// user has to confirm those exact settings once, because a sync-pulled file
+// with a raised cost could otherwise stall every unlock and merge. Above
+// that nothing opens: a header asking for hours of work is not a vault.
 const MAX_ARGON2_WORK: u64 = 32 * 1024 * 1024 * 1024;
+const MAX_CONFIRMED_ARGON2_WORK: u64 = 16 * MAX_ARGON2_WORK;
+// The work caps above bound the time; the iteration cap must not bind
+// before them. KeePassXC picks the iteration count by benchmarking against a
+// target decryption time, so a fast Mac lands well above 100 (64 MiB and 1 s
+// gave 126), and its memory floor is 1 MiB. Deriving the cap from that floor
+// keeps every setting the work caps allow openable.
+const MAX_ARGON2_ITERATIONS: u64 = MAX_CONFIRMED_ARGON2_WORK / (1024 * 1024);
+
+/// The Argon2 settings a vault header asks for, as the user confirms them.
+///
+/// Stored in settings.json once confirmed, so the exact values are what is
+/// approved, not the file: a header whose cost rises again asks again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KdfCost {
+    pub variant: Argon2Variant,
+    pub memory: u64,
+    pub iterations: u64,
+    pub parallelism: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Argon2Variant {
+    Argon2d,
+    Argon2id,
+}
+
+impl KdfCost {
+    pub fn memory_mib(&self) -> u64 {
+        self.memory / (1024 * 1024)
+    }
+
+    /// Rough unlock time on a recent Apple Silicon Mac, in whole seconds,
+    /// rounded up. Measured on an M3 Pro: 256 MiB x 160 passes (40 GiB) took
+    /// 6.2 s, about 6.5 GiB of Argon2 work per second; 6 GiB keeps the
+    /// estimate on the safe side. Older Macs are slower, so the UI words
+    /// this as "about", never as a promise.
+    pub fn estimated_seconds(&self) -> u64 {
+        const WORK_PER_SECOND: u64 = 6 * 1024 * 1024 * 1024;
+        argon2_work(self.memory, self.iterations, Some(self.parallelism))
+            .div_ceil(WORK_PER_SECOND)
+            .max(1)
+    }
+}
+
+/// Carried inside the `io::Error` that `validate_kdbx_resources` returns
+/// when a header is over the unconfirmed budget but under the hard cap, so
+/// every existing caller keeps its signature and only the unlock and sync
+/// paths look for it.
+#[derive(Debug)]
+pub struct KdfConfirmationRequired(pub KdfCost);
+
+impl fmt::Display for KdfConfirmationRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Argon2 settings ({} MiB, {} iterations) exceed the default unlock budget \
+             and have to be confirmed in FerrisPass first",
+            self.0.memory_mib(),
+            self.0.iterations
+        )
+    }
+}
+
+impl std::error::Error for KdfConfirmationRequired {}
+
+/// The cost to put in front of the user, when `error` is a confirmation
+/// request rather than a real failure.
+pub fn confirmation_required(error: &DatabaseOpenError) -> Option<KdfCost> {
+    let DatabaseOpenError::Io(error) = error else {
+        return None;
+    };
+    error
+        .get_ref()?
+        .downcast_ref::<KdfConfirmationRequired>()
+        .map(|required| required.0)
+}
+
+// Process-wide because the check runs deep inside every open and merge path
+// (GUI, sync, CLI) and none of them should need a settings handle for it.
+// Seeded from settings.json at startup and kept in step by the settings
+// writer, which is the only persistent source.
+static CONFIRMED_KDF_COSTS: RwLock<Vec<KdfCost>> = RwLock::new(Vec::new());
+
+/// Replace the confirmed set with what settings.json holds.
+pub fn set_confirmed_kdf_costs(costs: &[KdfCost]) {
+    *CONFIRMED_KDF_COSTS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = costs.to_vec();
+}
+
+/// Add one confirmed cost for the rest of this process. The caller persists
+/// it to settings.json; this only saves the next open a settings round trip.
+pub fn confirm_kdf_cost(cost: KdfCost) {
+    let mut confirmed = CONFIRMED_KDF_COSTS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    if !confirmed.contains(&cost) {
+        confirmed.push(cost);
+    }
+}
+
+fn is_confirmed(cost: &KdfCost) -> bool {
+    CONFIRMED_KDF_COSTS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(cost)
+}
 
 pub(crate) fn validate_kdbx_size(size: u64) -> io::Result<()> {
     if size > MAX_KDBX_BYTES {
@@ -257,16 +377,52 @@ fn validate_kdf(fields: KdfFields<'_>) -> io::Result<()> {
             "Argon2 parallelism exceeds the {MAX_ARGON2_PARALLELISM}-lane limit"
         )));
     }
-    if let (Some(memory), Some(iterations)) = (fields.memory, fields.iterations)
-        && memory
-            .checked_mul(iterations)
-            .is_none_or(|work| work > MAX_ARGON2_WORK)
-    {
+    let (Some(memory), Some(iterations)) = (fields.memory, fields.iterations) else {
+        return Ok(());
+    };
+    let work = argon2_work(memory, iterations, fields.parallelism);
+    if work > MAX_CONFIRMED_ARGON2_WORK {
         return Err(invalid_data(
             "Argon2 memory/iteration cost exceeds the safety limit",
         ));
     }
+    if work > MAX_ARGON2_WORK {
+        let cost = KdfCost {
+            variant: if uuid == KDF_ARGON2ID {
+                Argon2Variant::Argon2id
+            } else {
+                Argon2Variant::Argon2d
+            },
+            memory,
+            iterations,
+            // Absent means the crate's default of 1 lane would not even
+            // parse; 0 keeps the value honest rather than guessing.
+            parallelism: fields.parallelism.unwrap_or(0),
+        };
+        if !is_confirmed(&cost) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                KdfConfirmationRequired(cost),
+            ));
+        }
+    }
     Ok(())
+}
+
+/// What one Argon2 run costs, in bytes of memory work, for both budgets.
+///
+/// Memory x passes alone undercounts a header that asks for almost no memory
+/// but many lanes and passes: `rust-argon2` starts one thread per lane for
+/// each of the four slices of every pass, so 32 KiB, 4 lanes and half a
+/// million passes is millions of thread starts at next to no "memory work".
+/// Charging at least 1 MiB per lane per pass prices that in (a thread start
+/// and join costs a few hundred KiB of Argon2 time on a recent Mac) and
+/// leaves ordinary settings alone: KeePassXC's 64 MiB with 12 lanes counts
+/// as 64 MiB, as before.
+fn argon2_work(memory: u64, iterations: u64, parallelism: Option<u32>) -> u64 {
+    const PER_LANE_FLOOR: u64 = 1024 * 1024;
+    let lane_floor = u64::from(parallelism.unwrap_or(1)).saturating_mul(PER_LANE_FLOOR);
+    memory.max(lane_floor).saturating_mul(iterations)
 }
 
 fn validate_aes_rounds(rounds: u64) -> io::Result<()> {
@@ -377,6 +533,37 @@ mod tests {
     }
 
     #[test]
+    fn keepassxc_benchmarked_iteration_count_is_accepted() {
+        // KeePassXC's 1 s benchmark on an Apple Silicon Mac. The old
+        // 100-iteration cap rejected this vault although its total work
+        // (8 GiB) is far inside the budget.
+        let dictionary = kdf_dictionary(
+            &KDF_ARGON2ID,
+            &[
+                (b"M", Value::U64(64 * 1024 * 1024)),
+                (b"I", Value::U64(126)),
+                (b"P", Value::U32(12)),
+            ],
+        );
+
+        assert!(validate_kdbx_resources(&kdbx4_with_kdf(dictionary)).is_ok());
+    }
+
+    #[test]
+    fn excessive_argon2_iterations_are_rejected() {
+        let dictionary = kdf_dictionary(
+            &KDF_ARGON2ID,
+            &[
+                (b"M", Value::U64(8 * 1024)),
+                (b"I", Value::U64(MAX_ARGON2_ITERATIONS + 1)),
+                (b"P", Value::U32(1)),
+            ],
+        );
+
+        assert_invalid_data(&kdbx4_with_kdf(dictionary));
+    }
+
+    #[test]
     fn excessive_argon2_memory_is_rejected() {
         let dictionary = kdf_dictionary(
             &KDF_ARGON2,
@@ -391,19 +578,112 @@ mod tests {
     }
 
     #[test]
-    fn excessive_combined_argon2_cost_is_rejected() {
+    fn argon2_cost_over_the_budget_asks_for_confirmation() {
+        // Both individually inside the per-parameter caps, but the product
+        // busts the unconfirmed budget (1 GiB x 40 = 40 GiB).
         let dictionary = kdf_dictionary(
             &KDF_ARGON2ID,
             &[
-                // Both individually inside the per-parameter caps, but the
-                // product busts the combined budget (1 GiB × 40 = 40 GiB).
                 (b"M", Value::U64(1024 * 1024 * 1024)),
                 (b"I", Value::U64(40)),
                 (b"P", Value::U32(4)),
             ],
         );
 
-        assert_invalid_data(&kdbx4_with_kdf(dictionary));
+        let error = validate_kdbx_resources(&kdbx4_with_kdf(dictionary)).unwrap_err();
+        assert_eq!(
+            confirmation_required(&DatabaseOpenError::Io(error)),
+            Some(KdfCost {
+                variant: Argon2Variant::Argon2id,
+                memory: 1024 * 1024 * 1024,
+                iterations: 40,
+                parallelism: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn many_lanes_and_passes_on_little_memory_are_rejected() {
+        // Tiny memory keeps memory x passes small, but every pass starts a
+        // thread per lane per slice. Priced per lane, this is far over the cap.
+        let dictionary = kdf_dictionary(
+            &KDF_ARGON2ID,
+            &[
+                (b"M", Value::U64(32 * 1024)),
+                (b"I", Value::U64(MAX_ARGON2_ITERATIONS)),
+                (b"P", Value::U32(4)),
+            ],
+        );
+
+        let error = validate_kdbx_resources(&kdbx4_with_kdf(dictionary)).unwrap_err();
+        assert!(confirmation_required(&DatabaseOpenError::Io(error)).is_none());
+    }
+
+    #[test]
+    fn a_confirmed_argon2_cost_opens() {
+        // Unique to this test: the confirmed set is process-wide.
+        let cost = KdfCost {
+            variant: Argon2Variant::Argon2d,
+            memory: 512 * 1024 * 1024,
+            iterations: 97,
+            parallelism: 3,
+        };
+        let dictionary = kdf_dictionary(
+            &KDF_ARGON2,
+            &[
+                (b"M", Value::U64(cost.memory)),
+                (b"I", Value::U64(cost.iterations)),
+                (b"P", Value::U32(cost.parallelism)),
+            ],
+        );
+        let data = kdbx4_with_kdf(dictionary);
+        assert!(validate_kdbx_resources(&data).is_err());
+
+        confirm_kdf_cost(cost);
+
+        assert!(validate_kdbx_resources(&data).is_ok());
+    }
+
+    #[test]
+    fn a_confirmation_covers_only_the_exact_cost() {
+        let confirmed = KdfCost {
+            variant: Argon2Variant::Argon2id,
+            memory: 256 * 1024 * 1024,
+            iterations: 300,
+            parallelism: 2,
+        };
+        confirm_kdf_cost(confirmed);
+
+        // Same file, cost raised by one iteration: asks again.
+        let dictionary = kdf_dictionary(
+            &KDF_ARGON2ID,
+            &[
+                (b"M", Value::U64(confirmed.memory)),
+                (b"I", Value::U64(confirmed.iterations + 1)),
+                (b"P", Value::U32(confirmed.parallelism)),
+            ],
+        );
+        let error = validate_kdbx_resources(&kdbx4_with_kdf(dictionary)).unwrap_err();
+        assert!(confirmation_required(&DatabaseOpenError::Io(error)).is_some());
+    }
+
+    #[test]
+    fn argon2_cost_over_the_hard_cap_is_rejected_outright() {
+        let dictionary = kdf_dictionary(
+            &KDF_ARGON2ID,
+            &[
+                (b"M", Value::U64(1024 * 1024 * 1024)),
+                (
+                    b"I",
+                    Value::U64(MAX_CONFIRMED_ARGON2_WORK / (1024 * 1024 * 1024) + 1),
+                ),
+                (b"P", Value::U32(4)),
+            ],
+        );
+
+        let error = validate_kdbx_resources(&kdbx4_with_kdf(dictionary)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(confirmation_required(&DatabaseOpenError::Io(error)).is_none());
     }
 
     #[test]

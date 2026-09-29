@@ -97,6 +97,25 @@ impl KeePassRepository {
         ))
     }
 
+    /// The Argon2 cost the user still has to confirm before this vault can
+    /// open, read from the header alone - no password, no KDF. The unlock
+    /// screen asks this when a vault is picked, so the question comes before
+    /// the password rather than after a failed attempt. Anything unreadable
+    /// is `None`: the real open reports it properly.
+    pub fn pending_kdf_confirmation(path: &Path) -> Option<crate::keepass::limits::KdfCost> {
+        // The outer header is a few hundred bytes; 1 MiB leaves room for
+        // large public custom data without reading a whole vault.
+        const HEADER_READ_LIMIT: u64 = 1024 * 1024;
+        let mut header = Vec::new();
+        File::open(path)
+            .ok()?
+            .take(HEADER_READ_LIMIT)
+            .read_to_end(&mut header)
+            .ok()?;
+        let error = crate::keepass::limits::validate_kdbx_resources(&header).err()?;
+        crate::keepass::limits::confirmation_required(&DatabaseOpenError::Io(error))
+    }
+
     /// Resolve a sibling key file path next to the database file (e.g. `Personal.kdbx` →
     /// `Personal.keyx`). Returns the path only if such a file exists. Used as a courtesy
     /// suggestion in the unlock screen; the real choice is on the user.
@@ -111,11 +130,21 @@ impl KeePassRepository {
     }
 }
 
+/// One Argon2 run at a time, process-wide. Each run may allocate up to the
+/// 1 GiB memory cap, and unlocks, sync merges and superseded merges all end
+/// up here on background threads; a run cannot be cancelled once started,
+/// so without this several could hold a gigabyte each at once. Waiting
+/// behind another unlock is the cheaper failure.
+static KDF_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn parse_database_bytes(
     bytes: &[u8],
     key: DatabaseKey,
 ) -> Result<Database, DatabaseOpenError> {
     crate::keepass::limits::validate_kdbx_resources(bytes)?;
+    let _gate = KDF_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     Database::parse(bytes, key)
 }
 

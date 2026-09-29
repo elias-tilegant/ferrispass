@@ -118,6 +118,12 @@ pub struct AppSettings {
     /// large display or a tiling habit.
     #[serde(default)]
     pub window: Option<WindowBoundsSetting>,
+    /// Argon2 settings above the default unlock budget that the user has
+    /// agreed to, as exact values. Not secret, and not per file on purpose:
+    /// what the user accepted is a cost, and a vault asking for the same
+    /// cost costs the same. A header that asks for more asks again.
+    #[serde(default)]
+    pub confirmed_kdf_costs: Vec<crate::keepass::limits::KdfCost>,
 }
 
 /// Which appearance the app uses.
@@ -301,6 +307,7 @@ impl Default for AppSettings {
             auto_sync_secs: default_auto_sync_secs(),
             theme: ThemeChoice::System,
             window: None,
+            confirmed_kdf_costs: Vec::new(),
         }
     }
 }

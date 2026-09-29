@@ -21,6 +21,7 @@ use gpui_component::{Sizable as _, h_flex, v_flex};
 use crate::app::actions::{OpenConnect, OpenReconnect};
 use crate::app::time::relative_time_label;
 use crate::app::{SyncBinding, SyncChangeKind, SyncHistoryEntry, SyncStatus};
+use crate::keepass::limits::KdfCost;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
@@ -37,6 +38,7 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
     let binding = snapshot.sync_binding().cloned_for_render();
     let status = SyncStatusView::of(snapshot.sync_status());
     let history: Vec<SyncHistoryEntry> = snapshot.sync_history().to_vec();
+    let remote_kdf = snapshot.remote_kdf_confirmation_for_active();
 
     match sync_tab_mode(binding.is_some(), &status) {
         SyncTabMode::Reconnect => render_reconnect(status.detail.as_deref(), cx),
@@ -45,6 +47,7 @@ pub fn render_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyEleme
             &status,
             &history,
             shell.disconnect_armed(),
+            remote_kdf,
             cx,
         ),
         SyncTabMode::Restoring => render_restore(&status, cx),
@@ -174,6 +177,7 @@ fn render_connected(
     status: &SyncStatusView,
     history: &[SyncHistoryEntry],
     disconnect_armed: bool,
+    remote_kdf: Option<KdfCost>,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
     let provider_name = match binding.provider {
@@ -242,6 +246,9 @@ fn render_connected(
                 )
                 .when(disconnect_armed, |this| {
                     this.child(disconnect_confirmation(binding, provider_name, cx))
+                })
+                .when_some(remote_kdf, |this, cost| {
+                    this.child(remote_kdf_confirmation(&cost, cx))
                 })
                 .child(file_card(binding))
                 // Reassures the user the sign-in is being kept alive: with
@@ -785,6 +792,80 @@ fn disconnect_confirmation(
                         .child("Keep connected")
                         .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
                             shell.cancel_disconnect(cx);
+                        })),
+                ),
+        )
+}
+
+/// Asked when the remote copy's Argon2 settings went above the default
+/// unlock budget. A background sync never answers this on its own: a raised
+/// cost is what a tampered remote would look like, so the user decides, with
+/// the numbers in front of them.
+fn remote_kdf_confirmation(cost: &KdfCost, cx: &mut Context<AppShell>) -> impl gpui::IntoElement {
+    let duration = crate::ui::screens::unlock::unlock_duration(cost);
+    v_flex()
+        .gap_2()
+        .p_3()
+        .rounded(px(8.))
+        .bg(palette::orange_soft())
+        .border_1()
+        .border_color(palette::orange_border())
+        .child(
+            div()
+                .text_sm()
+                .text_color(palette::text())
+                .child(format!("The synced copy now takes {duration} to unlock.")),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette::text_muted())
+                .child(format!(
+                    "Its key settings were raised to {}. If you or your team \
+                     changed them, allow it. If not, leave sync paused and \
+                     check the file.",
+                    crate::ui::screens::unlock::kdf_settings(cost)
+                )),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .id("remote-kdf-confirm")
+                        .h(px(28.))
+                        .px_3()
+                        .rounded(px(5.))
+                        .bg(palette::blue())
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(palette::panel())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .pressable_dim()
+                        .child("Allow and sync")
+                        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                            shell.confirm_remote_kdf_cost(cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .id("remote-kdf-dismiss")
+                        .h(px(28.))
+                        .px_3()
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(palette::border_strong())
+                        .text_xs()
+                        .text_color(palette::text())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover_press(palette::border())
+                        .child("Not now")
+                        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                            shell.dismiss_remote_kdf_cost(cx);
                         })),
                 ),
         )

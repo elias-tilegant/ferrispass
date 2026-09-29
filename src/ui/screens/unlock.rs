@@ -12,6 +12,7 @@ use crate::app::BiometricAttempt;
 use crate::app::actions::{
     CancelUnlock, ForgetBiometric, SubmitBiometricUnlock, SubmitPassword, ToggleBiometricEnrollment,
 };
+use crate::keepass::limits::{Argon2Variant, KdfCost};
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
 use crate::ui::palette;
@@ -94,12 +95,18 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 ),
                         )
                         .child(
+                            // `min_w_0` lets the column shrink to the card;
+                            // without it a long path set the width and ran
+                            // out of the card.
                             v_flex()
+                                .flex_1()
+                                .min_w_0()
                                 .gap_0p5()
                                 .child(
                                     div()
                                         .text_base()
                                         .font_weight(gpui::FontWeight::BOLD)
+                                        .truncate()
                                         .child(prompt.file_name.clone()),
                                 )
                                 .child(
@@ -107,10 +114,17 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                         .text_xs()
                                         .text_color(palette::text_muted())
                                         .font_family("JetBrains Mono")
+                                        // Middle, not end: the start says
+                                        // where, the end names the folder.
+                                        .truncate()
+                                        .text_ellipsis_middle()
                                         .child(subtitle),
                                 ),
                         ),
                 )
+                .when_some(prompt.kdf_confirmation, |this, cost| {
+                    this.child(kdf_cost_notice(&cost))
+                })
                 .child(
                     v_flex()
                         .gap_2()
@@ -163,12 +177,23 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                         .on_click(cx.listener(|_: &mut AppShell, _: &ClickEvent, window, cx| {
                             window.dispatch_action(Box::new(SubmitPassword), cx);
                         }))
-                        .child(primary_button("Unlock vault", AppIcon::Unlock)),
+                        .child(primary_button(
+                            // The notice above says unlocking accepts the
+                            // settings; the button says it too, so the
+                            // click that confirms is never a surprise.
+                            if prompt.kdf_confirmation.is_some() {
+                                "Allow and unlock"
+                            } else {
+                                "Unlock vault"
+                            },
+                            AppIcon::Unlock,
+                        )),
                 )
                 .when(show_unlock_button, |this| {
                     this.child(touch_id_unlock_button(
                         biometric_in_flight,
                         biometric_available,
+                        prompt.kdf_confirmation.is_some(),
                         cx,
                     ))
                 })
@@ -201,6 +226,98 @@ pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+/// Shown before the password when the vault's Argon2 settings are above
+/// the default unlock budget. The budget exists so a tampered file from a
+/// sync cannot stall the app; a vault the user set up that way in KeePassXC
+/// is legitimate, so this explains the wait instead of refusing it.
+fn kdf_cost_notice(cost: &KdfCost) -> impl gpui::IntoElement {
+    let duration = unlock_duration(cost);
+    h_flex()
+        .items_start()
+        .gap_3()
+        .p_3()
+        .rounded(px(8.))
+        .bg(palette::orange_soft())
+        .border_1()
+        .border_color(palette::orange_border())
+        .child(
+            div().pt_0p5().child(
+                gpui_component::Icon::from(AppIcon::Clock)
+                    .with_size(gpui_component::Size::Size(px(14.)))
+                    .text_color(palette::orange_deep()),
+            ),
+        )
+        .child(
+            // `min_w_0` so the text wraps inside the card instead of
+            // widening the column to one long line.
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(palette::text())
+                        .child(format!("Unlocking takes {duration}")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(palette::text_muted())
+                        .child(format!(
+                            "This vault uses stronger key settings than FerrisPass \
+                             accepts on its own: {}.",
+                            kdf_settings(cost)
+                        )),
+                )
+                .child(div().text_xs().text_color(palette::text_faint()).child(
+                    "Unlocking allows these exact settings. If they go up, you are asked again.",
+                )),
+        )
+}
+
+/// The four values an allowed cost is remembered by, so the notice shows
+/// exactly what the click agrees to.
+pub(crate) fn kdf_settings(cost: &KdfCost) -> String {
+    let variant = match cost.variant {
+        Argon2Variant::Argon2d => "Argon2d",
+        Argon2Variant::Argon2id => "Argon2id",
+    };
+    let threads = match cost.parallelism {
+        1 => "1 thread".to_string(),
+        n => format!("{n} threads"),
+    };
+    format!(
+        "{variant}, {}, {} iterations, {threads}",
+        memory_label(cost.memory),
+        cost.iterations
+    )
+}
+
+/// Exact, because the notice says the exact values are what gets allowed:
+/// whole MiB when it is one (every KeePassXC setting is), else KiB or bytes.
+fn memory_label(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes.is_multiple_of(MIB) {
+        format!("{} MiB", bytes / MIB)
+    } else if bytes.is_multiple_of(KIB) {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// "about 7 seconds" / "over a minute", for the cost notices here and in
+/// Settings → Sync. Past a minute the exact figure is noise.
+pub(crate) fn unlock_duration(cost: &KdfCost) -> String {
+    match cost.estimated_seconds() {
+        seconds @ ..60 => format!("about {seconds} seconds"),
+        _ => "over a minute".to_string(),
+    }
 }
 
 fn touch_id_enrollment_checkbox(
@@ -255,6 +372,7 @@ fn touch_id_enrollment_caveat() -> impl gpui::IntoElement {
 fn touch_id_unlock_button(
     in_flight: bool,
     sensor_available: bool,
+    allows_cost: bool,
     cx: &mut Context<AppShell>,
 ) -> impl gpui::IntoElement {
     // Honest label: when the sensor is reachable the OS prompt leads
@@ -263,12 +381,14 @@ fn touch_id_unlock_button(
     // button is only shown because the passcode-fallback setting is
     // on - the prompt will present the macOS account password - so we
     // say that instead of mislabeling a password unlock as biometric.
-    let label_text = if in_flight {
-        "Waiting…"
-    } else if sensor_available {
-        "Unlock with Touch ID"
-    } else {
-        "Unlock with macOS password"
+    // With a cost notice up, this click allows it just like the primary
+    // button does, so it says so too.
+    let label_text = match (in_flight, sensor_available, allows_cost) {
+        (true, _, _) => "Waiting…",
+        (false, true, false) => "Unlock with Touch ID",
+        (false, true, true) => "Allow and unlock with Touch ID",
+        (false, false, false) => "Unlock with macOS password",
+        (false, false, true) => "Allow and unlock with macOS password",
     };
     let icon = if sensor_available {
         AppIcon::Fingerprint

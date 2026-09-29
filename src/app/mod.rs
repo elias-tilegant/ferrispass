@@ -92,6 +92,7 @@ pub fn run() {
         // One read for both the theme and the saved window geometry: the
         // first paint has to be in the right appearance and the right place.
         let startup_settings = settings::load();
+        crate::keepass::limits::set_confirmed_kdf_costs(&startup_settings.confirmed_kdf_costs);
         ui_theme::init_from_settings(startup_settings.theme, cx);
 
         let app_state = cx.new(|cx| {

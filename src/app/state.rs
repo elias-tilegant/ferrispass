@@ -6,6 +6,7 @@ use crate::biometric::{
     NoopBiometricStore,
 };
 use crate::domain::{VaultEntry, VaultSnapshot};
+use crate::keepass::limits::KdfCost;
 use crate::keepass::merge::{ConflictKind, ConflictReport, Side};
 use crate::keepass::{
     EntryDraft, MutationError, OtpDisplay, SavePayload, StrengthReport, VaultDocument,
@@ -277,6 +278,31 @@ pub struct AppState {
     /// the user submits the password. Consumed by `finish_open_attempt`
     /// on success and reset on every transition into `AwaitingPassword`.
     pending_biometric_enrollment: bool,
+    /// What the unlock screen's header pre-check found for a path: `Some`
+    /// once the check has run, holding the Argon2 cost the user still has
+    /// to confirm (if any). Keyed by path so a result that lands after the
+    /// user moved on to another vault is never shown against the wrong one.
+    kdf_check: Option<(PathBuf, Option<KdfCost>)>,
+    /// Bumped by every pre-check start and every direct write, so a
+    /// pre-check that lands late (A -> B -> A, or after a failed open already
+    /// recorded the real answer) is dropped instead of overwriting it.
+    kdf_check_generation: u64,
+    /// Bumped on every transition into `Opening`, so a password open that
+    /// comes back after the user left and re-entered the same vault is
+    /// recognised as stale rather than taken for the current attempt.
+    open_attempt: u64,
+    /// A synced remote whose Argon2 cost is above the default budget and not
+    /// yet confirmed, keyed by the local vault it belongs to. The merge stops
+    /// there; Settings → Sync offers the confirmation. Never decided by a
+    /// background sync: raising that cost is exactly what a tampered remote
+    /// would do.
+    remote_kdf_confirmations: HashMap<PathBuf, KdfCost>,
+    /// Remote merges whose decrypt is running in the background, by vault,
+    /// with the token of the newest one. The continuation only runs while its
+    /// token is still here: a newer merge replaces it, and a healthy sync or
+    /// a disconnect removes it, so an old remote can never land on top.
+    remote_merges_in_flight: HashMap<PathBuf, u64>,
+    remote_merge_token: u64,
     /// In-flight / last-failure state for the Touch ID button on the
     /// Unlock screen. Lives on the state rather than on AppShell so
     /// re-renders driven by `cx.observe(&state, …)` show the spinner
@@ -583,6 +609,12 @@ impl Default for AppState {
             biometric: Arc::new(NoopBiometricStore),
             biometric_registry: BiometricRegistry::new(),
             pending_biometric_enrollment: false,
+            kdf_check: None,
+            kdf_check_generation: 0,
+            open_attempt: 0,
+            remote_kdf_confirmations: HashMap::new(),
+            remote_merges_in_flight: HashMap::new(),
+            remote_merge_token: 0,
             biometric_attempt: BiometricAttempt::default(),
             biometric_generation: 0,
             auto_sync_in_flight: HashSet::new(),
@@ -985,6 +1017,9 @@ pub struct UnlockPrompt {
     pub display_path: String,
     pub keyfile: Option<PathBuf>,
     pub error: Option<String>,
+    /// Argon2 settings above the default budget that unlocking this vault
+    /// will accept. The screen says so before the user commits.
+    pub kdf_confirmation: Option<KdfCost>,
 }
 
 /// Health tone for the sidebar header's status dot. Derived from the live
@@ -1391,6 +1426,8 @@ impl AppState {
         self.sync = None;
         if let Some(target) = target {
             self.deferred_conflicts.remove(target);
+            self.remote_kdf_confirmations.remove(target);
+            self.remote_merges_in_flight.remove(target);
         }
         if let Some(target) = target {
             let generation = self
@@ -1684,6 +1721,33 @@ impl AppState {
         // sites is the only way it cannot be forgotten at one of them.
         if matches!(status, SyncStatus::Synced { .. } | SyncStatus::Idle) {
             self.clear_sync_backoff(target);
+        }
+        // A cost question belongs to the remote it was asked about. Once the
+        // sync is healthy again or the vault is no longer synced, it is
+        // stale, and allowing a stale cost must not be on offer.
+        // A new attempt (`Syncing`) fetches the remote again, so the notice
+        // would otherwise offer a cost from a revision that is being replaced.
+        if matches!(
+            status,
+            SyncStatus::Synced { .. }
+                | SyncStatus::Idle
+                | SyncStatus::Disconnected
+                | SyncStatus::Syncing
+        ) {
+            self.remote_kdf_confirmations.remove(target);
+        }
+        // Same for a merge still decrypting: a new attempt supersedes it, and
+        // its old remote must not land in the middle of the new one.
+        // `handle_remote_conflict_for` sets its token after the `Syncing`
+        // that precedes it, so its own merge is unaffected.
+        if matches!(
+            status,
+            SyncStatus::Synced { .. }
+                | SyncStatus::Idle
+                | SyncStatus::Disconnected
+                | SyncStatus::Syncing
+        ) {
+            self.remote_merges_in_flight.remove(target);
         }
         // Same reasoning, same place: anything that is not the deferred
         // conflict itself ends the wait, including the overlay finally
@@ -2145,7 +2209,19 @@ impl AppState {
         // doesn't get overwritten silently.
         self.park_active();
         self.vault = VaultStatus::Opening { path };
+        self.open_attempt += 1;
         cx.notify();
+    }
+
+    /// Number of the newest open attempt, taken right after `begin_open`.
+    pub fn open_attempt(&self) -> u64 {
+        self.open_attempt
+    }
+
+    /// Whether `attempt` is still the open in progress for `path`.
+    pub fn open_attempt_is_current(&self, path: &Path, attempt: u64) -> bool {
+        attempt == self.open_attempt
+            && matches!(&self.vault, VaultStatus::Opening { path: current } if current == path)
     }
 
     /// Returns `true` iff this call actually transitioned the active
@@ -4019,8 +4095,104 @@ impl AppState {
                 display_path: path.display().to_string(),
                 keyfile: keyfile.clone(),
                 error: error.clone(),
+                kdf_confirmation: self.kdf_confirmation_for_pending(),
             }),
             _ => None,
+        }
+    }
+
+    /// The Argon2 cost the pending vault still needs confirmed, if the
+    /// header pre-check found one for exactly this path.
+    pub fn kdf_confirmation_for_pending(&self) -> Option<KdfCost> {
+        let pending = self.pending_unlock_path()?;
+        match &self.kdf_check {
+            Some((path, cost)) if *path == pending => *cost,
+            _ => None,
+        }
+    }
+
+    /// Whether the header pre-check has finished for the pending vault.
+    /// The automatic Touch ID attempt waits for it: prompting for a
+    /// fingerprint and then stopping at a cost question is a wasted prompt.
+    pub fn kdf_check_settled_for_pending(&self) -> bool {
+        match (&self.kdf_check, self.pending_unlock_path()) {
+            (Some((path, _)), Some(pending)) => *path == pending,
+            _ => false,
+        }
+    }
+
+    /// The remote cost waiting for confirmation on the active vault's sync.
+    pub fn remote_kdf_confirmation_for_active(&self) -> Option<KdfCost> {
+        let active = self.current_vault_path()?;
+        self.remote_kdf_confirmations.get(&active).copied()
+    }
+
+    /// Hand the pending remote cost to the caller and forget it, for either
+    /// answer: confirmed, it is persisted and the sync re-runs; declined, the
+    /// sync stays failed until the next attempt asks again.
+    pub fn take_remote_kdf_confirmation(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<(PathBuf, KdfCost)> {
+        let active = self.current_vault_path()?;
+        let cost = self.remote_kdf_confirmations.remove(&active)?;
+        cx.notify();
+        Some((active, cost))
+    }
+
+    /// Start a header pre-check. The returned generation goes back into
+    /// `finish_kdf_check`; any later start or direct write supersedes it.
+    pub fn begin_kdf_check(&mut self, cx: &mut Context<Self>) -> u64 {
+        // A result from an earlier visit to the same vault is not an answer
+        // for this one: until the fresh read lands, nothing counts as settled.
+        if self.kdf_check.take().is_some() {
+            cx.notify();
+        }
+        self.kdf_check_generation += 1;
+        self.kdf_check_generation
+    }
+
+    /// Record a pre-check result, unless something newer already has.
+    pub fn finish_kdf_check(
+        &mut self,
+        generation: u64,
+        path: PathBuf,
+        cost: Option<KdfCost>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation == self.kdf_check_generation {
+            self.set_kdf_check(path, cost, cx);
+        }
+    }
+
+    /// Record an answer that is more current than any pre-check in flight:
+    /// a failed open that turned out to be a cost question, or a cost the
+    /// user just allowed (`None`: nothing left to ask).
+    ///
+    /// Only while `path` is still the vault being unlocked: an open for A
+    /// that fails after the user moved on to B must not cancel B's check.
+    pub fn note_kdf_check(&mut self, path: PathBuf, cost: Option<KdfCost>, cx: &mut Context<Self>) {
+        if !self.is_unlocking(&path) {
+            return;
+        }
+        self.kdf_check_generation += 1;
+        self.set_kdf_check(path, cost, cx);
+    }
+
+    fn is_unlocking(&self, path: &Path) -> bool {
+        matches!(
+            &self.vault,
+            VaultStatus::Opening { path: current }
+                | VaultStatus::AwaitingPassword { path: current, .. }
+                if current == path
+        )
+    }
+
+    fn set_kdf_check(&mut self, path: PathBuf, cost: Option<KdfCost>, cx: &mut Context<Self>) {
+        let next = Some((path, cost));
+        if self.kdf_check != next {
+            self.kdf_check = next;
+            cx.notify();
         }
     }
 
@@ -5586,7 +5758,11 @@ impl AppState {
         }
         // One auto-sync request per vault at a time. A stalled Graph call
         // must not let the next tick start a competing one.
-        if self.auto_sync_in_flight.contains(target) {
+        // Nor while a remote from an earlier sync is still being decrypted:
+        // two long KDF runs for one vault would only compete for the CPU.
+        if self.auto_sync_in_flight.contains(target)
+            || self.remote_merges_in_flight.contains_key(target)
+        {
             return;
         }
         // Recover from a prior failed sync (e.g. a push that lost the
@@ -5788,16 +5964,73 @@ impl AppState {
             return;
         };
 
+        let Some(remote_key) = self.database_key_for_session(target, session.vault) else {
+            return;
+        };
+
+        // Decrypting runs the full Argon2 KDF: half a second normally, up to
+        // a minute and more for a cost the user allowed. On this thread that
+        // froze the whole window, so it runs in the background and the rest
+        // picks up on the foreground with every guard checked again.
+        self.remote_merge_token += 1;
+        let token = self.remote_merge_token;
+        self.remote_merges_in_flight
+            .insert(target.to_path_buf(), token);
+        let parse = cx.background_spawn(async move {
+            crate::keepass::repository::parse_database_bytes(&remote_bytes, remote_key)
+        });
+        let target = target.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let parsed = parse.await;
+            let _ = this.update(cx, |state, cx| {
+                if state.remote_merges_in_flight.get(&target) != Some(&token) {
+                    return;
+                }
+                state.remote_merges_in_flight.remove(&target);
+                if !state.sync_session_is_current(&target, session)
+                    || !state.has_sync_binding_for(&target)
+                {
+                    return;
+                }
+                state.continue_remote_conflict_for(
+                    &target,
+                    session,
+                    parsed,
+                    local_db,
+                    base_generation,
+                    remote_etag,
+                    interactive,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Second half of [`Self::handle_remote_conflict_for`], on the foreground
+    /// once the remote is decrypted. `local_db` and `base_generation` are
+    /// from before the decrypt: the merge runs against that snapshot, and
+    /// `commit_merged_for` refuses it if the live document moved on.
+    #[allow(clippy::too_many_arguments)]
+    fn continue_remote_conflict_for(
+        &mut self,
+        target: &Path,
+        session: SyncSession,
+        parsed: Result<Database, keepass::db::DatabaseOpenError>,
+        local_db: Database,
+        base_generation: u64,
+        remote_etag: String,
+        interactive: bool,
+        cx: &mut Context<Self>,
+    ) {
         let target_is_active = matches!(
             &self.vault,
             VaultStatus::Open { path, .. } if path.as_path() == target
         );
 
-        let Some(remote_key) = self.database_key_for_session(target, session.vault) else {
-            return;
-        };
-        match crate::keepass::repository::parse_database_bytes(&remote_bytes, remote_key) {
+        match parsed {
             Ok(remote_db) => {
+                self.remote_kdf_confirmations.remove(target);
                 let report = crate::keepass::merge::diff(&local_db, &remote_db);
 
                 let editing = matches!(
@@ -5914,6 +6147,13 @@ impl AppState {
                 // blaming the master password for those sends the user
                 // chasing a credential problem that does not exist.
                 let message = match &error {
+                    _ if let Some(cost) = crate::keepass::limits::confirmation_required(&error) => {
+                        self.remote_kdf_confirmations
+                            .insert(target.to_path_buf(), cost);
+                        "The synced vault now takes longer to unlock. \
+                         Review it in Settings → Sync."
+                            .to_string()
+                    }
                     keepass::db::DatabaseOpenError::Io(io_error)
                         if io_error.kind() == std::io::ErrorKind::InvalidData =>
                     {
@@ -7380,6 +7620,73 @@ mod park_tests {
     /// the same bytes, took the same 412, downloaded the same remote and
     /// deferred again: the most expensive request this app makes, on a timer,
     /// for as long as the user did not look.
+    fn heavy_cost() -> KdfCost {
+        KdfCost {
+            variant: crate::keepass::limits::Argon2Variant::Argon2id,
+            memory: 256 * 1024 * 1024,
+            iterations: 160,
+            parallelism: 4,
+        }
+    }
+
+    /// A new attempt refetches the remote, so neither the cost notice nor a
+    /// merge still decrypting from the last one may stay live: both belong
+    /// to a remote revision that is being replaced.
+    #[test]
+    fn a_new_sync_attempt_withdraws_the_remote_cost_notice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("heavy.kdbx");
+        let mut state = AppState::default();
+        fresh_open(&mut state, vault.clone(), "pw");
+
+        state
+            .remote_kdf_confirmations
+            .insert(vault.clone(), heavy_cost());
+        state.remote_merges_in_flight.insert(vault.clone(), 7);
+        state.route_sync_status(&vault, SyncStatus::Syncing);
+        assert!(state.remote_kdf_confirmation_for_active().is_none());
+        assert!(
+            state.remote_merges_in_flight.is_empty(),
+            "an older merge must not land in the middle of a new attempt"
+        );
+
+        state
+            .remote_kdf_confirmations
+            .insert(vault.clone(), heavy_cost());
+        state.remote_merges_in_flight.insert(vault.clone(), 8);
+        state.route_sync_status(
+            &vault,
+            SyncStatus::Synced {
+                at: chrono::Local::now(),
+                auto_merged: 0,
+            },
+        );
+        assert!(state.remote_kdf_confirmations.is_empty());
+        assert!(
+            state.remote_merges_in_flight.is_empty(),
+            "an older merge must not land on top of a healthy sync"
+        );
+    }
+
+    /// A failed open for vault A that comes back after the user moved on to
+    /// B must not touch B's pre-check.
+    #[test]
+    fn a_cost_note_applies_only_to_the_vault_being_unlocked() {
+        let mut state = AppState::default();
+        state.vault = VaultStatus::AwaitingPassword {
+            path: PathBuf::from("/vaults/b.kdbx"),
+            keyfile: None,
+            error: None,
+        };
+        assert!(state.is_unlocking(Path::new("/vaults/b.kdbx")));
+        assert!(!state.is_unlocking(Path::new("/vaults/a.kdbx")));
+
+        state.vault = VaultStatus::Opening {
+            path: PathBuf::from("/vaults/b.kdbx"),
+        };
+        assert!(state.is_unlocking(Path::new("/vaults/b.kdbx")));
+    }
+
     #[test]
     fn a_deferred_conflict_does_not_retry_itself_every_tick() {
         let dir = tempfile::tempdir().expect("tempdir");

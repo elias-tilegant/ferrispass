@@ -396,6 +396,11 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
     // through the rest of the command: a `launch` waits ten seconds for the
     // target app, and a `sync` makes network calls. The GUI does the same,
     // and SECURITY.md says so for both.
+    // The CLI cannot ask, so it honours what the user confirmed in the app
+    // and otherwise reports the cost question as a plain failure.
+    crate::keepass::limits::set_confirmed_kdf_costs(
+        &crate::app::settings::load().confirmed_kdf_costs,
+    );
     let mut document = {
         let password = unlock_password(cli)?;
         KeePassRepository::open(vault, &password, cli.key_file.as_deref())

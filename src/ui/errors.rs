@@ -51,12 +51,23 @@ pub fn open_message(error: &DatabaseOpenError) -> String {
             "This vault file is truncated. Restore it from a backup or from your cloud provider."
                 .to_string()
         }
-        DatabaseOpenError::Io(error) => match error.kind() {
+        DatabaseOpenError::Io(io_error) => match io_error.kind() {
             std::io::ErrorKind::NotFound => "That vault file no longer exists.".to_string(),
             std::io::ErrorKind::PermissionDenied => {
                 "FerrisPass is not allowed to read that file.".to_string()
             }
-            _ => format!("Could not read the vault file: {}", error.kind()),
+            // The unlock screen shows the settings next to this, so the
+            // sentence only has to say what to do.
+            _ if crate::keepass::limits::confirmation_required(error).is_some() => {
+                "This vault needs more unlock time than usual. Review the note above and unlock again."
+                    .to_string()
+            }
+            // The size and KDF limits carry their own reason. Printing only
+            // the kind ("invalid data") left the user with nothing to act on.
+            std::io::ErrorKind::InvalidData => {
+                format!("FerrisPass cannot open this vault: {io_error}.")
+            }
+            _ => format!("Could not read the vault file: {}", io_error.kind()),
         },
     }
 }
@@ -85,6 +96,30 @@ mod tests {
     fn a_missing_file_says_so() {
         let missing = DatabaseOpenError::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
         assert_eq!(open_message(&missing), "That vault file no longer exists.");
+    }
+
+    #[test]
+    fn a_resource_limit_says_which_limit() {
+        let error = DatabaseOpenError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Argon2 memory requirement exceeds the 1073741824-byte limit",
+        ));
+        assert!(open_message(&error).contains("Argon2 memory"));
+    }
+
+    #[test]
+    fn a_cost_question_is_not_a_failure_message() {
+        let cost = crate::keepass::limits::KdfCost {
+            variant: crate::keepass::limits::Argon2Variant::Argon2id,
+            memory: 1024 * 1024 * 1024,
+            iterations: 40,
+            parallelism: 4,
+        };
+        let error = DatabaseOpenError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            crate::keepass::limits::KdfConfirmationRequired(cost),
+        ));
+        assert!(open_message(&error).contains("unlock again"));
     }
 
     /// Every message is a sentence, and none of them says "Recycle Bin":
