@@ -237,6 +237,83 @@ mod tests {
         assert_eq!(strength_from_bits(200), crate::domain::Strength::Strong);
     }
 
+    fn classes_from(upper: bool, lower: bool, digits: bool, symbols: bool) -> CharClasses {
+        CharClasses {
+            upper,
+            lower,
+            digits,
+            symbols,
+        }
+    }
+
+    fn rank(strength: crate::domain::Strength) -> u8 {
+        match strength {
+            crate::domain::Strength::Weak => 0,
+            crate::domain::Strength::Fair => 1,
+            crate::domain::Strength::Strong => 2,
+        }
+    }
+
+    proptest::proptest! {
+        /// Every length and every combination of classes, not just the few the
+        /// examples above pick: the length is clamped to 4..=128, every
+        /// character comes from an enabled class (lowercase when none is), and
+        /// every enabled class shows up at least once. Half the cases are 8
+        /// characters or shorter, where a class goes missing if the resample
+        /// loop does not insist on it; uniform lengths up to 200 let a broken
+        /// loop pass.
+        #[test]
+        fn generate_honours_length_and_classes(
+            length in proptest::prop_oneof![0usize..=8, 9usize..=200],
+            upper: bool,
+            lower: bool,
+            digits: bool,
+            symbols: bool,
+        ) {
+            let mut enabled: Vec<&[u8]> = [(upper, UPPER), (lower, LOWER), (digits, DIGITS), (symbols, SYMBOLS)]
+                .into_iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, class)| class)
+                .collect();
+            if enabled.is_empty() {
+                enabled.push(LOWER);
+            }
+
+            let pw = generate(length, classes_from(upper, lower, digits, symbols));
+
+            proptest::prop_assert_eq!(pw.len(), length.clamp(4, 128));
+            for byte in pw.bytes() {
+                proptest::prop_assert!(
+                    enabled.iter().any(|class| class.contains(&byte)),
+                    "{:?} is not in an enabled class: {pw}", byte as char
+                );
+            }
+            for class in &enabled {
+                proptest::prop_assert!(
+                    pw.bytes().any(|byte| class.contains(&byte)),
+                    "a required class is missing: {pw}"
+                );
+            }
+        }
+
+        /// A longer password never scores fewer bits or a weaker band.
+        #[test]
+        fn estimate_never_drops_with_length(
+            length in 0usize..=256,
+            extra in 0usize..=64,
+            upper: bool,
+            lower: bool,
+            digits: bool,
+            symbols: bool,
+        ) {
+            let classes = classes_from(upper, lower, digits, symbols);
+            let short = estimate_bits(length, classes);
+            let long = estimate_bits(length + extra, classes);
+            proptest::prop_assert!(short <= long, "{short} bits at {length}, {long} at {}", length + extra);
+            proptest::prop_assert!(rank(strength_from_bits(short)) <= rank(strength_from_bits(long)));
+        }
+    }
+
     #[test]
     fn no_classes_falls_back_to_lowercase() {
         let pw = generate(

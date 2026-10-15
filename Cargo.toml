@@ -147,6 +147,10 @@ block2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
+# Property tests (T0.4 in the redesign plan, approved 14.10.2026): a failing
+# case is shrunk to a small one before it is reported. gpui-pre's test-support
+# pulls in the same version, so the lock gains no package.
+proptest = "1"
 # Headless UI tests (`#[gpui::test]`, `TestAppContext`). These are the features
 # gpui-kit's `test-support` turns on, minus the gpui-kit facade itself:
 # gpui-pre-macros rewrites every generated `gpui::` path to `gpui_kit::` as soon
