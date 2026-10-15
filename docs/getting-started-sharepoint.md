@@ -8,7 +8,7 @@ This walkthrough covers the first-time connect flow on macOS. If you already hav
 
 - A Microsoft 365 account with permission to read/write a SharePoint document library (or a personal OneDrive)
 - An existing `.kdbx` file uploaded to that library - FerrisPass doesn't create the cloud-side file for you in v0.2, you bring your own
-- macOS 12 (Monterey) or later, Apple Silicon
+- macOS 26 or later, Apple Silicon
 
 If your tenant has tightened admin policies, the OAuth grant for `Files.ReadWrite.All` may need a one-time admin approval. Ask your IT admin to consent if you hit "needs admin approval" during sign-in.
 

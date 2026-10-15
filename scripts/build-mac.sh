@@ -46,7 +46,7 @@ BUNDLE_ID="rs.ferrispass.app"
 TEAM_ID="5GAMHB3974"
 SIGNING_IDENTITY="Developer ID Application: Sonar Analytics - FZCO (${TEAM_ID})"
 NOTARIZE_PROFILE="ferrispass-notarize"
-MIN_MACOS="12.0"
+MIN_MACOS="26.0"
 
 # ---------- args ----------
 SKIP_NOTARIZE=false
@@ -192,6 +192,17 @@ echo ""
 
 # Build for the OS floor we declare in Info.plist so the binary actually runs there.
 export MACOSX_DEPLOYMENT_TARGET="${MIN_MACOS}"
+
+# A macOS 26 floor needs the macOS 26 SDK (Xcode 26) or newer. Which Xcode is
+# selected depends on the machine and, in CI, on the runner image, so check it
+# here, before anything is built or signed, instead of finding out on a tag.
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+if [ "${SDK_VERSION%%.*}" -lt "${MIN_MACOS%%.*}" ]; then
+    echo "✗ macOS SDK ${SDK_VERSION} is older than the deployment target ${MIN_MACOS}." >&2
+    echo "  Select Xcode ${MIN_MACOS%%.*} or newer with xcode-select, then build again." >&2
+    exit 1
+fi
+echo "  macOS SDK:   ${SDK_VERSION}"
 
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
