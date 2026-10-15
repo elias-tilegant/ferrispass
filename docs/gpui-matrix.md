@@ -51,7 +51,7 @@ P0.02 soll klären, ob Headless-UI-Tests auf dem `macos-latest`-Runner laufen. A
 - Fenster bekommen dann einen `HeadlessAtlas` statt eines Metal-Atlas (`gpui-pre-0.3.8/src/platform/test/window.rs:90-93`).
 - Metal braucht nur `HeadlessAppContext` mit `gpui_platform::current_headless_renderer` (`gpui-pre-0.3.8/src/app/headless_app_context.rs:82`, `gpui-pre-platform-0.3.8/src/gpui_platform.rs:111`). Das nutzt FerrisPass nicht. Für Pixel-Vergleiche in T3 wäre es der Weg, und erst dann stellt sich die Metal-Frage auf dem Runner.
 
-Die Tests aus P0.01 (`tests/keymap.rs`, die Tests in `src/ui/widgets/secret_input.rs`) laufen lokal so grün. Den Beleg auf dem Runner liefert erst der erste CI-Lauf des Zweigs, der noch nicht gepusht ist.
+Die Tests aus P0.01 (`tests/keymap.rs`, die Tests in `src/ui/widgets/secret_input.rs`) laufen lokal so grün. Der erste CI-Lauf des Zweigs (PR #2, 15.10.2026, Image `macos-26-arm64`) bestätigt das: Alle Tests laufen dort grün, die Headless-UI-Tests eingeschlossen.
 
 SP09 hat den Metal-Weg lokal genutzt: `HeadlessAppContext::with_platform` mit dem Textsystem der headless erzeugten macOS-Plattform und `gpui_platform::current_headless_renderer()` (Feature `test-support` von gpui-pre-platform) rendert eine Ansicht ohne Fenster in ein Bild. Für Pixel-Vergleiche in T3 geht das auf dem Mac; ob der Runner Metal hat, bleibt offen.
 

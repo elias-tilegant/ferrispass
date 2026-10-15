@@ -112,7 +112,7 @@ Hinweis: Codex hat nach dem Lauf über das MCP-Werkzeug von sich aus einen Eintr
 
 ## 9 Offen
 
-- **CI-Lauf:** SDK-Schritt und Headless-Tests auf `macos-latest` sind erst nach dem Push belegt. Kein Push in diesem Lauf.
+- **CI-Lauf:** erledigt am 15.10.2026 mit PR #2 (Lauf 38711125091). Das Image `macos-26-arm64` hat das SDK 26.5, der SDK-Schritt ist grün. Alle 606 Tests laufen auf dem Runner wie lokal, auch die Headless-UI-Tests (`#[gpui::test]`), 0 fehlgeschlagen, 4 ignoriert. Audit und CodeQL grün.
 - **Laufversuche der Matrix:** in den Spikes, Ergebnisse in `docs/gpui-matrix.md`.
 - **Unmaintained-Warnungen** im Audit (Abschnitt 3): nur notiert.
 - **Aus P0.01 weiter offen:** Elias' OK zur Dev-Abhängigkeit (`gpui` und `gpui-component` mit `test-support` statt `gpui-kit`), das manuelle Protokoll Teil 0 und die Freigabe der Migration.
