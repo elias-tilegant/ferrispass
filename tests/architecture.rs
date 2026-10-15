@@ -12,15 +12,25 @@
 //!   inside `cfg_attr`) and is not on the list, or a listed one that is gone,
 //! - any unsafe construct outside the items the list covers, so the rule
 //!   still holds if the lint level were ever lowered,
-//! - a lint level weaker than `deny`, and code the scan cannot see
-//!   (`include!`, a `#[path]` that leaves the directory).
+//! - a lint level weaker than `deny` in `Cargo.toml`, and lint flags in the
+//!   Cargo configuration or the CI workflows,
+//! - code the scan cannot see: `include!`, a `#[path]` module or a build
+//!   target that is not a `.rs` file inside the repository.
 //!
-//! The scan works on tokens, not lines. Comments, doc comments, string and
+//! Every `.rs` file under the manifest directory is read, except `target/` and
+//! `.git/`, so a module or target in an unexpected place is not missed. The
+//! scan works on tokens, not lines. Comments, doc comments, string and
 //! character literals are skipped, so a word in a message or a comment is not
-//! a finding. What it cannot see is unsafe code that another crate's macro
-//! generates without the word `unsafe` in this crate's source. rustc does not
-//! report `unsafe_code` for code expanded from another crate's macro either;
-//! those crates are reviewed with the supply chain (docs/release-process.md).
+//! a finding.
+//!
+//! What it cannot see is unsafe code that another crate's macro generates
+//! without the word `unsafe` in this crate's source. rustc does not report
+//! `unsafe_code` for code expanded from another crate's macro either; those
+//! crates are reviewed with the supply chain (docs/release-process.md). A
+//! `static mut` declaration passes both, but every access to it needs an
+//! `unsafe` block, which does not. Flags from outside the repository (the
+//! environment, a Cargo configuration above it) are out of reach; CI sets
+//! none, and the workflow check below keeps it that way.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,9 +54,9 @@ const LEGACY_EXCEPTIONS: &[(&str, &str)] = &[
 /// why it needs `unsafe`.
 const PLATFORM_MODULES: &[&str] = &[];
 
-/// Every target the `[lints]` table of `Cargo.toml` applies to.
-const SOURCE_DIRS: &[&str] = &["src", "tests", "examples", "benches"];
-const SOURCE_FILES: &[&str] = &["build.rs"];
+/// Top-level directories that are never scanned: build output and Git's own
+/// data. Everything else under the manifest directory is.
+const SKIPPED_DIRS: &[&str] = &["target", ".git"];
 
 #[test]
 fn unsafe_code_stays_on_the_exception_list() {
@@ -139,43 +149,67 @@ fn unsafe_code_stays_on_the_exception_list() {
 }
 
 #[test]
-fn the_lint_level_still_denies_unsafe_code() {
+fn nothing_lowers_the_unsafe_code_lint() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
-    let level = lint_level(&manifest, "unsafe_code");
+    let level = unsafe_code_level(&manifest);
     assert!(
-        matches!(level.as_deref(), Some("deny" | "forbid")),
-        "Cargo.toml sets unsafe_code to {level:?} under [lints.rust]; the exception list \
-         relies on \"deny\""
+        matches!(level.as_deref(), Ok("deny" | "forbid")),
+        "Cargo.toml must keep unsafe_code = \"deny\" under [lints.rust]; the exception \
+         list relies on it. Found: {level:?}"
     );
+
+    let mut problems = Vec::new();
     for name in [".cargo/config.toml", ".cargo/config"] {
-        if let Ok(config) = fs::read_to_string(root.join(name)) {
-            for word in ["unsafe_code", "cap-lints"] {
-                assert!(
-                    !config.contains(word),
-                    "{name} mentions {word}; lint levels belong in Cargo.toml"
-                );
+        if let Ok(text) = fs::read_to_string(root.join(name)) {
+            for word in cargo_config_overrides(&text) {
+                problems.push(format!("{name}: {word}"));
             }
         }
     }
+    let workflows = root.join(".github/workflows");
+    if let Ok(entries) = fs::read_dir(&workflows) {
+        for entry in entries {
+            let path = entry.expect("directory entry").path();
+            if !path
+                .extension()
+                .is_some_and(|ext| ext == "yml" || ext == "yaml")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(&path).expect("read workflow");
+            let name = path.strip_prefix(root).unwrap_or(&path).display();
+            for word in workflow_overrides(&text) {
+                problems.push(format!("{name}: {word}"));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "lint levels are set in Cargo.toml only, not through flags:\n{}",
+        problems.join("\n")
+    );
+}
+
+#[test]
+fn build_targets_stay_where_the_scan_reads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+    let stray = stray_target_paths(&manifest);
+    assert!(
+        stray.is_empty(),
+        "build targets must be .rs files inside the repository, or the unsafe scan \
+         does not read them:\n{}",
+        stray.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------- scanner --
 
 fn rust_sources(root: &Path) -> Vec<(String, PathBuf)> {
     let mut files = Vec::new();
-    for dir in SOURCE_DIRS {
-        let dir = root.join(dir);
-        if dir.is_dir() {
-            collect_rust_files(&dir, &mut files);
-        }
-    }
-    for file in SOURCE_FILES {
-        let file = root.join(file);
-        if file.is_file() {
-            files.push(file);
-        }
-    }
+    let mut visited = Vec::new();
+    collect_rust_files(root, root, &mut visited, &mut files);
     let mut sources: Vec<(String, PathBuf)> = files
         .into_iter()
         .map(|path| {
@@ -191,44 +225,243 @@ fn rust_sources(root: &Path) -> Vec<(String, PathBuf)> {
     sources
 }
 
-fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_rust_files(root: &Path, dir: &Path, visited: &mut Vec<PathBuf>, out: &mut Vec<PathBuf>) {
+    // A symlinked directory is followed, as rustc follows it, but only once.
+    let canonical = fs::canonicalize(dir)
+        .unwrap_or_else(|err| panic!("cannot resolve {}: {err}", dir.display()));
+    if visited.contains(&canonical) {
+        return;
+    }
+    visited.push(canonical);
     let entries =
         fs::read_dir(dir).unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()));
     for entry in entries {
         let path = entry.expect("directory entry").path();
         if path.is_dir() {
-            collect_rust_files(&path, out);
+            let skipped = dir == root
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| SKIPPED_DIRS.contains(&name));
+            if !skipped {
+                collect_rust_files(root, &path, visited, out);
+            }
         } else if path.extension().is_some_and(|ext| ext == "rs") {
             out.push(path);
         }
     }
 }
 
-/// The value of `name` in the `[lints.rust]` table, if it is a plain level
-/// or a table with a `level` key.
-fn lint_level(manifest: &str, name: &str) -> Option<String> {
-    let mut in_table = false;
-    for line in manifest.lines() {
-        let line = line.trim();
+/// The level `Cargo.toml` gives `unsafe_code`. An error for anything this
+/// reader does not follow: no entry, or more than one (`unsafe-code` is the
+/// same lint to rustc), a value that is not a level or `{ level = .. }`, or
+/// lints set in `[lints]` itself rather than in `[lints.rust]`.
+fn unsafe_code_level(manifest: &str) -> Result<String, String> {
+    let mut table = String::new();
+    let mut levels = Vec::new();
+    for (index, raw) in manifest.lines().enumerate() {
+        let line = strip_toml_comment(raw).trim();
         if line.starts_with('[') {
-            in_table = line == "[lints.rust]";
-            continue;
-        }
-        if !in_table || line.starts_with('#') {
+            table = toml_header(line);
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        if key.trim() != name {
+        if table == "[lints]" {
+            return Err(format!(
+                "line {}: lints set in [lints] itself, keep them in [lints.rust]",
+                index + 1
+            ));
+        }
+        if table != "[lints.rust]" || toml_key(key).replace('-', "_") != "unsafe_code" {
             continue;
         }
-        return ["forbid", "deny", "warn", "allow"]
-            .into_iter()
-            .find(|level| value.contains(&format!("\"{level}\"")))
-            .map(str::to_string);
+        let level = toml_level(value.trim())
+            .ok_or_else(|| format!("line {}: cannot read the level in `{line}`", index + 1))?;
+        levels.push(level);
     }
-    None
+    match levels.as_slice() {
+        [level] => Ok(level.clone()),
+        [] => Err("no unsafe_code entry under [lints.rust]".to_string()),
+        _ => Err(format!(
+            "unsafe_code is set {} times under [lints.rust]",
+            levels.len()
+        )),
+    }
+}
+
+/// `path` and `build` entries in `Cargo.toml` that point where the scan does
+/// not read: absolute, through `..`, or not a `.rs` file. Dependency, patch
+/// and replace tables are skipped; a path dependency is a crate of its own.
+fn stray_target_paths(manifest: &str) -> Vec<String> {
+    let mut table = String::new();
+    let mut stray = Vec::new();
+    for (index, raw) in manifest.lines().enumerate() {
+        let line = strip_toml_comment(raw).trim();
+        if line.starts_with('[') {
+            table = toml_header(line);
+            continue;
+        }
+        if ["dependencies", "patch", "replace"]
+            .iter()
+            .any(|word| table.contains(word))
+        {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = toml_key(key);
+        if key != "path" && key != "build" && !key.ends_with(".path") {
+            continue;
+        }
+        // `build = false` and other non-strings name no file.
+        let Some(target) = toml_string(value.trim()) else {
+            continue;
+        };
+        if !stays_in_tree(&target) {
+            stray.push(format!("Cargo.toml:{}: {key} = \"{target}\"", index + 1));
+        }
+    }
+    stray
+}
+
+/// A relative path to a `.rs` file that does not climb out with `..`.
+fn stays_in_tree(path: &str) -> bool {
+    !path.starts_with('/') && !path.split('/').any(|part| part == "..") && path.ends_with(".rs")
+}
+
+/// Words in a Cargo configuration that change lint levels or pull in more
+/// configuration: `-A unsafe_code`, `--cap-lints`, `--config`, `include`.
+fn cargo_config_overrides(text: &str) -> Vec<String> {
+    let text = decode_escapes(text).to_lowercase();
+    let mut found: Vec<String> = ["unsafe_code", "unsafe-code", "cap-lints", "--config"]
+        .into_iter()
+        .filter(|word| text.contains(word))
+        .map(str::to_string)
+        .collect();
+    let include_key = text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("include")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    });
+    if include_key {
+        found.push("include".to_string());
+    }
+    found
+}
+
+/// Words in a CI workflow that change lint levels: any rustflags variable or
+/// setting (`RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`, `build.rustflags`), the cap,
+/// or the lint itself.
+fn workflow_overrides(text: &str) -> Vec<String> {
+    let text = decode_escapes(text).to_lowercase();
+    ["unsafe_code", "unsafe-code", "cap-lints", "rustflags"]
+        .into_iter()
+        .filter(|word| text.contains(word))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `line` without a trailing `# comment`, minding quoted strings.
+fn strip_toml_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if c == '\\' => escaped = true,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '#' => return &line[..i],
+            None => {}
+        }
+    }
+    line
+}
+
+/// `[ lints . "rust" ]` as `[lints.rust]`.
+fn toml_header(line: &str) -> String {
+    line.chars()
+        .filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
+        .collect()
+}
+
+/// A key without quotes and escapes, lower-cased.
+fn toml_key(key: &str) -> String {
+    decode_escapes(key.trim().trim_matches(['"', '\''])).to_lowercase()
+}
+
+/// A TOML string value (`"basic"` with escapes or `'literal'`).
+fn toml_string(value: &str) -> Option<String> {
+    if let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        return Some(decode_escapes(inner));
+    }
+    value
+        .strip_prefix('\'')
+        .and_then(|v| v.strip_suffix('\''))
+        .map(str::to_string)
+}
+
+/// A lint level, given plainly or as `{ level = "..", priority = .. }`.
+fn toml_level(value: &str) -> Option<String> {
+    let level = match value.strip_prefix('{').and_then(|v| v.strip_suffix('}')) {
+        Some(table) => table.split(',').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (toml_key(key) == "level").then(|| value.trim().to_string())
+        })?,
+        None => value.to_string(),
+    };
+    let level = toml_string(&level)?.to_lowercase();
+    ["forbid", "deny", "warn", "allow"]
+        .contains(&level.as_str())
+        .then_some(level)
+}
+
+/// Text with the escapes TOML and YAML strings resolve (`\u002d`,
+/// `\U0000002d`, `\x2d`) resolved and backslash line continuations joined,
+/// so a flag is found however it is spelled.
+fn decode_escapes(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            let width = match chars.get(i + 1) {
+                Some('u') => 4,
+                Some('U') => 8,
+                Some('x') => 2,
+                _ => 0,
+            };
+            let hex: String = chars.iter().skip(i + 2).take(width).collect();
+            if width > 0
+                && let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+            {
+                out.push(c);
+                i += 2 + width;
+                continue;
+            }
+            let mut j = i + 1;
+            while chars
+                .get(j)
+                .is_some_and(|c| *c == ' ' || *c == '\t' || *c == '\r')
+            {
+                j += 1;
+            }
+            if chars.get(j) == Some(&'\n') {
+                while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 fn has_module_header(source: &str) -> bool {
@@ -294,6 +527,13 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut line = 1;
     let mut i = 0;
+    // A first line `#!...` that does not open an inner attribute is a
+    // shebang, which rustc drops.
+    if source.starts_with("#!") && !source[2..].trim_start().starts_with('[') {
+        while i < chars.len() && chars[i] != '\n' {
+            i += 1;
+        }
+    }
 
     while i < chars.len() {
         let c = chars[i];
@@ -465,19 +705,34 @@ struct Parsed {
     tokens: Vec<Token>,
     partner: Vec<Option<usize>>,
     enclosing_brace: Vec<Option<usize>>,
+    /// Whether the token sits in the arguments of a macro call (`name!(..)`).
+    in_macro_call: Vec<bool>,
 }
+
+/// Keywords that can stand before a `!` that negates rather than calls.
+const NOT_MACRO_NAMES: &[&str] = &[
+    "if", "while", "return", "match", "in", "else", "break", "let", "mut", "yield",
+];
 
 fn parse(source: &str) -> Result<Parsed, String> {
     let tokens = tokenize(source)?;
     let mut partner = vec![None; tokens.len()];
     let mut enclosing_brace = vec![None; tokens.len()];
+    let mut in_macro_call = vec![false; tokens.len()];
     let mut stack: Vec<usize> = Vec::new();
+    let is_macro_call = |open: usize| {
+        open >= 2
+            && tokens[open - 1].is_punct('!')
+            && matches!(&tokens[open - 2].tok, Tok::Ident(name) | Tok::RawIdent(name)
+                if !NOT_MACRO_NAMES.contains(&name.as_str()))
+    };
     for (i, token) in tokens.iter().enumerate() {
         enclosing_brace[i] = stack
             .iter()
             .rev()
             .find(|&&open| tokens[open].is_punct('{'))
             .copied();
+        in_macro_call[i] = stack.iter().any(|&open| is_macro_call(open));
         let Tok::Punct(c) = token.tok else {
             continue;
         };
@@ -510,6 +765,7 @@ fn parse(source: &str) -> Result<Parsed, String> {
         tokens,
         partner,
         enclosing_brace,
+        in_macro_call,
     })
 }
 
@@ -561,7 +817,12 @@ struct Report {
 
 const RELAXING_LEVELS: &[&str] = &["allow", "expect", "warn"];
 const STRICT_LEVELS: &[&str] = &["deny", "forbid"];
-const UNSAFE_ATTRIBUTES: &[&str] = &["no_mangle", "export_name", "link_section"];
+const UNSAFE_ATTRIBUTES: &[&str] = &[
+    "no_mangle",
+    "export_name",
+    "link_section",
+    "allow_internal_unsafe",
+];
 
 fn scan(source: &str) -> Result<Report, String> {
     let p = parse(source)?;
@@ -577,7 +838,10 @@ fn scan(source: &str) -> Result<Report, String> {
     // into an attribute) is a finding, because the scan cannot see where it
     // ends up.
     for (i, token) in t.iter().enumerate() {
-        if token.name() != Some("unsafe_code") {
+        if !token
+            .name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("unsafe_code"))
+        {
             continue;
         }
         let Some(attr) = inside_attribute(i) else {
@@ -609,9 +873,10 @@ fn scan(source: &str) -> Result<Report, String> {
 
     let mut unsafe_sites = Vec::new();
     for (i, token) in t.iter().enumerate() {
-        let next_is_bang = t.get(i + 1).is_some_and(|t| t.is_punct('!'));
+        // `global_asm` counts under any spelling and wherever it is named:
+        // `r#global_asm!`, or imported under another name.
         let site = token.is_keyword("unsafe")
-            || (token.is_keyword("global_asm") && next_is_bang)
+            || token.name() == Some("global_asm")
             || (token
                 .name()
                 .is_some_and(|name| UNSAFE_ATTRIBUTES.contains(&name))
@@ -628,7 +893,19 @@ fn scan(source: &str) -> Result<Report, String> {
                 ));
             }
         }
-        if token.is_keyword("include") && next_is_bang {
+        // The `include!` macro under any spelling: called (`include!`,
+        // `r#include!`), named by path (`std::include`), renamed on import
+        // (`include as inc`) or handed to another macro (`wrap!(include)`).
+        // A field or variable of that name is none of these, and neither is
+        // rust-embed's `#[include = ..]`.
+        let after_path = i >= 2 && t[i - 1].is_punct(':') && t[i - 2].is_punct(':');
+        let called_or_renamed = t
+            .get(i + 1)
+            .is_some_and(|n| n.is_punct('!') || n.is_keyword("as"));
+        if token.name() == Some("include")
+            && inside_attribute(i).is_none()
+            && (called_or_renamed || after_path || p.in_macro_call[i])
+        {
             problems.push((
                 token.line,
                 "include! brings in code this scan does not read".to_string(),
@@ -642,11 +919,11 @@ fn scan(source: &str) -> Result<Report, String> {
             && name.is_keyword("path")
             && eq.is_punct('=')
             && let Tok::Str(target) = &value.tok
-            && (target.starts_with('/') || target.split('/').any(|part| part == ".."))
+            && !stays_in_tree(target)
         {
             problems.push((
                 name.line,
-                format!("#[path = \"{target}\"] leaves the scanned directory"),
+                format!("#[path = \"{target}\"] is not a .rs file the scan reads"),
             ));
         }
     }
@@ -854,15 +1131,13 @@ fn every_unsafe_form_is_found() {
         core::arch::global_asm!("");
         trait T { unsafe fn n(&self); }
         fn o() { let _ = unsafe { p() }; }
+        core::arch::r#global_asm!("");
+        use core::arch::global_asm as ga;
+        #[allow_internal_unsafe] macro_rules! q { () => {} }
     "#;
-    assert_eq!(
-        unsafe_lines(source),
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    );
-    assert_eq!(
-        problem_lines(source),
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    );
+    let all: Vec<usize> = (2..=15).collect();
+    assert_eq!(unsafe_lines(source), all);
+    assert_eq!(problem_lines(source), all);
 }
 
 #[test]
@@ -943,8 +1218,96 @@ fn code_the_scan_cannot_read_is_a_finding() {
         #[path = "/abs/outside.rs"] mod absolute;
         #[path = "clipboard_macos.rs"] mod inside;
         const S: &str = include_str!("data.txt");
+        r#include!("hidden.inc");
+        use std::include as inc;
+        wrap!(include);
+        #[path = "hidden.inc"] mod hidden;
+        #[include = "icons/**/*.svg"] struct Assets;
+        struct Filter { include: bool }
+        fn f(x: Filter) -> bool { let include = x.include; include }
     "#;
-    assert_eq!(problem_lines(source), vec![2, 3, 4]);
+    assert_eq!(problem_lines(source), vec![2, 3, 4, 7, 8, 9, 10]);
+}
+
+#[test]
+fn a_shebang_line_is_not_code() {
+    let source = "#!/usr/bin/env run-cargo-script --unsafe\nfn a() {}\n";
+    assert_eq!(problem_lines(source), Vec::<usize>::new());
+    // An inner attribute is not a shebang.
+    assert_eq!(anchors("#![allow(unsafe_code)]\n"), vec!["file"]);
+}
+
+#[test]
+fn source_discovery_skips_only_target_and_git() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for file in [
+        "src/a.rs",
+        "tools/b.rs",
+        "nested/target/c.rs",
+        "target/d.rs",
+        ".git/e.rs",
+        "src/notes.txt",
+    ] {
+        let path = dir.path().join(file);
+        fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        fs::write(&path, "").expect("write");
+    }
+    let found: Vec<String> = rust_sources(dir.path())
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
+    assert_eq!(found, vec!["nested/target/c.rs", "src/a.rs", "tools/b.rs"]);
+}
+
+#[test]
+fn build_targets_outside_the_tree_are_found() {
+    let manifest = r#"
+[package]
+build = "build.rs"
+[lib]
+path = "src/lib.rs"
+[[bin]]
+path = "tools/helper.inc"
+[[bin]]
+path = "../outside.rs" # a comment
+[dependencies.local]
+path = "../local"
+[patch.crates-io.other]
+path = "../other"
+[package.metadata]
+build = false
+"#;
+    assert_eq!(
+        stray_target_paths(manifest),
+        vec![
+            "Cargo.toml:7: path = \"tools/helper.inc\"",
+            "Cargo.toml:9: path = \"../outside.rs\""
+        ]
+    );
+}
+
+#[test]
+fn lint_flags_outside_cargo_toml_are_found() {
+    assert_eq!(
+        cargo_config_overrides("[build]\nrustflags = [\"--cap\\u002dlints=allow\"]\n"),
+        vec!["cap-lints"]
+    );
+    assert_eq!(
+        cargo_config_overrides("[alias]\nt = \"test --config x.toml\"\ninclude = [\"a.toml\"]\n"),
+        vec!["--config", "include"]
+    );
+    assert_eq!(
+        cargo_config_overrides("[target.x]\nrustflags = [\"-A\", \"UNSAFE\\x5fCODE\"]\n"),
+        vec!["unsafe_code"]
+    );
+    assert!(
+        cargo_config_overrides("[target.x]\nrustflags = [\"--cfg\", \"aes_armv8\"]\n").is_empty()
+    );
+    assert_eq!(
+        workflow_overrides("env:\n  CARGO_BUILD_RUSTFLAGS: \"-A unsafe\\\n    -code\"\n"),
+        vec!["unsafe-code", "rustflags"]
+    );
+    assert!(workflow_overrides("run: git-cliff --config cliff.toml\n").is_empty());
 }
 
 #[test]
@@ -956,9 +1319,25 @@ fn malformed_source_is_an_error_not_a_pass() {
 
 #[test]
 fn lint_levels_are_read_from_the_lints_table() {
-    let manifest = "[package]\nunsafe_code = \"allow\"\n[lints.rust]\nunsafe_code = \"deny\"\n";
-    assert_eq!(lint_level(manifest, "unsafe_code").as_deref(), Some("deny"));
-    let table = "[lints.rust]\nunsafe_code = { level = \"warn\", priority = 1 }\n";
-    assert_eq!(lint_level(table, "unsafe_code").as_deref(), Some("warn"));
-    assert_eq!(lint_level("[lints.rust]\n", "unsafe_code"), None);
+    let level = unsafe_code_level;
+    assert_eq!(
+        level("[package]\nunsafe_code = \"allow\"\n[lints.rust]\nunsafe_code = \"deny\"\n"),
+        Ok("deny".to_string())
+    );
+    assert_eq!(
+        level("[lints.rust]\nunsafe_code = \"allow\" # was \"deny\"\n"),
+        Ok("allow".to_string())
+    );
+    assert_eq!(
+        level("[ lints . \"rust\" ]\nunsafe_code = { level = \"warn\", priority = 1 }\n"),
+        Ok("warn".to_string())
+    );
+    assert_eq!(
+        level("[lints.rust]\n\"unsafe_code\" = 'forbid'\n"),
+        Ok("forbid".to_string())
+    );
+    assert!(level("[lints.rust]\nunsafe_code = \"deny\"\nunsafe-code = \"allow\"\n").is_err());
+    assert!(level("[lints]\nrust.unsafe_code = \"allow\"\n").is_err());
+    assert!(level("[lints.rust]\nunsafe_code = \"loud\"\n").is_err());
+    assert!(level("[lints.rust]\n").is_err());
 }
