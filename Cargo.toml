@@ -27,18 +27,20 @@ incremental = false
 # those land upstream; bump it deliberately and re-run the interop round trip
 # against KeePassXC first.
 keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "b1093d2", features = ["save_kdbx4", "totp", "_merge"] }
-# Deliberately without a `rev`. gpui-component's manifest references Zed
-# without one, and Cargo treats `git+url` and `git+url?rev=X` as two distinct
-# sources: adding a rev here compiles two incompatible `gpui::App` types and
-# fails with hundreds of trait mismatches. Cargo.lock is therefore the only
-# pin (currently 1870e269), and CI builds with `--locked` so a drifting lock
-# fails the build instead of silently pulling an arbitrary upstream commit.
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
-# Keep both Longbridge crates on the same tested source revision. Their manifest
-# references Zed without a rev, so Cargo.lock owns that one shared GPUI SourceId.
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "b004e595cf5de98a73b6b561394a559a94ae1e2a" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "b004e595cf5de98a73b6b561394a559a94ae1e2a" }
+# GPUI ships as the crates.io snapshot family `gpui-pre` (0.3.8 = zed@279fe07).
+# gpui-component requires exactly this snapshot (=0.3.8); these pins must match it,
+# or resolution fails loudly instead of drifting. On every bump: diff the snapshot
+# against its Zed commit (scripts/verify-gpui-pre.sh), read the GPUI Kit release
+# notes, and keep CI on --locked.
+# Held by Cargo.lock alone, not by these pins: gpui-base and
+# gpui-component-macros at 0.7.1 (gpui-component asks only for ^0.7.1; set with
+# `cargo update -p <crate> --precise 0.7.1`), and the Zed exact pins gpui-pre
+# relaxed to `^` (objc2-*, cocoa, taffy). A bare `cargo update` lifts them all,
+# and gpui-base 0.7.2 also brings gpui-fast into the lock.
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
+gpui-component = "=0.7.1"
+gpui-kit-assets = "=0.7.1"
 rust-embed = "8"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -62,7 +64,7 @@ serde_json = "1"
 keyring = { version = "3", features = ["apple-native"] }
 url = "2"
 sha2 = "0.10"
-notify = "7"
+notify = "8"
 # Auto-update: cargo-packager parses cross-platform release metadata. FerrisPass
 # verifies signed metadata and uses its own transactional installer on macOS.
 cargo-packager-updater = "0.2"
@@ -145,6 +147,13 @@ block2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
+# Headless UI tests (`#[gpui::test]`, `TestAppContext`). These are the features
+# gpui-kit's `test-support` turns on, minus the gpui-kit facade itself:
+# gpui-pre-macros rewrites every generated `gpui::` path to `gpui_kit::` as soon
+# as the manifest names gpui-kit, dev-dependencies included, and the non-test
+# library build then fails to resolve `gpui_kit`.
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
+gpui-component = { version = "=0.7.1", features = ["test-support"] }
 
 [lints.rust]
 # `deny` (rather than `forbid`) so a single targeted module - currently

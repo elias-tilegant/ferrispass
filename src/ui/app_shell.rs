@@ -35,7 +35,7 @@ use gpui::{
     ScrollStrategy, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, VirtualListScrollHandle, WindowExt as _,
+    ActiveTheme as _, VirtualListScrollHandle, WindowExt as _,
     input::{InputEvent, InputState},
     slider::{SliderState, SliderValue},
 };
@@ -3472,8 +3472,13 @@ impl AppShell {
         }
     }
 
+    /// Moves the focus into the vault search. Since GPUI Kit 0.7 a text field
+    /// passes Cmd+F on to the shell, so this also runs from inside a field; that
+    /// is intended, Cmd+F always searches. While an overlay is open the search
+    /// field is hidden or behind a modal, so the focus stays where it is.
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.read(cx).vault_browser().is_some() {
+        let state = self.state.read(cx);
+        if state.vault_browser().is_some() && !state.overlay().is_active() {
             self.search_input
                 .update(cx, |input, cx| input.focus(window, cx));
         }
@@ -3918,14 +3923,8 @@ impl AppShell {
 }
 
 impl Render for AppShell {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let body = AppShell::render_body(self, cx);
-        // Without this layer the `Root::notification` `NotificationList`
-        // never gets painted - `window.push_notification(...)` queues
-        // toasts into a list that nothing renders, so the user sees
-        // nothing despite the call site looking correct. Mirrors the
-        // gpui-component story-shell pattern.
-        let notification_layer = Root::render_notification_layer(window, cx);
         let clipboard_pill = self.render_clipboard_pill();
         let modal_overlay = self.render_modal_overlay(cx);
 
@@ -3985,7 +3984,6 @@ impl Render for AppShell {
             .child(body)
             .children(modal_overlay)
             .children(clipboard_pill)
-            .children(notification_layer)
     }
 }
 

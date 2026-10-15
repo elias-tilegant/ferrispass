@@ -29,9 +29,10 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # `--locked` is the pin for the Zed dependency: gpui-component forces us
-      # to reference Zed without a rev, so Cargo.lock is the only thing holding
-      # the revision. A drifting lock must fail the build, not slip through.
+      # `--locked` keeps the exact gpui-pre pins in Cargo.toml and Cargo.lock
+      # together: GPUI Kit requires one gpui-pre snapshot (=0.3.8), and every
+      # other crate in the tree is held by the lock alone. A drifting lock must
+      # fail the build, not slip through.
       - name: Build
         run: cargo build --locked --verbose
 

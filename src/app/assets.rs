@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use anyhow::anyhow;
 use gpui::{AssetSource, Result, SharedString};
-use gpui_component_assets::Assets as ComponentAssets;
+use gpui_kit_assets::Assets as ComponentAssets;
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
