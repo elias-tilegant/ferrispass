@@ -17,6 +17,14 @@ panic = "abort"
 debug = 0
 incremental = false
 
+# Build scripts and proc macros keep their symbols. They run on the build
+# machine and never end up in the app. With Apple's toolchain 27 and a
+# deployment target of 12.0 or later, dyld refuses the stripped proc-macro
+# dylibs ("mis-aligned LINKEDIT string pool") and the build stops with
+# E0463 for ztracing_macro. The shipped binaries are still stripped.
+[profile.release.build-override]
+strip = "none"
+
 [dependencies]
 # Pinned to the elias-tilegant/keepass-rs fork. It carries three KDBX 4
 # write-path interop fixes (AES-KDF UUID, omit-None-Option XML fields, base64
