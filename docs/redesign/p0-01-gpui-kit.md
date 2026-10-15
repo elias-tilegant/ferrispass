@@ -201,4 +201,4 @@ Already in 0.9.2, not caused by the migration: the password health card showed 9
 
 - Checked on: 2026-10-15 on macOS 27.0.1, macOS 26 still open
 - Differences: see above
-- Migration approved for 0.9.3: [ ] yes  [ ] no
+- Migration approved for 0.9.3: [x] yes  [ ] no (2026-10-15)
