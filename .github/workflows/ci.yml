@@ -18,6 +18,32 @@ jobs:
           # The commit-message scan needs the range, not just the tip.
           fetch-depth: 0
 
+      # The release build targets macOS 26 and needs the macOS 26 SDK or newer,
+      # and which SDK there is depends only on the runner image. release.yml
+      # runs on the same macos-latest image, so checking here shows on every
+      # pull request whether the release can build, instead of on a tag. Same
+      # check as scripts/build-mac.sh, and the floor is read from there so it
+      # is set in one place.
+      - name: macOS SDK covers the deployment target
+        run: |
+          min=$(sed -n 's/^MIN_MACOS="\([0-9][0-9.]*\)"$/\1/p' scripts/build-mac.sh)
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          echo "macOS SDK ${sdk}, deployment target ${min}"
+          # Both must be numbers: [ "" -lt 26 ] exits 2, and an if reads that
+          # as a pass.
+          if ! [[ "$min" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::MIN_MACOS not found in scripts/build-mac.sh"
+            exit 1
+          fi
+          if ! [[ "$sdk" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::unexpected macOS SDK version '${sdk}'"
+            exit 1
+          fi
+          if [ "${sdk%%.*}" -lt "${min%%.*}" ]; then
+            echo "::error::macOS SDK ${sdk} is older than the deployment target ${min}. release.yml runs on the same image: move both to an image with Xcode ${min%%.*} or newer"
+            exit 1
+          fi
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
