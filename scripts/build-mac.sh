@@ -238,6 +238,10 @@ mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
 mv "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${BINARY_NAME}"
 cp "${CLI_BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${CLI_BINARY_NAME}"
 mv "${DIST_DIR}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+# The OFL (JetBrains Mono) and the ISC license (Lucide icons) require their
+# texts to travel with every copy. Copied before signing, so the seal covers them.
+mkdir -p "${APP_BUNDLE}/Contents/Resources/Licenses"
+cp "${PROJECT_ROOT}/assets/licenses/"*.txt "${APP_BUNDLE}/Contents/Resources/Licenses/"
 echo "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
 sed "s/__VERSION__/${VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
     > "${APP_BUNDLE}/Contents/Info.plist"
