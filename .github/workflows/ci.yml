@@ -52,11 +52,18 @@ jobs:
       # to enforce everywhere than to keep a list current.
       - name: Reject em and en dashes
         run: |
+          # The pattern is built from the UTF-8 bytes of the two dashes and
+          # matched with -E: the runner's grep is BSD grep, which has no -P.
+          # The earlier -P form exited 2 on every run, and both scans read
+          # that as clean. The self-test makes a grep that cannot match fail
+          # the job instead of passing it.
+          pat=$(printf '\342\200\224|\342\200\223')
+          printf 'x\342\200\224\n' | grep -qE "$pat" || { echo "::error::dash scan self-test failed"; exit 1; }
           # Collected rather than tested by exit code: xargs may split the
           # file list into several greps, and only the last one's status
           # would survive the pipeline. -I keeps binary assets out, where
           # the three bytes of an em dash can occur by chance.
-          found=$(git ls-files -z | xargs -0 grep -nIP '\x{2014}|\x{2013}' || true)
+          found=$(git ls-files -z | xargs -0 grep -nIE "$pat" || true)
           if [ -n "$found" ]; then
             echo "$found"
             echo "::error::em or en dash found in a file; use a plain hyphen"
@@ -75,7 +82,10 @@ jobs:
             echo "no comparable base for this event; skipping"
             exit 0
           fi
-          if git log --format='%B' "$BASE_SHA..$HEAD_SHA" | grep -nP '\x{2014}|\x{2013}'; then
+          # Same pattern and self-test as the file scan above.
+          pat=$(printf '\342\200\224|\342\200\223')
+          printf 'x\342\200\224\n' | grep -qE "$pat" || { echo "::error::dash scan self-test failed"; exit 1; }
+          if git log --format='%B' "$BASE_SHA..$HEAD_SHA" | grep -nE "$pat"; then
             echo "::error::em or en dash found in a commit message; use a plain hyphen"
             exit 1
           fi
