@@ -211,9 +211,9 @@ fn cmd_c_copies_the_password_from_the_list_but_not_from_a_text_field(cx: &mut Te
 /// the shell. Up to GPUI Kit 0.5 a field that is not searchable (none in
 /// FerrisPass is) swallowed `Search`, so Cmd+F inside a field did nothing.
 /// Since 0.7 such a field passes it on and the shell's `FocusSearch` runs.
-/// Elias decided on 2026-10-15 to keep that: Cmd+F always searches. While an
-/// overlay is open, `AppShell::focus_search` leaves the focus alone; see
-/// docs/redesign/p0-01-abnahme.md.
+/// That is kept on purpose: Cmd+F always searches. While an overlay is open,
+/// `AppShell::focus_search` leaves the focus alone; see
+/// docs/redesign/p0-01-gpui-kit.md.
 #[gpui::test]
 fn cmd_f_focuses_the_search_from_the_shell_and_from_a_text_field(cx: &mut TestAppContext) {
     let (window, shell) = open_shell(cx);
