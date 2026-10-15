@@ -34,6 +34,8 @@ GPUI's inspector is not in the release build. No `inspector` feature shows up in
 
 Without `MACOSX_DEPLOYMENT_TARGET`, rustc writes `minos 11.0` into the binary. `scripts/build-mac.sh` sets the target from `MIN_MACOS`, which is now 26.0, and now also stops if the selected SDK is older than that. `release.yml` runs on the same `macos-latest` image as CI, and the first CI run showed that image to be `macos-26-arm64` with SDK 26.5 (see P0.02), so release builds meet the new minimum.
 
+With Apple's toolchain 27 (Xcode 27 beta and the Command Line Tools 27 alike), the local release build stopped with `E0463 can't find crate for ztracing_macro`. rustc strips the proc-macro dylibs, and once the deployment target is 12.0 or later, dyld refuses the stripped files ("mis-aligned LINKEDIT string pool"). This has nothing to do with the new minimum, 12.0 fails the same way. `[profile.release.build-override] strip = "none"` in `Cargo.toml` keeps the symbols in build scripts and proc macros, which only run on the build machine. With it, `scripts/build-mac.sh --skip-notarize` builds again after a clean rebuild of both proc macros, and the shipped binaries are still stripped (`nm -U` lists only `__mh_execute_header`). The `macos-latest` image still comes with SDK 26.5, and the setting keeps `release.yml` working once the image moves to toolchain 27.
+
 ## Supply chain
 
 How the check works is described in [release-process.md](../release-process.md#gpui-supply-chain-on-every-gpui-bump). The script is `scripts/verify-gpui-pre.sh`, and its final run exited with 0. In short:
@@ -134,42 +136,44 @@ Same colors, radii and font families, both at startup without a window and when 
 
 "Old" is the installed v0.9.2, "new" is a build of this branch (`scripts/build-mac.sh --skip-notarize`, output `dist/FerrisPass.app`). Quit the old app before starting the new one, because both use the same bundle ID and the same settings.
 
+First run on 2026-10-15 on macOS 27.0.1, with a test vault of 3,501 entries in six groups and the same settings for old and new. A tick means the item passed in the new build. Items without a tick are still open, and the note says how far they got.
+
 **Minimum version**
-- [ ] `plutil -extract LSMinimumSystemVersion raw dist/FerrisPass.app/Contents/Info.plist` prints `26.0`
-- [ ] Starts on macOS 26 (VM or a colleague's Mac) and on macOS 27
-- [ ] `dist/FerrisPass.app/Contents/Resources/Licenses/` contains `ISC-Lucide.txt` and `OFL-JetBrainsMono.txt`
+- [x] `plutil -extract LSMinimumSystemVersion raw dist/FerrisPass.app/Contents/Info.plist` prints `26.0`
+- [ ] Starts on macOS 26 (VM or a colleague's Mac) and on macOS 27. Starts on 27, not tried on 26 yet.
+- [x] `dist/FerrisPass.app/Contents/Resources/Licenses/` contains `ISC-Lucide.txt` and `OFL-JetBrainsMono.txt`
 
 **Unlock and lock**
-- [ ] Unlock with the password
+- [x] Unlock with the password
 - [ ] Unlock with Touch ID, including the automatic prompt after auto-lock (`f956864`)
 - [ ] The Argon2 cost prompt when opening a KeePassXC vault with expensive KDF settings
-- [ ] Auto-lock, and locking on screen lock and on sleep
+- [ ] Auto-lock, and locking on screen lock and on sleep. Auto-lock after one minute works, and with an edited entry open it shows the error that the unsaved changes were discarded. Screen lock and sleep not tried yet.
 
 **Toasts**
-- [ ] An error toast stays, a success toast fades out
-- [ ] Compare the position, old vs. new, and write it down
+- [x] An error toast stays, a success toast fades out. Toasts stack, so the error toast is still there after a later one has faded.
+- [x] Compare the position, old vs. new, and write it down. Same corner, same top edge, same right margin. The new toast is narrower, about 381 pt instead of 447 pt, so longer messages wrap earlier.
 
 **Appearance**
-- [ ] Theme System, Light and Dark, each switched live while the app runs. ⌘⇧D toggles as before
-- [ ] Font unchanged (the system font fix is a separate change, see SP09 in [gpui-matrix.md](../gpui-matrix.md))
-- [ ] Icons: Check, Plus, Folder, Chevron up, down and right, Settings, Close, Star, StarFill, Eye, EyeOff
-- [ ] Scrollbars in the list and in the settings as before
+- [x] Theme System, Light and Dark, each switched live while the app runs. ⌘⇧D toggles as before (Light, Dark, System). System only tried with macOS in light mode.
+- [x] Font unchanged (the system font fix is a separate change, see SP09 in [gpui-matrix.md](../gpui-matrix.md))
+- [ ] Icons: Check, Plus, Folder, Chevron up, down and right, Settings, Close, Star, StarFill, Eye, EyeOff. All unchanged except Chevron up, Chevron right and StarFill, which didn't come up.
+- [ ] Scrollbars in the list and in the settings as before. Both scroll, the scrollbars themselves not compared yet.
 
 **Password field**
-- [ ] Right-click in the protected field shows only Paste and Select All, masked and revealed
-- [ ] ⌘C and ⌘X copy nothing, masked and revealed (paste into TextEdit to check)
-- [ ] Edit > Copy in the revealed protected field copies nothing
+- [x] Right-click in the protected field shows only Paste and Select All, masked and revealed
+- [x] ⌘C and ⌘X copy nothing, masked and revealed (paste into TextEdit to check). Checked with a marker string on the clipboard, which stayed. The master password field doesn't copy either.
+- [x] Edit > Copy in the revealed protected field copies nothing
 
 **Edit menu and Kit components**
-- [ ] Undo, Redo, Cut, Copy and Paste in normal fields
-- [ ] Generator sliders and checkboxes, spinner, tooltips
-- [ ] Group context menu with the arrow keys, Enter and Esc
+- [x] Undo, Redo, Cut, Copy and Paste in normal fields, from the keyboard and from the Edit menu
+- [ ] Generator sliders and checkboxes, spinner, tooltips. They look right but haven't been used yet.
+- [x] Group context menu with the arrow keys, Enter and Esc
 
 **Keyboard**
-- [ ] ⌘C in the entry list copies the password. ⌘C in the search field with a selection copies the text
-- [ ] ⌘F with no field focused, and from a field in the vault view, jumps to the search field
-- [ ] ⌘F in the entry editor and in every other overlay does nothing, and the focus stays in the field
-- [ ] Tab and ⇧Tab as before. Enter in the master password field unlocks, Esc cancels
+- [x] ⌘C in the entry list copies the password. ⌘C in the search field with a selection copies the text
+- [ ] ⌘F with no field focused, and from a field in the vault view, jumps to the search field. Works with no field focused, the second case is still open.
+- [ ] ⌘F in the entry editor and in every other overlay does nothing, and the focus stays in the field. Checked in the entry editor only.
+- [ ] Tab and ⇧Tab as before. Enter in the master password field unlocks, Esc cancels. Tab, Enter, and Esc in the editor (it asks before discarding) work. ⇧Tab still open.
 
 **Auto-Type, launcher, sync**
 - [ ] Hotkey ⌃⌥⌘V with the window hidden, and ⌘⇧T with the countdown
@@ -178,13 +182,23 @@ Same colors, radii and font families, both at startup without a window and when 
 - [ ] iCloud watcher (notify 8): change the file from outside, the event arrives
 
 **Lists, windows, updates, VoiceOver**
-- [ ] Vault switcher (⌘O). A list with about 3,500 entries scrolls smoothly
-- [ ] ⌘W hides and locks, a click on the Dock icon brings the window back. ⌘Q is refused while a save is running
-- [ ] The update check runs (the updater doesn't check the minimum version)
-- [ ] VoiceOver spot check: labels unchanged or better
+- [ ] Vault switcher (⌘O). A list with about 3,500 entries scrolls smoothly. ⌘O works and the list scrolls through all entries. Smoothness needs a look by eye.
+- [ ] ⌘W hides and locks, a click on the Dock icon brings the window back. ⌘Q is refused while a save is running. Driven by UI automation, ⌘W, File > Close Window and the red close button did nothing, in 0.9.2 as well. Most likely the window wasn't key, so this needs a try by hand. ⌘Q quits.
+- [x] The update check runs (the updater doesn't check the minimum version). "Check now" reports "You're on the latest version."
+- [ ] VoiceOver spot check: labels unchanged or better. In 0.9.2 the accessibility API sees only the window title and the three window buttons, none of the content.
 
 **Screenshots, old vs. new**, each in light and dark, same window size, same vault, stored outside the repo: Welcome, Unlock, vault browser, editor, settings (all tabs), conflict, switcher, About, toast, group context menu, password field context menu. Apart from the toast position, write down every difference here instead of quietly fixing it.
 
-- Checked on: ______ on macOS ______ and ______
-- Differences: ______
+All taken except the conflict view, which needs a sync setup. Differences:
+- Text in input fields starts about 2 pt further left, and the eye button in password fields sits about 5 pt further right.
+- The generator checkboxes are blue instead of black. In dark mode they now look checked; in 0.9.2 they looked empty there.
+- The clear button in the Auto-Type sequence field is a plain × instead of a circled one.
+- In dark mode the group context menu is a slightly lighter gray.
+- The native context menu of the password field stays light in dark mode, in both versions.
+- Settings > General shows "Registration blocked" for the CLI in the new build. That's only because it runs from `dist/` while `/usr/local/bin/ferrispass-cli` points into `/Applications`.
+
+Already in 0.9.2, not caused by the migration: the password health card showed 91 bits for an entry and later 45 bits for the same entry. I haven't looked into why yet.
+
+- Checked on: 2026-10-15 on macOS 27.0.1, macOS 26 still open
+- Differences: see above
 - Migration approved for 0.9.3: [ ] yes  [ ] no

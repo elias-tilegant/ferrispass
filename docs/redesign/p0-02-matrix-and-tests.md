@@ -115,4 +115,4 @@ Two smaller fixes: `#[allow_internal_unsafe]` now counts as unsafe, and a sheban
 
 - Spike runs for the matrix rows. Results go into `docs/gpui-matrix.md`.
 - The five "unmaintained" warnings from `cargo audit`. Nothing to do about them yet.
-- Carried over from P0.01: approving the dev dependency setup (`gpui` and `gpui-component` with `test-support` instead of `gpui-kit`), running the [manual check](p0-01-gpui-kit.md#manual-check-before-release), and signing off the migration.
+- Carried over from P0.01: approving the dev dependency setup (`gpui` and `gpui-component` with `test-support` instead of `gpui-kit`), the open items of the [manual check](p0-01-gpui-kit.md#manual-check-before-release), and signing off the migration.
