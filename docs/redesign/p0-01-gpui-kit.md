@@ -126,7 +126,7 @@ Same colors, radii and font families, both at startup without a window and when 
 
 ## What turned out differently
 
-- Dev dependencies: I meant to add `gpui-kit =0.7.1` with `test-support`. That doesn't work. `gpui-pre-macros` 0.3.8 rewrites every generated `gpui::` path to `gpui_kit::` as soon as the manifest lists `gpui-kit`, dev dependencies included, and the normal library build then fails. So `[dev-dependencies]` now has `gpui` (gpui-pre) and `gpui-component`, each with `test-support`, which are the features `gpui-kit/test-support` would turn on. If FerrisPass ever depends on `gpui-kit` directly, all gpui macros will go through the facade. I haven't decided yet whether to keep it this way.
+- Dev dependencies: I meant to add `gpui-kit =0.7.1` with `test-support`. That doesn't work. `gpui-pre-macros` 0.3.8 rewrites every generated `gpui::` path to `gpui_kit::` as soon as the manifest lists `gpui-kit`, dev dependencies included, and the normal library build then fails. So `[dev-dependencies]` now has `gpui` (gpui-pre) and `gpui-component`, each with `test-support`, which are the features `gpui-kit/test-support` would turn on. Only test builds see the difference, so I'm keeping it. If FerrisPass ever depends on `gpui-kit` directly, all gpui macros will go through the facade.
 - proptest is already in `Cargo.lock`, pulled in by `gpui-pre/test-support`, and only appears in test builds.
 - gpui-base and gpui-component-macros are held at 0.7.1 with `cargo update -p ... --precise 0.7.1`, which only `Cargo.lock` records (there's a comment in `Cargo.toml`). A plain `cargo update` would raise them, and gpui-base 0.7.2 pulls gpui-fast into `Cargo.lock`.
 - The password field's context menu is built by `protected_context_menu() -> gpui::Menu` and converted with `NativeMenu::from`, so a test can read the entries. The entries haven't changed.
@@ -201,4 +201,4 @@ Already in 0.9.2, not caused by the migration: the password health card showed 9
 
 - Checked on: 2026-10-15 on macOS 27.0.1, macOS 26 still open
 - Differences: see above
-- Migration approved for 0.9.3: [x] yes  [ ] no (2026-10-15)
+- Migration approved for 0.9.3: yes, on 2026-10-15
