@@ -19,81 +19,87 @@ pub fn apply(cx: &mut App) {
     // `panel` (= near-black in dark mode) would be invisible.
     let on_accent = if is_dark { p.text } else { p.panel };
 
-    let theme = Theme::global_mut(cx);
-    theme.font_family = SharedString::from(
-        "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"Helvetica Neue\", sans-serif",
-    );
-    theme.mono_font_family = SharedString::from("JetBrains Mono");
+    // `Theme::update` rather than `global_mut`: since GPUI Kit 0.7 the theme keeps
+    // its colors twice (solid `colors` and renderable `tokens`) plus a Base-layer
+    // projection for scrollbars and resize handles. Only `update` reconciles all
+    // three after the edit and refreshes open windows; `global_mut` would leave
+    // the tokens and the projection on the stock palette.
+    Theme::update(cx, |theme| {
+        theme.font_family = SharedString::from(
+            "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"Helvetica Neue\", sans-serif",
+        );
+        theme.mono_font_family = SharedString::from("JetBrains Mono");
 
-    let c = &mut theme.colors;
+        let c = &mut theme.colors;
 
-    c.background = p.bg;
-    c.foreground = p.text;
-    c.border = p.border;
-    c.muted_foreground = p.text_muted;
-    c.muted = p.sidebar;
+        c.background = p.bg;
+        c.foreground = p.text;
+        c.border = p.border;
+        c.muted_foreground = p.text_muted;
+        c.muted = p.sidebar;
 
-    c.popover = p.panel;
-    c.popover_foreground = p.text;
+        c.popover = p.panel;
+        c.popover_foreground = p.text;
 
-    c.sidebar = p.sidebar;
-    c.sidebar_foreground = p.text;
-    c.sidebar_border = p.border;
-    c.sidebar_accent = p.blue;
-    c.sidebar_accent_foreground = on_accent;
-    c.sidebar_primary = p.blue;
-    c.sidebar_primary_foreground = on_accent;
+        c.sidebar = p.sidebar;
+        c.sidebar_foreground = p.text;
+        c.sidebar_border = p.border;
+        c.sidebar_accent = p.blue;
+        c.sidebar_accent_foreground = on_accent;
+        c.sidebar_primary = p.blue;
+        c.sidebar_primary_foreground = on_accent;
 
-    c.primary = p.blue;
-    c.primary_hover = p.blue_hover;
-    c.primary_active = p.blue_hover;
-    c.primary_foreground = on_accent;
+        c.primary = p.blue;
+        c.primary_hover = p.blue_hover;
+        c.primary_active = p.blue_hover;
+        c.primary_foreground = on_accent;
 
-    c.button_primary = p.blue;
-    c.button_primary_hover = p.blue_hover;
-    c.button_primary_active = p.blue_hover;
-    c.button_primary_foreground = on_accent;
+        c.button_primary = p.blue;
+        c.button_primary_hover = p.blue_hover;
+        c.button_primary_active = p.blue_hover;
+        c.button_primary_foreground = on_accent;
 
-    c.accent = p.blue_soft;
-    c.accent_foreground = p.text;
+        c.accent = p.blue_soft;
+        c.accent_foreground = p.text;
 
-    c.secondary = p.sidebar;
-    c.secondary_foreground = p.text;
-    c.secondary_hover = p.border;
-    c.secondary_active = p.border_strong;
+        c.secondary = p.sidebar;
+        c.secondary_foreground = p.text;
+        c.secondary_hover = p.border;
+        c.secondary_active = p.border_strong;
 
-    c.danger = p.red;
-    c.danger_foreground = on_accent;
-    c.success = p.green;
-    c.success_foreground = on_accent;
-    c.info = p.blue;
-    c.info_foreground = on_accent;
-    c.warning = p.yellow;
-    c.warning_foreground = on_accent;
+        c.danger = p.red;
+        c.danger_foreground = on_accent;
+        c.success = p.green;
+        c.success_foreground = on_accent;
+        c.info = p.blue;
+        c.info_foreground = on_accent;
+        c.warning = p.yellow;
+        c.warning_foreground = on_accent;
 
-    c.input = p.border_strong;
-    c.ring = p.blue_border;
-    c.caret = p.blue;
-    c.selection = p.blue_soft;
+        c.input = p.border_strong;
+        c.ring = p.blue_border;
+        c.caret = p.blue;
+        c.selection = p.blue_soft;
 
-    c.list = p.panel;
-    c.list_hover = p.sidebar;
-    c.list_active = p.blue_soft;
-    c.list_active_border = p.blue_border;
+        c.list = p.panel;
+        c.list_hover = p.sidebar;
+        c.list_active = p.blue_soft;
+        c.list_active_border = p.blue_border;
 
-    c.switch = p.border_strong;
-    c.switch_thumb = p.panel;
+        c.switch = p.border_strong;
+        c.switch_thumb = p.panel;
 
-    c.title_bar = p.panel;
-    c.title_bar_border = p.border;
+        c.title_bar = p.panel;
+        c.title_bar_border = p.border;
 
-    c.red = p.red;
-    c.green = p.green;
-    c.blue = p.blue;
-    c.yellow = p.yellow;
+        c.red = p.red;
+        c.green = p.green;
+        c.blue = p.blue;
+        c.yellow = p.yellow;
 
-    theme.radius = gpui::px(6.0);
-    theme.radius_lg = gpui::px(10.0);
+        theme.radius = gpui::px(6.0);
+        theme.radius_lg = gpui::px(10.0);
+    });
 }
 
 /// Put the chosen appearance into effect and re-apply our palette overrides.

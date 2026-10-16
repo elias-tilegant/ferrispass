@@ -68,7 +68,7 @@ Download `FerrisPass-X.Y.Z-arm64.dmg` from the [Releases](https://github.com/eli
 
 The app is signed with a Developer ID and Apple-notarized, so first launch opens cleanly with no Gatekeeper override.
 
-Requires Apple Silicon (M1 or newer) and macOS 12 (Monterey) or later. Intel Macs are not supported.
+Requires Apple Silicon (M1 or newer) and macOS 26 or later. Intel Macs are not supported.
 
 ## Command-line interface
 

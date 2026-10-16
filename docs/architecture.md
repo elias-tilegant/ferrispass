@@ -245,7 +245,7 @@ enter the runtime synchronously. That Tokio runtime is the only one: everything 
 
 ## UI rendering
 
-GPUI is element-based, not retained-tree. Every render of a screen produces a fresh element tree. State changes trigger re-renders via `cx.notify()` on the relevant `Entity`. The `gpui-component` crate provides h_flex/v_flex layout, theme-aware styling, and ready-made widgets (Input, Slider, Icon).
+GPUI is element-based, not retained-tree. Every render of a screen produces a fresh element tree. State changes trigger re-renders via `cx.notify()` on the relevant `Entity`. GPUI Kit (gpui-component, gpui-base) provides h_flex/v_flex layout, theme-aware styling, and ready-made widgets (Input, Slider, Icon).
 
 Screens live in `src/ui/screens/` and follow the convention:
 

@@ -18,6 +18,32 @@ jobs:
           # The commit-message scan needs the range, not just the tip.
           fetch-depth: 0
 
+      # The release build targets macOS 26 and needs the macOS 26 SDK or newer,
+      # and which SDK there is depends only on the runner image. release.yml
+      # runs on the same macos-latest image, so checking here shows on every
+      # pull request whether the release can build, instead of on a tag. Same
+      # check as scripts/build-mac.sh, and the floor is read from there so it
+      # is set in one place.
+      - name: macOS SDK covers the deployment target
+        run: |
+          min=$(sed -n 's/^MIN_MACOS="\([0-9][0-9.]*\)"$/\1/p' scripts/build-mac.sh)
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          echo "macOS SDK ${sdk}, deployment target ${min}"
+          # Both must be numbers: [ "" -lt 26 ] exits 2, and an if reads that
+          # as a pass.
+          if ! [[ "$min" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::MIN_MACOS not found in scripts/build-mac.sh"
+            exit 1
+          fi
+          if ! [[ "$sdk" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::unexpected macOS SDK version '${sdk}'"
+            exit 1
+          fi
+          if [ "${sdk%%.*}" -lt "${min%%.*}" ]; then
+            echo "::error::macOS SDK ${sdk} is older than the deployment target ${min}. release.yml runs on the same image: move both to an image with Xcode ${min%%.*} or newer"
+            exit 1
+          fi
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -29,9 +55,10 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # `--locked` is the pin for the Zed dependency: gpui-component forces us
-      # to reference Zed without a rev, so Cargo.lock is the only thing holding
-      # the revision. A drifting lock must fail the build, not slip through.
+      # `--locked` keeps the exact gpui-pre pins in Cargo.toml and Cargo.lock
+      # together: GPUI Kit requires one gpui-pre snapshot (=0.3.8), and every
+      # other crate in the tree is held by the lock alone. A drifting lock must
+      # fail the build, not slip through.
       - name: Build
         run: cargo build --locked --verbose
 
@@ -51,11 +78,18 @@ jobs:
       # to enforce everywhere than to keep a list current.
       - name: Reject em and en dashes
         run: |
+          # The pattern is built from the UTF-8 bytes of the two dashes and
+          # matched with -E: the runner's grep is BSD grep, which has no -P.
+          # The earlier -P form exited 2 on every run, and both scans read
+          # that as clean. The self-test makes a grep that cannot match fail
+          # the job instead of passing it.
+          pat=$(printf '\342\200\224|\342\200\223')
+          printf 'x\342\200\224\n' | grep -qE "$pat" || { echo "::error::dash scan self-test failed"; exit 1; }
           # Collected rather than tested by exit code: xargs may split the
           # file list into several greps, and only the last one's status
           # would survive the pipeline. -I keeps binary assets out, where
           # the three bytes of an em dash can occur by chance.
-          found=$(git ls-files -z | xargs -0 grep -nIP '\x{2014}|\x{2013}' || true)
+          found=$(git ls-files -z | xargs -0 grep -nIE "$pat" || true)
           if [ -n "$found" ]; then
             echo "$found"
             echo "::error::em or en dash found in a file; use a plain hyphen"
@@ -74,7 +108,10 @@ jobs:
             echo "no comparable base for this event; skipping"
             exit 0
           fi
-          if git log --format='%B' "$BASE_SHA..$HEAD_SHA" | grep -nP '\x{2014}|\x{2013}'; then
+          # Same pattern and self-test as the file scan above.
+          pat=$(printf '\342\200\224|\342\200\223')
+          printf 'x\342\200\224\n' | grep -qE "$pat" || { echo "::error::dash scan self-test failed"; exit 1; }
+          if git log --format='%B' "$BASE_SHA..$HEAD_SHA" | grep -nE "$pat"; then
             echo "::error::em or en dash found in a commit message; use a plain hyphen"
             exit 1
           fi

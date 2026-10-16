@@ -60,6 +60,65 @@ tree and any custom icons survived. Copy it out of `$work` first, or run the
 KeePassXC step before leaving the shell. The KDBX write path is a pinned fork,
 and reading it with a second implementation is the only thing that proves it.
 
+## GPUI supply chain (on every GPUI bump)
+
+GPUI comes from crates.io as `gpui-pre`, a republication of Zed's GPUI crates
+by a single Longbridge maintainer, and GPUI Kit (`gpui-component`, `gpui-base`,
+`gpui-component-macros`, `gpui-kit-assets`) is published by Longbridge. Neither
+is a pinned git source any more, so every change of those pins in `Cargo.toml`
+is checked before the lock change is committed:
+
+```sh
+scripts/verify-gpui-pre.sh --keep    # exit 0: nothing unexpected
+cargo audit
+```
+
+The script downloads every `gpui-pre*` crate in `Cargo.lock` from
+static.crates.io, compares it with the lock's checksum, checks every archive
+member (regular files and directories under the crate directory only) before
+it writes anything, and diffs the crate against the Zed commit it names in
+`[package.metadata.gpui-pre]` (the crates carry no `.cargo_vcs_info.json`).
+That commit must equal `EXPECTED_ZED_REV` in the script and be on Zed's `main`.
+Manifests are compared on their own: the published `Cargo.toml`, the one Cargo
+builds with, against Zed's after workspace inheritance, every dependency field
+included. Git dependencies the republish swapped for crates.io releases are
+diffed against their git commit, manifests included. The GPUI Kit crates must
+come from `EXPECTED_KIT_REV`, the commit of their release tag; they are diffed
+against it, manifests included, and scanned for build scripts, network and
+process APIs, embedded files and `unsafe`. The resolved feature graph must not
+enable the inspector, speech or GitHub-download features, nor pull in
+gpui-fast, gpui-shell or gpui-webview. A file upstream that a crate leaves out
+counts as a difference too. Differences that were read and accepted live in
+`REVIEWED_FINDINGS` in the script, each with its reason; findings on files
+carry the full SHA-256 of both sides, so a change on either side fails the run
+again, and so does a listed finding that no longer appears. On a bump, set
+`EXPECTED_ZED_REV` and `EXPECTED_KIT_REV`, run the script, read every new
+finding in `report/`, and either add it to the list with its reason or reject
+the bump. Do not run a
+blanket `cargo update` afterwards: the republished manifests relax Zed's exact
+pins (`objc2-*` 0.3.2, `cocoa` 0.26.0, `taffy` 0.13.0) to caret requirements,
+and only the lock still holds the versions Zed builds with. The script fails
+when the lock drifts away from them.
+
+Result for gpui-pre 0.3.8 (zed@279fe07) and GPUI Kit 0.7.1, checked on
+14 October 2026: the checksums match the lock, all 22 Zed snapshot crates name
+the same commit, which is on Zed's `main`, and their sources are identical to
+Zed except for three patches by Longbridge's public republish script
+(`script/bump-gpui.ts` in longbridge/gpui-kit). `actions!` derives
+`$crate::Action`. The gpui-pre-apple build script reads five gpui source files
+from a vendored copy, which is byte-identical to Zed. gpui-pre-macros passes
+every macro's output through a rewrite to the `gpui-kit` facade: `gpui::` and
+`gpui_platform::` path heads, and string literals that contain them. That
+rewrite does nothing unless the crate being compiled names `gpui-kit` in its
+manifest, which is why FerrisPass cannot list `gpui-kit` even as a
+dev-dependency. The crates.io `zed-font-kit` asks for `dirs` 5 where Zed's pin
+asks for 6; on macOS font-kit only calls `dirs::home_dir`, which is the same
+code in both. The GPUI Kit crates match tag v0.7.1 byte for byte. Outside
+wasm they use no network or process APIs (gpui-kit-assets fetches icons with
+reqwest only on wasm), and on macOS they add no `unsafe` beyond what the
+previous git revision already had (the speech module is behind a feature that
+is off).
+
 ## Commit message conventions
 
 The Release-page body is auto-generated from commit messages by [git-cliff](https://git-cliff.org), driven by `cliff.toml` at the repo root. Prefix each commit with a Conventional-Commits-style tag so it lands in the right section.
