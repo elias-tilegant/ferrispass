@@ -121,7 +121,7 @@ is off).
 
 ## Commit message conventions
 
-The Release-page body is auto-generated from commit messages by [git-cliff](https://git-cliff.org), driven by `cliff.toml` at the repo root. Prefix each commit with a Conventional-Commits-style tag so it lands in the right section.
+The Release-page body is auto-generated from commit messages by [git-cliff](https://git-cliff.org), driven by `cliff.toml` at the repo root. Prefix each commit with a Conventional-Commits-style tag so it lands in the right section. A hand-written note for the tag, `docs/release-notes/<tag>.md`, goes above the generated list; [`docs/release-notes/README.md`](./release-notes/README.md) says what belongs in it.
 
 | Prefix | Section | Example |
 |---|---|---|
@@ -168,12 +168,86 @@ git push origin v0.x.y
 
 The `v` prefix matters - `release.yml` matches `tags: ['v*']`. Tagging without push to master means CI runs against a commit nobody else can see; not catastrophic but messy.
 
+A test build is tagged on `rebuild` instead, so the branch push is `git push origin rebuild`. Either way the tag only publishes a pre-release; going live is the next section.
+
+## Pre-releases, test builds and going live
+
+Every tag is published as a GitHub pre-release, whatever branch it comes
+from. The in-app updater asks `releases/latest` for its manifest, and GitHub
+resolves "latest" to the newest release *without* the pre-release flag, so a
+new tag reaches nobody's installed app on its own. Shipping a version to
+everyone is a separate step, taken by hand once the release page is right:
+
+```sh
+gh release edit vX.Y.Z --prerelease=false --latest
+```
+
+**Never do this for a tag with a hyphen** (`v0.10.0-pre.3`). Those are test
+builds, and they stay pre-releases. The version order is the second guard:
+`0.9.x < 0.10.0-pre.N < 0.10.0`, so a tester on a test build is never offered
+a 0.9.x as an update, and is offered the release once it is live.
+
+After the run, before going live, check the release page:
+
+- the release is marked Pre-release and carries the disk image, both
+  archives, `update.json` and their `.minisig` files;
+- the hand-written note, if there is one, sits above the generated list;
+- the `kanal-vorab` release carries this tag's `update.json` and
+  `update.json.minisig` (the version inside is the one just tagged).
+
+**0.9.x fixes** come from `master` and take exactly this path: tag, check,
+then mark the release latest.
+
+**Test builds** come from `rebuild`, and `rebuild` is tagged for nothing else:
+
+1. Set the version in `Cargo.toml` to `0.10.0-pre.N` and commit it as
+   `release: v0.10.0-pre.N`.
+2. Add a short build note, `docs/release-notes/v0.10.0-pre.N.md` (what goes
+   into it is in [`docs/release-notes/README.md`](./release-notes/README.md)),
+   in that commit or before it.
+3. Tag and push as above, with `rebuild` in place of `master`.
+
+Testers install them from the release page; they are never marked latest.
+
+**A release candidate** carries its real version number, without a suffix,
+and stays a pre-release while the test group uses it. Going live is the same
+`gh release edit` on that same release; nothing is rebuilt.
+
+**The pre-release channel.** After publishing, the workflow also copies
+`update.json` and `update.json.minisig` into a permanent release named
+`kanal-vorab`, replacing what was there. Its tag has no `v`, so it never
+starts the workflow. The app does not read this release yet; test builds
+will, to find the next test build, while builds without a suffix keep
+reading only `releases/latest`. A 0.9.x manifest there does no harm, since
+its version is below every test build. The release has to exist before the
+first tag that runs this workflow; create it once:
+
+```sh
+gh release create kanal-vorab --prerelease --title "Pre-release channel" \
+    --notes "Holds the update manifest of the newest tag. Do not delete."
+```
+
+If it is missing, the publish job fails at its last step, after the release
+itself is already up as a pre-release. Create `kanal-vorab`, then re-run the
+failed job.
+
+Two things this relies on:
+
+- Re-running the workflow for a version that is already live sets the
+  pre-release flag again, because the publishing step always does, and takes
+  the version off "latest". Mark it latest again afterwards.
+- Immutable releases stay off for this repository (Settings, General,
+  Releases). The publishing step creates a pre-release first and uploads the
+  files to it afterwards, and the channel release is rewritten on every tag;
+  an immutable release allows neither.
+
 ## What the pipeline does
 
 `release.yml` uses separate build, notes, signing, and publishing jobs. The
-build and notes jobs never receive the updater private key. The isolated
-signing job treats the generated notes as bounded data, verifies the payload
-size, and only then signs the payload and complete manifest.
+build and notes jobs never receive the updater private key. The notes job
+puts the tag's hand-written note, if there is one, above the generated list.
+The isolated signing job treats the combined notes as bounded data, verifies
+the payload size, and only then signs the payload and complete manifest.
 
 Stages, with rough timing:
 
@@ -189,7 +263,7 @@ Stages, with rough timing:
 | 8 | Staple notarization ticket | <5 s | - |
 | 9 | Generate `.app.tar.gz` + unsigned `update.json` with exact payload size | <10 s | `jq` missing or archive creation fails |
 | Sign | Inject notes, sign payload, then sign the complete manifest | <10 s | minisign key missing, malformed, or payload size mismatch |
-| End | `softprops/action-gh-release@v2` uploads to a GitHub Release | <30 s | `permissions: contents: write` not granted |
+| End | `softprops/action-gh-release@v2` publishes a pre-release with the files, then the manifest is copied into `kanal-vorab` | <30 s | `permissions: contents: write` not granted; `kanal-vorab` missing (see above) |
 
 Total wall-clock: usually 8-12 minutes.
 
@@ -251,7 +325,7 @@ git tag -a v0.x.(y+1) -m "FerrisPass 0.x.(y+1)"
 git push origin master --tags
 ```
 
-Existing v0.x.y installs will see the new release on their next auto-update check.
+Existing v0.x.y installs will see the new release on their next auto-update check once it is marked latest (see "Pre-releases, test builds and going live").
 
 If the tag was pushed but no Release was ever created (workflow failed early), it's safe to delete + re-push:
 
