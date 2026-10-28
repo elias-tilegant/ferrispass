@@ -1354,8 +1354,11 @@ fn lint_levels_are_read_from_the_lints_table() {
 /// artefacts the sign job hands over, `SHA256SUMS` included, are all
 /// attached, and a missing one stops the publishing step. After
 /// publishing, the same job copies the signed manifest into the permanent
-/// `kanal-vorab` release, for every tag. No step or job may fail quietly, so
-/// a missing channel release stops the run.
+/// `kanal-vorab` release, for every tag whose version is higher than the one
+/// already there: it reads that manifest first and compares the two with
+/// `scripts/semver-compare.py`, never with `sort -V`, which ranks
+/// `0.10.0-pre.1` above `0.10.0`. No step or job may fail quietly, so a
+/// missing channel release stops the run.
 ///
 /// CI and CodeQL run for pushes to `master` and `rebuild` and for pull
 /// requests into either, so merges from `master` into the long-lived
@@ -1401,6 +1404,7 @@ fn release_pipeline_rules_hold() {
 
 const PUBLISH_ACTION: &str = "softprops/action-gh-release";
 const CHANNEL_RELEASE: &str = "kanal-vorab";
+const VERSION_COMPARE: &str = "scripts/semver-compare.py";
 /// What the sign job hands over in `signed-release` and the release carries.
 const RELEASE_FILES: &[&str] = &[
     "dist/*.dmg",
@@ -1517,6 +1521,32 @@ fn release_workflow_problems(workflow: &str) -> Vec<String> {
                     "the upload to {CHANNEL_RELEASE} runs for every tag, not `if: {condition}`"
                 ));
             }
+            let find = |command: &[&str]| {
+                words
+                    .windows(command.len())
+                    .position(|window| window == command)
+            };
+            let read = find(&["gh", "release", "download", CHANNEL_RELEASE]);
+            let compare = find(&[VERSION_COMPARE]);
+            let write = find(&upload);
+            if !(read < compare && compare < write && read.is_some()) {
+                problems.push(format!(
+                    "the step must read the manifest in {CHANNEL_RELEASE}, compare the versions \
+                     with {VERSION_COMPARE} and only then upload"
+                ));
+            }
+            if !steps[..at].iter().any(|before| {
+                before.job == step.job
+                    && before
+                        .get("uses")
+                        .is_some_and(|uses| uses.starts_with("actions/checkout"))
+            }) {
+                problems.push(format!(
+                    "job {} must check out the repository before the upload to \
+                     {CHANNEL_RELEASE}, for {VERSION_COMPARE}",
+                    step.job
+                ));
+            }
         }
         _ => problems.push(format!(
             "expected one step that runs `gh release upload {CHANNEL_RELEASE}`, found {}",
@@ -1526,6 +1556,19 @@ fn release_workflow_problems(workflow: &str) -> Vec<String> {
 
     for step in &steps {
         let words = step.words();
+        for command in words.windows(2) {
+            let flag = command[1];
+            if command[0] == "sort"
+                && (flag == "--version-sort"
+                    || (flag.starts_with('-') && !flag.starts_with("--") && flag.contains('V')))
+            {
+                problems.push(format!(
+                    "job {}: `sort {flag}` does not order versions by SemVer precedence; use \
+                     {VERSION_COMPARE}",
+                    step.job
+                ));
+            }
+        }
         for command in words.windows(3) {
             if command[..2] == ["gh", "release"]
                 && matches!(command[2], "create" | "edit" | "delete")
@@ -1837,6 +1880,7 @@ jobs:
             dist/SHA256SUMS
   release:
     steps:
+      - uses: actions/checkout@v4
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
@@ -1851,6 +1895,9 @@ jobs:
           prerelease: true
       - name: Channel
         run: |
+          gh release download kanal-vorab --pattern update.json --output old.json
+          order="$(python3 -I scripts/semver-compare.py "$new" "$old")"
+          if [ "$order" != higher ]; then exit 0; fi
           gh release upload kanal-vorab \
             dist/update.json dist/update.json.minisig \
             --clobber
@@ -1914,6 +1961,86 @@ fn release_rules_catch_every_way_around_the_pre_release_flag() {
     }
 }
 
+/// The comparison that keeps `kanal-vorab` moving forward, run as the
+/// workflow runs it. The order is semver.org's example plus the versions
+/// this project tags; `sort -V` gets every pre-release against its release
+/// wrong.
+#[test]
+fn the_channel_compares_versions_by_semver_precedence() {
+    let compare = |a: &str, b: &str| {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(VERSION_COMPARE);
+        let out = std::process::Command::new("python3")
+            .arg("-I")
+            .arg(&script)
+            .args([a, b])
+            .output()
+            .unwrap_or_else(|err| panic!("cannot run python3 {}: {err}", script.display()));
+        let answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.code(), answer)
+    };
+    let ascending = [
+        "0.9.3",
+        "0.9.4",
+        "0.9.10",
+        "0.10.0-pre.1",
+        "0.10.0-pre.2",
+        "0.10.0-pre.10",
+        "0.10.0-rc.1",
+        "0.10.0",
+        "1.0.0-alpha",
+        "1.0.0-alpha.1",
+        "1.0.0-alpha.beta",
+        "1.0.0-beta",
+        "1.0.0-beta.2",
+        "1.0.0-beta.11",
+        "1.0.0-rc.1",
+        "1.0.0",
+        "2.0.0",
+        "10.0.0",
+    ];
+    let mut cases = vec![
+        ("0.9.4", "0.10.0-pre.3", "lower"),
+        ("0.10.0", "0.10.0-pre.9", "higher"),
+        ("0.10.0-pre.3", "0.10.0-pre.3", "equal"),
+        ("1.0.0+build.2", "1.0.0+build.1", "equal"),
+        ("1.0.0-rc.1+a", "1.0.0-rc.1", "equal"),
+        ("1.0.0-0a", "1.0.0-0", "higher"),
+    ];
+    for pair in ascending.windows(2) {
+        cases.push((pair[0], pair[1], "lower"));
+        cases.push((pair[1], pair[0], "higher"));
+    }
+    for (a, b, expected) in cases {
+        assert_eq!(
+            compare(a, b),
+            (Some(0), expected.to_string()),
+            "{a} against {b}"
+        );
+    }
+    for malformed in [
+        "v0.9.4",
+        "0.9",
+        "1.2.3.4",
+        "01.2.3",
+        "1.2.3-",
+        "1.2.3-01",
+        "1.2.3-a..b",
+        "1.2.3+",
+        "",
+    ] {
+        assert_eq!(
+            compare(malformed, "0.9.4"),
+            (Some(2), String::new()),
+            "{malformed:?}"
+        );
+        assert_eq!(
+            compare("0.9.4", malformed),
+            (Some(2), String::new()),
+            "{malformed:?}"
+        );
+    }
+}
+
 #[test]
 fn branch_filters_are_read_from_the_triggers() {
     let list = |names: &[&str]| Ok(Some(names.iter().map(|n| n.to_string()).collect()));
@@ -1949,7 +2076,11 @@ fn branch_filters_are_read_from_the_triggers() {
 #[test]
 fn release_rules_catch_a_tag_that_skips_the_channel() {
     let channel = "      - name: Channel\n";
+    let download =
+        "          gh release download kanal-vorab --pattern update.json --output old.json\n";
+    let compare = "          order=\"$(python3 -I scripts/semver-compare.py \"$new\" \"$old\")\"\n";
     let (head, step) = RELEASE_SAMPLE.split_once(channel).expect("channel step");
+    let (_, after) = step.split_once(compare).expect("comparison");
     let before_publish = head.replacen(
         "      - name: Publish\n",
         &format!("{channel}{step}      - name: Publish\n"),
@@ -1969,6 +2100,14 @@ fn release_rules_catch_a_tag_that_skips_the_channel() {
         ),
         (channel.into(), format!("  channel:\n    steps:\n{channel}")),
         (channel.into(), format!("{channel}{step}{channel}")),
+        (compare.into(), String::new()),
+        (download.into(), String::new()),
+        (
+            compare.into(),
+            "          order=\"$(printf '%s\\n' \"$old\" \"$new\" | sort -V | tail -1)\"\n".into(),
+        ),
+        (format!("{compare}{after}"), format!("{after}{compare}")),
+        ("      - uses: actions/checkout@v4\n".into(), String::new()),
     ] {
         let mutated = RELEASE_SAMPLE.replacen(&from, &to, 1);
         assert_ne!(mutated, RELEASE_SAMPLE, "{from} not in the sample");

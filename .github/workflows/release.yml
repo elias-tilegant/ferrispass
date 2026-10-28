@@ -256,6 +256,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # For scripts/semver-compare.py, which the channel step runs. First,
+      # because a checkout empties the workspace, and without credentials,
+      # because nothing here pushes.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
       - name: Download signed release artefacts
         uses: actions/download-artifact@v4
         with:
@@ -303,17 +311,35 @@ jobs:
           prerelease: true
 
       # The permanent release kanal-vorab (no v, so it never starts this
-      # workflow) holds the manifest of whichever tag was published last. The
-      # app does not read it yet. Test builds will, to find the next test
+      # workflow) holds the manifest of the highest version tagged so far.
+      # The app does not read it yet. Test builds will, to find the next test
       # build; builds without a pre-release suffix keep reading only
-      # releases/latest. A 0.9.x manifest there is harmless: its version is
-      # below every 0.10.0-pre.N. The release is created once by hand
-      # (docs/release-process.md); while it is missing, this step fails the
-      # run instead of skipping.
+      # releases/latest. The channel only moves forward: a tag whose version
+      # is not higher than the one already there, such as a 0.9.x fix after a
+      # test build, leaves it as it is. Versions are compared by SemVer
+      # precedence, which ranks 0.10.0-pre.3 below 0.10.0; sort -V does not.
+      # The release is created once by hand (docs/release-process.md); while
+      # it is missing, this step fails the run instead of skipping.
       - name: Update the pre-release channel
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          tagged="$(jq -er .version dist/update.json)"
+          # Fails here when kanal-vorab does not exist.
+          held="$(gh release view kanal-vorab --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq 'any(.assets[]; .name == "update.json")')"
+          # Anything but a clear no reads the manifest, so a surprise fails.
+          if [ "${held}" != false ]; then
+            gh release download kanal-vorab --repo "${GITHUB_REPOSITORY}" \
+              --pattern update.json --output "${RUNNER_TEMP}/channel.json"
+            current="$(jq -er .version "${RUNNER_TEMP}/channel.json")"
+            order="$(python3 -I scripts/semver-compare.py "${tagged}" "${current}")"
+            if [ "${order}" != higher ]; then
+              echo "::notice::kanal-vorab stays at ${current}; ${tagged} is not higher"
+              exit 0
+            fi
+          fi
           gh release upload kanal-vorab \
             dist/update.json dist/update.json.minisig \
             --clobber --repo "${GITHUB_REPOSITORY}"

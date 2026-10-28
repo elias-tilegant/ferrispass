@@ -201,8 +201,9 @@ After the run, before going live, check the release page:
   archives, `update.json`, a `.minisig` file for each of these four, and
   `SHA256SUMS`;
 - the hand-written note, if there is one, sits above the generated list;
-- the `kanal-vorab` release carries this tag's `update.json` and
-  `update.json.minisig` (the version inside is the one just tagged).
+- the `kanal-vorab` release carries `update.json` and `update.json.minisig`
+  of the highest version tagged so far: this tag's, unless a higher one was
+  already there, which the run reports in a notice.
 
 **0.9.x fixes** come from `master` and take exactly this path: tag, check,
 then mark the release latest.
@@ -224,16 +225,30 @@ and stays a pre-release while the test group uses it. Going live is the same
 
 **The pre-release channel.** After publishing, the workflow also copies
 `update.json` and `update.json.minisig` into a permanent release named
-`kanal-vorab`, replacing what was there. Its tag has no `v`, so it never
-starts the workflow. The app does not read this release yet; test builds
-will, to find the next test build, while builds without a suffix keep
-reading only `releases/latest`. A 0.9.x manifest there does no harm, since
-its version is below every test build. The release has to exist before the
-first tag that runs this workflow; create it once:
+`kanal-vorab`, replacing what was there, but only when the tag's version is
+higher than the one already in the channel. The channel only moves forward:
+a 0.9.x fix tagged after a test build leaves the test build's manifest in
+place, and the run says so in a notice. Versions are compared by SemVer
+precedence (`scripts/semver-compare.py`), which ranks `0.10.0-pre.3` below
+`0.10.0`; `sort -V` gets that wrong. The release's tag has no `v`, so it
+never starts the workflow. The app does not read this release yet; test
+builds will, to find the next test build, while builds without a suffix keep
+reading only `releases/latest`. The release has to exist before the first
+tag that runs this workflow; create it once:
 
 ```sh
 gh release create kanal-vorab --prerelease --title "Pre-release channel" \
-    --notes "Holds the update manifest of the newest tag. Do not delete."
+    --notes "Holds the update manifest of the highest version tagged so far. Do not delete."
+```
+
+The workflow never moves the channel back, and a re-run for the same tag
+leaves it alone. To point it at an older release, for instance after
+withdrawing a test build, or to repair an upload that broke off half-way,
+copy the two files over by hand:
+
+```sh
+gh release download vX.Y.Z --pattern 'update.json*' --dir channel
+gh release upload kanal-vorab channel/update.json channel/update.json.minisig --clobber
 ```
 
 If it is missing, the publish job fails at its last step, after the release
