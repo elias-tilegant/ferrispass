@@ -190,7 +190,8 @@ a 0.9.x as an update, and is offered the release once it is live.
 After the run, before going live, check the release page:
 
 - the release is marked Pre-release and carries the disk image, both
-  archives, `update.json` and their `.minisig` files;
+  archives, `update.json`, a `.minisig` file for each of these four, and
+  `SHA256SUMS`;
 - the hand-written note, if there is one, sits above the generated list;
 - the `kanal-vorab` release carries this tag's `update.json` and
   `update.json.minisig` (the version inside is the one just tagged).
@@ -248,6 +249,15 @@ build and notes jobs never receive the updater private key. The notes job
 puts the tag's hand-written note, if there is one, above the generated list.
 The isolated signing job treats the combined notes as bounded data, verifies
 the payload size, and only then signs the payload and complete manifest.
+It also signs the disk image with the same key and writes `SHA256SUMS` for
+the disk image and both archives. The updater reads neither; they are for
+anyone who downloads the disk image by hand, such as a tester going back to
+a 0.9.x release:
+
+```sh
+shasum -a 256 -c SHA256SUMS --ignore-missing
+minisign -V -p bundle/minisign-pub.txt -m FerrisPass-X.Y.Z-arm64.dmg
+```
 
 Stages, with rough timing:
 
@@ -262,8 +272,8 @@ Stages, with rough timing:
 | 7 | Notarize via `xcrun notarytool submit --wait` | 1-5 min | Apple's queue. Rejection = read the notarization log carefully |
 | 8 | Staple notarization ticket | <5 s | - |
 | 9 | Generate `.app.tar.gz` + unsigned `update.json` with exact payload size | <10 s | `jq` missing or archive creation fails |
-| Sign | Inject notes, sign payload, then sign the complete manifest | <10 s | minisign key missing, malformed, or payload size mismatch |
-| End | `softprops/action-gh-release@v2` publishes a pre-release with the files, then the manifest is copied into `kanal-vorab` | <30 s | `permissions: contents: write` not granted; `kanal-vorab` missing (see above) |
+| Sign | Inject notes, sign payload, then the complete manifest, then the disk image; write `SHA256SUMS` | <10 s | minisign key missing, malformed, or payload size mismatch |
+| End | `softprops/action-gh-release@v2` publishes a pre-release with the files, then the manifest is copied into `kanal-vorab` | <30 s | `permissions: contents: write` not granted; a file missing from `signed-release` (the step stops before creating the release); `kanal-vorab` missing (see above) |
 
 Total wall-clock: usually 8-12 minutes.
 

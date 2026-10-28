@@ -245,6 +245,7 @@ jobs:
             dist/*.tar.gz
             dist/*.minisig
             dist/update.json
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 1
 
@@ -274,13 +275,18 @@ jobs:
           # Attach everything the project needs:
           # - .dmg          : human-friendly first download
           # - .app.tar.gz   : payload the in-app updater fetches
-          # - .minisig      : detached signature paired with the tar.gz
+          # - .minisig      : detached signatures for both archives and the .dmg
           # - update.json + .minisig: signed manifest binding version, URL and payload
+          # - SHA256SUMS    : sums of the .dmg and both archives, for downloads by hand
           files: |
             dist/*.dmg
             dist/*.tar.gz
             dist/*.minisig
             dist/update.json
+            dist/SHA256SUMS
+          # A pattern that matches nothing stops the step before the release
+          # is created, instead of publishing it without that file.
+          fail_on_unmatched_files: true
           # Body comes from git-cliff's isolated notes job instead of GitHub's
           # generate_release_notes - the latter only produces a Full
           # Changelog link when there are no PRs/labels to categorise.

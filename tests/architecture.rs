@@ -1350,7 +1350,9 @@ fn lint_levels_are_read_from_the_lints_table() {
 /// Every release is published as a pre-release, and the workflow has no other
 /// way to create a release, edit one or mark one as latest. The updater reads
 /// `releases/latest`, which GitHub never resolves to a pre-release, so
-/// shipping a version to everyone stays a step taken by hand. After
+/// shipping a version to everyone stays a step taken by hand. The signed
+/// artefacts the sign job hands over, `SHA256SUMS` included, are all
+/// attached, and a missing one stops the publishing step. After
 /// publishing, the same job copies the signed manifest into the permanent
 /// `kanal-vorab` release, for every tag. No step or job may fail quietly, so
 /// a missing channel release stops the run.
@@ -1399,6 +1401,14 @@ fn release_pipeline_rules_hold() {
 
 const PUBLISH_ACTION: &str = "softprops/action-gh-release";
 const CHANNEL_RELEASE: &str = "kanal-vorab";
+/// What the sign job hands over in `signed-release` and the release carries.
+const RELEASE_FILES: &[&str] = &[
+    "dist/*.dmg",
+    "dist/*.tar.gz",
+    "dist/*.minisig",
+    "dist/update.json",
+    "dist/SHA256SUMS",
+];
 
 fn release_workflow_problems(workflow: &str) -> Vec<String> {
     let mut problems = Vec::new();
@@ -1448,6 +1458,39 @@ fn release_workflow_problems(workflow: &str) -> Vec<String> {
         problems.push(format!(
             "the step that uses {PUBLISH_ACTION} must set `prerelease: true`"
         ));
+    }
+    if !steps[publish].lines.iter().any(|line| {
+        yaml_entry(line).is_some_and(|(key, value)| {
+            key == "fail_on_unmatched_files" && unquote(value) == "true"
+        })
+    }) {
+        problems.push(format!(
+            "the step that uses {PUBLISH_ACTION} must set `fail_on_unmatched_files: true`"
+        ));
+    }
+    let handover: Vec<&Step> = steps
+        .iter()
+        .filter(|step| {
+            step.get("uses")
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact"))
+                && step.words().contains(&"signed-release")
+        })
+        .collect();
+    if handover.len() != 1 {
+        problems.push(format!(
+            "expected one upload of the `signed-release` artefact, found {}",
+            handover.len()
+        ));
+    }
+    for file in RELEASE_FILES {
+        if !steps[publish].words().contains(file) {
+            problems.push(format!("the release does not attach `{file}`"));
+        }
+        for step in &handover {
+            if !step.words().contains(file) {
+                problems.push(format!("`signed-release` does not carry `{file}`"));
+            }
+        }
     }
 
     let upload = ["gh", "release", "upload", CHANNEL_RELEASE];
@@ -1780,12 +1823,31 @@ on:
   push:
     tags: ['v*']
 jobs:
+  sign:
+    steps:
+      - name: Hand over
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.minisig
+            dist/update.json
+            dist/SHA256SUMS
   release:
     steps:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.minisig
+            dist/update.json
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
           prerelease: true
       - name: Channel
         run: |
@@ -1829,6 +1891,19 @@ fn release_rules_catch_every_way_around_the_pre_release_flag() {
             "      - name: Publish\n        continue-on-error: true\n",
         ),
         ("    steps:", "    continue-on-error: true\n    steps:"),
+        (
+            "fail_on_unmatched_files: true",
+            "fail_on_unmatched_files: false",
+        ),
+        ("          fail_on_unmatched_files: true\n", ""),
+        (
+            "            dist/SHA256SUMS\n          fail",
+            "          fail",
+        ),
+        ("            dist/SHA256SUMS\n  release:", "  release:"),
+        ("files: |\n            dist/*.dmg\n", "files: |\n"),
+        ("path: |\n            dist/*.dmg\n", "path: |\n"),
+        ("name: signed-release", "name: signed"),
     ] {
         let mutated = RELEASE_SAMPLE.replacen(from, to, 1);
         assert_ne!(mutated, RELEASE_SAMPLE, "{from} not in the sample");

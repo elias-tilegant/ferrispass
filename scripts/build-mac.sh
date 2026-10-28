@@ -16,7 +16,8 @@
 #   6. Codesign the DMG
 #   7. Submit to Apple's notarization service (--wait)
 #   8. Staple notarization ticket onto DMG
-#   9. Tarball + update manifest (optionally minisign-sign both)
+#   9. Tarball + update manifest (optionally minisign-sign both, the DMG
+#      too, and write SHA256SUMS)
 #  10. Final spctl Gatekeeper assessment
 #
 # Flags:
@@ -88,6 +89,21 @@ MANIFEST_SIG="${MANIFEST}.minisig"
 CLI_TAR_NAME="FerrisPass-CLI-${VERSION}-aarch64-apple-darwin.tar.gz"
 CLI_TAR_PATH="${DIST_DIR}/${CLI_TAR_NAME}"
 CLI_SIG_PATH="${CLI_TAR_PATH}.minisig"
+DMG_NAME="${APP_NAME}-${VERSION}-arm64.dmg"
+DMG_PATH="${DIST_DIR}/${DMG_NAME}"
+DMG_SIG_PATH="${DMG_PATH}.minisig"
+SUMS_PATH="${DIST_DIR}/SHA256SUMS"
+
+# Signs one file with the updater key. The passphrase comes from
+# MINISIGN_PASSWORD when it is set (CI), otherwise minisign asks for it.
+minisign_sign() {
+    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+        printf '%s\n' "${MINISIGN_PASSWORD}" \
+            | minisign -S -s "${MINISIGN_KEY}" -m "$1" >/dev/null
+    else
+        minisign -S -s "${MINISIGN_KEY}" -m "$1"
+    fi
+}
 
 sign_update_artifacts() {
     if ! command -v minisign >/dev/null 2>&1; then
@@ -102,7 +118,8 @@ sign_update_artifacts() {
         echo "✗ Minisign private key not found: ${MINISIGN_KEY}" >&2
         exit 1
     fi
-    if [ ! -f "${TAR_PATH}" ] || [ ! -f "${CLI_TAR_PATH}" ] || [ ! -f "${MANIFEST}" ]; then
+    if [ ! -f "${TAR_PATH}" ] || [ ! -f "${CLI_TAR_PATH}" ] || [ ! -f "${MANIFEST}" ] \
+        || [ ! -f "${DMG_PATH}" ]; then
         echo "✗ Missing updater artefacts in ${DIST_DIR}; run a release build first" >&2
         exit 1
     fi
@@ -127,19 +144,9 @@ sign_update_artifacts() {
         exit 1
     fi
 
-    rm -f "${SIG_PATH}" "${CLI_SIG_PATH}" "${MANIFEST_SIG}"
-    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
-        printf '%s\n' "${MINISIGN_PASSWORD}" \
-            | minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}" >/dev/null
-    else
-        minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}"
-    fi
-    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
-        printf '%s\n' "${MINISIGN_PASSWORD}" \
-            | minisign -S -s "${MINISIGN_KEY}" -m "${CLI_TAR_PATH}" >/dev/null
-    else
-        minisign -S -s "${MINISIGN_KEY}" -m "${CLI_TAR_PATH}"
-    fi
+    rm -f "${SIG_PATH}" "${CLI_SIG_PATH}" "${MANIFEST_SIG}" "${DMG_SIG_PATH}" "${SUMS_PATH}"
+    minisign_sign "${TAR_PATH}"
+    minisign_sign "${CLI_TAR_PATH}"
 
     # cargo-packager-updater expects base64(contents-of-.minisig) in the
     # platform record. Updating only that field preserves signed release notes.
@@ -152,19 +159,26 @@ sign_update_artifacts() {
 
     # Sign the final manifest bytes after every field, including release notes
     # and the payload signature, has been fixed.
-    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
-        printf '%s\n' "${MINISIGN_PASSWORD}" \
-            | minisign -S -s "${MINISIGN_KEY}" -m "${MANIFEST}" >/dev/null
-    else
-        minisign -S -s "${MINISIGN_KEY}" -m "${MANIFEST}"
-    fi
+    minisign_sign "${MANIFEST}"
+
+    # For people who download the disk image by hand rather than through the
+    # updater, which reads neither: a signature with the same key, and the
+    # sums of everything they might download. Relative names, so
+    # `shasum -a 256 -c SHA256SUMS` works in the download folder.
+    minisign_sign "${DMG_PATH}"
+    (cd "${DIST_DIR}" && shasum -a 256 "${DMG_NAME}" "${TAR_NAME}" "${CLI_TAR_NAME}") \
+        > "${SUMS_PATH}"
 
     minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${TAR_PATH}"
     minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${CLI_TAR_PATH}"
     minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${MANIFEST}"
+    minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${DMG_PATH}"
+    (cd "${DIST_DIR}" && shasum -a 256 -c -s SHA256SUMS)
     echo "    ✓ ${TAR_NAME}.minisig"
     echo "    ✓ ${CLI_TAR_NAME}.minisig"
     echo "    ✓ update.json.minisig"
+    echo "    ✓ ${DMG_NAME}.minisig"
+    echo "    ✓ SHA256SUMS"
 }
 
 if [ "${SIGN_UPDATE_ONLY}" = "true" ]; then
@@ -266,8 +280,6 @@ codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}" 2>&1 | tail -3
 
 # ---------- 5. DMG ----------
 echo "▸ [5/9] Building DMG"
-DMG_NAME="${APP_NAME}-${VERSION}-arm64.dmg"
-DMG_PATH="${DIST_DIR}/${DMG_NAME}"
 
 if command -v create-dmg >/dev/null 2>&1; then
     create-dmg \
@@ -309,8 +321,9 @@ fi
 # Produces the artefacts the in-app auto-updater fetches:
 #   - ${APP_NAME}-${VERSION}-arm64.app.tar.gz   (the bundle to install)
 #   - update.json                               (manifest read by the updater)
-# When a minisign key is available locally, this also signs the payload and
-# complete manifest. CI calls `--sign-update` in a later secret-bearing step.
+# When a minisign key is available locally and the build is notarized, this
+# also signs the payload, the complete manifest and the disk image, and writes
+# SHA256SUMS. CI calls `--sign-update` in a later secret-bearing step.
 #
 echo "▸ [9/9] Generating .app.tar.gz + update manifest"
 
@@ -375,4 +388,5 @@ echo "✓ ${APP_NAME} ${VERSION} ready for distribution"
 ls -lh "${DIST_DIR}/"*.dmg 2>/dev/null || true
 ls -lh "${DIST_DIR}/"*.tar.gz 2>/dev/null || true
 ls -lh "${DIST_DIR}/"update.json 2>/dev/null || true
-ls -lh "${DIST_DIR}/"update.json.minisig 2>/dev/null || true
+ls -lh "${DIST_DIR}/"*.minisig 2>/dev/null || true
+ls -lh "${SUMS_PATH}" 2>/dev/null || true
