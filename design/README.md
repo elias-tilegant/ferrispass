@@ -37,3 +37,38 @@ Two settings stay out of the theme set for now:
 
 - `font.size`. The Kit applies it on every theme change, over whatever text size the app set. The app sets the text size after each change instead.
 - The mono font is still JetBrains Mono, because it is the only monospace font the app ships today. GPUI gives up on the first layout in a font family that isn't there, so the theme can only name Atkinson Hyperlegible Mono once the app loads it.
+
+## The old screens
+
+The screens and widgets from before the redesign read their colors from `src/ui/palette.rs` without a context. That module now returns tokens, so the old screens use the new colors until they are rebuilt. It is deprecated, and a test keeps new code from naming it.
+
+| Old accessor | Token |
+|---|---|
+| `bg()` | `bg.window` |
+| `panel()` | `bg.surface` |
+| `sidebar()` | `bg.sidebar` |
+| `border()` | `border.separator` |
+| `border_strong()` | `border.control` |
+| `text()` | `text.primary` |
+| `text_muted()` | `text.secondary` |
+| `text_faint()` | `text.tertiary` |
+| `blue()` | `accent.fill` |
+| `blue_hover()` | `accent.fill.hover` |
+| `blue_soft()` | `bg.selected` |
+| `blue_border()` | `focus.ring` |
+| `orange()` | `accent.text` |
+| `orange_deep()` | `accent.fill.hover` |
+| `orange_soft()` | `bg.selected` |
+| `orange_border()` | `focus.ring` |
+| `green()` | `status.ok.text` |
+| `green_soft()` | `status.ok.soft` |
+| `green_border()` | `status.ok.text` |
+| `red()` | `status.danger.text` |
+| `yellow()` | `status.attention.text` |
+| `transparent_overlay()` | `scrim` |
+
+A test reads this table and checks each accessor against it in all four modes, so the table is the mapping.
+
+## Still to come
+
+Two more outputs will be generated from the same file: CSS custom properties for the HTML mockups (the names in `css_aliases` included) and the token file for the published design system page. `tokens.json` already holds what both need.

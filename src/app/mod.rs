@@ -17,7 +17,7 @@ pub use state::{
 };
 pub use sync_history::{SyncChangeKind, SyncHistoryEntry};
 
-use crate::ui::{AppShell, theme as ui_theme};
+use crate::ui::AppShell;
 use gpui::{
     App, AppContext as _, Context, Entity, QuitMode, SharedString, Styled as _, TitlebarOptions,
     WindowBounds, WindowOptions, px, size,
@@ -93,7 +93,7 @@ pub fn run() {
         // first paint has to be in the right appearance and the right place.
         let startup_settings = settings::load();
         crate::keepass::limits::set_confirmed_kdf_costs(&startup_settings.confirmed_kdf_costs);
-        ui_theme::init_from_settings(startup_settings.theme, cx);
+        crate::ui::ds::init(startup_settings.theme, cx);
 
         let app_state = cx.new(|cx| {
             let mut state = AppState::with_resume();
