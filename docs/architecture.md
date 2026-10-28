@@ -83,7 +83,7 @@ User submits password (Unlock screen)
 
 ## State pattern
 
-`AppState` (in `src/app/state.rs`) holds *all* mutable application state in a single `gpui::Entity`. Status is encoded in enums per concern:
+`AppState` (in `src/app/state/`: the type in `mod.rs`, its methods in one file per concern) holds *all* mutable application state in a single `gpui::Entity`. Status is encoded in enums per concern:
 
 - `VaultStatus` - Empty, AwaitingPassword, Opening, Open, LockedPendingSave,
   Error
@@ -120,9 +120,9 @@ pub fn start_some_async_thing(&mut self, cx: &mut Context<Self>) {
 }
 ```
 
-Reference implementation: `try_restore_sync_binding` in `app/state.rs`, whose completion body is split out as `apply_sync_binding_restore` so it can be tested. Copy that shape for any new async operation. No line number here: it would be wrong by the next commit.
+Reference implementation: `try_restore_sync_binding` in `app/state/binding.rs`, whose completion body is split out as `apply_sync_binding_restore` so it can be tested. Copy that shape for any new async operation. No line number here: it would be wrong by the next commit.
 
-`AppShell` (in `src/ui/app_shell.rs`) holds UI-local state (input fields, scroll positions, focus handles, debounce tasks) and subscribes to `AppState` via `cx.observe`. AppShell never mutates AppState directly - it dispatches actions or calls public methods on the `Entity<AppState>`.
+`AppShell` (in `src/ui/legacy/shell/`, split the same way) holds UI-local state (input fields, scroll positions, focus handles, debounce tasks) and subscribes to `AppState` via `cx.observe`. AppShell never mutates AppState directly - it dispatches actions or calls public methods on the `Entity<AppState>`.
 
 ## Trust boundaries
 
@@ -247,7 +247,7 @@ enter the runtime synchronously. That Tokio runtime is the only one: everything 
 
 GPUI is element-based, not retained-tree. Every render of a screen produces a fresh element tree. State changes trigger re-renders via `cx.notify()` on the relevant `Entity`. GPUI Kit (gpui-component, gpui-base) provides h_flex/v_flex layout, theme-aware styling, and ready-made widgets (Input, Slider, Icon).
 
-Screens live in `src/ui/screens/` and follow the convention:
+Screens live in `src/ui/legacy/screens/` (still reachable as `crate::ui::screens`) and follow the convention:
 
 ```rust
 pub fn render(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
