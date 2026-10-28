@@ -1,0 +1,106 @@
+_version: 2
+# Quick Access, the panel that opens over any app. Drafts for the first
+# version of the panel: it searches the open vault, copies instead of typing
+# and sends a locked user to the main window when Touch ID is not set up.
+# Keycaps (⏎, ⌘1) that stand on their own are drawn by the panel; the ones
+# inside a sentence are part of the text.
+quick:
+  search:
+    placeholder:
+      en: Search...
+      de: Suchen ...
+  footer:
+    # The main action for the selected entry, always with the user name.
+    sap_login:
+      en: Sign in to %{sid}, client %{client} as %{user}
+      de: In %{sid}, Mandant %{client} als %{user} anmelden
+    open_website:
+      en: Open website
+      de: Website öffnen
+    copy_password:
+      en: Copy password
+      de: Passwort kopieren
+    # With an empty search, ⏎ never acts on a production system.
+    prd_select_first:
+      en: "Production system: select it first (↓ or ⌘1), then ⏎"
+      de: "Produktivsystem: erst wählen (↓ oder ⌘1), dann ⏎"
+    # Copies keep the panel open; the footer confirms them.
+    copied:
+      password:
+        en: Password copied
+        de: Passwort kopiert
+      user:
+        en: User name copied
+        de: Benutzer kopiert
+      one_time_code:
+        en: One-time code copied
+        de: Einmalcode kopiert
+    # When other vaults are parked, the panel only searches the open one.
+    other_vaults:
+      en: You switch to other vaults in the main window.
+      de: Andere Tresore wechselst du im Hauptfenster.
+  results:
+    same_matches:
+      one:
+        en: "%{count} identical match"
+        de: "%{count} gleicher Treffer"
+      other:
+        en: "%{count} identical matches"
+        de: "%{count} gleiche Treffer"
+  # The preview of the selected entry. The one-time code is
+  # glossary.one_time_code.
+  preview:
+    user:
+      en: User name
+      de: Benutzer
+    password:
+      en: Password
+      de: Passwort
+  no_match:
+    text:
+      en: No match in %{vault}.
+      de: Kein Treffer in %{vault}.
+    unlock:
+      en: Unlock
+      de: Entsperren
+    new_entry:
+      en: New
+      de: Neu
+  locked:
+    # Typed ahead while locked, with Touch ID set up.
+    search_pending:
+      en: Search saved
+      de: Suche vorgemerkt
+    typed_ahead:
+      en: Your vaults are locked. Your search runs right after.
+      de: Deine Tresore sind gesperrt. Deine Suche läuft gleich danach.
+    unlock_touch_id:
+      en: Unlock with Touch ID
+      de: Mit Touch ID entsperren
+    still_unlocking:
+      en: Still unlocking %{vault}...
+      de: "%{vault} wird noch entsperrt ..."
+    # The special cases while locked.
+    needs_main_window:
+      en: Needs the main window
+      de: Braucht das Hauptfenster
+    unlock_mac_password:
+      en: Unlock with Mac password
+      de: Mit Mac-Passwort entsperren
+    not_set_up:
+      en: FerrisPass isn't set up yet.
+      de: FerrisPass ist noch nicht eingerichtet.
+    set_up:
+      en: Set up
+      de: Einrichten
+    file_missing:
+      en: "%{vault} is no longer where it was."
+      de: "%{vault} liegt nicht mehr dort, wo es war."
+  # Errors from the background stand as one carmine line at the top.
+  error:
+    website_failed:
+      en: The website didn't open.
+      de: Die Website ließ sich nicht öffnen.
+    copy_failed:
+      en: The password couldn't be copied.
+      de: Das Passwort ließ sich nicht kopieren.

@@ -1,0 +1,19 @@
+_version: 2
+# Everyday buttons that many screens share. A button that runs a command from
+# the action registry takes its label from the registry, not from here.
+common:
+  cancel:
+    en: Cancel
+    de: Abbrechen
+  later:
+    en: Later
+    de: Später
+  back:
+    en: Back
+    de: Zurück
+  done:
+    en: Done
+    de: Fertig
+  why:
+    en: Why?
+    de: Warum?

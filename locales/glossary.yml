@@ -1,0 +1,64 @@
+_version: 2
+# The names FerrisPass gives to the kinds of entries and vaults and to a few
+# other things that appear on many screens. design/glossary.toml lists the
+# words to use and to avoid; these keys are the words themselves, so a list,
+# a label and an accessible name all say the same.
+glossary:
+  type:
+    sap_system:
+      en: SAP system
+      de: SAP-System
+    remote_access:
+      en: Remote access
+      de: Fernzugang
+    web_login:
+      en: Web login
+      de: Web-Zugang
+    server:
+      en: Server
+      de: Server
+    secure_note:
+      en: Secure note
+      de: Sichere Notiz
+  vault:
+    personal:
+      en: Personal vault
+      de: Persönlicher Tresor
+    team:
+      en: Team vault
+      de: Team-Tresor
+    # Not "other": a key ending in .one or .other is a plural form.
+    other_vault:
+      en: Other vault
+      de: Sonstiger Tresor
+  password:
+    master:
+      en: Master password
+      de: Master-Passwort
+    team:
+      en: Team password
+      de: Team-Passwort
+    saved_team:
+      en: Saved team password
+      de: Gemerktes Team-Passwort
+  favorite:
+    en: Favorite
+    de: Favorit
+  pinned_for_everyone:
+    en: Pinned for everyone
+    de: Für alle angeheftet
+  one_time_code:
+    en: One-time code
+    de: Einmalcode
+  sap_client:
+    en: SAP client
+    de: Mandant
+  system_number:
+    en: System number
+    de: Systemnummer
+  earlier_versions:
+    en: Earlier versions
+    de: Frühere Versionen
+  trash:
+    en: Trash
+    de: Papierkorb

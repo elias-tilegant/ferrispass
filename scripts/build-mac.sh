@@ -242,6 +242,13 @@ mv "${DIST_DIR}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 # texts to travel with every copy. Copied before signing, so the seal covers them.
 mkdir -p "${APP_BUNDLE}/Contents/Resources/Licenses"
 cp "${PROJECT_ROOT}/assets/licenses/"*.txt "${APP_BUNDLE}/Contents/Resources/Licenses/"
+# Texts macOS shows for the app itself, such as the Touch ID prompt: one
+# .lproj folder per language. bundle/macos only has folders for languages the
+# app shows, because macOS switches these texts to any language it finds here.
+for lproj in "${BUNDLE_DIR}"/*.lproj; do
+    [ -d "${lproj}" ] || continue
+    cp -R "${lproj}" "${APP_BUNDLE}/Contents/Resources/"
+done
 echo "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
 sed "s/__VERSION__/${VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
     > "${APP_BUNDLE}/Contents/Info.plist"

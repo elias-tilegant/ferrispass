@@ -1,0 +1,203 @@
+# The words FerrisPass uses, the words it avoids, and the style rules every
+# text in locales/ follows. `glossary_lint` in src/i18n/tests.rs checks each
+# value in both languages against this file.
+#
+# How the rules match:
+# - Avoided and scoped words match at the start of a word and ignore case, so
+#   "Konflikt" also catches "Konflikte".
+# - A term's own words never count as avoided: "Remote access" is the name of
+#   an entry type, "remote" alone is a place and is avoided.
+# - Phrase rules are regular expressions (Rust regex syntax).
+# - Placeholders such as %{vault} are left out before any word is checked.
+# - Key patterns use * for any run of characters: "msg.*", "onb.*.error.*".
+# - Exceptions go only through allow_keys.
+
+[style]
+# Technical details keep the words of the trade. Terms, phrases, scoped words
+# and the capitals rule skip these keys; the other style rules still apply.
+exempt_keys = ["*.tech.*"]
+
+# Security and error texts stay calm.
+no_exclamation_keys = ["msg.*", "lock.*", "security.*", "sync.*", "onb.*.error.*"]
+
+# A message says what happened. It does not start with a label.
+forbidden_starts = ["Fehler:", "Error:"]
+
+# Words written in capitals, as far as texts may use them. Identifiers such as
+# NHP 100 or a user name come in through placeholders.
+capitals = [
+    "PRD", "QAS", "DEV", "SBX", "SID", "SAP", "GUI", "VPN", "RDP", "SSH",
+    "PIN", "PDF", "IT", "ID", "OK", "CLI", "URL", "EWM", "S/4",
+]
+
+# German speaks to the reader with "du". The polite forms are wrong anywhere;
+# "Sie" may still start a sentence, where it means "it" or "she" ("Sie liegt
+# unter Frühere Versionen").
+formal_de = ["Ihnen", "Ihr", "Ihre", "Ihren", "Ihrem", "Ihrer", "Ihres"]
+formal_de_mid_sentence = ["Sie"]
+
+# Playful texts carry the segment "playful" in their key and never sit under
+# these keys, which stay factual.
+no_playful_keys = [
+    "msg.*", "lock.*", "quick.locked.*", "quick.gate.*", "quick.footer.*",
+    "hud.*", "show_typing.*", "signin_helper.*", "pw_change.*", "security.*",
+    "after_leave.*", "team_pw.*", "decisions.*", "sync.*", "trash.*",
+    "onb.*.error.*",
+]
+
+# ------------------------------------------------------------------ terms --
+
+[[term]]
+id = "vault"
+de = ["Tresor", "Persönlicher Tresor", "Team-Tresor", "Sonstiger Tresor"]
+en = ["Vault", "Personal vault", "Team vault", "Other vault"]
+avoid_de = ["Datenbank", "KDBX"]
+avoid_en = ["database", "KDBX"]
+allow_keys = ["msg.security_model"]
+
+[[term]]
+id = "passwords"
+de = ["Master-Passwort", "Team-Passwort", "Gemerktes Team-Passwort"]
+en = ["Master password", "Team password", "Saved team password"]
+avoid_de = ["AutoOpen"]
+avoid_en = ["AutoOpen"]
+
+[[term]]
+# Opening is for websites and files; the phrase rules below catch an opened
+# vault.
+id = "unlock"
+de = ["Entsperren", "Sperren", "Öffnen"]
+en = ["Unlock", "Lock", "Open"]
+
+[[term]]
+id = "entry_types"
+de = ["SAP-System", "Fernzugang", "Web-Zugang", "Server", "Sichere Notiz"]
+en = ["SAP system", "Remote access", "Web login", "Server", "Secure note"]
+
+[[term]]
+id = "order"
+de = ["Zugangsdaten", "Ordner", "Kunde", "Kundenmarke", "Archiv"]
+en = ["Sign-in details", "Folder", "Customer", "Customer mark", "Archive"]
+avoid_de = ["Gruppe"]
+
+[[term]]
+id = "marks"
+de = ["Favorit", "Für alle angeheftet", "Einmalcode"]
+en = ["Favorite", "Pinned for everyone", "One-time code"]
+avoid_de = ["TOTP"]
+avoid_en = ["TOTP"]
+
+[[term]]
+id = "typing"
+de = ["Eintippen", "Eintipp-Ablauf", "Für dieses Fenster merken"]
+en = ["Type in", "Typing sequence", "Remember for this window"]
+avoid_de = ["Auto-Type"]
+avoid_en = ["Auto-Type"]
+
+[[term]]
+id = "quick_access"
+de = ["Schnellzugriff", "Befehle", "Diskret", "Zum Abtippen"]
+en = ["Quick Access", "Commands", "Discreet", "Show for typing"]
+avoid_de = ["Large Type"]
+
+[[term]]
+id = "helpers"
+de = ["Wechsel-Begleiter", "Anmelde-Begleiter", "Ausführlich", "Knapp", "Aus"]
+en = ["Password change helper", "Sign-in helper", "Detailed", "Brief", "Off"]
+avoid_de = ["Wizard"]
+avoid_en = ["wizard"]
+
+[[term]]
+id = "sync"
+de = ["Abgleich", "aktuell", "Entscheidung nötig", "zwei Fassungen"]
+en = ["Sync", "up to date", "Decision needed", "two versions"]
+avoid_de = ["Konflikt", "Merge"]
+avoid_en = ["conflict", "merge"]
+
+[[term]]
+# The security model keeps its wording: "im lokalen Schlüsselbund".
+id = "places"
+de = ["auf diesem Mac", "in SharePoint", "Frühere Versionen", "Papierkorb"]
+en = ["on this Mac", "in SharePoint", "Earlier versions", "Trash"]
+avoid_de = ["lokal", "remote"]
+avoid_en = ["local", "remote"]
+allow_keys = ["msg.security_model"]
+
+[[term]]
+id = "unlock_time"
+de = ["Entsperrdauer", "Bestätigte Entsperrdauern"]
+en = ["Unlock time", "Approved unlock times"]
+avoid_de = ["KDF", "Argon2"]
+avoid_en = ["KDF", "Argon2"]
+
+[[term]]
+id = "typing_permission"
+de = ["Erlaubnis zum Tippen", "Schlüsselbund", "Startdatei"]
+en = ["Permission to type", "keychain", "Launch file"]
+avoid_de = ["Payload"]
+avoid_en = ["payload"]
+
+[[term]]
+id = "sap"
+de = ["Mandant", "SID", "Systemnummer", "Systemlinie"]
+en = ["SAP client", "SID", "System number", "System line"]
+
+[[term]]
+id = "organization"
+de = ["Organisation"]
+en = ["Organization"]
+avoid_de = ["Tenant"]
+avoid_en = ["tenant"]
+
+[[term]]
+id = "network"
+de = ["Erst verbinden", "Weg ins Netz"]
+en = ["Connect first", "Way into the network"]
+avoid_de = ["Route"]
+
+[[term]]
+id = "pending"
+de = ["Vorgemerktes Passwort", "Notfallblatt", "Mit dem Mac starten"]
+en = ["Pending password", "Emergency sheet", "Open at login"]
+
+[[term]]
+id = "security"
+de = ["Sicherheit", "Nach einem Austritt"]
+en = ["Security", "After someone leaves"]
+avoid_de = ["Score"]
+
+# ---------------------------------------------------------------- phrases --
+
+[[phrase]]
+# Vaults are unlocked, not opened. "Tresor-Datei öffnen" is the one command
+# that opens a vault's file.
+lang = "de"
+forbid = [
+    '(?i)\b(Tresor|Tresore|Team-Tresor)\w*\b[\s\S]*(\böffne|geöffnet)',
+    '(?i)(\böffne|geöffnet)[\s\S]*\b(Tresor|Tresore|Team-Tresor)',
+    '(?i)\bmit (Touch ID|Mac-Passwort) öffnen\b',
+]
+allow_keys = ["action.open_vault_file.*"]
+
+[[phrase]]
+lang = "en"
+forbid = [
+    '(?i)\bvaults?\b[\s\S]*\bopen',
+    '(?i)\bopen[\s\S]*\bvaults?\b',
+    '(?i)\bopen with (Touch ID|your Mac password|Mac password)\b',
+]
+allow_keys = ["action.open_vault_file.*"]
+
+# ----------------------------------------------------------------- scoped --
+
+[[scoped]]
+# "Mandant" is an SAP client and nothing else. A Microsoft organization is an
+# "Organisation".
+lang = "de"
+word = "Mandant"
+only_keys = ["quick.*", "entry.sap.*", "editor.*", "customer.*", "msg.sap_*", "a11y.sap.*", "glossary.*"]
+
+[[scoped]]
+lang = "en"
+word = "client"
+only_keys = ["quick.*", "entry.sap.*", "editor.*", "customer.*", "msg.sap_*", "a11y.sap.*", "glossary.*"]

@@ -1,0 +1,9 @@
+_version: 2
+# Texts macOS shows for the app from its bundle, outside the app's own
+# windows. bundle/macos/en.lproj/InfoPlist.strings carries the English;
+# the German waits here for de.lproj, which ships together with the app's
+# German so that the system texts and the app change language together.
+bundle:
+  face_id_usage:
+    en: Use Touch ID to unlock your KeePass vaults without typing the master password.
+    de: Mit Touch ID entsperrst du deine KeePass-Tresore, ohne das Master-Passwort einzutippen.
