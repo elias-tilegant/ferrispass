@@ -1,8 +1,12 @@
 use std::fs;
 use std::path::Path;
 
+use keepass::Database;
+use keepass::db::fields;
+
 use super::*;
 use crate::domain::CustomField;
+use crate::keepass::repository::snapshot_from_database;
 
 /// One made-up entry and the kind it should get, written the way
 /// [`summary`] prints a kind so a table reads like the rules.
@@ -235,6 +239,107 @@ fn sap_table() {
             url: "",
             expect: "sap title sid=NH1 client=300 role=- line=-",
         },
+        // The title pattern comes before the remote words.
+        Row {
+            title: "NHP 100",
+            fields: &[],
+            tags: &["VPN"],
+            url: "",
+            expect: "sap title sid=NHP client=100 role=prd line=-",
+        },
+    ]);
+}
+
+#[test]
+fn remote_table() {
+    check(&[
+        Row {
+            title: "Nordhafen GP",
+            fields: &[("REMOTE_CLIENT", "GlobalProtect")],
+            tags: &[],
+            url: "",
+            expect: "remote fields program=GlobalProtect",
+        },
+        // VPN gives it away but names no program.
+        Row {
+            title: "Nordhafen VPN",
+            fields: &[],
+            tags: &[],
+            url: "https://vpn.example",
+            expect: "remote heuristic program=-",
+        },
+        Row {
+            title: "Citrix Brenner",
+            fields: &[],
+            tags: &["citrix"],
+            url: "",
+            expect: "remote heuristic program=Citrix",
+        },
+        Row {
+            title: "Fortigate",
+            fields: &[("REMOTE_CLIENT", "forti")],
+            tags: &[],
+            url: "",
+            expect: "remote fields program=Forti",
+        },
+        Row {
+            title: "Partner access",
+            fields: &[("REMOTE_CLIENT", " FORTICLIENT ")],
+            tags: &[],
+            url: "",
+            expect: "remote fields program=Forti",
+        },
+        // A name that is not one of the known ones is kept as written.
+        Row {
+            title: "Brenner desktop",
+            fields: &[("REMOTE_CLIENT", "Cisco AnyConnect")],
+            tags: &[],
+            url: "",
+            expect: "remote fields program=other:Cisco AnyConnect",
+        },
+        Row {
+            title: "Brenner portal",
+            fields: &[],
+            tags: &[],
+            url: "https://portal.example/GlobalProtect/login",
+            expect: "remote heuristic program=GlobalProtect",
+        },
+        Row {
+            title: "Workspot desktop",
+            fields: &[],
+            tags: &[],
+            url: "",
+            expect: "remote heuristic program=Workspot",
+        },
+        // A program named after VPN still names the program.
+        Row {
+            title: "VPN Cisco",
+            fields: &[],
+            tags: &[],
+            url: "",
+            expect: "remote heuristic program=Cisco",
+        },
+        Row {
+            title: "cisco-vpn",
+            fields: &[],
+            tags: &[],
+            url: "",
+            expect: "remote heuristic program=Cisco",
+        },
+        Row {
+            title: "Brenner",
+            fields: &[],
+            tags: &["Remote", "vpn"],
+            url: "",
+            expect: "remote heuristic program=-",
+        },
+        Row {
+            title: "Nordhafen VPN",
+            fields: &[],
+            tags: &["Citrix gateway"],
+            url: "",
+            expect: "remote heuristic program=Citrix",
+        },
     ]);
 }
 
@@ -325,6 +430,36 @@ fn web_table() {
             title: "Host without instance",
             fields: &[HOST, ("SAP_INSTANCE", "")],
             tags: &[],
+            url: "",
+            expect: "web fallback url=no",
+        },
+        // An empty REMOTE_CLIENT does not count.
+        Row {
+            title: "GitHub",
+            fields: &[("REMOTE_CLIENT", "")],
+            tags: &[],
+            url: "https://github.com",
+            expect: "web fallback url=yes",
+        },
+        Row {
+            title: "Blank client",
+            fields: &[("REMOTE_CLIENT", "  ")],
+            tags: &[],
+            url: "",
+            expect: "web fallback url=no",
+        },
+        // Only whole words give remote access away.
+        Row {
+            title: "Myvpn",
+            fields: &[],
+            tags: &[],
+            url: "https://myvpn.example",
+            expect: "web fallback url=yes",
+        },
+        Row {
+            title: "Fortinet portal",
+            fields: &[],
+            tags: &["citrix_gateway"],
             url: "",
             expect: "web fallback url=no",
         },
@@ -447,4 +582,361 @@ fn no_gpui_in_kinds() {
         scanned += 1;
     }
     assert!(scanned >= 4, "only {scanned} files under {}", dir.display());
+}
+
+/// One entry for each pair of rules that can overlap, matching both. The
+/// rule numbers are the ones in the module docs; the earlier rule decides.
+#[test]
+fn precedence_holds_when_rules_overlap() {
+    let cases = [
+        (
+            "1 over 2",
+            Some("web"),
+            Row {
+                title: "Nordhafen",
+                fields: &[HOST, INSTANCE],
+                tags: &[],
+                url: "",
+                expect: "web marker url=no",
+            },
+        ),
+        (
+            "1 over 3",
+            Some("sap"),
+            Row {
+                title: "Nordhafen",
+                fields: &[("REMOTE_CLIENT", "Citrix")],
+                tags: &[],
+                url: "",
+                expect: "sap marker sid=- client=- role=- line=-",
+            },
+        ),
+        (
+            "1 over 4",
+            Some("remote"),
+            Row {
+                title: "NHP 100",
+                fields: &[],
+                tags: &[],
+                url: "",
+                expect: "remote marker program=-",
+            },
+        ),
+        (
+            "1 over 5",
+            Some("web"),
+            Row {
+                title: "Citrix",
+                fields: &[],
+                tags: &[],
+                url: "",
+                expect: "web marker url=no",
+            },
+        ),
+        (
+            "2 over 3",
+            None,
+            Row {
+                title: "Nordhafen",
+                fields: &[HOST, INSTANCE, ("REMOTE_CLIENT", "GlobalProtect")],
+                tags: &[],
+                url: "",
+                expect: "sap fields sid=- client=- role=- line=-",
+            },
+        ),
+        (
+            "2 over 4",
+            None,
+            Row {
+                title: "NHP 100",
+                fields: &[("SAP_SID", "BRQ")],
+                tags: &[],
+                url: "",
+                expect: "sap fields sid=BRQ client=100 role=qas line=-",
+            },
+        ),
+        (
+            "2 over 5",
+            None,
+            Row {
+                title: "Nordhafen VPN",
+                fields: &[("SAP_SID", "NHP")],
+                tags: &["citrix"],
+                url: "",
+                expect: "sap fields sid=NHP client=- role=prd line=-",
+            },
+        ),
+        (
+            "3 over 4",
+            None,
+            Row {
+                title: "NHP 100",
+                fields: &[("REMOTE_CLIENT", "Citrix")],
+                tags: &[],
+                url: "",
+                expect: "remote fields program=Citrix",
+            },
+        ),
+        (
+            "3 over 5",
+            None,
+            Row {
+                title: "Cisco VPN",
+                fields: &[("REMOTE_CLIENT", "GlobalProtect")],
+                tags: &[],
+                url: "",
+                expect: "remote fields program=GlobalProtect",
+            },
+        ),
+        (
+            "4 over 5",
+            None,
+            Row {
+                title: "NHP 100 Citrix",
+                fields: &[],
+                tags: &["VPN"],
+                url: "https://vpn.example",
+                expect: "sap title sid=NHP client=100 role=prd line=-",
+            },
+        ),
+        (
+            "5 over 6",
+            None,
+            Row {
+                title: "Sales",
+                fields: &[],
+                tags: &[],
+                url: "https://vpn.example",
+                expect: "remote heuristic program=-",
+            },
+        ),
+    ];
+    for (rules, marker, row) in cases {
+        assert_eq!(
+            summary(&classify(&row.entry(), marker)),
+            row.expect,
+            "rules {rules}"
+        );
+    }
+}
+
+/// A value of nothing but whitespace counts as empty in every rule. Each
+/// of these would match a rule if the value were taken as it stands.
+#[test]
+fn whitespace_counts_as_empty() {
+    check(&[
+        Row {
+            title: "Blank SID",
+            fields: &[("SAP_SID", " \t ")],
+            tags: &[],
+            url: "",
+            expect: "web fallback url=no",
+        },
+        Row {
+            title: "Blank host",
+            fields: &[("SAP_HOST", "   "), INSTANCE],
+            tags: &[],
+            url: "",
+            expect: "web fallback url=no",
+        },
+        Row {
+            title: "Blank instance",
+            fields: &[HOST, ("SAP_INSTANCE", "\n")],
+            tags: &[],
+            url: "",
+            expect: "web fallback url=no",
+        },
+        Row {
+            title: "Blank client",
+            fields: &[("REMOTE_CLIENT", "   ")],
+            tags: &[],
+            url: "",
+            expect: "web fallback url=no",
+        },
+        // Around a value, whitespace is trimmed rather than rejected.
+        Row {
+            title: "Padded SID",
+            fields: &[("SAP_SID", " NHP "), ("SAP_ROLE", " qas ")],
+            tags: &[],
+            url: "",
+            expect: "sap fields sid=NHP client=- role=qas line=-",
+        },
+    ]);
+
+    // A blank override does not hide the role the SID gives.
+    let EntryKind::Sap(sap) = classify(&entry("NHP 100", &[("SAP_ROLE", "  ")]), None) else {
+        panic!("expected an SAP system");
+    };
+    assert_eq!(sap.role, Some(SapRole::Prd));
+}
+
+/// Classifying a whole vault leaves its snapshot exactly as it was. The
+/// vault is built the way `examples/make_test_vault.rs` builds one and read
+/// the way the app reads a file.
+#[test]
+fn classification_never_writes() {
+    let mut db = Database::new();
+    {
+        let mut root = db.root_mut();
+        {
+            let mut customers = root.add_group();
+            customers.name = "Customers".into();
+            {
+                let mut sap = customers.add_entry();
+                sap.set_unprotected(fields::TITLE, "NHP 100");
+                sap.set_unprotected(fields::USERNAME, "nordhafen-user");
+                sap.set_protected(fields::PASSWORD, "s3cret");
+                sap.set_unprotected("SAP_HOST", "nhp-ci");
+                sap.set_unprotected("SAP_INSTANCE", "00");
+                sap.set_unprotected("SAP_ROLE", "  ");
+            }
+            {
+                let mut remote = customers.add_entry();
+                remote.set_unprotected(fields::TITLE, "Nordhafen VPN");
+                remote.set_unprotected("REMOTE_CLIENT", "GlobalProtect");
+                remote.tags.push("vpn".into());
+            }
+            let mut title_only = customers.add_entry();
+            title_only.set_unprotected(fields::TITLE, "BRQ 200");
+        }
+        let mut web = root.add_entry();
+        web.set_unprotected(fields::TITLE, "Sales Portal");
+        web.set_unprotected(fields::URL, "https://sales.example");
+    }
+    let snapshot = snapshot_from_database(&db);
+    let before = snapshot.clone();
+
+    let kinds = classify_all(&snapshot);
+
+    assert_eq!(snapshot, before);
+    let mut by_title: Vec<(String, String)> = kinds
+        .iter()
+        .map(|(id, kind)| {
+            let entry = snapshot
+                .find_entry(id)
+                .expect("classified id is in the snapshot");
+            (entry.title.clone(), summary(kind))
+        })
+        .collect();
+    by_title.sort();
+    assert_eq!(
+        by_title,
+        [
+            ("BRQ 200", "sap title sid=BRQ client=200 role=qas line=-"),
+            ("NHP 100", "sap fields sid=NHP client=100 role=prd line=-"),
+            ("Nordhafen VPN", "remote fields program=GlobalProtect"),
+            ("Sales Portal", "web fallback url=yes"),
+        ]
+        .map(|(title, kind)| (title.to_string(), kind.to_string()))
+    );
+}
+
+/// Every valid SID, all 33,696 of them: each parses, and the role follows the
+/// last character.
+#[test]
+fn role_from_sid_is_total() {
+    let letters = 'A'..='Z';
+    let rest: Vec<char> = ('A'..='Z').chain('0'..='9').collect();
+    let mut checked = 0;
+    for first in letters {
+        for &second in &rest {
+            for &third in &rest {
+                let text: String = [first, second, third].into_iter().collect();
+                let sid = Sid::parse(&text).unwrap_or_else(|| panic!("{text} is a valid SID"));
+                let expected = match third {
+                    'D' => Some(SapRole::Dev),
+                    'Q' => Some(SapRole::Qas),
+                    'P' => Some(SapRole::Prd),
+                    'S' => Some(SapRole::Sbx),
+                    _ => None,
+                };
+                assert_eq!(role_from_sid(&sid), expected, "{text}");
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 26 * 36 * 36);
+}
+
+/// The custom fields the rules read, in the order the property test fills
+/// them.
+const KEYS: [&str; 9] = [
+    "SAP_HOST",
+    "SAP_INSTANCE",
+    "SAP_SID",
+    "SAP_CLIENT",
+    "SAP_ROLE",
+    "SAP_LINE",
+    "SAP_USER",
+    "SAP_LANG",
+    "REMOTE_CLIENT",
+];
+
+proptest::proptest! {
+    /// Any title, URL, tag, field value or marker, multi-byte characters
+    /// included: `classify` returns, and what it returns is consistent. A
+    /// kind from the title has a title of that form, a SID it reports is
+    /// valid, and a remote program from a field is never blank. Half the
+    /// generated strings are shaped like the values the rules look for, so
+    /// the slicing in the title parser sees near misses and not only noise.
+    #[test]
+    fn classify_never_panics(
+        title in proptest::prop_oneof![
+            proptest::arbitrary::any::<String>(),
+            "[A-Za-z0-9\\x{c4}]{1,4}[ \\t\\x{a0}]{0,2}[0-9\\x{663}]{2,4}.{0,3}",
+        ],
+        url in proptest::prop_oneof![
+            proptest::arbitrary::any::<String>(),
+            "(https://)?[a-z]{0,6}[._/-]?(vpn|citrix|forti)?[._/-]?[a-z]{0,6}",
+        ],
+        tags in proptest::collection::vec(proptest::arbitrary::any::<String>(), 0..3),
+        values in proptest::collection::vec(
+            proptest::option::of(proptest::prop_oneof![
+                proptest::arbitrary::any::<String>(),
+                "[ \\t]{0,2}[A-Za-z0-9]{0,4}[ \\t]{0,2}",
+            ]),
+            KEYS.len(),
+        ),
+        marker in proptest::option::of(proptest::prop_oneof![
+            proptest::arbitrary::any::<String>(),
+            " ?(sap|SAP|remote|Remote|web|WEB|server) ?",
+        ]),
+    ) {
+        let entry = VaultEntry {
+            title,
+            url,
+            tags,
+            custom_fields: KEYS
+                .iter()
+                .zip(values)
+                .filter_map(|(key, value)| {
+                    value.map(|value| CustomField {
+                        key: key.to_string(),
+                        value,
+                        protected: false,
+                    })
+                })
+                .collect(),
+            ..VaultEntry::default()
+        };
+
+        let kind = classify(&entry, marker.as_deref());
+
+        if kind.source() == Source::Title {
+            proptest::prop_assert!(title_pattern(&entry.title).is_some());
+        }
+        match &kind {
+            EntryKind::Sap(sap) => {
+                if let Some(sid) = &sap.sid {
+                    proptest::prop_assert!(Sid::parse(sid.as_str()).is_some());
+                }
+            }
+            EntryKind::Remote(remote) => {
+                if let Some(RemoteProgram::Other(name)) = &remote.program {
+                    proptest::prop_assert!(!name.trim().is_empty());
+                }
+            }
+            EntryKind::Web(_) => {}
+        }
+    }
 }

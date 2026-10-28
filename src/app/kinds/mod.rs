@@ -16,11 +16,20 @@
 //!    decide.
 //! 2. `SAP_HOST` and `SAP_INSTANCE` both set, or a valid `SAP_SID`: an SAP
 //!    system, [`Source::Fields`].
-//! 3. A title that starts with a SID and a three-digit client, like
+//! 3. `REMOTE_CLIENT` set: remote access, [`Source::Fields`], with the
+//!    program the field names.
+//! 4. A title that starts with a SID and a three-digit client, like
 //!    "NHP 100" (see [`title_pattern`]): an SAP system, [`Source::Title`].
-//! 4. Anything else is a web login, [`Source::Fallback`].
+//! 5. The title, the URL or a tag contains one of the words VPN,
+//!    GlobalProtect, Cisco, Forti, FortiClient, Citrix or Workspot, in any
+//!    case: remote access, [`Source::Heuristic`]. A word is a run of letters,
+//!    digits and underscores, so "vpn.example.com" counts and "myvpn" does
+//!    not.
+//! 6. Anything else is a web login, [`Source::Fallback`].
 //!
 //! A field that holds nothing but whitespace counts as empty in every rule.
+//! The order matters where rules overlap: "NHP 100" tagged VPN is an SAP
+//! system, and an entry with both `SAP_SID` and `REMOTE_CLIENT` is too.
 
 mod remote;
 mod sap;
@@ -33,7 +42,7 @@ pub use remote::{KEY_REMOTE_CLIENT, RemoteAccess, RemoteProgram};
 pub use sap::{KEY_LINE, KEY_ROLE, KEY_SID, SapRole, SapSystem, Sid, role_from_sid, title_pattern};
 pub use web::WebLogin;
 
-use crate::domain::VaultEntry;
+use crate::domain::{VaultEntry, VaultSnapshot};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -90,10 +99,26 @@ pub fn classify(entry: &VaultEntry, marker: Option<&str>) -> EntryKind {
     if sap::has_sap_fields(entry) {
         return EntryKind::Sap(SapSystem::read(entry, Source::Fields));
     }
+    if field(entry, KEY_REMOTE_CLIENT).is_some() {
+        return EntryKind::Remote(RemoteAccess::read(entry, Source::Fields));
+    }
     if title_pattern(&entry.title).is_some() {
         return EntryKind::Sap(SapSystem::read(entry, Source::Title));
     }
+    if let Some(remote) = remote::guess(entry) {
+        return EntryKind::Remote(remote);
+    }
     EntryKind::Web(WebLogin::read(entry, Source::Fallback))
+}
+
+/// The kind of every entry in the snapshot, the Recycle Bin included, in the
+/// order [`VaultSnapshot::entries_recursive`] lists them.
+pub fn classify_all(snapshot: &VaultSnapshot) -> Vec<(String, EntryKind)> {
+    snapshot
+        .entries_recursive()
+        .into_iter()
+        .map(|entry| (entry.id.clone(), classify(entry, None)))
+        .collect()
 }
 
 fn from_marker(entry: &VaultEntry, marker: &str) -> Option<EntryKind> {
