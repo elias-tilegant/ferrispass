@@ -136,6 +136,10 @@ fn from_marker(entry: &VaultEntry, marker: &str) -> Option<EntryKind> {
 
 /// The value of the custom field `key`, trimmed. `None` when the entry has no
 /// such field or the value is only whitespace.
+///
+/// Takes the first field with that key, as the SAP launcher does. An entry
+/// read from a vault has each key once: keepass-rs keeps an entry's fields in
+/// a map.
 fn field<'a>(entry: &'a VaultEntry, key: &str) -> Option<&'a str> {
     entry
         .custom_fields
