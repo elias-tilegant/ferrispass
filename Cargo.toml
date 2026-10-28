@@ -172,6 +172,11 @@ proptest = "1"
 # library build then fails to resolve `gpui_kit`.
 gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
 gpui-component = { version = "=0.7.1", features = ["test-support"] }
+# The text tests in src/i18n/ read design/glossary.toml and apply its rules.
+# Both crates are already in the tree (rust-i18n reads TOML, regex comes in
+# through several crates), so the lock gains no package.
+regex = "1"
+toml = "0.8"
 
 [lints.rust]
 # `deny` (rather than `forbid`) so a single targeted module - currently

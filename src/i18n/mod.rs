@@ -131,7 +131,9 @@ pub fn init() {
 #[cfg_attr(not(test), allow(dead_code))]
 const CATALOGUES: &[(&str, &str)] = &[
     ("common.yml", include_str!("../../locales/common.yml")),
+    ("glossary.yml", include_str!("../../locales/glossary.yml")),
     ("kit.yml", include_str!("../../locales/kit.yml")),
+    ("msg.yml", include_str!("../../locales/msg.yml")),
 ];
 
 /// The text for `key` in the current language. Use [`tr!`](crate::tr).
