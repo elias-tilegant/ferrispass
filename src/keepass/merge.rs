@@ -2333,6 +2333,18 @@ fn reference_to_share(
 /// key, an item time or a block, otherwise the local (merged)
 /// representation wins. Pairs whose timestamps differ are left alone - the
 /// fork resolves those wholesale by the newer side.
+///
+/// Plugin data and Auto-Type are no exception, although the older side's
+/// generated keys and item times are then gone. When the remote copy of an
+/// entry is newer, the fork archives the local one unless it equals the
+/// newest archived version, and for an entry `diff` resolved automatically,
+/// `preserve_auto_resolved_history` has just archived exactly that one.
+/// Uniting the two here would archive it a second time, differing only in
+/// what KeePassXC regenerates. Groups keep no history, but follow the same
+/// rule, so that one rule covers both. A pair dated on one side only is left
+/// alone too: the fork keeps the local copy unless the remote one is dated
+/// in the future, and `entry_content_eq` or `group_content_eq` has checked
+/// that the two agree on everything that is compared.
 fn reconcile_unsurfaced_metadata(
     merged: &mut Database,
     source: &mut Database,
@@ -2458,10 +2470,12 @@ fn reconcile_unsurfaced_metadata(
 /// The plugin data both copies of a tied object get when they differ only in
 /// what the comparison leaves out, or `None` when there is nothing to align.
 ///
-/// Every key either side holds is kept. Where both hold one, ours stands and
-/// only an item time we lack is taken from theirs: the values agree on every
-/// compared key, so the only value that can be set aside is a generated one,
-/// which KeePassXC writes afresh anyway.
+/// Every key either side holds is kept. Where both hold one, the item dated
+/// later stands, ours on a tie: the values agree on every compared key, so
+/// there only the item time differs, and the later one is when that value
+/// was last set. Keeping ours regardless made the result depend on which
+/// copy was local. Only a generated key can hold two values, and KeePassXC
+/// writes those afresh anyway.
 fn united_custom_data(
     ours: &HashMap<String, CustomDataItem>,
     theirs: &HashMap<String, CustomDataItem>,
@@ -2471,13 +2485,13 @@ fn united_custom_data(
     }
     let mut united = theirs.clone();
     for (key, item) in ours {
-        let mut item = item.clone();
-        item.last_modification_time = item.last_modification_time.or_else(|| {
-            theirs
-                .get(key)
-                .and_then(|theirs| theirs.last_modification_time)
-        });
-        united.insert(key.clone(), item);
+        // `None` orders before any date, so an undated item never wins.
+        let theirs_is_later = theirs
+            .get(key)
+            .is_some_and(|theirs| theirs.last_modification_time > item.last_modification_time);
+        if !theirs_is_later {
+            united.insert(key.clone(), item.clone());
+        }
     }
     Some(united)
 }
@@ -7295,6 +7309,48 @@ mod tests {
                 assert_eq!(group.times.last_modification, group_time);
             }
         }
+    }
+
+    /// One value, dated twice: both copies hold it, each with its own item
+    /// time. The later time is when the value was last set, so it is the one
+    /// kept, whichever copy it came from, and both directions end up with the
+    /// same plugin data.
+    #[test]
+    fn the_later_of_two_item_times_is_kept_either_way() {
+        let (ours, id, group_id) = vault_with_plugin_data();
+        let later = keepass::db::Times::now() - chrono::TimeDelta::days(1);
+        let mut theirs = fork(&ours);
+        theirs
+            .entry_mut(id)
+            .unwrap()
+            .custom_data
+            .insert("Plugin".into(), plugin_text("sap", Some(later)));
+        theirs
+            .group_mut(group_id)
+            .unwrap()
+            .custom_data
+            .insert("Plugin".into(), plugin_text("partner", Some(later)));
+
+        let mut results = Vec::new();
+        for (local, remote) in [(&ours, &theirs), (&theirs, &ours)] {
+            let report = diff(local, remote);
+            assert!(report.is_clean(), "{report:?}");
+            let merged = apply_picks(local, remote, &Resolutions::default(), &report)
+                .expect("the values agree");
+            assert_eq!(
+                merged.entry(id).unwrap().custom_data.get("Plugin"),
+                Some(&plugin_text("sap", Some(later)))
+            );
+            assert_eq!(
+                merged.group(group_id).unwrap().custom_data.get("Plugin"),
+                Some(&plugin_text("partner", Some(later)))
+            );
+            results.push(merged);
+        }
+        assert_eq!(
+            results[0].entry(id).unwrap().custom_data,
+            results[1].entry(id).unwrap().custom_data
+        );
     }
 
     /// Without a modification time the fork merges on substitute times, which
