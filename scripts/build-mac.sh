@@ -216,8 +216,12 @@ cargo build --release --target aarch64-apple-darwin
 
 BIN_PATH="${DIST_DIR}/${BINARY_NAME}"
 CLI_BIN_PATH="${DIST_DIR}/${CLI_BINARY_NAME}"
-cp "${PROJECT_ROOT}/target/aarch64-apple-darwin/release/${BINARY_NAME}" "${BIN_PATH}"
-cp "${PROJECT_ROOT}/target/aarch64-apple-darwin/release/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}"
+# Cargo writes to CARGO_TARGET_DIR when it is set, so the binaries are read
+# from there too; a relative path means the same to both, since both run in
+# the current directory.
+RELEASE_DIR="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}/aarch64-apple-darwin/release"
+cp "${RELEASE_DIR}/${BINARY_NAME}" "${BIN_PATH}"
+cp "${RELEASE_DIR}/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}"
 echo "    ✓ $(file "${BIN_PATH}" | sed 's|.*: ||')"
 
 # ---------- 2. icon ----------
