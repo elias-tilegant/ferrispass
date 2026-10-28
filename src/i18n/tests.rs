@@ -528,17 +528,24 @@ struct Call {
 
 /// Every call of the macro `name!` in code, under any path (`tr!`,
 /// `crate::tr!`, `ferrispass::tr!`), but not inside comments or strings.
+/// Rust allows space and comments around the `!` (`tr !(..)`), so the scan
+/// does too.
 fn calls(source: &str, name: &str) -> Vec<Call> {
     let chars: Vec<char> = source.chars().collect();
     let parts = classify(&chars);
-    let pattern: Vec<char> = format!("{name}!").chars().collect();
+    let name: Vec<char> = name.chars().collect();
     let mut found = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         if parts[i] == Part::Code
-            && chars[i..].starts_with(&pattern)
+            && chars[i..].starts_with(&name)
             && !continues_identifier(&chars, i)
-            && let Some((args, end)) = arguments(&chars, &parts, i + pattern.len())
+            && chars
+                .get(i + name.len())
+                .is_none_or(|&c| !(c.is_alphanumeric() || c == '_'))
+            && let Some(bang) = skip_space(&chars, &parts, i + name.len())
+            && chars[bang] == '!'
+            && let Some((args, end)) = arguments(&chars, &parts, bang + 1)
         {
             found.push(Call {
                 line: line_of(&chars, i),
@@ -550,6 +557,11 @@ fn calls(source: &str, name: &str) -> Vec<Call> {
         i += 1;
     }
     found
+}
+
+/// The first index from `from` on that is neither space nor comment.
+fn skip_space(chars: &[char], parts: &[Part], from: usize) -> Option<usize> {
+    (from..chars.len()).find(|&i| !chars[i].is_whitespace() && parts[i] != Part::Comment)
 }
 
 /// The arguments of a macro call whose `!` ends just before `from`, and the
@@ -687,23 +699,58 @@ fn check_key_uses(file: &str, uses: &[KeyUse], english: &BTreeMap<String, String
     problems
 }
 
+/// `source` with comments and string and char literals blanked out and the
+/// line breaks kept, so a pattern sees only what the compiler sees.
+fn code_only(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let parts = classify(&chars);
+    chars
+        .iter()
+        .zip(&parts)
+        .map(|(&c, part)| {
+            if *part == Part::Code || c == '\n' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+/// The lines of `code` (from `code_only`) on which `pattern` matches.
+fn pattern_lines(code: &str, pattern: &str) -> Vec<usize> {
+    Regex::new(pattern)
+        .expect("scan pattern")
+        .find_iter(code)
+        .map(|hit| code[..hit.start()].matches('\n').count() + 1)
+        .collect()
+}
+
 /// Ways to read a catalogue that skip `tr!` and `tp!`, and with them the key
-/// check. Only `src/i18n/` may use them.
-const LOOKUPS_PAST_THE_SCAN: &[&str] = &[
-    "i18n::text(",
-    "i18n::plural(",
-    "_rust_i18n_translate",
-    "_rust_i18n_try_translate",
-    "_rust_i18n_backend",
+/// check, as patterns over code. Only `src/i18n/` may use them.
+const LOOKUPS_PAST_THE_SCAN: &[(&str, &str)] = &[
+    (
+        r"\bi18n\s*::\s*(text|plural)\b",
+        "calls the lookup behind tr! and tp!",
+    ),
+    (
+        r"\bi18n\s*::\s*\{[^}]*\b(text|plural)\b",
+        "imports the lookup behind tr! and tp!",
+    ),
+    (r"\bi18n\s*::\s*\*", "imports all of i18n"),
+    (r"\bi18n\s+as\b", "renames the i18n module"),
+    (r"\b(tr|tp)\s+as\b", "renames tr! or tp!"),
+    (r"\b_rust_i18n_\w+", "reads rust-i18n's catalogues directly"),
 ];
 
 /// Problems with how one file outside `src/i18n/` reads texts.
 fn lookups_past_the_scan(file: &str, source: &str) -> Vec<String> {
+    let code = code_only(source);
     let mut problems = Vec::new();
-    for needle in LOOKUPS_PAST_THE_SCAN {
-        for line in code_lines(source, needle) {
+    for (pattern, what) in LOOKUPS_PAST_THE_SCAN {
+        for line in pattern_lines(&code, pattern) {
             problems.push(format!(
-                "{file}:{line}: `{needle}` skips the key check, use tr! or tp!"
+                "{file}:{line}: {what}, which skips the key check; use tr! or tp!"
             ));
         }
     }
@@ -721,7 +768,10 @@ fn used_keys_exist() {
     let english = catalogue(Language::English);
     let mut problems = Vec::new();
     let mut scanned = 0;
-    for (file, source) in rust_files(&root().join("src")) {
+    let files = ["src", "tests", "examples", "benches"]
+        .into_iter()
+        .flat_map(|dir| rust_files(&root().join(dir)));
+    for (file, source) in files {
         scanned += 1;
         // This file holds the scanner's own test sources.
         if file == "src/i18n/tests.rs" {
@@ -732,7 +782,7 @@ fn used_keys_exist() {
             problems.extend(lookups_past_the_scan(&file, &source));
         }
     }
-    assert!(scanned > 50, "only {scanned} files under src/");
+    assert!(scanned > 50, "only {scanned} source files");
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
@@ -821,7 +871,7 @@ fn the_scan_catches_lookups_that_skip_the_key_check() {
     assert!(lookups_past_the_scan("f.rs", clean).is_empty());
     assert_eq!(
         lookups_past_the_scan("f.rs", "let a = crate::i18n::text(key, &[]);"),
-        ["f.rs:1: `i18n::text(` skips the key check, use tr! or tp!"]
+        ["f.rs:1: calls the lookup behind tr! and tp!, which skips the key check; use tr! or tp!"]
     );
     assert_eq!(
         lookups_past_the_scan("f.rs", "\nlet b = rust_i18n::t!(\"x\");"),
@@ -829,8 +879,49 @@ fn the_scan_catches_lookups_that_skip_the_key_check() {
     );
     assert_eq!(
         lookups_past_the_scan("f.rs", "crate::_rust_i18n_try_translate(\"de\", key)"),
-        ["f.rs:1: `_rust_i18n_try_translate` skips the key check, use tr! or tp!"]
+        [
+            "f.rs:1: reads rust-i18n's catalogues directly, which skips the key check; use tr! or tp!"
+        ]
     );
+}
+
+#[test]
+fn the_scan_sees_through_spacing_and_renames() {
+    // Valid Rust that reads a text. The key check has to see each one.
+    for source in [
+        "let a = tr !(\"sample.gone\");",
+        "let a = tr! (\"sample.gone\");",
+        "let a = crate::tr /* why */ ! [\"sample.gone\"];",
+        "let a = tp !(\"sample.gone\", n);",
+    ] {
+        let found: Vec<Result<String, String>> = key_uses(source)
+            .into_iter()
+            .map(|key_use| key_use.key)
+            .collect();
+        assert_eq!(found, [Ok("sample.gone".to_string())], "{source}");
+    }
+    // Ways around tr! and tp! that the key check cannot follow.
+    for source in [
+        "let a = crate::i18n::text (key, &[]);",
+        "let a = crate::i18n :: plural(key, 2, &[]);",
+        "use crate::i18n::{text, Language};",
+        "use crate::i18n::*;",
+        "use crate::i18n as words;",
+        "use crate::tr as label;",
+        "use crate::{tp as count_label};",
+        "let b = rust_i18n::t !(\"x\");",
+    ] {
+        assert_eq!(lookups_past_the_scan("f.rs", source).len(), 1, "{source}");
+    }
+    // What other modules may use.
+    for source in [
+        "use crate::i18n::{fmt, Language};",
+        "use crate::i18n::fmt::integer;",
+        "let german = crate::i18n::GERMAN_ENABLED;",
+        "let a = tr!(\"x\"); // i18n::text(\"y\", &[])",
+    ] {
+        assert!(lookups_past_the_scan("f.rs", source).is_empty(), "{source}");
+    }
 }
 
 /// The command line tool and its installer. Their output is read by scripts
@@ -867,6 +958,7 @@ fn cli_text_key_uses(file: &str, source: &str) -> Vec<String> {
             "{file}:{line}: the command line tool reaches into i18n"
         ));
     }
+    problems.extend(lookups_past_the_scan(file, source));
     problems
 }
 
@@ -880,7 +972,10 @@ fn the_cli_scan_catches_a_text_key() {
     );
     assert_eq!(
         cli_text_key_uses("cli.rs", "\nuse ferrispass::i18n::text;"),
-        ["cli.rs:2: the command line tool reaches into i18n"]
+        [
+            "cli.rs:2: the command line tool reaches into i18n",
+            "cli.rs:2: calls the lookup behind tr! and tp!, which skips the key check; use tr! or tp!",
+        ]
     );
 }
 
@@ -888,17 +983,22 @@ fn the_cli_scan_catches_a_text_key() {
 fn only_the_app_starts_i18n() {
     let mut init_callers = Vec::new();
     let mut extend_callers = Vec::new();
+    let mut locale_setters = Vec::new();
     for (file, source) in rust_files(&root().join("src")) {
         if file == "src/i18n/tests.rs" {
             continue;
         }
+        let code = code_only(&source);
         if !file.starts_with("src/i18n/") {
-            for _ in code_lines(&source, "i18n::init") {
+            for _ in pattern_lines(&code, r"\bi18n\s*::\s*(init\b|\{[^}]*\binit\b)") {
                 init_callers.push(file.clone());
             }
         }
         for _ in calls(&source, "extend") {
             extend_callers.push(file.clone());
+        }
+        for _ in pattern_lines(&code, r"\bset_locale\b") {
+            locale_setters.push(file.clone());
         }
     }
     assert_eq!(
@@ -912,6 +1012,12 @@ fn only_the_app_starts_i18n() {
         extend_callers,
         ["src/i18n/mod.rs"],
         "rust_i18n::extend! runs in i18n::init() and nowhere else"
+    );
+    // The language is set in one place, from ui_language().
+    assert_eq!(
+        locale_setters,
+        ["src/i18n/mod.rs"],
+        "only i18n::init() sets the language"
     );
 }
 
