@@ -301,6 +301,9 @@ jobs:
           # --prerelease=false --latest) is the deliberate step that ships a
           # version to everyone, and it is never done for a tag with a hyphen.
           prerelease: true
+          # GitHub never makes a pre-release latest, but this says so outright,
+          # so the step stays harmless if the flag above is ever changed.
+          make_latest: false
 
   # The permanent release kanal-vorab (no v, so it never starts this
   # workflow) holds the manifest of the highest version tagged so far. The

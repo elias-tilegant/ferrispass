@@ -1348,7 +1348,8 @@ fn lint_levels_are_read_from_the_lints_table() {
 /// else exercises a workflow before a tag does.
 ///
 /// Every release is published as a pre-release, and the workflow has no other
-/// way to create a release, edit one or mark one as latest. The updater reads
+/// way to create a release, edit one or mark one as latest; the publishing
+/// step says `make_latest: false` outright. The updater reads
 /// `releases/latest`, which GitHub never resolves to a pre-release, so
 /// shipping a version to everyone stays a step taken by hand. The signed
 /// artefacts the sign job hands over, `SHA256SUMS` included, are all
@@ -1454,14 +1455,16 @@ fn release_workflow_problems(workflow: &str) -> Vec<String> {
             return problems;
         }
     };
-    if !steps[publish]
-        .lines
-        .iter()
-        .any(|line| yaml_entry(line).is_some_and(|(key, _)| key == "prerelease"))
-    {
-        problems.push(format!(
-            "the step that uses {PUBLISH_ACTION} must set `prerelease: true`"
-        ));
+    for (key, value) in [("prerelease", "true"), ("make_latest", "false")] {
+        if !steps[publish]
+            .lines
+            .iter()
+            .any(|line| yaml_entry(line).is_some_and(|(k, _)| k == key))
+        {
+            problems.push(format!(
+                "the step that uses {PUBLISH_ACTION} must set `{key}: {value}`"
+            ));
+        }
     }
     if !steps[publish].lines.iter().any(|line| {
         yaml_entry(line).is_some_and(|(key, value)| {
@@ -1932,6 +1935,7 @@ jobs:
             dist/SHA256SUMS
           fail_on_unmatched_files: true
           prerelease: true
+          make_latest: false
   channel:
     needs: release
     concurrency:
@@ -1988,6 +1992,9 @@ fn release_rules_catch_every_way_around_the_pre_release_flag() {
             "fail_on_unmatched_files: true",
             "fail_on_unmatched_files: false",
         ),
+        ("          make_latest: false\n", ""),
+        ("make_latest: false", "make_latest: legacy"),
+        ("make_latest: false", "make_latest: \"true\""),
         ("          fail_on_unmatched_files: true\n", ""),
         (
             "            dist/SHA256SUMS\n          fail",
