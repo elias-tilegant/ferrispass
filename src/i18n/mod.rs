@@ -131,6 +131,7 @@ pub fn init() {
 #[cfg_attr(not(test), allow(dead_code))]
 const CATALOGUES: &[(&str, &str)] = &[
     ("a11y.yml", include_str!("../../locales/a11y.yml")),
+    ("bundle.yml", include_str!("../../locales/bundle.yml")),
     ("common.yml", include_str!("../../locales/common.yml")),
     ("glossary.yml", include_str!("../../locales/glossary.yml")),
     ("kit.yml", include_str!("../../locales/kit.yml")),

@@ -1,0 +1,3 @@
+/* Texts macOS shows for FerrisPass from the bundle. Each one comes from a
+   key in locales/bundle.yml, and a test keeps the two the same. */
+"NSFaceIDUsageDescription" = "Use Touch ID to unlock your KeePass vaults without typing the master password.";

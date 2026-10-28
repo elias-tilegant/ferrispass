@@ -1017,7 +1017,10 @@ fn no_unused_keys() {
         .collect();
     let reserved = fs::read_to_string(root().join("locales/_reserved.txt"))
         .expect("read locales/_reserved.txt");
-    let problems = unused_key_problems(&keys, &keys_read_by_code(), &parse_reserved(&reserved));
+    // The bundle's .strings files read their keys too.
+    let mut used = keys_read_by_code();
+    used.extend(INFO_PLIST_TEXTS.iter().map(|(_, key)| key.to_string()));
+    let problems = unused_key_problems(&keys, &used, &parse_reserved(&reserved));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
@@ -1798,4 +1801,128 @@ fn the_render_scan_finds_literal_texts() {
             "f.rs:10: \"Copy password\" belongs in locales/, use tr!",
         ]
     );
+}
+
+// ---------------------------------------------------------------- bundle --
+
+/// Info.plist texts that macOS shows for the app, with the key that holds
+/// them in every language. The `.lproj` folders in `bundle/macos/` carry them
+/// into the bundle.
+const INFO_PLIST_TEXTS: &[(&str, &str)] = &[("NSFaceIDUsageDescription", "bundle.face_id_usage")];
+
+/// The entries of a `.strings` file: `"key" = "value";` per line.
+fn strings_entries(text: &str) -> BTreeMap<String, String> {
+    let entry = Regex::new(r#"^\s*"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"\s*;\s*$"#)
+        .expect("strings pattern");
+    let unescape = |text: &str| text.replace("\\\"", "\"").replace("\\\\", "\\");
+    text.lines()
+        .filter_map(|line| entry.captures(line))
+        .map(|found| (unescape(&found[1]), unescape(&found[2])))
+        .collect()
+}
+
+/// The `<string>` that follows `<key>name</key>` in a property list.
+fn plist_string(plist: &str, name: &str) -> Option<String> {
+    let pattern = format!(
+        r"<key>{}</key>\s*<string>([^<]*)</string>",
+        regex::escape(name)
+    );
+    Regex::new(&pattern)
+        .expect("plist pattern")
+        .captures(plist)
+        .map(|found| found[1].to_string())
+}
+
+/// The `.lproj` folders in `bundle/macos/`, by name.
+fn lproj_folders() -> Vec<String> {
+    let mut folders: Vec<String> = fs::read_dir(root().join("bundle/macos"))
+        .expect("read bundle/macos")
+        .map(|entry| entry.expect("directory entry").file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".lproj"))
+        .collect();
+    folders.sort();
+    folders
+}
+
+#[test]
+fn german_bundle_texts_wait_for_german() {
+    // With a de.lproj in the bundle, macOS would show its own texts for the
+    // app (the Touch ID prompt, system panels) in German while the app is
+    // still English. So de.lproj ships together with the app's German.
+    let expected: &[&str] = if GERMAN_ENABLED {
+        &["de.lproj", "en.lproj"]
+    } else {
+        &["en.lproj"]
+    };
+    assert_eq!(
+        lproj_folders(),
+        expected,
+        "bundle/macos holds exactly the .lproj folders of the languages the app shows"
+    );
+    let plist =
+        fs::read_to_string(root().join("bundle/macos/Info.plist")).expect("read Info.plist");
+    assert_eq!(
+        plist_string(&plist, "CFBundleDevelopmentRegion").as_deref(),
+        Some("en")
+    );
+    assert_eq!(
+        plist.contains("<key>CFBundleLocalizations</key>"),
+        GERMAN_ENABLED,
+        "Info.plist offers German in the per-app language setting only once the app speaks it"
+    );
+}
+
+#[test]
+fn the_bundle_texts_come_from_the_catalogue() {
+    let plist =
+        fs::read_to_string(root().join("bundle/macos/Info.plist")).expect("read Info.plist");
+    let english = catalogue(Language::English);
+    for (name, key) in INFO_PLIST_TEXTS {
+        // Info.plist holds the English, for a Mac in any other language.
+        assert_eq!(
+            plist_string(&plist, name).as_deref(),
+            english.get(*key).map(String::as_str),
+            "Info.plist {name} differs from {key}"
+        );
+    }
+    for folder in lproj_folders() {
+        let code = folder.trim_end_matches(".lproj");
+        let language = language_named(code);
+        let path = format!("bundle/macos/{folder}/InfoPlist.strings");
+        let entries = strings_entries(
+            &fs::read_to_string(root().join(&path)).unwrap_or_else(|err| panic!("{path}: {err}")),
+        );
+        let texts = catalogue(language);
+        let names: BTreeSet<&str> = entries.keys().map(String::as_str).collect();
+        let expected: BTreeSet<&str> = INFO_PLIST_TEXTS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names, expected,
+            "{path}: list each text in INFO_PLIST_TEXTS"
+        );
+        for (name, key) in INFO_PLIST_TEXTS {
+            assert_eq!(
+                entries.get(*name),
+                texts.get(*key),
+                "{path}: {name} differs from {key} ({code})"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_strings_reader_reads_entries() {
+    let entries = strings_entries(
+        "/* comment */\n\"NSFaceIDUsageDescription\" = \"Use \\\"Touch ID\\\".\";\nnot an entry\n",
+    );
+    assert_eq!(
+        entries,
+        BTreeMap::from([(
+            "NSFaceIDUsageDescription".to_string(),
+            "Use \"Touch ID\".".to_string()
+        )])
+    );
+    let plist = "<key>A</key>\n    <string>one</string>\n<key>B</key><string>two</string>";
+    assert_eq!(plist_string(plist, "B").as_deref(), Some("two"));
+    assert_eq!(plist_string(plist, "C"), None);
 }
