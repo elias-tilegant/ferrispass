@@ -212,9 +212,10 @@ After the run, before going live, check the release page:
   archives, `update.json`, a `.minisig` file for each of these four, and
   `SHA256SUMS`;
 - the hand-written note, if there is one, sits above the generated list;
-- the `kanal-vorab` release carries `update.json` and `update.json.minisig`
-  of the highest version tagged so far: this tag's, unless a higher one was
-  already there, which the run reports in a notice.
+- the `kanal-vorab` release is still a pre-release and carries `update.json`
+  and `update.json.minisig` of the highest version released so far: this
+  tag's, unless a higher one is already out, which the run reports in a
+  notice.
 
 **0.9.x fixes** come from `master` and take exactly this path: tag, check,
 then mark the release latest.
@@ -241,43 +242,54 @@ Testers install them from the release page; they are never marked latest.
 and stays a pre-release while the test group uses it. Going live is the same
 `gh release edit` on that same release; nothing is rebuilt.
 
-**The pre-release channel.** After publishing, a job of its own copies
-`update.json` and `update.json.minisig` into a permanent release named
-`kanal-vorab`, replacing what was there, but only when the tag's version is
-higher than the one already in the channel. The channel only moves forward:
-a 0.9.x fix tagged after a test build leaves the test build's manifest in
-place, and the run says so in a notice. Versions are compared by SemVer
-precedence (`scripts/semver-compare.py`), which ranks `0.10.0-pre.3` below
-`0.10.0`; `sort -V` gets that wrong. The release's tag has no `v`, so it
-never starts the workflow. The app does not read this release yet; test
-builds will, to find the next test build, while builds without a suffix keep
-reading only `releases/latest`. The release has to exist before the first
-tag that runs this workflow; create it once:
+**The pre-release channel.** After publishing, a job of its own runs
+`scripts/update-channel.sh`. It finds the highest version among the
+published `v*` releases that carry `update.json` and `update.json.minisig`,
+and makes a permanent release named `kanal-vorab` hold exactly that pair.
+The channel only moves forward: a 0.9.x fix tagged after a test build leaves
+the test build's manifest in place, and the run says so in a notice.
+Versions are compared by SemVer precedence (`scripts/semver-compare.py`),
+which ranks `0.10.0-pre.3` below `0.10.0`; `sort -V` gets that wrong. The
+release's tag has no `v`, so it never starts the workflow. The app does not
+read this release yet; test builds will, to find the next test build, while
+builds without a suffix keep reading only `releases/latest`. The release has
+to exist, as a pre-release, before the first tag that runs this workflow;
+create it once:
 
 ```sh
 gh release create kanal-vorab --prerelease --title "Pre-release channel" \
-    --notes "Holds the update manifest of the highest version tagged so far. Do not delete."
+    --notes "Holds the update manifest of the highest version released so far. Do not delete."
 ```
 
-While it is empty, the next tag fills it, whatever its version. After that
-it must hold exactly those two files. The channel job fails, and leaves the
-channel alone, when `kanal-vorab` is missing, holds anything else, or has a
-manifest without a readable version. If `kanal-vorab` was missing, create
+It must stay a pre-release: as a full release it could become latest and
+hand test builds to every installed app, so the channel job fails if it is
+not one. It must also hold either nothing, before the first tag, or exactly
+those two files. The job fails, and leaves the channel alone, when
+`kanal-vorab` is missing, is not a pre-release, holds anything else, or when
+a manifest or a version cannot be read. If `kanal-vorab` was missing, create
 it and re-run the failed channel job; the release itself is already up as a
 pre-release and is not touched again.
 
-Only one channel job runs at a time, so two tags published close together
-cannot both read the channel before either writes it. A channel job that
-finds another one already waiting replaces it, and the replaced one shows
-as cancelled. Re-run it; it compares again and moves the channel if its
-version is the higher one.
-
-The workflow never moves the channel back, and a re-run for the same tag
-leaves it alone. To point it at an older release, for instance after
-withdrawing a test build, or to repair an upload that broke off half-way,
-copy the two files over by hand:
+Because every run looks at all releases, not only the one it published, a
+later run puts right whatever an earlier one left behind: a channel job that
+was cancelled while it waited (only one runs at a time, and a newer one
+replaces one that is still waiting), an upload that broke off between the
+two files, or a release that was re-run and signed again. The same script
+runs by hand with `gh` logged in to an account that may edit releases:
 
 ```sh
+scripts/update-channel.sh elias-tilegant/ferrispass
+```
+
+It never moves the channel back. To point it at an older release, for
+instance to withdraw a test build, first take `update.json` and
+`update.json.minisig` off the withdrawn release (or delete the release), so
+no later run moves the channel forward to it again, then copy the older pair
+over by hand:
+
+```sh
+gh release delete-asset vX.Y.Z-pre.N update.json
+gh release delete-asset vX.Y.Z-pre.N update.json.minisig
 gh release download vX.Y.Z --pattern 'update.json*' --dir channel
 gh release upload kanal-vorab channel/update.json channel/update.json.minisig --clobber
 ```
@@ -329,7 +341,7 @@ Stages, with rough timing:
 | 9 | Generate `.app.tar.gz` + unsigned `update.json` with exact payload size | <10 s | `jq` missing or archive creation fails |
 | Sign | Check the disk image's notarization ticket, inject notes, sign payload, then the complete manifest, then the disk image; write `SHA256SUMS` | <10 s | disk image without a valid ticket; minisign key missing, malformed, or payload size mismatch |
 | End | `softprops/action-gh-release@v2` publishes a pre-release with the files | <30 s | `permissions: contents: write` not granted; a file missing from `signed-release` (the step stops before creating the release); an upload failing after the release is created (see above) |
-| Channel | Copy the manifest into `kanal-vorab` if the tag's version is higher, one run at a time | <30 s | `kanal-vorab` missing or holding anything but the manifest and its signature (see above) |
+| Channel | Point `kanal-vorab` at the highest release with a manifest, one run at a time | <30 s | `kanal-vorab` missing, not a pre-release, or holding anything but the manifest and its signature (see above) |
 
 Total wall-clock: usually 8-12 minutes.
 

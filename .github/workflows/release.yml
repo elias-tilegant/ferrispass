@@ -306,20 +306,25 @@ jobs:
           make_latest: false
 
   # The permanent release kanal-vorab (no v, so it never starts this
-  # workflow) holds the manifest of the highest version tagged so far. The
+  # workflow) holds the manifest of the highest version released so far. The
   # app does not read it yet. Test builds will, to find the next test build;
   # builds without a pre-release suffix keep reading only releases/latest.
   #
-  # The channel only moves forward: a tag whose version is not higher than
-  # the one already there, such as a 0.9.x fix after a test build, leaves it
-  # as it is. Versions are compared by SemVer precedence, which ranks
-  # 0.10.0-pre.3 below 0.10.0; sort -V does not.
+  # scripts/update-channel.sh finds the highest version, by SemVer precedence
+  # (sort -V ranks 0.10.0-pre.3 above 0.10.0), among all published v*
+  # releases that carry update.json and update.json.minisig, and copies that
+  # pair into kanal-vorab. The channel only moves forward, so a 0.9.x fix
+  # after a test build leaves it as it is. Because every run looks at every
+  # release, any run puts right one that an earlier run left behind. The
+  # script fails when kanal-vorab is missing, is not a pre-release (it could
+  # then become latest and hand test builds to everyone) or holds anything
+  # but nothing or exactly that pair.
   #
   # A job of its own, so that one run at a time reads and writes the
-  # channel: two tags published close together would otherwise both read it
-  # before either writes, and the lower one could land last. A channel job
-  # that finds another one already waiting replaces it, and the replaced one
-  # shows as cancelled; re-run it.
+  # channel: two runs close together could otherwise both read it before
+  # either writes. A channel job that finds another one already waiting
+  # replaces it, and the replaced one shows as cancelled; the next run
+  # catches up on it.
   channel:
     name: Update the pre-release channel
     needs: release
@@ -330,50 +335,14 @@ jobs:
       group: kanal-vorab
       cancel-in-progress: false
     steps:
-      # For scripts/semver-compare.py. First, because a checkout empties the
-      # workspace, and without credentials, because nothing here pushes.
+      # The script comes from the commit this workflow runs from: the tag on
+      # a push, the branch on a manual run, which may name an older tag.
+      # Without credentials, because nothing here pushes.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
-      - name: Download signed release artefacts
-        uses: actions/download-artifact@v4
-        with:
-          name: signed-release
-          path: dist
-
-      # kanal-vorab holds exactly update.json and its signature, or nothing
-      # before the first tag. Anything else, and a missing release, stops the
-      # run: the channel is repaired by hand (docs/release-process.md), never
-      # skipped or overwritten blindly.
-      - name: Update the pre-release channel
+      - name: Point kanal-vorab at the highest release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tagged="$(jq -er .version dist/update.json)"
-          held="$(gh release view kanal-vorab --repo "${GITHUB_REPOSITORY}" \
-            --json assets --jq '[.assets[].name] | sort | join(" ")')"
-          case "${held}" in
-            "")
-              echo "kanal-vorab is empty; it starts at ${tagged}"
-              ;;
-            "update.json update.json.minisig")
-              gh release download kanal-vorab --repo "${GITHUB_REPOSITORY}" \
-                --pattern update.json --output "${RUNNER_TEMP}/channel.json"
-              current="$(jq -er .version "${RUNNER_TEMP}/channel.json")"
-              order="$(python3 -I scripts/semver-compare.py "${tagged}" "${current}")"
-              if [ "${order}" != higher ]; then
-                echo "::notice::kanal-vorab stays at ${current}; ${tagged} is not higher"
-                exit 0
-              fi
-              ;;
-            *)
-              echo "::error::kanal-vorab holds '${held}', not update.json and update.json.minisig; repair it by hand"
-              exit 1
-              ;;
-          esac
-          gh release upload kanal-vorab \
-            dist/update.json dist/update.json.minisig \
-            --clobber --repo "${GITHUB_REPOSITORY}"
+        run: scripts/update-channel.sh "${GITHUB_REPOSITORY}"
