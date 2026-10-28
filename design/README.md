@@ -26,6 +26,26 @@ There is no build script. A golden test generates each file again and compares i
 - `kit`: how the tokens map onto the color keys of GPUI Kit.
 - `css_aliases`: the variable names the HTML mockups use for some tokens.
 
+## Color family names
+
+The color families have English names here. The design spec and the HTML mockups use other names, so this is how they match:
+
+| Here | Design spec |
+|---|---|
+| `sand` | `sand` |
+| `copper` | `kupfer` |
+| `brand` | `marke` |
+| `patina` | `patina` |
+| `ochre` | `ocker` |
+| `blue` | `blau` |
+| `carmine` | `karmin` |
+| `teal` | `petrol` |
+| `plum` | `pflaume` |
+| `moss` | `moos` |
+| `slate` | `schiefer` |
+
+The vault colors follow the same table: `team.teal` is `team.petrol` in the design spec. The keys of `css_aliases` keep the names the mockups use, such as `--team-petrol`.
+
 ## The GPUI Kit theme
 
 `assets/theme/ferrispass.theme.json` holds four Kit themes, one per mode. `kit.colors` sets every one of the 140 color keys the Kit's schema knows, so nothing falls back to the Kit's stock colors. Two things look odd there and are on purpose:

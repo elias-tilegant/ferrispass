@@ -208,8 +208,8 @@ mod tests {
     #[test]
     fn primitive_names() {
         const FAMILIES: [&str; 11] = [
-            "sand", "kupfer", "marke", "patina", "ocker", "blau", "karmin", "petrol", "pflaume",
-            "moos", "schiefer",
+            "sand", "copper", "brand", "patina", "ochre", "blue", "carmine", "teal", "plum",
+            "moss", "slate",
         ];
         let tokens = Tokens::load();
         for (name, primitive) in tokens.primitives() {

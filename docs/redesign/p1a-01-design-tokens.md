@@ -15,6 +15,8 @@ A step of the redesign on the `rebuild` branch, finished up to the switch-over o
 - `src/ui/ds/tokens/generated.rs`: the primitives, one `ColorSet` per mode (light, dark, and both with increased contrast), the dimensions and the shadows. Each color holds its hex value for the contrast math and the `Hsla` GPUI draws with.
 - `assets/theme/ferrispass.theme.json`: four GPUI Kit themes, with every one of the Kit's 140 color keys set from a token, so nothing falls back to the Kit's stock colors.
 
+The color families have English names (`copper`, `ochre`, `teal` and so on). `design/README.md` has a table that maps them to the names in the design spec and the mockups.
+
 There is no build script. A golden test generates each file again and compares it byte for byte, so a JSON change that wasn't regenerated fails `cargo test`. To regenerate:
 
 ```

@@ -19,7 +19,7 @@ pub const TEXT_SIZE_LARGE: f32 = 15.0;
 pub mod primitive {
     use super::{Color, Hsla};
 
-    pub const BLAU_272: Color = Color {
+    pub const BLUE_272: Color = Color {
         rgb: 0x1A2640,
         hsla: Hsla {
             h: 0.61403507,
@@ -29,7 +29,7 @@ pub mod primitive {
         },
     };
 
-    pub const BLAU_418: Color = Color {
+    pub const BLUE_418: Color = Color {
         rgb: 0x13479B,
         hsla: Hsla {
             h: 0.6029412,
@@ -39,7 +39,7 @@ pub mod primitive {
         },
     };
 
-    pub const BLAU_508: Color = Color {
+    pub const BLUE_508: Color = Color {
         rgb: 0x2E62B8,
         hsla: Hsla {
             h: 0.6038647,
@@ -49,7 +49,7 @@ pub mod primitive {
         },
     };
 
-    pub const BLAU_731: Color = Color {
+    pub const BLUE_731: Color = Color {
         rgb: 0x7FA8F0,
         hsla: Hsla {
             h: 0.6061947,
@@ -59,7 +59,7 @@ pub mod primitive {
         },
     };
 
-    pub const BLAU_781: Color = Color {
+    pub const BLUE_781: Color = Color {
         rgb: 0x90B8FF,
         hsla: Hsla {
             h: 0.6066066,
@@ -69,7 +69,7 @@ pub mod primitive {
         },
     };
 
-    pub const BLAU_941: Color = Color {
+    pub const BLUE_941: Color = Color {
         rgb: 0xE4ECF8,
         hsla: Hsla {
             h: 0.59999996,
@@ -79,287 +79,7 @@ pub mod primitive {
         },
     };
 
-    pub const KARMIN_197: Color = Color {
-        rgb: 0x2A0710,
-        hsla: Hsla {
-            h: 0.95714283,
-            s: 0.71428573,
-            l: 0.09607843,
-            a: 1.0,
-        },
-    };
-
-    pub const KARMIN_269: Color = Color {
-        rgb: 0x3E1820,
-        hsla: Hsla {
-            h: 0.96491224,
-            s: 0.44186044,
-            l: 0.16862746,
-            a: 1.0,
-        },
-    };
-
-    pub const KARMIN_435: Color = Color {
-        rgb: 0x990033,
-        hsla: Hsla {
-            h: 0.9444444,
-            s: 1.0,
-            l: 0.3,
-            a: 1.0,
-        },
-    };
-
-    pub const KARMIN_486: Color = Color {
-        rgb: 0xAD1940,
-        hsla: Hsla {
-            h: 0.9560811,
-            s: 0.7474748,
-            l: 0.3882353,
-            a: 1.0,
-        },
-    };
-
-    pub const KARMIN_506: Color = Color {
-        rgb: 0xB42245,
-        hsla: Hsla {
-            h: 0.96004564,
-            s: 0.682243,
-            l: 0.41960785,
-            a: 1.0,
-        },
-    };
-
-    pub const KARMIN_724: Color = Color {
-        rgb: 0xFF6F8E,
-        hsla: Hsla {
-            h: 0.9641204,
-            s: 1.0,
-            l: 0.7176471,
-            a: 1.0,
-        },
-    };
-
-    pub const KARMIN_727: Color = Color {
-        rgb: 0xFF718F,
-        hsla: Hsla {
-            h: 0.96478873,
-            s: 1.0,
-            l: 0.72156864,
-            a: 1.0,
-        },
-    };
-
-    pub const KARMIN_795: Color = Color {
-        rgb: 0xFF9AAB,
-        hsla: Hsla {
-            h: 0.9719472,
-            s: 1.0000001,
-            l: 0.8019608,
-            a: 1.0,
-        },
-    };
-
-    pub const KARMIN_938: Color = Color {
-        rgb: 0xFAE4E9,
-        hsla: Hsla {
-            h: 0.96212125,
-            s: 0.6875,
-            l: 0.9372549,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_178: Color = Color {
-        rgb: 0x1C0D04,
-        hsla: Hsla {
-            h: 0.062499996,
-            s: 0.75,
-            l: 0.0627451,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_285: Color = Color {
-        rgb: 0x3A2418,
-        hsla: Hsla {
-            h: 0.05882354,
-            s: 0.4146341,
-            l: 0.16078432,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_426: Color = Color {
-        rgb: 0x862E01,
-        hsla: Hsla {
-            h: 0.056390975,
-            s: 0.9851852,
-            l: 0.2647059,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_439: Color = Color {
-        rgb: 0x8B3101,
-        hsla: Hsla {
-            h: 0.05797101,
-            s: 0.9857143,
-            l: 0.27450982,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_479: Color = Color {
-        rgb: 0x9D3801,
-        hsla: Hsla {
-            h: 0.058760684,
-            s: 0.98734176,
-            l: 0.30980393,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_487: Color = Color {
-        rgb: 0x9E3C0C,
-        hsla: Hsla {
-            h: 0.05479452,
-            s: 0.85882354,
-            l: 0.33333334,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_509: Color = Color {
-        rgb: 0xA8400D,
-        hsla: Hsla {
-            h: 0.054838713,
-            s: 0.8563536,
-            l: 0.35490197,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_532: Color = Color {
-        rgb: 0xB24501,
-        hsla: Hsla {
-            h: 0.06403013,
-            s: 0.9888268,
-            l: 0.3509804,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_546: Color = Color {
-        rgb: 0xB9470F,
-        hsla: Hsla {
-            h: 0.05490196,
-            s: 0.85,
-            l: 0.39215687,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_553: Color = Color {
-        rgb: 0xC2410C,
-        hsla: Hsla {
-            h: 0.0485348,
-            s: 0.88349515,
-            l: 0.40392157,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_590: Color = Color {
-        rgb: 0xC8551A,
-        hsla: Hsla {
-            h: 0.056513414,
-            s: 0.7699115,
-            l: 0.44313726,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_697: Color = Color {
-        rgb: 0xF0753A,
-        hsla: Hsla {
-            h: 0.0540293,
-            s: 0.85849065,
-            l: 0.58431375,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_714: Color = Color {
-        rgb: 0xF67A40,
-        hsla: Hsla {
-            h: 0.053113554,
-            s: 0.91,
-            l: 0.60784316,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_739: Color = Color {
-        rgb: 0xF58A55,
-        hsla: Hsla {
-            h: 0.05520834,
-            s: 0.8888889,
-            l: 0.64705884,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_754: Color = Color {
-        rgb: 0xF5925F,
-        hsla: Hsla {
-            h: 0.056666676,
-            s: 0.88235295,
-            l: 0.6666667,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_763: Color = Color {
-        rgb: 0xFF9060,
-        hsla: Hsla {
-            h: 0.050314467,
-            s: 1.0,
-            l: 0.6882353,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_787: Color = Color {
-        rgb: 0xF6A27A,
-        hsla: Hsla {
-            h: 0.05376345,
-            s: 0.8732395,
-            l: 0.72156864,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_790: Color = Color {
-        rgb: 0xFF9F6E,
-        hsla: Hsla {
-            h: 0.05632184,
-            s: 1.0,
-            l: 0.71568626,
-            a: 1.0,
-        },
-    };
-
-    pub const KUPFER_936: Color = Color {
-        rgb: 0xF8E6DA,
-        hsla: Hsla {
-            h: 0.06666667,
-            s: 0.6818182,
-            l: 0.9137255,
-            a: 1.0,
-        },
-    };
-
-    pub const MARKE_653: Color = Color {
+    pub const BRAND_653: Color = Color {
         rgb: 0xF74C00,
         hsla: Hsla {
             h: 0.051282052,
@@ -369,7 +89,287 @@ pub mod primitive {
         },
     };
 
-    pub const MOOS_505: Color = Color {
+    pub const CARMINE_197: Color = Color {
+        rgb: 0x2A0710,
+        hsla: Hsla {
+            h: 0.95714283,
+            s: 0.71428573,
+            l: 0.09607843,
+            a: 1.0,
+        },
+    };
+
+    pub const CARMINE_269: Color = Color {
+        rgb: 0x3E1820,
+        hsla: Hsla {
+            h: 0.96491224,
+            s: 0.44186044,
+            l: 0.16862746,
+            a: 1.0,
+        },
+    };
+
+    pub const CARMINE_435: Color = Color {
+        rgb: 0x990033,
+        hsla: Hsla {
+            h: 0.9444444,
+            s: 1.0,
+            l: 0.3,
+            a: 1.0,
+        },
+    };
+
+    pub const CARMINE_486: Color = Color {
+        rgb: 0xAD1940,
+        hsla: Hsla {
+            h: 0.9560811,
+            s: 0.7474748,
+            l: 0.3882353,
+            a: 1.0,
+        },
+    };
+
+    pub const CARMINE_506: Color = Color {
+        rgb: 0xB42245,
+        hsla: Hsla {
+            h: 0.96004564,
+            s: 0.682243,
+            l: 0.41960785,
+            a: 1.0,
+        },
+    };
+
+    pub const CARMINE_724: Color = Color {
+        rgb: 0xFF6F8E,
+        hsla: Hsla {
+            h: 0.9641204,
+            s: 1.0,
+            l: 0.7176471,
+            a: 1.0,
+        },
+    };
+
+    pub const CARMINE_727: Color = Color {
+        rgb: 0xFF718F,
+        hsla: Hsla {
+            h: 0.96478873,
+            s: 1.0,
+            l: 0.72156864,
+            a: 1.0,
+        },
+    };
+
+    pub const CARMINE_795: Color = Color {
+        rgb: 0xFF9AAB,
+        hsla: Hsla {
+            h: 0.9719472,
+            s: 1.0000001,
+            l: 0.8019608,
+            a: 1.0,
+        },
+    };
+
+    pub const CARMINE_938: Color = Color {
+        rgb: 0xFAE4E9,
+        hsla: Hsla {
+            h: 0.96212125,
+            s: 0.6875,
+            l: 0.9372549,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_178: Color = Color {
+        rgb: 0x1C0D04,
+        hsla: Hsla {
+            h: 0.062499996,
+            s: 0.75,
+            l: 0.0627451,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_285: Color = Color {
+        rgb: 0x3A2418,
+        hsla: Hsla {
+            h: 0.05882354,
+            s: 0.4146341,
+            l: 0.16078432,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_426: Color = Color {
+        rgb: 0x862E01,
+        hsla: Hsla {
+            h: 0.056390975,
+            s: 0.9851852,
+            l: 0.2647059,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_439: Color = Color {
+        rgb: 0x8B3101,
+        hsla: Hsla {
+            h: 0.05797101,
+            s: 0.9857143,
+            l: 0.27450982,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_479: Color = Color {
+        rgb: 0x9D3801,
+        hsla: Hsla {
+            h: 0.058760684,
+            s: 0.98734176,
+            l: 0.30980393,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_487: Color = Color {
+        rgb: 0x9E3C0C,
+        hsla: Hsla {
+            h: 0.05479452,
+            s: 0.85882354,
+            l: 0.33333334,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_509: Color = Color {
+        rgb: 0xA8400D,
+        hsla: Hsla {
+            h: 0.054838713,
+            s: 0.8563536,
+            l: 0.35490197,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_532: Color = Color {
+        rgb: 0xB24501,
+        hsla: Hsla {
+            h: 0.06403013,
+            s: 0.9888268,
+            l: 0.3509804,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_546: Color = Color {
+        rgb: 0xB9470F,
+        hsla: Hsla {
+            h: 0.05490196,
+            s: 0.85,
+            l: 0.39215687,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_553: Color = Color {
+        rgb: 0xC2410C,
+        hsla: Hsla {
+            h: 0.0485348,
+            s: 0.88349515,
+            l: 0.40392157,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_590: Color = Color {
+        rgb: 0xC8551A,
+        hsla: Hsla {
+            h: 0.056513414,
+            s: 0.7699115,
+            l: 0.44313726,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_697: Color = Color {
+        rgb: 0xF0753A,
+        hsla: Hsla {
+            h: 0.0540293,
+            s: 0.85849065,
+            l: 0.58431375,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_714: Color = Color {
+        rgb: 0xF67A40,
+        hsla: Hsla {
+            h: 0.053113554,
+            s: 0.91,
+            l: 0.60784316,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_739: Color = Color {
+        rgb: 0xF58A55,
+        hsla: Hsla {
+            h: 0.05520834,
+            s: 0.8888889,
+            l: 0.64705884,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_754: Color = Color {
+        rgb: 0xF5925F,
+        hsla: Hsla {
+            h: 0.056666676,
+            s: 0.88235295,
+            l: 0.6666667,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_763: Color = Color {
+        rgb: 0xFF9060,
+        hsla: Hsla {
+            h: 0.050314467,
+            s: 1.0,
+            l: 0.6882353,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_787: Color = Color {
+        rgb: 0xF6A27A,
+        hsla: Hsla {
+            h: 0.05376345,
+            s: 0.8732395,
+            l: 0.72156864,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_790: Color = Color {
+        rgb: 0xFF9F6E,
+        hsla: Hsla {
+            h: 0.05632184,
+            s: 1.0,
+            l: 0.71568626,
+            a: 1.0,
+        },
+    };
+
+    pub const COPPER_936: Color = Color {
+        rgb: 0xF8E6DA,
+        hsla: Hsla {
+            h: 0.06666667,
+            s: 0.6818182,
+            l: 0.9137255,
+            a: 1.0,
+        },
+    };
+
+    pub const MOSS_505: Color = Color {
         rgb: 0x487315,
         hsla: Hsla {
             h: 0.2429078,
@@ -379,7 +379,7 @@ pub mod primitive {
         },
     };
 
-    pub const MOOS_528: Color = Color {
+    pub const MOSS_528: Color = Color {
         rgb: 0x4E7A1E,
         hsla: Hsla {
             h: 0.2463768,
@@ -389,7 +389,7 @@ pub mod primitive {
         },
     };
 
-    pub const MOOS_791: Color = Color {
+    pub const MOSS_791: Color = Color {
         rgb: 0x9FCC68,
         hsla: Hsla {
             h: 0.24166667,
@@ -399,7 +399,7 @@ pub mod primitive {
         },
     };
 
-    pub const OCKER_303: Color = Color {
+    pub const OCHRE_303: Color = Color {
         rgb: 0x3A2C12,
         hsla: Hsla {
             h: 0.10833334,
@@ -409,7 +409,7 @@ pub mod primitive {
         },
     };
 
-    pub const OCKER_417: Color = Color {
+    pub const OCHRE_417: Color = Color {
         rgb: 0x6B4200,
         hsla: Hsla {
             h: 0.102803744,
@@ -419,7 +419,7 @@ pub mod primitive {
         },
     };
 
-    pub const OCKER_514: Color = Color {
+    pub const OCHRE_514: Color = Color {
         rgb: 0x8F5A00,
         hsla: Hsla {
             h: 0.10489511,
@@ -429,7 +429,7 @@ pub mod primitive {
         },
     };
 
-    pub const OCKER_793: Color = Color {
+    pub const OCHRE_793: Color = Color {
         rgb: 0xE7B24A,
         hsla: Hsla {
             h: 0.110403396,
@@ -439,7 +439,7 @@ pub mod primitive {
         },
     };
 
-    pub const OCKER_949: Color = Color {
+    pub const OCHRE_949: Color = Color {
         rgb: 0xF8EDD6,
         hsla: Hsla {
             h: 0.1127451,
@@ -509,37 +509,7 @@ pub mod primitive {
         },
     };
 
-    pub const PETROL_509: Color = Color {
-        rgb: 0x0B7284,
-        hsla: Hsla {
-            h: 0.5247934,
-            s: 0.84615386,
-            l: 0.28039217,
-            a: 1.0,
-        },
-    };
-
-    pub const PETROL_512: Color = Color {
-        rgb: 0x0E7385,
-        hsla: Hsla {
-            h: 0.5252101,
-            s: 0.8095238,
-            l: 0.2882353,
-            a: 1.0,
-        },
-    };
-
-    pub const PETROL_746: Color = Color {
-        rgb: 0x4CBFCF,
-        hsla: Hsla {
-            h: 0.52035624,
-            s: 0.5770925,
-            l: 0.55490196,
-            a: 1.0,
-        },
-    };
-
-    pub const PFLAUME_509: Color = Color {
+    pub const PLUM_509: Color = Color {
         rgb: 0x8C3FA0,
         hsla: Hsla {
             h: 0.7989691,
@@ -549,7 +519,7 @@ pub mod primitive {
         },
     };
 
-    pub const PFLAUME_743: Color = Color {
+    pub const PLUM_743: Color = Color {
         rgb: 0xD38DE2,
         hsla: Hsla {
             h: 0.8039215,
@@ -889,7 +859,7 @@ pub mod primitive {
         },
     };
 
-    pub const SCHIEFER_508: Color = Color {
+    pub const SLATE_508: Color = Color {
         rgb: 0x596777,
         hsla: Hsla {
             h: 0.5888889,
@@ -899,12 +869,42 @@ pub mod primitive {
         },
     };
 
-    pub const SCHIEFER_755: Color = Color {
+    pub const SLATE_755: Color = Color {
         rgb: 0xA4B1C0,
         hsla: Hsla {
             h: 0.58928573,
             s: 0.18181819,
             l: 0.69803923,
+            a: 1.0,
+        },
+    };
+
+    pub const TEAL_509: Color = Color {
+        rgb: 0x0B7284,
+        hsla: Hsla {
+            h: 0.5247934,
+            s: 0.84615386,
+            l: 0.28039217,
+            a: 1.0,
+        },
+    };
+
+    pub const TEAL_512: Color = Color {
+        rgb: 0x0E7385,
+        hsla: Hsla {
+            h: 0.5252101,
+            s: 0.8095238,
+            l: 0.2882353,
+            a: 1.0,
+        },
+    };
+
+    pub const TEAL_746: Color = Color {
+        rgb: 0x4CBFCF,
+        hsla: Hsla {
+            h: 0.52035624,
+            s: 0.5770925,
+            l: 0.55490196,
             a: 1.0,
         },
     };
@@ -1020,13 +1020,13 @@ pub struct ColorSet {
     /// Patina: up to date, saved, cleared
     pub status_ok_text: Color,
     /// Vault colour
-    pub team_moos: Color,
+    pub team_moss: Color,
     /// Vault colour
-    pub team_petrol: Color,
+    pub team_plum: Color,
     /// Vault colour
-    pub team_pflaume: Color,
+    pub team_slate: Color,
     /// Vault colour
-    pub team_schiefer: Color,
+    pub team_teal: Color,
     /// Titles, values
     pub text_primary: Color,
     /// Second line, icons, captions
@@ -1173,14 +1173,14 @@ pub struct ColorSet {
 }
 
 pub static LIGHT: ColorSet = ColorSet {
-    accent_fill: primitive::KUPFER_546,
-    accent_fill_hover: primitive::KUPFER_487,
+    accent_fill: primitive::COPPER_546,
+    accent_fill_hover: primitive::COPPER_487,
     accent_on: primitive::SAND_1000,
-    accent_text: primitive::KUPFER_509,
+    accent_text: primitive::COPPER_509,
     bg_elevated: primitive::SAND_1000,
     bg_hover: primitive::SAND_941,
     bg_keycap: primitive::SAND_947,
-    bg_selected: primitive::KUPFER_936,
+    bg_selected: primitive::COPPER_936,
     bg_selected_unfocused: primitive::SAND_927,
     bg_sidebar: primitive::SAND_947,
     bg_surface: primitive::SAND_1000,
@@ -1188,73 +1188,73 @@ pub static LIGHT: ColorSet = ColorSet {
     border_control: primitive::SAND_593,
     border_keycap: primitive::SAND_866,
     border_separator: primitive::SAND_909,
-    brand_mark: primitive::MARKE_653,
-    focus_ring: primitive::KUPFER_590,
-    status_attention_soft: primitive::OCKER_949,
-    status_attention_text: primitive::OCKER_514,
-    status_danger_fill: primitive::KARMIN_506,
+    brand_mark: primitive::BRAND_653,
+    focus_ring: primitive::COPPER_590,
+    status_attention_soft: primitive::OCHRE_949,
+    status_attention_text: primitive::OCHRE_514,
+    status_danger_fill: primitive::CARMINE_506,
     status_danger_on: primitive::SAND_1000,
-    status_danger_soft: primitive::KARMIN_938,
-    status_danger_text: primitive::KARMIN_506,
-    status_decision_soft: primitive::BLAU_941,
-    status_decision_text: primitive::BLAU_508,
+    status_danger_soft: primitive::CARMINE_938,
+    status_danger_text: primitive::CARMINE_506,
+    status_decision_soft: primitive::BLUE_941,
+    status_decision_text: primitive::BLUE_508,
     status_ok_soft: primitive::PATINA_946,
     status_ok_text: primitive::PATINA_488,
-    team_moos: primitive::MOOS_528,
-    team_petrol: primitive::PETROL_512,
-    team_pflaume: primitive::PFLAUME_509,
-    team_schiefer: primitive::SCHIEFER_508,
+    team_moss: primitive::MOSS_528,
+    team_plum: primitive::PLUM_509,
+    team_slate: primitive::SLATE_508,
+    team_teal: primitive::TEAL_512,
     text_primary: primitive::SAND_221,
     text_secondary: primitive::SAND_461,
     text_tertiary: primitive::SAND_500,
-    clipboard_thread: primitive::KUPFER_590,
+    clipboard_thread: primitive::COPPER_590,
     clipboard_thread_end: primitive::PATINA_488,
     otp_ring: primitive::SAND_461,
-    otp_ring_warn: primitive::OCKER_514,
+    otp_ring_warn: primitive::OCHRE_514,
     otp_track: primitive::SAND_909,
-    prd_chip_bg: primitive::OCKER_949,
-    prd_chip_text: primitive::OCKER_514,
-    secret_digit: primitive::BLAU_508,
-    secret_symbol: primitive::KUPFER_509,
+    prd_chip_bg: primitive::OCHRE_949,
+    prd_chip_text: primitive::OCHRE_514,
+    secret_digit: primitive::BLUE_508,
+    secret_symbol: primitive::COPPER_509,
     vault_other: primitive::SAND_461,
     vault_personal: primitive::SAND_461,
-    brand_ferris_cheek: primitive::KUPFER_787,
+    brand_ferris_cheek: primitive::COPPER_787,
     brand_ferris_chest: primitive::PATINA_576,
-    brand_ferris_claw: primitive::KUPFER_553,
+    brand_ferris_claw: primitive::COPPER_553,
     brand_ferris_eye: primitive::SAND_272,
     brand_ferris_glint: primitive::SAND_1000,
     brand_ferris_key: primitive::PATINA_576,
     brand_ferris_metal: primitive::SAND_893,
-    brand_ferris_shell: primitive::MARKE_653,
+    brand_ferris_shell: primitive::BRAND_653,
     brand_icon_bg_bottom: primitive::SAND_893,
     brand_icon_bg_top: primitive::SAND_953,
-    brand_icon_cheek: primitive::KUPFER_787,
-    brand_icon_claw: primitive::KUPFER_553,
+    brand_icon_cheek: primitive::COPPER_787,
+    brand_icon_claw: primitive::COPPER_553,
     brand_icon_eye: primitive::SAND_272,
     brand_icon_glint: primitive::SAND_1000,
     brand_icon_key: primitive::PATINA_576,
-    brand_icon_shell: primitive::MARKE_653,
-    banner_attention_bg: primitive::OCKER_949,
-    banner_attention_glyph: primitive::OCKER_514,
+    brand_icon_shell: primitive::BRAND_653,
+    banner_attention_bg: primitive::OCHRE_949,
+    banner_attention_glyph: primitive::OCHRE_514,
     banner_attention_text: primitive::SAND_221,
-    banner_danger_bg: primitive::KARMIN_938,
-    banner_danger_glyph: primitive::KARMIN_506,
+    banner_danger_bg: primitive::CARMINE_938,
+    banner_danger_glyph: primitive::CARMINE_506,
     banner_danger_text: primitive::SAND_221,
-    banner_decision_bg: primitive::BLAU_941,
-    banner_decision_glyph: primitive::BLAU_508,
+    banner_decision_bg: primitive::BLUE_941,
+    banner_decision_glyph: primitive::BLUE_508,
     banner_decision_text: primitive::SAND_221,
     banner_ok_bg: primitive::PATINA_946,
     banner_ok_glyph: primitive::PATINA_488,
     banner_ok_text: primitive::SAND_221,
-    button_danger_bg: primitive::KARMIN_506,
-    button_danger_hover: primitive::KARMIN_486,
+    button_danger_bg: primitive::CARMINE_506,
+    button_danger_hover: primitive::CARMINE_486,
     button_danger_text: primitive::SAND_1000,
     button_disabled_bg: primitive::SAND_941,
     button_disabled_text: primitive::SAND_500,
     button_ghost_hover_bg: primitive::SAND_941,
-    button_ghost_text: primitive::KUPFER_509,
-    button_primary_bg: primitive::KUPFER_546,
-    button_primary_hover: primitive::KUPFER_487,
+    button_ghost_text: primitive::COPPER_509,
+    button_primary_bg: primitive::COPPER_546,
+    button_primary_hover: primitive::COPPER_487,
     button_primary_text: primitive::SAND_1000,
     button_quiet_hover_bg: primitive::SAND_941,
     button_quiet_text: primitive::SAND_461,
@@ -1265,7 +1265,7 @@ pub static LIGHT: ColorSet = ColorSet {
     chip_neutral_text: primitive::SAND_461,
     field_bg: primitive::SAND_1000,
     field_border: primitive::SAND_593,
-    field_border_error: primitive::KARMIN_506,
+    field_border_error: primitive::CARMINE_506,
     keycap_bg: primitive::SAND_947,
     keycap_border: primitive::SAND_866,
     keycap_on_accent_border: Color {
@@ -1317,7 +1317,7 @@ pub static LIGHT: ColorSet = ColorSet {
     },
     kit_status_on: primitive::SAND_1000,
     matrix_missing_text: primitive::SAND_500,
-    row_selected_bg: primitive::KUPFER_936,
+    row_selected_bg: primitive::COPPER_936,
     row_selected_border: Color {
         rgb: 0x000000,
         hsla: Hsla {
@@ -1407,14 +1407,14 @@ pub static LIGHT: ColorSet = ColorSet {
 };
 
 pub static DARK: ColorSet = ColorSet {
-    accent_fill: primitive::KUPFER_697,
-    accent_fill_hover: primitive::KUPFER_739,
-    accent_on: primitive::KUPFER_178,
-    accent_text: primitive::KUPFER_754,
+    accent_fill: primitive::COPPER_697,
+    accent_fill_hover: primitive::COPPER_739,
+    accent_on: primitive::COPPER_178,
+    accent_text: primitive::COPPER_754,
     bg_elevated: primitive::SAND_262,
     bg_hover: primitive::SAND_249,
     bg_keycap: primitive::SAND_290,
-    bg_selected: primitive::KUPFER_285,
+    bg_selected: primitive::COPPER_285,
     bg_selected_unfocused: primitive::SAND_290,
     bg_sidebar: primitive::SAND_178,
     bg_surface: primitive::SAND_224,
@@ -1422,74 +1422,74 @@ pub static DARK: ColorSet = ColorSet {
     border_control: primitive::SAND_573,
     border_keycap: primitive::SAND_343,
     border_separator: primitive::SAND_298,
-    brand_mark: primitive::MARKE_653,
-    focus_ring: primitive::KUPFER_697,
-    status_attention_soft: primitive::OCKER_303,
-    status_attention_text: primitive::OCKER_793,
-    status_danger_fill: primitive::KARMIN_724,
-    status_danger_on: primitive::KARMIN_197,
-    status_danger_soft: primitive::KARMIN_269,
-    status_danger_text: primitive::KARMIN_724,
-    status_decision_soft: primitive::BLAU_272,
-    status_decision_text: primitive::BLAU_731,
+    brand_mark: primitive::BRAND_653,
+    focus_ring: primitive::COPPER_697,
+    status_attention_soft: primitive::OCHRE_303,
+    status_attention_text: primitive::OCHRE_793,
+    status_danger_fill: primitive::CARMINE_724,
+    status_danger_on: primitive::CARMINE_197,
+    status_danger_soft: primitive::CARMINE_269,
+    status_danger_text: primitive::CARMINE_724,
+    status_decision_soft: primitive::BLUE_272,
+    status_decision_text: primitive::BLUE_731,
     status_ok_soft: primitive::PATINA_285,
     status_ok_text: primitive::PATINA_782,
-    team_moos: primitive::MOOS_791,
-    team_petrol: primitive::PETROL_746,
-    team_pflaume: primitive::PFLAUME_743,
-    team_schiefer: primitive::SCHIEFER_755,
+    team_moss: primitive::MOSS_791,
+    team_plum: primitive::PLUM_743,
+    team_slate: primitive::SLATE_755,
+    team_teal: primitive::TEAL_746,
     text_primary: primitive::SAND_938,
     text_secondary: primitive::SAND_719,
     text_tertiary: primitive::SAND_664,
-    clipboard_thread: primitive::KUPFER_697,
+    clipboard_thread: primitive::COPPER_697,
     clipboard_thread_end: primitive::PATINA_782,
     otp_ring: primitive::SAND_719,
-    otp_ring_warn: primitive::OCKER_793,
+    otp_ring_warn: primitive::OCHRE_793,
     otp_track: primitive::SAND_298,
-    prd_chip_bg: primitive::OCKER_303,
-    prd_chip_text: primitive::OCKER_793,
-    secret_digit: primitive::BLAU_731,
-    secret_symbol: primitive::KUPFER_754,
+    prd_chip_bg: primitive::OCHRE_303,
+    prd_chip_text: primitive::OCHRE_793,
+    secret_digit: primitive::BLUE_731,
+    secret_symbol: primitive::COPPER_754,
     vault_other: primitive::SAND_719,
     vault_personal: primitive::SAND_719,
-    brand_ferris_cheek: primitive::KUPFER_787,
+    brand_ferris_cheek: primitive::COPPER_787,
     brand_ferris_chest: primitive::PATINA_576,
-    brand_ferris_claw: primitive::KUPFER_553,
+    brand_ferris_claw: primitive::COPPER_553,
     brand_ferris_eye: primitive::SAND_197,
     brand_ferris_glint: primitive::SAND_1000,
     brand_ferris_key: primitive::PATINA_576,
     brand_ferris_metal: primitive::SAND_893,
-    brand_ferris_shell: primitive::MARKE_653,
+    brand_ferris_shell: primitive::BRAND_653,
     brand_icon_bg_bottom: primitive::SAND_197,
     brand_icon_bg_top: primitive::SAND_272,
-    brand_icon_cheek: primitive::KUPFER_787,
-    brand_icon_claw: primitive::KUPFER_553,
+    brand_icon_cheek: primitive::COPPER_787,
+    brand_icon_claw: primitive::COPPER_553,
     brand_icon_eye: primitive::SAND_272,
     brand_icon_glint: primitive::SAND_1000,
     brand_icon_key: primitive::PATINA_576,
-    brand_icon_shell: primitive::MARKE_653,
-    banner_attention_bg: primitive::OCKER_303,
-    banner_attention_glyph: primitive::OCKER_793,
+    brand_icon_shell: primitive::BRAND_653,
+    banner_attention_bg: primitive::OCHRE_303,
+    banner_attention_glyph: primitive::OCHRE_793,
     banner_attention_text: primitive::SAND_938,
-    banner_danger_bg: primitive::KARMIN_269,
-    banner_danger_glyph: primitive::KARMIN_724,
+    banner_danger_bg: primitive::CARMINE_269,
+    banner_danger_glyph: primitive::CARMINE_724,
     banner_danger_text: primitive::SAND_938,
-    banner_decision_bg: primitive::BLAU_272,
-    banner_decision_glyph: primitive::BLAU_731,
+    banner_decision_bg: primitive::BLUE_272,
+    banner_decision_glyph: primitive::BLUE_731,
     banner_decision_text: primitive::SAND_938,
     banner_ok_bg: primitive::PATINA_285,
     banner_ok_glyph: primitive::PATINA_782,
     banner_ok_text: primitive::SAND_938,
-    button_danger_bg: primitive::KARMIN_724,
-    button_danger_hover: primitive::KARMIN_727,
-    button_danger_text: primitive::KARMIN_197,
+    button_danger_bg: primitive::CARMINE_724,
+    button_danger_hover: primitive::CARMINE_727,
+    button_danger_text: primitive::CARMINE_197,
     button_disabled_bg: primitive::SAND_249,
     button_disabled_text: primitive::SAND_664,
     button_ghost_hover_bg: primitive::SAND_249,
-    button_ghost_text: primitive::KUPFER_754,
-    button_primary_bg: primitive::KUPFER_697,
-    button_primary_hover: primitive::KUPFER_739,
-    button_primary_text: primitive::KUPFER_178,
+    button_ghost_text: primitive::COPPER_754,
+    button_primary_bg: primitive::COPPER_697,
+    button_primary_hover: primitive::COPPER_739,
+    button_primary_text: primitive::COPPER_178,
     button_quiet_hover_bg: primitive::SAND_249,
     button_quiet_text: primitive::SAND_719,
     button_secondary_bg: primitive::SAND_249,
@@ -1499,7 +1499,7 @@ pub static DARK: ColorSet = ColorSet {
     chip_neutral_text: primitive::SAND_719,
     field_bg: primitive::SAND_224,
     field_border: primitive::SAND_573,
-    field_border_error: primitive::KARMIN_724,
+    field_border_error: primitive::CARMINE_724,
     keycap_bg: primitive::SAND_290,
     keycap_border: primitive::SAND_343,
     keycap_on_accent_border: Color {
@@ -1511,7 +1511,7 @@ pub static DARK: ColorSet = ColorSet {
             a: 0.4509804,
         },
     },
-    keycap_on_accent_text: primitive::KUPFER_178,
+    keycap_on_accent_text: primitive::COPPER_178,
     keycap_text: primitive::SAND_719,
     kit_drop_target: Color {
         rgb: 0xF0753A,
@@ -1549,9 +1549,9 @@ pub static DARK: ColorSet = ColorSet {
             a: 0.0,
         },
     },
-    kit_status_on: primitive::KUPFER_178,
+    kit_status_on: primitive::COPPER_178,
     matrix_missing_text: primitive::SAND_664,
-    row_selected_bg: primitive::KUPFER_285,
+    row_selected_bg: primitive::COPPER_285,
     row_selected_border: Color {
         rgb: 0x000000,
         hsla: Hsla {
@@ -1649,14 +1649,14 @@ pub static DARK: ColorSet = ColorSet {
 };
 
 pub static LIGHT_HC: ColorSet = ColorSet {
-    accent_fill: primitive::KUPFER_479,
-    accent_fill_hover: primitive::KUPFER_439,
+    accent_fill: primitive::COPPER_479,
+    accent_fill_hover: primitive::COPPER_439,
     accent_on: primitive::SAND_1000,
-    accent_text: primitive::KUPFER_426,
+    accent_text: primitive::COPPER_426,
     bg_elevated: primitive::SAND_1000,
     bg_hover: primitive::SAND_941,
     bg_keycap: primitive::SAND_947,
-    bg_selected: primitive::KUPFER_936,
+    bg_selected: primitive::COPPER_936,
     bg_selected_unfocused: primitive::SAND_927,
     bg_sidebar: primitive::SAND_947,
     bg_surface: primitive::SAND_1000,
@@ -1664,73 +1664,73 @@ pub static LIGHT_HC: ColorSet = ColorSet {
     border_control: primitive::SAND_514,
     border_keycap: primitive::SAND_613,
     border_separator: primitive::SAND_613,
-    brand_mark: primitive::MARKE_653,
-    focus_ring: primitive::KUPFER_532,
-    status_attention_soft: primitive::OCKER_949,
-    status_attention_text: primitive::OCKER_417,
-    status_danger_fill: primitive::KARMIN_486,
+    brand_mark: primitive::BRAND_653,
+    focus_ring: primitive::COPPER_532,
+    status_attention_soft: primitive::OCHRE_949,
+    status_attention_text: primitive::OCHRE_417,
+    status_danger_fill: primitive::CARMINE_486,
     status_danger_on: primitive::SAND_1000,
-    status_danger_soft: primitive::KARMIN_938,
-    status_danger_text: primitive::KARMIN_435,
-    status_decision_soft: primitive::BLAU_941,
-    status_decision_text: primitive::BLAU_418,
+    status_danger_soft: primitive::CARMINE_938,
+    status_danger_text: primitive::CARMINE_435,
+    status_decision_soft: primitive::BLUE_941,
+    status_decision_text: primitive::BLUE_418,
     status_ok_soft: primitive::PATINA_946,
     status_ok_text: primitive::PATINA_401,
-    team_moos: primitive::MOOS_505,
-    team_petrol: primitive::PETROL_509,
-    team_pflaume: primitive::PFLAUME_509,
-    team_schiefer: primitive::SCHIEFER_508,
+    team_moss: primitive::MOSS_505,
+    team_plum: primitive::PLUM_509,
+    team_slate: primitive::SLATE_508,
+    team_teal: primitive::TEAL_509,
     text_primary: primitive::SAND_221,
     text_secondary: primitive::SAND_414,
     text_tertiary: primitive::SAND_414,
-    clipboard_thread: primitive::KUPFER_532,
+    clipboard_thread: primitive::COPPER_532,
     clipboard_thread_end: primitive::PATINA_401,
     otp_ring: primitive::SAND_414,
-    otp_ring_warn: primitive::OCKER_417,
+    otp_ring_warn: primitive::OCHRE_417,
     otp_track: primitive::SAND_613,
-    prd_chip_bg: primitive::OCKER_949,
-    prd_chip_text: primitive::OCKER_417,
-    secret_digit: primitive::BLAU_418,
-    secret_symbol: primitive::KUPFER_426,
+    prd_chip_bg: primitive::OCHRE_949,
+    prd_chip_text: primitive::OCHRE_417,
+    secret_digit: primitive::BLUE_418,
+    secret_symbol: primitive::COPPER_426,
     vault_other: primitive::SAND_414,
     vault_personal: primitive::SAND_414,
-    brand_ferris_cheek: primitive::KUPFER_787,
+    brand_ferris_cheek: primitive::COPPER_787,
     brand_ferris_chest: primitive::PATINA_576,
-    brand_ferris_claw: primitive::KUPFER_553,
+    brand_ferris_claw: primitive::COPPER_553,
     brand_ferris_eye: primitive::SAND_272,
     brand_ferris_glint: primitive::SAND_1000,
     brand_ferris_key: primitive::PATINA_576,
     brand_ferris_metal: primitive::SAND_893,
-    brand_ferris_shell: primitive::MARKE_653,
+    brand_ferris_shell: primitive::BRAND_653,
     brand_icon_bg_bottom: primitive::SAND_893,
     brand_icon_bg_top: primitive::SAND_953,
-    brand_icon_cheek: primitive::KUPFER_787,
-    brand_icon_claw: primitive::KUPFER_553,
+    brand_icon_cheek: primitive::COPPER_787,
+    brand_icon_claw: primitive::COPPER_553,
     brand_icon_eye: primitive::SAND_272,
     brand_icon_glint: primitive::SAND_1000,
     brand_icon_key: primitive::PATINA_576,
-    brand_icon_shell: primitive::MARKE_653,
-    banner_attention_bg: primitive::OCKER_949,
-    banner_attention_glyph: primitive::OCKER_417,
+    brand_icon_shell: primitive::BRAND_653,
+    banner_attention_bg: primitive::OCHRE_949,
+    banner_attention_glyph: primitive::OCHRE_417,
     banner_attention_text: primitive::SAND_221,
-    banner_danger_bg: primitive::KARMIN_938,
-    banner_danger_glyph: primitive::KARMIN_435,
+    banner_danger_bg: primitive::CARMINE_938,
+    banner_danger_glyph: primitive::CARMINE_435,
     banner_danger_text: primitive::SAND_221,
-    banner_decision_bg: primitive::BLAU_941,
-    banner_decision_glyph: primitive::BLAU_418,
+    banner_decision_bg: primitive::BLUE_941,
+    banner_decision_glyph: primitive::BLUE_418,
     banner_decision_text: primitive::SAND_221,
     banner_ok_bg: primitive::PATINA_946,
     banner_ok_glyph: primitive::PATINA_401,
     banner_ok_text: primitive::SAND_221,
-    button_danger_bg: primitive::KARMIN_486,
-    button_danger_hover: primitive::KARMIN_486,
+    button_danger_bg: primitive::CARMINE_486,
+    button_danger_hover: primitive::CARMINE_486,
     button_danger_text: primitive::SAND_1000,
     button_disabled_bg: primitive::SAND_941,
     button_disabled_text: primitive::SAND_414,
     button_ghost_hover_bg: primitive::SAND_941,
-    button_ghost_text: primitive::KUPFER_426,
-    button_primary_bg: primitive::KUPFER_479,
-    button_primary_hover: primitive::KUPFER_439,
+    button_ghost_text: primitive::COPPER_426,
+    button_primary_bg: primitive::COPPER_479,
+    button_primary_hover: primitive::COPPER_439,
     button_primary_text: primitive::SAND_1000,
     button_quiet_hover_bg: primitive::SAND_941,
     button_quiet_text: primitive::SAND_414,
@@ -1741,7 +1741,7 @@ pub static LIGHT_HC: ColorSet = ColorSet {
     chip_neutral_text: primitive::SAND_414,
     field_bg: primitive::SAND_1000,
     field_border: primitive::SAND_514,
-    field_border_error: primitive::KARMIN_435,
+    field_border_error: primitive::CARMINE_435,
     keycap_bg: primitive::SAND_947,
     keycap_border: primitive::SAND_613,
     keycap_on_accent_border: Color {
@@ -1793,7 +1793,7 @@ pub static LIGHT_HC: ColorSet = ColorSet {
     },
     kit_status_on: primitive::SAND_1000,
     matrix_missing_text: primitive::SAND_414,
-    row_selected_bg: primitive::KUPFER_936,
+    row_selected_bg: primitive::COPPER_936,
     row_selected_border: primitive::SAND_514,
     row_selected_unfocused_bg: primitive::SAND_927,
     scrim: Color {
@@ -1875,14 +1875,14 @@ pub static LIGHT_HC: ColorSet = ColorSet {
 };
 
 pub static DARK_HC: ColorSet = ColorSet {
-    accent_fill: primitive::KUPFER_714,
-    accent_fill_hover: primitive::KUPFER_763,
-    accent_on: primitive::KUPFER_178,
-    accent_text: primitive::KUPFER_790,
+    accent_fill: primitive::COPPER_714,
+    accent_fill_hover: primitive::COPPER_763,
+    accent_on: primitive::COPPER_178,
+    accent_text: primitive::COPPER_790,
     bg_elevated: primitive::SAND_262,
     bg_hover: primitive::SAND_249,
     bg_keycap: primitive::SAND_290,
-    bg_selected: primitive::KUPFER_285,
+    bg_selected: primitive::COPPER_285,
     bg_selected_unfocused: primitive::SAND_290,
     bg_sidebar: primitive::SAND_178,
     bg_surface: primitive::SAND_224,
@@ -1890,74 +1890,74 @@ pub static DARK_HC: ColorSet = ColorSet {
     border_control: primitive::SAND_660,
     border_keycap: primitive::SAND_558,
     border_separator: primitive::SAND_558,
-    brand_mark: primitive::MARKE_653,
-    focus_ring: primitive::KUPFER_697,
-    status_attention_soft: primitive::OCKER_303,
-    status_attention_text: primitive::OCKER_793,
-    status_danger_fill: primitive::KARMIN_727,
-    status_danger_on: primitive::KARMIN_197,
-    status_danger_soft: primitive::KARMIN_269,
-    status_danger_text: primitive::KARMIN_795,
-    status_decision_soft: primitive::BLAU_272,
-    status_decision_text: primitive::BLAU_781,
+    brand_mark: primitive::BRAND_653,
+    focus_ring: primitive::COPPER_697,
+    status_attention_soft: primitive::OCHRE_303,
+    status_attention_text: primitive::OCHRE_793,
+    status_danger_fill: primitive::CARMINE_727,
+    status_danger_on: primitive::CARMINE_197,
+    status_danger_soft: primitive::CARMINE_269,
+    status_danger_text: primitive::CARMINE_795,
+    status_decision_soft: primitive::BLUE_272,
+    status_decision_text: primitive::BLUE_781,
     status_ok_soft: primitive::PATINA_285,
     status_ok_text: primitive::PATINA_782,
-    team_moos: primitive::MOOS_791,
-    team_petrol: primitive::PETROL_746,
-    team_pflaume: primitive::PFLAUME_743,
-    team_schiefer: primitive::SCHIEFER_755,
+    team_moss: primitive::MOSS_791,
+    team_plum: primitive::PLUM_743,
+    team_slate: primitive::SLATE_755,
+    team_teal: primitive::TEAL_746,
     text_primary: primitive::SAND_938,
     text_secondary: primitive::SAND_780,
     text_tertiary: primitive::SAND_780,
-    clipboard_thread: primitive::KUPFER_697,
+    clipboard_thread: primitive::COPPER_697,
     clipboard_thread_end: primitive::PATINA_782,
     otp_ring: primitive::SAND_780,
-    otp_ring_warn: primitive::OCKER_793,
+    otp_ring_warn: primitive::OCHRE_793,
     otp_track: primitive::SAND_558,
-    prd_chip_bg: primitive::OCKER_303,
-    prd_chip_text: primitive::OCKER_793,
-    secret_digit: primitive::BLAU_781,
-    secret_symbol: primitive::KUPFER_790,
+    prd_chip_bg: primitive::OCHRE_303,
+    prd_chip_text: primitive::OCHRE_793,
+    secret_digit: primitive::BLUE_781,
+    secret_symbol: primitive::COPPER_790,
     vault_other: primitive::SAND_780,
     vault_personal: primitive::SAND_780,
-    brand_ferris_cheek: primitive::KUPFER_787,
+    brand_ferris_cheek: primitive::COPPER_787,
     brand_ferris_chest: primitive::PATINA_576,
-    brand_ferris_claw: primitive::KUPFER_553,
+    brand_ferris_claw: primitive::COPPER_553,
     brand_ferris_eye: primitive::SAND_197,
     brand_ferris_glint: primitive::SAND_1000,
     brand_ferris_key: primitive::PATINA_576,
     brand_ferris_metal: primitive::SAND_893,
-    brand_ferris_shell: primitive::MARKE_653,
+    brand_ferris_shell: primitive::BRAND_653,
     brand_icon_bg_bottom: primitive::SAND_197,
     brand_icon_bg_top: primitive::SAND_272,
-    brand_icon_cheek: primitive::KUPFER_787,
-    brand_icon_claw: primitive::KUPFER_553,
+    brand_icon_cheek: primitive::COPPER_787,
+    brand_icon_claw: primitive::COPPER_553,
     brand_icon_eye: primitive::SAND_272,
     brand_icon_glint: primitive::SAND_1000,
     brand_icon_key: primitive::PATINA_576,
-    brand_icon_shell: primitive::MARKE_653,
-    banner_attention_bg: primitive::OCKER_303,
-    banner_attention_glyph: primitive::OCKER_793,
+    brand_icon_shell: primitive::BRAND_653,
+    banner_attention_bg: primitive::OCHRE_303,
+    banner_attention_glyph: primitive::OCHRE_793,
     banner_attention_text: primitive::SAND_938,
-    banner_danger_bg: primitive::KARMIN_269,
-    banner_danger_glyph: primitive::KARMIN_795,
+    banner_danger_bg: primitive::CARMINE_269,
+    banner_danger_glyph: primitive::CARMINE_795,
     banner_danger_text: primitive::SAND_938,
-    banner_decision_bg: primitive::BLAU_272,
-    banner_decision_glyph: primitive::BLAU_781,
+    banner_decision_bg: primitive::BLUE_272,
+    banner_decision_glyph: primitive::BLUE_781,
     banner_decision_text: primitive::SAND_938,
     banner_ok_bg: primitive::PATINA_285,
     banner_ok_glyph: primitive::PATINA_782,
     banner_ok_text: primitive::SAND_938,
-    button_danger_bg: primitive::KARMIN_727,
-    button_danger_hover: primitive::KARMIN_727,
-    button_danger_text: primitive::KARMIN_197,
+    button_danger_bg: primitive::CARMINE_727,
+    button_danger_hover: primitive::CARMINE_727,
+    button_danger_text: primitive::CARMINE_197,
     button_disabled_bg: primitive::SAND_249,
     button_disabled_text: primitive::SAND_780,
     button_ghost_hover_bg: primitive::SAND_249,
-    button_ghost_text: primitive::KUPFER_790,
-    button_primary_bg: primitive::KUPFER_714,
-    button_primary_hover: primitive::KUPFER_763,
-    button_primary_text: primitive::KUPFER_178,
+    button_ghost_text: primitive::COPPER_790,
+    button_primary_bg: primitive::COPPER_714,
+    button_primary_hover: primitive::COPPER_763,
+    button_primary_text: primitive::COPPER_178,
     button_quiet_hover_bg: primitive::SAND_249,
     button_quiet_text: primitive::SAND_780,
     button_secondary_bg: primitive::SAND_249,
@@ -1967,7 +1967,7 @@ pub static DARK_HC: ColorSet = ColorSet {
     chip_neutral_text: primitive::SAND_780,
     field_bg: primitive::SAND_224,
     field_border: primitive::SAND_660,
-    field_border_error: primitive::KARMIN_795,
+    field_border_error: primitive::CARMINE_795,
     keycap_bg: primitive::SAND_290,
     keycap_border: primitive::SAND_558,
     keycap_on_accent_border: Color {
@@ -1979,7 +1979,7 @@ pub static DARK_HC: ColorSet = ColorSet {
             a: 0.4509804,
         },
     },
-    keycap_on_accent_text: primitive::KUPFER_178,
+    keycap_on_accent_text: primitive::COPPER_178,
     keycap_text: primitive::SAND_780,
     kit_drop_target: Color {
         rgb: 0xF67A40,
@@ -2017,9 +2017,9 @@ pub static DARK_HC: ColorSet = ColorSet {
             a: 0.0,
         },
     },
-    kit_status_on: primitive::KUPFER_178,
+    kit_status_on: primitive::COPPER_178,
     matrix_missing_text: primitive::SAND_780,
-    row_selected_bg: primitive::KUPFER_285,
+    row_selected_bg: primitive::COPPER_285,
     row_selected_border: primitive::SAND_660,
     row_selected_unfocused_bg: primitive::SAND_290,
     scrim: Color {
@@ -2139,10 +2139,10 @@ impl ColorSet {
             "status.decision.text" => self.status_decision_text,
             "status.ok.soft" => self.status_ok_soft,
             "status.ok.text" => self.status_ok_text,
-            "team.moos" => self.team_moos,
-            "team.petrol" => self.team_petrol,
-            "team.pflaume" => self.team_pflaume,
-            "team.schiefer" => self.team_schiefer,
+            "team.moss" => self.team_moss,
+            "team.plum" => self.team_plum,
+            "team.slate" => self.team_slate,
+            "team.teal" => self.team_teal,
             "text.primary" => self.text_primary,
             "text.secondary" => self.text_secondary,
             "text.tertiary" => self.text_tertiary,
