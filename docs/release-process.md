@@ -364,10 +364,13 @@ scripts/build-mac.sh --skip-notarize
 
 Outputs `dist/FerrisPass-X.Y.Z-arm64.dmg` that opens with a Gatekeeper warning (signed but not notarized). Useful for verifying the icon, app start-up flow, etc., before committing to a real release.
 
-`--skip-notarize` stops after the DMG and deliberately does not create updater
-artefacts. A normal notarized build produces `.app.tar.gz` and an unsigned
-`update.json`; `scripts/build-mac.sh --sign-update` then signs those existing
-artefacts. Unsigned manifests are rejected by the application.
+`--skip-notarize` leaves out notarization, stapling and the final Gatekeeper
+check, and still builds the updater artefacts: `.app.tar.gz`, the CLI archive
+and an unsigned `update.json`, the same files a notarized build produces. It
+never signs them on its own, even with a key in `~/.ferrispass/`: a signed
+manifest is what installed apps accept, and it should only exist for a build
+Apple has checked. `scripts/build-mac.sh --sign-update` signs existing
+artefacts when asked to. Unsigned manifests are rejected by the application.
 
 ## v0.2.1 release: cleanup recipe for affected users
 

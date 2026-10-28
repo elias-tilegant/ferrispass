@@ -20,8 +20,10 @@
 #  10. Final spctl Gatekeeper assessment
 #
 # Flags:
-#   --skip-notarize    Stop after step 6. Useful for local iteration where
-#                      waiting ~3 min for Apple is friction.
+#   --skip-notarize    Skip steps 7, 8 and 10. Useful for local iteration where
+#                      waiting ~3 min for Apple is friction. Step 9 still runs,
+#                      so the updater artefacts exist, but they stay unsigned
+#                      unless `--sign-update` is run on them.
 #   --sign-update      Sign existing updater artefacts only. This deliberately
 #                      runs separately from `cargo build` in CI so build scripts
 #                      cannot read the updater signing key or passphrase.
@@ -286,22 +288,18 @@ echo "▸ [6/9] Code-signing DMG"
 codesign --force --sign "${SIGNING_IDENTITY}" --timestamp "${DMG_PATH}"
 
 if [ "${SKIP_NOTARIZE}" = "true" ]; then
-    echo ""
-    echo "✓ Local build complete (unnotarized - Gatekeeper will warn on first open)"
-    echo "  ${DMG_PATH}"
-    ls -lh "${DMG_PATH}"
-    exit 0
+    echo "▸ [7-8/9] Skipping notarization and stapling (--skip-notarize)"
+else
+    # ---------- 7. notarize ----------
+    echo "▸ [7/9] Submitting to Apple notarization (typically 1-5 min)"
+    xcrun notarytool submit "${DMG_PATH}" \
+        --keychain-profile "${NOTARIZE_PROFILE}" \
+        --wait
+
+    # ---------- 8. staple ----------
+    echo "▸ [8/9] Stapling notarization ticket"
+    xcrun stapler staple "${DMG_PATH}"
 fi
-
-# ---------- 7. notarize ----------
-echo "▸ [7/9] Submitting to Apple notarization (typically 1-5 min)"
-xcrun notarytool submit "${DMG_PATH}" \
-    --keychain-profile "${NOTARIZE_PROFILE}" \
-    --wait
-
-# ---------- 8. staple ----------
-echo "▸ [8/9] Stapling notarization ticket"
-xcrun stapler staple "${DMG_PATH}"
 
 # ---------- 9. update tarball + manifest ----------
 # Produces the artefacts the in-app auto-updater fetches:
@@ -345,10 +343,22 @@ jq -n \
 echo "    ✓ ${TAR_NAME}"
 echo "    ✓ update.json (unsigned)"
 
-if command -v minisign >/dev/null 2>&1 && [ -f "${MINISIGN_KEY}" ]; then
+# An unnotarized build is not signed for the updater automatically, even
+# with a key at the default path: installed apps accept a signed manifest,
+# and one should only exist for a build Apple has checked. Signing it anyway
+# takes an explicit `--sign-update`.
+if [ "${SKIP_NOTARIZE}" != "true" ] \
+    && command -v minisign >/dev/null 2>&1 && [ -f "${MINISIGN_KEY}" ]; then
     sign_update_artifacts
 else
     echo "    (updater signing deferred; run '$0 --sign-update')"
+fi
+
+if [ "${SKIP_NOTARIZE}" = "true" ]; then
+    echo ""
+    echo "✓ Local build complete (unnotarized - Gatekeeper will warn on first open)"
+    ls -lh "${DMG_PATH}" "${TAR_PATH}" "${CLI_TAR_PATH}" "${MANIFEST}"
+    exit 0
 fi
 
 # ---------- final verification ----------
