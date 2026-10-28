@@ -315,10 +315,11 @@ jobs:
   # releases that carry update.json and update.json.minisig, and copies that
   # pair into kanal-vorab. The channel only moves forward, so a 0.9.x fix
   # after a test build leaves it as it is. Because every run looks at every
-  # release, any run puts right one that an earlier run left behind. The
-  # script fails when kanal-vorab is missing, is not a pre-release (it could
-  # then become latest and hand test builds to everyone) or holds anything
-  # but nothing or exactly that pair.
+  # release, any run puts right what an earlier run left behind, an upload
+  # that broke off included. The script fails when kanal-vorab is missing,
+  # is not a pre-release (it could then become latest and hand test builds
+  # to everyone) or holds a file it does not expect; its header lists the
+  # rest.
   #
   # A job of its own, so that one run at a time reads and writes the
   # channel: two runs close together could otherwise both read it before

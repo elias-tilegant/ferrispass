@@ -263,19 +263,28 @@ gh release create kanal-vorab --prerelease --title "Pre-release channel" \
 
 It must stay a pre-release: as a full release it could become latest and
 hand test builds to every installed app, so the channel job fails if it is
-not one. It must also hold either nothing, before the first tag, or exactly
-those two files. The job fails, and leaves the channel alone, when
-`kanal-vorab` is missing, is not a pre-release, holds anything else, or when
-a manifest or a version cannot be read. If `kanal-vorab` was missing, create
-it and re-run the failed channel job; the release itself is already up as a
-pre-release and is not touched again.
+not one. Files that have not finished uploading count as missing, in the
+channel and in the releases, and a `v*` release whose tag is not a version
+is skipped with a warning. The job fails, and leaves the channel alone,
+when `kanal-vorab` is missing, is not a pre-release, holds any file but
+those two, or holds a lone manifest above every release, and when a
+manifest or a version cannot be read or a release's manifest names another
+version than its tag. If `kanal-vorab` was missing, create it and re-run
+the failed channel job; the release itself is already up as a pre-release
+and is not touched again.
 
 Because every run looks at all releases, not only the one it published, a
-later run puts right whatever an earlier one left behind: a channel job that
-was cancelled while it waited (only one runs at a time, and a newer one
-replaces one that is still waiting), an upload that broke off between the
-two files, or a release that was re-run and signed again. The same script
-runs by hand with `gh` logged in to an account that may edit releases:
+later run puts right whatever an earlier one left behind. A channel job may
+have been cancelled while it waited: only one runs at a time, and a newer
+one replaces one that is still waiting. A release may have been re-run and
+signed again. Or an upload may have broken off: `gh release upload
+--clobber` deletes the old files before it uploads the new ones, so that
+leaves the channel empty or holding one of the two files. A lone manifest
+still says its version, and the channel moves on from there as from a pair.
+A lone signature says nothing, but every pair in the channel came from a
+release, so the highest release is not lower, and its pair goes in. The
+same script runs by hand with `gh` logged in to an account that may edit
+releases:
 
 ```sh
 scripts/update-channel.sh elias-tilegant/ferrispass
