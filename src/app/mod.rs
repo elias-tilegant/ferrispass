@@ -89,6 +89,7 @@ pub fn run() {
         }
 
         gpui_component::init(cx);
+        crate::i18n::init();
         // One read for both the theme and the saved window geometry: the
         // first paint has to be in the right appearance and the right place.
         let startup_settings = settings::load();

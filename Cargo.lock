@@ -2183,6 +2183,7 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rust-embed",
+ "rust-i18n",
  "security-framework 3.7.0",
  "security-framework-sys",
  "semver",

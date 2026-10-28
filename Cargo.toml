@@ -49,6 +49,12 @@ gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
 gpui-component = "=0.7.1"
 gpui-kit-assets = "=0.7.1"
+# Text keys (src/i18n/, locales/). GPUI Kit already uses rust-i18n for its own
+# texts and asks for ^4.2.0. The app compiles its catalogues with the same
+# crate, so one `set_locale` switches both, and `extend!` hands the Kit the
+# German it does not ship. Two versions in the lock would mean two current
+# locales: bump it only together with the Kit.
+rust-i18n = "4.2"
 rust-embed = "8"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
