@@ -30,7 +30,9 @@
 #                      cannot read the updater signing key or passphrase. It
 #                      signs only when the disk image carries a valid
 #                      notarization ticket; a dry run with a throwaway key
-#                      sets FERRISPASS_ALLOW_UNSTAPLED=1 to skip that check.
+#                      sets FERRISPASS_ALLOW_UNSTAPLED=1 to skip that check,
+#                      which it refuses unless MINISIGN_KEY names a key other
+#                      than ~/.ferrispass/minisign.key.
 #
 # Requirements:
 #   - Xcode Command Line Tools (lipo, sips, iconutil, codesign, notarytool)
@@ -93,7 +95,11 @@ if ! [[ "${BUNDLE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-MINISIGN_KEY="${MINISIGN_KEY:-${HOME}/.ferrispass/minisign.key}"
+# The release key's usual place. FERRISPASS_ALLOW_UNSTAPLED only works with a
+# key named explicitly somewhere else, so it never signs with this one.
+DEFAULT_MINISIGN_KEY="${HOME}/.ferrispass/minisign.key"
+MINISIGN_KEY_GIVEN="${MINISIGN_KEY:-}"
+MINISIGN_KEY="${MINISIGN_KEY:-${DEFAULT_MINISIGN_KEY}}"
 TAR_NAME="${APP_NAME}-${VERSION}-arm64.app.tar.gz"
 TAR_PATH="${DIST_DIR}/${TAR_NAME}"
 SIG_PATH="${TAR_PATH}.minisig"
@@ -119,6 +125,15 @@ minisign_sign() {
 }
 
 sign_update_artifacts() {
+    # Checked first, before anything touches a key.
+    if [ "${FERRISPASS_ALLOW_UNSTAPLED:-}" = "1" ] && {
+        [ -z "${MINISIGN_KEY_GIVEN}" ] || [ "${MINISIGN_KEY}" = "${DEFAULT_MINISIGN_KEY}" ] \
+            || [ "${MINISIGN_KEY}" -ef "${DEFAULT_MINISIGN_KEY}" ]
+    }; then
+        echo "✗ FERRISPASS_ALLOW_UNSTAPLED=1 is for a throwaway key; set MINISIGN_KEY to one" >&2
+        echo "  that is not ${DEFAULT_MINISIGN_KEY}" >&2
+        exit 1
+    fi
     if ! command -v minisign >/dev/null 2>&1; then
         echo "✗ minisign is required to sign updater artefacts" >&2
         exit 1

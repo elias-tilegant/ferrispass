@@ -451,7 +451,8 @@ Apple has checked. For the same reason `scripts/build-mac.sh --sign-update`
 signs only when `xcrun stapler validate` passes on the disk image, which it
 does once the notarization ticket is stapled. To try the signing step on an
 unnotarized build, use a throwaway key, never the real one, and set
-`FERRISPASS_ALLOW_UNSTAPLED=1`:
+`FERRISPASS_ALLOW_UNSTAPLED=1`. The script refuses the override unless
+`MINISIGN_KEY` names a key, and one other than `~/.ferrispass/minisign.key`:
 
 ```sh
 minisign -G -W -p /tmp/test.pub -s /tmp/test.key         # throwaway, no passphrase
