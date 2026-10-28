@@ -180,11 +180,12 @@ A test build is tagged on `rebuild` instead, so the branch push is `git push ori
 
 ## Pre-releases, test builds and going live
 
-Every tag is published as a GitHub pre-release, whatever branch it comes
-from. The in-app updater asks `releases/latest` for its manifest, and GitHub
-resolves "latest" to the newest release *without* the pre-release flag, so a
-new tag reaches nobody's installed app on its own. Shipping a version to
-everyone is a separate step, taken by hand once the release page is right:
+Every tag on a tree that carries this release workflow is published as a
+GitHub pre-release. The in-app updater asks `releases/latest` for its
+manifest, and GitHub resolves "latest" to the newest release *without* the
+pre-release flag, so such a tag reaches nobody's installed app on its own.
+Shipping a version to everyone is a separate step, taken by hand once the
+release page is right:
 
 ```sh
 gh release edit vX.Y.Z --prerelease=false --latest
@@ -194,6 +195,16 @@ gh release edit vX.Y.Z --prerelease=false --latest
 builds, and they stay pre-releases. The version order is the second guard:
 `0.9.x < 0.10.0-pre.N < 0.10.0`, so a tester on a test build is never offered
 a 0.9.x as an update, and is offered the release once it is live.
+
+**Older trees still publish as latest.** GitHub runs `release.yml` from the
+tagged commit, not from `master`. A tag on a tree without this workflow, such
+as `rebuild` before `master` was merged into it, runs the old workflow,
+which publishes a full release and makes it latest straight away. For a
+test build that means every 0.9.x install is offered it. So check the tree
+before tagging it (step 3 below for test builds). A manual run picks its
+workflow the same way, from the ref it is started on: start it from
+`master`, as `gh workflow run release.yml -f tag=vX.Y.Z` does, never with an
+old tag as `--ref`.
 
 After the run, before going live, check the release page:
 
@@ -215,7 +226,14 @@ then mark the release latest.
 2. Add a short build note, `docs/release-notes/v0.10.0-pre.N.md` (what goes
    into it is in [`docs/release-notes/README.md`](./release-notes/README.md)),
    in that commit or before it.
-3. Tag and push as above, with `rebuild` in place of `master`.
+3. Check that the commit you are about to tag has this workflow; nothing
+   printed means stop and merge `master` into `rebuild` first:
+
+   ```sh
+   git show HEAD:.github/workflows/release.yml | grep -q 'prerelease: true' && echo ok
+   ```
+
+4. Tag and push as above, with `rebuild` in place of `master`.
 
 Testers install them from the release page; they are never marked latest.
 
