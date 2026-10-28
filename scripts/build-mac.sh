@@ -79,6 +79,16 @@ if [ -z "${VERSION}" ]; then
     echo "✗ Could not parse version from Cargo.toml" >&2
     exit 1
 fi
+# Info.plist takes numbers only: CFBundleShortVersionString and
+# CFBundleVersion are one to three integers separated by periods. A
+# pre-release such as 0.10.0-pre.3 is therefore 0.10.0 in both keys. The
+# full version stays in the binary, which the updater compares and the About
+# box shows, and in the file names, the manifest and the download URL.
+BUNDLE_VERSION="${VERSION%%[-+]*}"
+if ! [[ "${BUNDLE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "✗ Version ${VERSION} does not start with MAJOR.MINOR.PATCH" >&2
+    exit 1
+fi
 
 MINISIGN_KEY="${MINISIGN_KEY:-${HOME}/.ferrispass/minisign.key}"
 TAR_NAME="${APP_NAME}-${VERSION}-arm64.app.tar.gz"
@@ -200,6 +210,7 @@ if ! security find-identity -v -p codesigning | grep -q "${SIGNING_IDENTITY}"; t
 fi
 
 echo "▸ ${APP_NAME} ${VERSION}"
+echo "  Info.plist:  ${BUNDLE_VERSION}"
 echo "  bundle id:   ${BUNDLE_ID}"
 echo "  team id:     ${TEAM_ID}"
 echo "  min macOS:   ${MIN_MACOS}"
@@ -263,7 +274,7 @@ mv "${DIST_DIR}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 mkdir -p "${APP_BUNDLE}/Contents/Resources/Licenses"
 cp "${PROJECT_ROOT}/assets/licenses/"*.txt "${APP_BUNDLE}/Contents/Resources/Licenses/"
 echo "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
-sed "s/__VERSION__/${VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
+sed "s/__VERSION__/${BUNDLE_VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
     > "${APP_BUNDLE}/Contents/Info.plist"
 
 # ---------- 4. codesign ----------

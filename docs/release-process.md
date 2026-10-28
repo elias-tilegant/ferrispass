@@ -147,6 +147,14 @@ Prints the exact markdown that will appear on the Release page. If the output lo
 
 Single source of truth is `Cargo.toml`'s `[package].version`. Everything else (Welcome footer, About box, .app Info.plist, update manifest) reads it via `env!("CARGO_PKG_VERSION")` or `sed`-substitution at build time.
 
+`Info.plist` gets the numeric part only, because Apple allows nothing but
+numbers and periods in its two version keys: for `0.10.0-pre.3` both
+`CFBundleShortVersionString` and `CFBundleVersion` read `0.10.0`, so Finder
+shows a test build as 0.10.0. The About box, the Welcome footer, the file
+names, `update.json` and the download URL keep the full version, and the
+updater compares the version compiled into the binary, not the bundle's.
+Without a suffix, as for every 0.9.x, both keys carry the version unchanged.
+
 ```sh
 # Patch (bug fixes only):     0.2.0 → 0.2.1
 # Minor (new features):       0.2.x → 0.3.0
