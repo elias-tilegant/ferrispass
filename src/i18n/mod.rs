@@ -130,10 +130,13 @@ pub fn init() {
 /// each file here does. A test checks that the list matches the directory.
 #[cfg_attr(not(test), allow(dead_code))]
 const CATALOGUES: &[(&str, &str)] = &[
+    ("a11y.yml", include_str!("../../locales/a11y.yml")),
     ("common.yml", include_str!("../../locales/common.yml")),
     ("glossary.yml", include_str!("../../locales/glossary.yml")),
     ("kit.yml", include_str!("../../locales/kit.yml")),
+    ("menubar.yml", include_str!("../../locales/menubar.yml")),
     ("msg.yml", include_str!("../../locales/msg.yml")),
+    ("quick.yml", include_str!("../../locales/quick.yml")),
 ];
 
 /// The text for `key` in the current language. Use [`tr!`](crate::tr).

@@ -1646,3 +1646,156 @@ fn playful_only_where_allowed() {
         ]
     );
 }
+
+// ------------------------------------------------------- catalogue texts --
+
+#[test]
+fn tp_picks_the_form_and_writes_the_count_for_the_language() {
+    let key = "quick.results.same_matches";
+    assert_eq!(
+        plural_in(Language::English, key, 1, &[]),
+        "1 identical match"
+    );
+    assert_eq!(
+        plural_in(Language::English, key, 1_234, &[]),
+        "1,234 identical matches"
+    );
+    assert_eq!(
+        plural_in(Language::German, key, 0, &[]),
+        "0 gleiche Treffer"
+    );
+    assert_eq!(
+        plural_in(Language::German, key, 1, &[]),
+        "1 gleicher Treffer"
+    );
+    assert_eq!(
+        plural_in(Language::German, key, 1_234, &[]),
+        "1.234 gleiche Treffer"
+    );
+    init();
+    assert_eq!(
+        crate::tp!("quick.results.same_matches", 2),
+        "2 identical matches"
+    );
+}
+
+#[test]
+fn placeholders_fill_in_both_languages() {
+    let args = [
+        ("sid", "NHP".to_string()),
+        ("client", "100".to_string()),
+        ("user", "N.WEISS".to_string()),
+    ];
+    assert_eq!(
+        text_in(Language::English, "quick.footer.sap_login", &args),
+        "Sign in to NHP, client 100 as N.WEISS"
+    );
+    assert_eq!(
+        text_in(Language::German, "quick.footer.sap_login", &args),
+        "In NHP, Mandant 100 als N.WEISS anmelden"
+    );
+}
+
+// ----------------------------------------------------------- render code --
+
+/// The folders with the new UI. Every text there comes from a key; the
+/// first components that show text arrive later, until then the scan finds
+/// nothing to check.
+const RENDER_CODE: &[&str] = &["src/ui/ds", "src/ui/windows"];
+
+/// Keycap glyphs, which are the same in every language.
+const KEYCAP_GLYPHS: &str = "⌘⌥⌃⇧⏎↩⎋⌫⌦⇥⇞⇟↖↘→←↑↓␣";
+
+/// String literals handed straight to `.child(` or `aria_label(`, with their
+/// line.
+fn render_literals(source: &str) -> Vec<(usize, String)> {
+    let chars: Vec<char> = source.chars().collect();
+    let parts = classify(&chars);
+    let mut found = Vec::new();
+    for needle in [".child(", "aria_label("] {
+        let needle: Vec<char> = needle.chars().collect();
+        for (start, part) in parts.iter().enumerate() {
+            if *part != Part::Code
+                || !chars[start..].starts_with(&needle)
+                || (needle[0] != '.' && continues_identifier(&chars, start))
+            {
+                continue;
+            }
+            let mut i = start + needle.len();
+            while i < chars.len() && (chars[i].is_whitespace() || parts[i] == Part::Comment) {
+                i += 1;
+            }
+            if i < chars.len() && parts[i] == Part::Literal {
+                let end = (i..chars.len())
+                    .find(|&j| parts[j] != Part::Literal)
+                    .unwrap_or(chars.len());
+                let literal: String = chars[i..end].iter().collect();
+                found.push((line_of(&chars, start), literal));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Whether a literal in render code is allowed: keycaps (`⌘N`, `⇧⌘C`) and
+/// identifiers from the capitals list (`PRD`).
+fn allowed_in_render_code(literal: &str, capitals: &BTreeSet<String>) -> bool {
+    let text = literal
+        .trim_start_matches(['r', 'b', 'c', '#'])
+        .trim_matches(['"', '#']);
+    if capitals.contains(text) {
+        return true;
+    }
+    let rest: Vec<char> = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && !KEYCAP_GLYPHS.contains(*c))
+        .collect();
+    let has_glyph = text.chars().any(|c| KEYCAP_GLYPHS.contains(c));
+    has_glyph && rest.len() <= 1 && rest.iter().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn render_literal_problems(file: &str, source: &str, capitals: &BTreeSet<String>) -> Vec<String> {
+    render_literals(source)
+        .into_iter()
+        .filter(|(_, literal)| !allowed_in_render_code(literal, capitals))
+        .map(|(line, literal)| format!("{file}:{line}: {literal} belongs in locales/, use tr!"))
+        .collect()
+}
+
+#[test]
+fn no_literals_in_render_code() {
+    let capitals: BTreeSet<String> = glossary_file().style.capitals.into_iter().collect();
+    let mut problems = Vec::new();
+    for dir in RENDER_CODE {
+        for (file, source) in rust_files(&root().join(dir)) {
+            problems.extend(render_literal_problems(&file, &source, &capitals));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn the_render_scan_finds_literal_texts() {
+    let capitals: BTreeSet<String> = glossary_file().style.capitals.into_iter().collect();
+    let source = r##"
+        div().child(tr!("quick.footer.open_website"))
+            .child("Open website")
+            .child( /* a note */ r#"Copy"#)
+            .child("⌘N")
+            .child("⇧⌘C")
+            .child("PRD")
+            .child(label)
+            // .child("in a comment")
+            .aria_label("Copy password")
+            .my_aria_label("not this one")
+    "##;
+    assert_eq!(
+        render_literal_problems("f.rs", source, &capitals),
+        [
+            "f.rs:3: \"Open website\" belongs in locales/, use tr!",
+            "f.rs:4: r#\"Copy\"# belongs in locales/, use tr!",
+            "f.rs:10: \"Copy password\" belongs in locales/, use tr!",
+        ]
+    );
+}

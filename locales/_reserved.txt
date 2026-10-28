@@ -57,3 +57,41 @@ glossary.sap_client                  SAP entry details
 glossary.system_number               SAP entry details
 glossary.earlier_versions            entry history
 glossary.trash                       the trash
+
+quick.search.placeholder             the quick access panel
+quick.footer.sap_login               the quick access panel
+quick.footer.open_website            the quick access panel
+quick.footer.copy_password           the quick access panel
+quick.footer.prd_select_first        the quick access panel
+quick.footer.copied.password         the quick access panel
+quick.footer.copied.user             the quick access panel
+quick.footer.copied.one_time_code    the quick access panel
+quick.footer.other_vaults            the quick access panel
+quick.results.same_matches           the quick access panel
+quick.preview.user                   the quick access panel
+quick.preview.password               the quick access panel
+quick.no_match.text                  the quick access panel
+quick.no_match.unlock                the quick access panel
+quick.no_match.new_entry             the quick access panel
+quick.locked.search_pending          the quick access panel, locked
+quick.locked.typed_ahead             the quick access panel, locked
+quick.locked.unlock_touch_id         the quick access panel, locked
+quick.locked.still_unlocking         the quick access panel, locked
+quick.locked.needs_main_window       the quick access panel, locked
+quick.locked.unlock_mac_password     the quick access panel, locked
+quick.locked.not_set_up              the quick access panel, locked
+quick.locked.set_up                  the quick access panel, locked
+quick.locked.file_missing            the quick access panel, locked
+quick.error.website_failed           the quick access panel
+quick.error.copy_failed              the quick access panel
+
+menubar.menu.quick_access            the menu bar item
+menubar.menu.open_app                the menu bar item
+menubar.menu.lock_all                the menu bar item
+menubar.menu.settings                the menu bar item
+menubar.menu.quit                    the menu bar item
+menubar.notch.hidden                 the menu bar item, when the notch hides it
+menubar.notch.practice               the menu bar item, when the notch hides it
+
+a11y.copy_password                   copy buttons next to a password
+a11y.reveal_password                 show buttons next to a password
