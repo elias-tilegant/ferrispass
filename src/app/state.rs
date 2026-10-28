@@ -9286,46 +9286,63 @@ mod characterization_tests {
         cx.dispatcher.drain_tasks();
     }
 
-    /// Asking to lock while a save is still being written revokes access at
-    /// once but keeps the document until the save is on disk.
+    /// Asking to lock while work is not on disk yet revokes access at once
+    /// but keeps the document until it is. Either reason holds the document
+    /// back on its own: a save that is still being written, or changes whose
+    /// last save failed.
     #[gpui::test]
     fn unsaved_work_quarantines_instead_of_dropping(cx: &mut TestAppContext) {
-        let path = PathBuf::from("/tmp/characterize-quarantine.kdbx");
-        let state = cx.new(|_| {
-            let mut state = AppState::default();
-            state.open_for_test(path.clone(), document());
-            let session = state.active_vault_session_id.expect("session");
-            state.mark_vault_session_unpersisted(session);
-            state
-                .saves_in_flight
-                .insert(path.clone(), QueuedSave::new(session));
-            state
-        });
-        let session = state
-            .read_with(cx, |state, _| state.active_vault_session_id)
-            .expect("session");
-
-        let locked_at_once = state.update(cx, |state, cx| state.lock_vault(cx));
-
-        assert!(!locked_at_once, "the lock has to wait for the save");
-        state.read_with(cx, |state, _| {
-            assert!(matches!(
-                state.vault_status(),
-                VaultStatus::LockedPendingSave
-            ));
-            assert!(
-                state.vault_browser().is_none(),
-                "the vault is still readable"
-            );
-            assert!(!state.has_any_unlocked());
-            assert_eq!(
+        for save_running in [true, false] {
+            let case = if save_running {
+                "save still being written"
+            } else {
+                "last save failed"
+            };
+            let path = PathBuf::from("/tmp/characterize-quarantine.kdbx");
+            let state = cx.new(|_| {
+                let mut state = AppState::default();
+                state.open_for_test(path.clone(), document());
+                let session = state.active_vault_session_id.expect("session");
+                if save_running {
+                    state
+                        .saves_in_flight
+                        .insert(path.clone(), QueuedSave::new(session));
+                } else {
+                    state.mark_vault_session_unpersisted(session);
+                }
                 state
-                    .deferred_lock_sessions
-                    .get(&session)
-                    .map(|held| &held.path),
-                Some(&path),
-                "the unsaved document was dropped"
-            );
-        });
+            });
+            let session = state
+                .read_with(cx, |state, _| state.active_vault_session_id)
+                .expect("session");
+
+            let locked_at_once = state.update(cx, |state, cx| state.lock_vault(cx));
+
+            assert!(!locked_at_once, "{case}: the lock has to wait for the save");
+            state.read_with(cx, |state, _| {
+                assert!(
+                    matches!(state.vault_status(), VaultStatus::LockedPendingSave),
+                    "{case}: the vault does not wait for its save"
+                );
+                assert!(
+                    state.vault_browser().is_none(),
+                    "{case}: the vault is still readable"
+                );
+                assert!(!state.has_any_unlocked(), "{case}");
+                assert_eq!(
+                    state
+                        .deferred_lock_sessions
+                        .get(&session)
+                        .map(|held| &held.path),
+                    Some(&path),
+                    "{case}: the unsaved document was dropped"
+                );
+            });
+
+            // After a failed save the lock tries once more, and that write
+            // would land in /tmp. Drop it unrun, together with the timer the
+            // lock starts for a save that hangs.
+            cx.dispatcher.drain_tasks();
+        }
     }
 }
