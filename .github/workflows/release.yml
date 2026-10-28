@@ -295,3 +295,19 @@ jobs:
           # --prerelease=false --latest) is the deliberate step that ships a
           # version to everyone, and it is never done for a tag with a hyphen.
           prerelease: true
+
+      # The permanent release kanal-vorab (no v, so it never starts this
+      # workflow) holds the manifest of whichever tag was published last. The
+      # app does not read it yet. Test builds will, to find the next test
+      # build; builds without a pre-release suffix keep reading only
+      # releases/latest. A 0.9.x manifest there is harmless: its version is
+      # below every 0.10.0-pre.N. The release is created once by hand
+      # (docs/release-process.md); while it is missing, this step fails the
+      # run instead of skipping.
+      - name: Update the pre-release channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload kanal-vorab \
+            dist/update.json dist/update.json.minisig \
+            --clobber --repo "${GITHUB_REPOSITORY}"

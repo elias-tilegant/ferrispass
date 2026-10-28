@@ -1350,8 +1350,10 @@ fn lint_levels_are_read_from_the_lints_table() {
 /// Every release is published as a pre-release, and the workflow has no other
 /// way to create a release, edit one or mark one as latest. The updater reads
 /// `releases/latest`, which GitHub never resolves to a pre-release, so
-/// shipping a version to everyone stays a step taken by hand. No step or job
-/// may fail quietly either.
+/// shipping a version to everyone stays a step taken by hand. After
+/// publishing, the same job copies the signed manifest into the permanent
+/// `kanal-vorab` release, for every tag. No step or job may fail quietly, so
+/// a missing channel release stops the run.
 ///
 /// CI and CodeQL run for pushes to `master` and `rebuild` and for pull
 /// requests into either, so merges from `master` into the long-lived
@@ -1396,6 +1398,7 @@ fn release_pipeline_rules_hold() {
 }
 
 const PUBLISH_ACTION: &str = "softprops/action-gh-release";
+const CHANNEL_RELEASE: &str = "kanal-vorab";
 
 fn release_workflow_problems(workflow: &str) -> Vec<String> {
     let mut problems = Vec::new();
@@ -1420,30 +1423,64 @@ fn release_workflow_problems(workflow: &str) -> Vec<String> {
     }
 
     let steps = workflow_steps(workflow);
-    let publishing: Vec<&Step> = steps
-        .iter()
-        .filter(|step| {
-            step.get("uses")
+    let publishing: Vec<usize> = (0..steps.len())
+        .filter(|&i| {
+            steps[i]
+                .get("uses")
                 .is_some_and(|uses| uses.starts_with(PUBLISH_ACTION))
         })
         .collect();
-    match publishing[..] {
-        [step] => {
-            if !step
-                .lines
-                .iter()
-                .any(|line| yaml_entry(line).is_some_and(|(key, _)| key == "prerelease"))
-            {
+    let publish = match publishing[..] {
+        [publish] => publish,
+        _ => {
+            problems.push(format!(
+                "expected one step that uses {PUBLISH_ACTION}, found {}",
+                publishing.len()
+            ));
+            return problems;
+        }
+    };
+    if !steps[publish]
+        .lines
+        .iter()
+        .any(|line| yaml_entry(line).is_some_and(|(key, _)| key == "prerelease"))
+    {
+        problems.push(format!(
+            "the step that uses {PUBLISH_ACTION} must set `prerelease: true`"
+        ));
+    }
+
+    let upload = ["gh", "release", "upload", CHANNEL_RELEASE];
+    let channel: Vec<usize> = (0..steps.len())
+        .filter(|&i| steps[i].words().windows(4).any(|words| words == upload))
+        .collect();
+    match channel[..] {
+        [at] => {
+            let step = &steps[at];
+            if step.job != steps[publish].job || at < publish {
                 problems.push(format!(
-                    "the step that uses {PUBLISH_ACTION} must set `prerelease: true`"
+                    "the upload to {CHANNEL_RELEASE} must follow the publishing step in job {}",
+                    steps[publish].job
+                ));
+            }
+            let words = step.words();
+            for word in ["dist/update.json", "dist/update.json.minisig", "--clobber"] {
+                if !words.contains(&word) {
+                    problems.push(format!("the upload to {CHANNEL_RELEASE} needs `{word}`"));
+                }
+            }
+            if let Some(condition) = step.get("if") {
+                problems.push(format!(
+                    "the upload to {CHANNEL_RELEASE} runs for every tag, not `if: {condition}`"
                 ));
             }
         }
         _ => problems.push(format!(
-            "expected one step that uses {PUBLISH_ACTION}, found {}",
-            publishing.len()
+            "expected one step that runs `gh release upload {CHANNEL_RELEASE}`, found {}",
+            channel.len()
         )),
     }
+
     for step in &steps {
         let words = step.words();
         for command in words.windows(3) {
@@ -1750,6 +1787,11 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           prerelease: true
+      - name: Channel
+        run: |
+          gh release upload kanal-vorab \
+            dist/update.json dist/update.json.minisig \
+            --clobber
 "#;
 
 #[test]
@@ -1826,5 +1868,38 @@ fn branch_filters_are_read_from_the_triggers() {
         "on:\n  push:\n    branches-ignore: [main]\n",
     ] {
         assert!(branch_filter(unreadable, "push").is_err(), "{unreadable}");
+    }
+}
+
+#[test]
+fn release_rules_catch_a_tag_that_skips_the_channel() {
+    let channel = "      - name: Channel\n";
+    let (head, step) = RELEASE_SAMPLE.split_once(channel).expect("channel step");
+    let before_publish = head.replacen(
+        "      - name: Publish\n",
+        &format!("{channel}{step}      - name: Publish\n"),
+        1,
+    );
+    assert!(!release_workflow_problems(&before_publish).is_empty());
+
+    for (from, to) in [
+        (format!("{channel}{step}"), String::new()),
+        ("upload kanal-vorab".into(), "upload kanal".into()),
+        ("--clobber".into(), String::new()),
+        (" dist/update.json.minisig".into(), String::new()),
+        ("dist/update.json ".into(), String::new()),
+        (
+            channel.into(),
+            format!("{channel}        if: startsWith(github.ref, 'refs/tags/v0.10')\n"),
+        ),
+        (channel.into(), format!("  channel:\n    steps:\n{channel}")),
+        (channel.into(), format!("{channel}{step}{channel}")),
+    ] {
+        let mutated = RELEASE_SAMPLE.replacen(&from, &to, 1);
+        assert_ne!(mutated, RELEASE_SAMPLE, "{from} not in the sample");
+        assert!(
+            !release_workflow_problems(&mutated).is_empty(),
+            "not caught: {from:?} -> {to:?}"
+        );
     }
 }
