@@ -77,7 +77,7 @@ Moved lines are dimmed. Everything else should be one of these:
 
 A move like this can hide one trap. A private method called from another file does not compile, unless a trait in scope has a method of the same name; then the call quietly goes to the trait. Every private method named in a file other than its own was checked: the hits are mentions in comments and the trait methods `render` and `focus_handle`, so no call changed its target.
 
-`cargo test --locked -- --list` lists the same number of tests before and after. The state tests keep their names; the shell test only changed its module path, from `ui::app_shell::` to `ui::legacy::shell::`. `tests/keymap.rs` passes against its unchanged snapshot, and `tests/architecture.rs` finds no new `unsafe` and no new exception.
+`cargo test --locked -- --list` lists the same number of tests before and after. The state tests keep their names; the shell test and the screen tests only changed their module paths, from `ui::app_shell::` to `ui::legacy::shell::` and from `ui::screens::` to `ui::legacy::screens::`. `tests/keymap.rs` passes against its unchanged snapshot, and `tests/architecture.rs` finds no new `unsafe` and no new exception.
 
 ## What did not change
 
