@@ -27,7 +27,10 @@
 #                      unless `--sign-update` is run on them.
 #   --sign-update      Sign existing updater artefacts only. This deliberately
 #                      runs separately from `cargo build` in CI so build scripts
-#                      cannot read the updater signing key or passphrase.
+#                      cannot read the updater signing key or passphrase. It
+#                      signs only when the disk image carries a valid
+#                      notarization ticket; a dry run with a throwaway key
+#                      sets FERRISPASS_ALLOW_UNSTAPLED=1 to skip that check.
 #
 # Requirements:
 #   - Xcode Command Line Tools (lipo, sips, iconutil, codesign, notarytool)
@@ -131,6 +134,16 @@ sign_update_artifacts() {
     if [ ! -f "${TAR_PATH}" ] || [ ! -f "${CLI_TAR_PATH}" ] || [ ! -f "${MANIFEST}" ] \
         || [ ! -f "${DMG_PATH}" ]; then
         echo "✗ Missing updater artefacts in ${DIST_DIR}; run a release build first" >&2
+        exit 1
+    fi
+    # Installed apps accept whatever this key signs, so it signs only what
+    # Apple has notarized, and the stapled ticket on the disk image is the
+    # proof. Only a dry run with a throwaway key may skip this.
+    if [ "${FERRISPASS_ALLOW_UNSTAPLED:-}" = "1" ]; then
+        echo "    ! FERRISPASS_ALLOW_UNSTAPLED=1: signing without a notarization ticket" >&2
+    elif ! xcrun stapler validate -q "${DMG_PATH}"; then
+        echo "✗ ${DMG_NAME} carries no valid notarization ticket; refusing to sign" >&2
+        echo "  (a dry run with a throwaway key may set FERRISPASS_ALLOW_UNSTAPLED=1)" >&2
         exit 1
     fi
 
@@ -373,8 +386,9 @@ echo "    ✓ update.json (unsigned)"
 
 # An unnotarized build is not signed for the updater automatically, even
 # with a key at the default path: installed apps accept a signed manifest,
-# and one should only exist for a build Apple has checked. Signing it anyway
-# takes an explicit `--sign-update`.
+# and one should only exist for a build Apple has checked. `--sign-update`
+# refuses it as well, unless a dry run with a throwaway key sets
+# FERRISPASS_ALLOW_UNSTAPLED=1.
 if [ "${SKIP_NOTARIZE}" != "true" ] \
     && command -v minisign >/dev/null 2>&1 && [ -f "${MINISIGN_KEY}" ]; then
     sign_update_artifacts

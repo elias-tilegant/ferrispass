@@ -327,7 +327,7 @@ Stages, with rough timing:
 | 7 | Notarize via `xcrun notarytool submit --wait` | 1-5 min | Apple's queue. Rejection = read the notarization log carefully |
 | 8 | Staple notarization ticket | <5 s | - |
 | 9 | Generate `.app.tar.gz` + unsigned `update.json` with exact payload size | <10 s | `jq` missing or archive creation fails |
-| Sign | Inject notes, sign payload, then the complete manifest, then the disk image; write `SHA256SUMS` | <10 s | minisign key missing, malformed, or payload size mismatch |
+| Sign | Check the disk image's notarization ticket, inject notes, sign payload, then the complete manifest, then the disk image; write `SHA256SUMS` | <10 s | disk image without a valid ticket; minisign key missing, malformed, or payload size mismatch |
 | End | `softprops/action-gh-release@v2` publishes a pre-release with the files | <30 s | `permissions: contents: write` not granted; a file missing from `signed-release` (the step stops before creating the release); an upload failing after the release is created (see above) |
 | Channel | Copy the manifest into `kanal-vorab` if the tag's version is higher, one run at a time | <30 s | `kanal-vorab` missing or holding anything but the manifest and its signature (see above) |
 
@@ -435,8 +435,21 @@ check, and still builds the updater artefacts: `.app.tar.gz`, the CLI archive
 and an unsigned `update.json`, the same files a notarized build produces. It
 never signs them on its own, even with a key in `~/.ferrispass/`: a signed
 manifest is what installed apps accept, and it should only exist for a build
-Apple has checked. `scripts/build-mac.sh --sign-update` signs existing
-artefacts when asked to. Unsigned manifests are rejected by the application.
+Apple has checked. For the same reason `scripts/build-mac.sh --sign-update`
+signs only when `xcrun stapler validate` passes on the disk image, which it
+does once the notarization ticket is stapled. To try the signing step on an
+unnotarized build, use a throwaway key, never the real one, and set
+`FERRISPASS_ALLOW_UNSTAPLED=1`:
+
+```sh
+minisign -G -W -p /tmp/test.pub -s /tmp/test.key         # throwaway, no passphrase
+FERRISPASS_ALLOW_UNSTAPLED=1 MINISIGN_KEY=/tmp/test.key scripts/build-mac.sh --sign-update
+```
+
+It ends with an error there, because the result is checked against the real
+public key in `bundle/minisign-pub.txt`. That check is the point: nothing
+signed with a throwaway key passes for a release. Delete `dist/` afterwards.
+Unsigned manifests are rejected by the application.
 
 ## v0.2.1 release: cleanup recipe for affected users
 
