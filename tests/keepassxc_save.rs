@@ -11,8 +11,13 @@
 //! that release changed the username of "Live/Kept Entry" to "carol" and
 //! saved. Nothing else was touched.
 
+use std::collections::HashMap;
+
 use ferrispass::keepass::merge::{self, Resolutions, Side};
-use keepass::{Database, DatabaseKey, db::fields};
+use keepass::{
+    Database, DatabaseKey,
+    db::{CustomDataItem, fields},
+};
 
 /// Generated for these fixtures and used nowhere else.
 const PASSWORD: &str = "cmTWKQxX2yP1mqh/xwQZqM39";
@@ -81,22 +86,65 @@ fn a_keepassxc_save_asks_nothing_about_what_it_did_not_change() {
                 Some("carol"),
                 "{name}: the edit lands"
             );
-            let untouched = entry(&merged, "Karte");
-            assert!(
-                untouched.custom_data.contains_key("_LAST_MODIFIED"),
-                "{name}: what KeePassXC added is kept"
-            );
-            assert!(
-                untouched
-                    .custom_data
-                    .values()
-                    .any(|item| item.last_modification_time.is_some()),
-                "{name}: and so is the item time this app wrote"
-            );
-            assert!(
-                untouched.autotype.is_some(),
-                "{name}: and the Auto-Type block"
-            );
+
+            // The edited entry comes from the save. Every other entry and
+            // group kept its modification time, so the two copies were
+            // united: nothing either of them wrote is lost.
+            for ours_entry in ours.iter_all_entries() {
+                let title = ours_entry.get(fields::TITLE).unwrap_or_default();
+                let what = format!("{name}: entry {title}");
+                let theirs_entry = theirs.entry(ours_entry.id()).expect("in both");
+                let merged_entry = merged.entry(ours_entry.id()).expect("merged");
+                assert_united(
+                    &what,
+                    &merged_entry.custom_data,
+                    &ours_entry.custom_data,
+                    &theirs_entry.custom_data,
+                );
+                assert_eq!(
+                    merged_entry.autotype, theirs_entry.autotype,
+                    "{what}: the Auto-Type block stays"
+                );
+                assert_eq!(
+                    merged_entry.times.last_modification, theirs_entry.times.last_modification,
+                    "{what}: no modification time moves"
+                );
+            }
+            for ours_group in ours.iter_all_groups() {
+                let what = format!("{name}: group {:?}", ours_group.name);
+                let theirs_group = theirs.group(ours_group.id()).expect("in both");
+                let merged_group = merged.group(ours_group.id()).expect("merged");
+                assert_united(
+                    &what,
+                    &merged_group.custom_data,
+                    &ours_group.custom_data,
+                    &theirs_group.custom_data,
+                );
+            }
         }
+    }
+}
+
+/// Every plugin data item this app wrote, item time included, and every key
+/// KeePassXC added, with its value.
+fn assert_united(
+    what: &str,
+    merged: &HashMap<String, CustomDataItem>,
+    ours: &HashMap<String, CustomDataItem>,
+    theirs: &HashMap<String, CustomDataItem>,
+) {
+    for (key, item) in ours {
+        assert_eq!(
+            merged.get(key),
+            Some(item),
+            "{what}: {key} as this app wrote it"
+        );
+    }
+    for (key, item) in theirs {
+        assert_eq!(
+            merged.get(key).map(|merged| &merged.value),
+            Some(&item.value),
+            "{what}: {key} as KeePassXC wrote it"
+        );
     }
 }

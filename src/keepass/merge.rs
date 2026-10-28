@@ -7376,11 +7376,33 @@ mod tests {
             .custom_data
             .insert("_LAST_MODIFIED".into(), keepassxc_stamp());
 
+        let dated = local.entry(id).unwrap().custom_data["Plugin"].last_modification_time;
         for (local, remote) in [(&local, &remote), (&remote, &local)] {
             let report = diff(local, remote);
             assert!(!report.needs_a_decision(), "{report:?}");
-            apply_picks(local, remote, &Resolutions::default(), &report)
-                .expect("whichever side the fork keeps, nothing is lost");
+            let merged = apply_picks(local, remote, &Resolutions::default(), &report)
+                .expect("the two copies agree on everything that is compared");
+
+            let entry = merged.entry(id).unwrap();
+            assert_eq!(
+                entry.custom_data.get("Plugin"),
+                Some(&plugin_text("sap", dated)),
+                "whichever side the fork keeps, nothing is lost"
+            );
+            assert_eq!(
+                entry.custom_data.get("_LAST_MODIFIED"),
+                Some(&keepassxc_stamp())
+            );
+            assert_eq!(entry.autotype, Some(keepassxc_autotype()));
+            let group = merged.group(group_id).unwrap();
+            assert_eq!(
+                group.custom_data.get("Plugin"),
+                Some(&plugin_text("partner", dated))
+            );
+            assert_eq!(
+                group.custom_data.get("_LAST_MODIFIED"),
+                Some(&keepassxc_stamp())
+            );
         }
     }
 
