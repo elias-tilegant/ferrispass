@@ -10,6 +10,7 @@
 
 #[cfg(test)]
 mod codegen;
+pub mod contrast;
 mod generated;
 
 pub use generated::*;

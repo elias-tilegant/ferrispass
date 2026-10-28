@@ -5,4 +5,5 @@
 
 #![forbid(unsafe_code)]
 
+pub mod kit_theme;
 pub mod tokens;

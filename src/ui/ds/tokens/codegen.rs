@@ -1,8 +1,8 @@
-//! The generator behind `generated.rs`, and the golden test that keeps it in
-//! step with `design/tokens.json`.
+//! The generators behind `generated.rs` and the GPUI Kit theme set, and the
+//! golden tests that keep both in step with `design/tokens.json`.
 //!
-//! Nothing here runs in the app. The output is checked in and there is no
-//! build script: the test writes the file again and compares it byte for
+//! Nothing here runs in the app. The outputs are checked in and there is no
+//! build script: each test writes its file again and compares it byte for
 //! byte. After changing the JSON, `FP_UPDATE_GOLDEN=1 cargo test golden`
 //! rewrites it.
 
@@ -35,6 +35,17 @@ pub(super) struct Resolved {
     pub alpha: u8,
     /// The primitive it ends in, when it is that primitive unchanged.
     pub primitive: Option<String>,
+}
+
+impl Resolved {
+    /// `#RRGGBB`, or `#RRGGBBAA` when the color is not opaque.
+    pub fn hex(&self) -> String {
+        if self.alpha == 0xFF {
+            format!("#{:06X}", self.rgb)
+        } else {
+            format!("#{:06X}{:02X}", self.rgb, self.alpha)
+        }
+    }
 }
 
 impl Tokens {
@@ -492,6 +503,61 @@ pub(super) fn rust(tokens: &Tokens) -> String {
     out
 }
 
+/// `assets/theme/ferrispass.theme.json`: one GPUI Kit theme per mode, every
+/// color key of the Kit schema set from a token.
+pub(super) fn kit_theme_set(tokens: &Tokens) -> String {
+    let kit = &tokens.json()["kit"];
+    let settings = sorted(kit["settings"].as_object().expect("kit.settings"));
+    // The Kit applies a config's font size on every theme change, over the
+    // text size the app chose, so `ds::apply` sets it after the change.
+    assert!(
+        settings.iter().all(|(key, _)| *key != "font.size"),
+        "tokens.json: kit.settings must not set font.size"
+    );
+    let mut colors: Vec<(&String, &Value)> = kit["colors"]
+        .as_object()
+        .expect("kit.colors")
+        .iter()
+        .collect();
+    colors.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut out = format!("{{\n  \"name\": {},\n  \"themes\": [\n", kit["name"]);
+    for (index, mode) in Mode::ALL.into_iter().enumerate() {
+        let name = &kit["themes"][mode.name()];
+        assert!(
+            name.is_string(),
+            "tokens.json: kit.themes has no {}",
+            mode.name()
+        );
+        out.push_str(&format!("    {{\n      \"name\": {name},\n"));
+        let kit_mode = if mode.is_dark() { "dark" } else { "light" };
+        out.push_str(&format!("      \"mode\": \"{kit_mode}\",\n"));
+        for (key, value) in &settings {
+            out.push_str(&format!("      {}: {value},\n", Value::from(*key)));
+        }
+        out.push_str("      \"colors\": {\n");
+        for (position, (key, token)) in colors.iter().enumerate() {
+            let token = token
+                .as_str()
+                .unwrap_or_else(|| panic!("tokens.json: kit.colors.{key} names a token"));
+            let separator = if position + 1 < colors.len() { "," } else { "" };
+            out.push_str(&format!(
+                "        {}: \"{}\"{separator}\n",
+                Value::from(key.as_str()),
+                tokens.resolve_name(token, mode).hex()
+            ));
+        }
+        out.push_str("      }\n");
+        out.push_str(if index + 1 < Mode::ALL.len() {
+            "    },\n"
+        } else {
+            "    }\n"
+        });
+    }
+    out.push_str("  ]\n}\n");
+    out
+}
+
 /// Compares a checked-in file with what the generator makes now, or writes it
 /// when `FP_UPDATE_GOLDEN` is set.
 fn check_golden(relative: &str, actual: &str) {
@@ -523,6 +589,14 @@ mod golden {
     #[test]
     fn generated_rs_is_current() {
         check_golden("src/ui/ds/tokens/generated.rs", &rust(&Tokens::load()));
+    }
+
+    #[test]
+    fn kit_theme_json_is_current() {
+        check_golden(
+            "assets/theme/ferrispass.theme.json",
+            &kit_theme_set(&Tokens::load()),
+        );
     }
 }
 

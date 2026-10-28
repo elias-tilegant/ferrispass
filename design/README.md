@@ -5,6 +5,7 @@
 | Generated file | Read by |
 |---|---|
 | `src/ui/ds/tokens/generated.rs` | the app, through `cx.ds()` |
+| `assets/theme/ferrispass.theme.json` | GPUI Kit, one theme per mode |
 
 There is no build script. A golden test generates each file again and compares it byte for byte with the checked-in copy, so a change to `tokens.json` that wasn't regenerated fails `cargo test`.
 
@@ -24,3 +25,15 @@ There is no build script. A golden test generates each file again and compares i
 - `contrast`, `exempt`, `neutral_family`, `hue_separation`: what the tests in `src/ui/ds/tokens/contrast.rs` hold the colors to.
 - `kit`: how the tokens map onto the color keys of GPUI Kit.
 - `css_aliases`: the variable names the HTML mockups use for some tokens.
+
+## The GPUI Kit theme
+
+`assets/theme/ferrispass.theme.json` holds four Kit themes, one per mode. `kit.colors` sets every one of the 140 color keys the Kit's schema knows, so nothing falls back to the Kit's stock colors. Two things look odd there and are on purpose:
+
+- The Kit's `accent` is its hover color in menus and lists, not an accent color. Copper is `primary`.
+- `switch.background` is the track of a switch that is off. The Kit paints a switch that is on in `primary` unless the control sets its own color, and a switch that is on is never copper here, so a Kit switch has to be given `switch.on.bg` where it is used.
+
+Two settings stay out of the theme set for now:
+
+- `font.size`. The Kit applies it on every theme change, over whatever text size the app set. The app sets the text size after each change instead.
+- The mono font is still JetBrains Mono, because it is the only monospace font the app ships today. GPUI gives up on the first layout in a font family that isn't there, so the theme can only name Atkinson Hyperlegible Mono once the app loads it.
