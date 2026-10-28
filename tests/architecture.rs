@@ -1341,3 +1341,381 @@ fn lint_levels_are_read_from_the_lints_table() {
     assert!(level("[lints.rust]\nunsafe_code = \"loud\"\n").is_err());
     assert!(level("[lints.rust]\n").is_err());
 }
+
+// -------------------------------------------------------- release pipeline --
+
+/// The release rules, read from the workflow files as text, because nothing
+/// else exercises a workflow before a tag does.
+///
+/// Every release is published as a pre-release, and the workflow has no other
+/// way to create a release, edit one or mark one as latest. The updater reads
+/// `releases/latest`, which GitHub never resolves to a pre-release, so
+/// shipping a version to everyone stays a step taken by hand. No step or job
+/// may fail quietly either.
+#[test]
+fn release_pipeline_rules_hold() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |name: &str| {
+        fs::read_to_string(root.join(name))
+            .unwrap_or_else(|err| panic!("cannot read {name}: {err}"))
+    };
+
+    let problems: Vec<String> = release_workflow_problems(&read(".github/workflows/release.yml"))
+        .into_iter()
+        .map(|problem| format!(".github/workflows/release.yml: {problem}"))
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "the release pipeline rules are broken:\n{}",
+        problems.join("\n")
+    );
+}
+
+const PUBLISH_ACTION: &str = "softprops/action-gh-release";
+
+fn release_workflow_problems(workflow: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (_, line) in yaml_lines(workflow) {
+        let Some((key, value)) = yaml_entry(line) else {
+            continue;
+        };
+        match key {
+            "prerelease" if unquote(value) != "true" => {
+                problems.push(format!("`{line}`: every release is a pre-release"));
+            }
+            "make_latest" if unquote(value) != "false" => {
+                problems.push(format!("`{line}`: only a person marks a release as latest"));
+            }
+            "continue-on-error" => {
+                problems.push(format!(
+                    "`{line}`: a failing release step must fail the run"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let steps = workflow_steps(workflow);
+    let publishing: Vec<&Step> = steps
+        .iter()
+        .filter(|step| {
+            step.get("uses")
+                .is_some_and(|uses| uses.starts_with(PUBLISH_ACTION))
+        })
+        .collect();
+    match publishing[..] {
+        [step] => {
+            if !step
+                .lines
+                .iter()
+                .any(|line| yaml_entry(line).is_some_and(|(key, _)| key == "prerelease"))
+            {
+                problems.push(format!(
+                    "the step that uses {PUBLISH_ACTION} must set `prerelease: true`"
+                ));
+            }
+        }
+        _ => problems.push(format!(
+            "expected one step that uses {PUBLISH_ACTION}, found {}",
+            publishing.len()
+        )),
+    }
+    for step in &steps {
+        let words = step.words();
+        for command in words.windows(3) {
+            if command[..2] == ["gh", "release"]
+                && matches!(command[2], "create" | "edit" | "delete")
+            {
+                problems.push(format!(
+                    "job {}: `gh release {}`: the workflow publishes through {PUBLISH_ACTION} \
+                     only; releases are edited by hand",
+                    step.job, command[2]
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// One step of a job: its top-level keys, and all its lines for searching.
+struct Step {
+    job: String,
+    keys: Vec<(String, String)>,
+    lines: Vec<String>,
+}
+
+impl Step {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.keys
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The step's text split on blanks, with shell line continuations gone,
+    /// so a command reads the same however it is wrapped.
+    fn words(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .flat_map(|line| line.split_whitespace())
+            .filter(|word| *word != "\\")
+            .collect()
+    }
+}
+
+/// Every step of every job, in file order.
+fn workflow_steps(workflow: &str) -> Vec<Step> {
+    let lines = yaml_lines(workflow);
+    let mut steps = Vec::new();
+    let Some(jobs) = top_level(&lines, "jobs") else {
+        return steps;
+    };
+    let jobs = children(&lines, jobs);
+    for (job, (_, line)) in entries(jobs) {
+        let Some((name, _)) = yaml_entry(line) else {
+            continue;
+        };
+        let job_block = children(jobs, job);
+        let Some(at) = entries(job_block)
+            .find(|(_, (_, line))| yaml_entry(line).is_some_and(|(key, _)| key == "steps"))
+            .map(|(at, _)| at)
+        else {
+            continue;
+        };
+        let items = children(job_block, at);
+        for (item, (indent, line)) in entries(items) {
+            let Some(first) = line.strip_prefix('-') else {
+                continue;
+            };
+            let first = first.trim_start();
+            let key_indent = indent + (line.len() - first.len());
+            let mut keys = Vec::new();
+            let mut lines = vec![first.to_string()];
+            if let Some((key, value)) = yaml_entry(first) {
+                keys.push((key.to_string(), unquote(value).to_string()));
+            }
+            for &(indent, line) in children(items, item) {
+                if indent == key_indent
+                    && let Some((key, value)) = yaml_entry(line)
+                {
+                    keys.push((key.to_string(), unquote(value).to_string()));
+                }
+                lines.push(line.to_string());
+            }
+            steps.push(Step {
+                job: name.to_string(),
+                keys,
+                lines,
+            });
+        }
+    }
+    steps
+}
+
+/// The lines of a YAML file that carry content, as (indent, text), without
+/// comments and trailing blanks.
+fn yaml_lines(text: &str) -> Vec<(usize, &str)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = strip_yaml_comment(line).trim_end();
+            let text = line.trim_start();
+            (!text.is_empty()).then_some((line.len() - text.len(), text))
+        })
+        .collect()
+}
+
+/// `line` without a `# comment`: a `#` at the start or after a blank, outside
+/// a quoted string. A quote only opens a string where a value or a word
+/// starts, so an apostrophe in a shell comment does not hide the comment.
+fn strip_yaml_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut prev = ' ';
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if (c == '"' || c == '\'')
+                && (prev.is_whitespace() || "[{,:=(".contains(prev)) =>
+            {
+                quote = Some(c)
+            }
+            None if c == '#' && prev.is_whitespace() => return &line[..i],
+            None => {}
+        }
+        prev = c;
+    }
+    line
+}
+
+/// The lines below `lines[at]` that belong to it: those indented further,
+/// and for a key that is not itself a list item, a list at its own indent.
+fn children<'a>(lines: &'a [(usize, &'a str)], at: usize) -> &'a [(usize, &'a str)] {
+    let (indent, line) = lines[at];
+    let item = line.starts_with('-');
+    let end = lines[at + 1..]
+        .iter()
+        .position(|&(i, text)| i < indent || (i == indent && (item || !text.starts_with('-'))))
+        .map_or(lines.len(), |n| at + 1 + n);
+    &lines[at + 1..end]
+}
+
+/// The lines of a block at its own level: its keys, or its list items.
+fn entries<'a>(
+    block: &'a [(usize, &'a str)],
+) -> impl Iterator<Item = (usize, (usize, &'a str))> + 'a {
+    let indent = block.first().map_or(0, |&(indent, _)| indent);
+    block
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(move |&(_, (i, _))| i == indent)
+}
+
+fn top_level(lines: &[(usize, &str)], key: &str) -> Option<usize> {
+    lines
+        .iter()
+        .position(|&(indent, line)| indent == 0 && yaml_entry(line).is_some_and(|(k, _)| k == key))
+}
+
+/// `key: value` on a line, with a leading `- ` and quotes around the key
+/// removed. The value is empty when it follows on the lines below.
+fn yaml_entry(line: &str) -> Option<(&str, &str)> {
+    let line = line.strip_prefix("- ").unwrap_or(line);
+    let (key, value) = match line.find(": ") {
+        Some(at) => (&line[..at], line[at + 2..].trim()),
+        None => (line.strip_suffix(':')?, ""),
+    };
+    let key = unquote(key.trim());
+    (!key.is_empty() && !key.contains(' ')).then_some((key, value))
+}
+
+fn unquote(value: &str) -> &str {
+    let value = value.trim();
+    for q in ['"', '\''] {
+        if let Some(inner) = value.strip_prefix(q).and_then(|v| v.strip_suffix(q)) {
+            return inner;
+        }
+    }
+    value
+}
+
+#[test]
+fn yaml_lines_drop_comments_but_keep_quoted_hashes() {
+    let text = "a: 1 # one\n  # whole line\n\nb: \"x # y\"\nc: it's # gone\nd: a#b\n";
+    assert_eq!(
+        yaml_lines(text),
+        vec![
+            (0, "a: 1"),
+            (0, "b: \"x # y\""),
+            (0, "c: it's"),
+            (0, "d: a#b")
+        ]
+    );
+}
+
+#[test]
+fn steps_are_read_with_their_job_and_keys() {
+    let workflow = r#"
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        if: always()
+        run: |
+          make \
+            all
+  release:
+    runs-on: macos-latest
+    steps:
+    - name: "Publish"
+      uses: 'softprops/action-gh-release@v2'
+      with:
+        prerelease: true
+"#;
+    let steps = workflow_steps(workflow);
+    let summary: Vec<(&str, Option<&str>, Option<&str>)> = steps
+        .iter()
+        .map(|step| (step.job.as_str(), step.get("name"), step.get("uses")))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("build", None, Some("actions/checkout@v4")),
+            ("build", Some("Build"), None),
+            (
+                "release",
+                Some("Publish"),
+                Some("softprops/action-gh-release@v2")
+            ),
+        ]
+    );
+    assert_eq!(steps[1].get("if"), Some("always()"));
+    assert_eq!(
+        steps[1].words(),
+        vec![
+            "name:", "Build", "if:", "always()", "run:", "|", "make", "all"
+        ]
+    );
+    assert_eq!(steps[2].get("prerelease"), None);
+}
+
+/// The smallest workflow that keeps the release rules.
+const RELEASE_SAMPLE: &str = r#"
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    steps:
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          prerelease: true
+"#;
+
+#[test]
+fn release_rules_catch_every_way_around_the_pre_release_flag() {
+    assert_eq!(
+        release_workflow_problems(RELEASE_SAMPLE),
+        Vec::<String>::new()
+    );
+    let publish = "      - name: Publish\n";
+    for (from, to) in [
+        ("prerelease: true", "prerelease: false"),
+        ("prerelease: true", "# prerelease: true"),
+        (
+            "prerelease: true",
+            "prerelease: ${{ !contains(github.ref, '-') }}",
+        ),
+        (
+            "prerelease: true",
+            "prerelease: true\n          make_latest: true",
+        ),
+        (
+            "softprops/action-gh-release@v2",
+            "ncipollo/release-action@v1",
+        ),
+        (
+            publish,
+            "      - run: gh release edit \"$TAG\" --latest\n      - name: Publish\n",
+        ),
+        (
+            publish,
+            "      - run: |\n          gh release \\\n            create x\n      - name: Publish\n",
+        ),
+        (
+            publish,
+            "      - name: Publish\n        continue-on-error: true\n",
+        ),
+        ("    steps:", "    continue-on-error: true\n    steps:"),
+    ] {
+        let mutated = RELEASE_SAMPLE.replacen(from, to, 1);
+        assert_ne!(mutated, RELEASE_SAMPLE, "{from} not in the sample");
+        assert!(
+            !release_workflow_problems(&mutated).is_empty(),
+            "not caught: {from:?} -> {to:?}"
+        );
+    }
+}

@@ -150,6 +150,23 @@ jobs:
           # already a per-release context.
           "$BIN" --config cliff.toml --latest --strip header --output RELEASE_NOTES.md
 
+      # The generated list says what changed; a hand-written note says what
+      # it means for the people using the app. When the tagged commit has one
+      # for this tag, it goes above the list. The result is the one file that
+      # becomes both the release page and the notes in update.json, so the
+      # size check in the sign job covers the note too.
+      - name: Prepend the hand-written release note
+        run: |
+          set -euo pipefail
+          NOTE="docs/release-notes/${RELEASE_TAG}.md"
+          if [ -f "${NOTE}" ]; then
+            { cat "${NOTE}"; printf '\n'; cat RELEASE_NOTES.md; } > RELEASE_NOTES.md.tmp
+            mv RELEASE_NOTES.md.tmp RELEASE_NOTES.md
+            echo "Prepended ${NOTE}"
+          else
+            echo "No ${NOTE}; the notes are the generated list only"
+          fi
+
       - name: Upload release notes
         uses: actions/upload-artifact@v4
         with:
@@ -270,4 +287,11 @@ jobs:
           body_path: RELEASE_NOTES.md
           generate_release_notes: false
           draft: false
-          prerelease: false
+          # Every tag goes out as a pre-release: test builds, release
+          # candidates and 0.9.x fixes alike. The in-app updater reads
+          # releases/latest, which GitHub resolves to the newest release
+          # without this flag, so nothing here reaches existing installs.
+          # Clearing the flag by hand (gh release edit vX.Y.Z
+          # --prerelease=false --latest) is the deliberate step that ships a
+          # version to everyone, and it is never done for a tag with a hyphen.
+          prerelease: true
