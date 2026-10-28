@@ -1352,6 +1352,10 @@ fn lint_levels_are_read_from_the_lints_table() {
 /// `releases/latest`, which GitHub never resolves to a pre-release, so
 /// shipping a version to everyone stays a step taken by hand. No step or job
 /// may fail quietly either.
+///
+/// CI and CodeQL run for pushes to `master` and `rebuild` and for pull
+/// requests into either, so merges from `master` into the long-lived
+/// `rebuild` branch are built and scanned like everything else.
 #[test]
 fn release_pipeline_rules_hold() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1360,10 +1364,30 @@ fn release_pipeline_rules_hold() {
             .unwrap_or_else(|err| panic!("cannot read {name}: {err}"))
     };
 
-    let problems: Vec<String> = release_workflow_problems(&read(".github/workflows/release.yml"))
-        .into_iter()
-        .map(|problem| format!(".github/workflows/release.yml: {problem}"))
-        .collect();
+    let mut problems: Vec<String> =
+        release_workflow_problems(&read(".github/workflows/release.yml"))
+            .into_iter()
+            .map(|problem| format!(".github/workflows/release.yml: {problem}"))
+            .collect();
+    for name in [".github/workflows/ci.yml", ".github/workflows/codeql.yml"] {
+        let workflow = read(name);
+        for event in ["push", "pull_request"] {
+            match branch_filter(&workflow, event) {
+                Ok(None) => {}
+                Ok(Some(branches)) => {
+                    for branch in ["master", "rebuild"] {
+                        if !branches.iter().any(|b| b == branch) {
+                            problems.push(format!(
+                                "{name}: `{event}` does not run for {branch}, only for \
+                                 {branches:?}"
+                            ));
+                        }
+                    }
+                }
+                Err(err) => problems.push(format!("{name}: {err}")),
+            }
+        }
+    }
     assert!(
         problems.is_empty(),
         "the release pipeline rules are broken:\n{}",
@@ -1435,6 +1459,59 @@ fn release_workflow_problems(workflow: &str) -> Vec<String> {
         }
     }
     problems
+}
+
+/// The branches `event` runs for, from the workflow's `on:` block: `None` for
+/// every branch, otherwise the names listed under `branches`. A trigger that
+/// lists only tags runs for no branch at all. Forms this reader does not
+/// follow are an error, not a guess.
+fn branch_filter(workflow: &str, event: &str) -> Result<Option<Vec<String>>, String> {
+    let lines = yaml_lines(workflow);
+    let on = top_level(&lines, "on").ok_or("no `on:` block")?;
+    if !yaml_entry(lines[on].1).is_some_and(|(_, value)| value.is_empty()) {
+        return Err(format!("`{}`: list the triggers as a block", lines[on].1));
+    }
+    let triggers = children(&lines, on);
+    let (at, (_, line)) = entries(triggers)
+        .find(|(_, (_, line))| yaml_entry(line).is_some_and(|(key, _)| key == event))
+        .ok_or_else(|| format!("no `{event}` trigger"))?;
+    if yaml_entry(line).is_some_and(|(_, value)| !value.is_empty()) {
+        return Err(format!("`{line}`: write the filters as a block"));
+    }
+    let filters = children(triggers, at);
+    let mut branches = None;
+    let mut tags_only = false;
+    for (at, (_, line)) in entries(filters) {
+        match yaml_entry(line) {
+            Some(("branches", value)) => branches = Some(yaml_list(value, children(filters, at))),
+            Some(("tags" | "tags-ignore", _)) => tags_only = true,
+            Some(("branches-ignore", _)) => {
+                return Err(format!("`{line}`: name the branches instead"));
+            }
+            _ => {}
+        }
+    }
+    Ok(branches.or(tags_only.then(Vec::new)))
+}
+
+/// A list written inline (`[a, b]`), as `- a` lines below its key, or as a
+/// single value.
+fn yaml_list(value: &str, below: &[(usize, &str)]) -> Vec<String> {
+    if let Some(inline) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+        return inline
+            .split(',')
+            .map(|item| unquote(item).to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+    }
+    if !value.is_empty() {
+        return vec![unquote(value).to_string()];
+    }
+    below
+        .iter()
+        .filter_map(|(_, line)| line.strip_prefix('-'))
+        .map(|item| unquote(item).to_string())
+        .collect()
 }
 
 /// One step of a job: its top-level keys, and all its lines for searching.
@@ -1717,5 +1794,37 @@ fn release_rules_catch_every_way_around_the_pre_release_flag() {
             !release_workflow_problems(&mutated).is_empty(),
             "not caught: {from:?} -> {to:?}"
         );
+    }
+}
+
+#[test]
+fn branch_filters_are_read_from_the_triggers() {
+    let list = |names: &[&str]| Ok(Some(names.iter().map(|n| n.to_string()).collect()));
+    let workflow = "on:\n  push:\n    branches: [master, \"rebuild\"] # both\n  pull_request:\n  \
+                    schedule:\n    - cron: '0 6 * * 1'\n";
+    assert_eq!(
+        branch_filter(workflow, "push"),
+        list(&["master", "rebuild"])
+    );
+    assert_eq!(branch_filter(workflow, "pull_request"), Ok(None));
+    assert!(branch_filter(workflow, "workflow_dispatch").is_err());
+
+    let block = "\"on\":\n  pull_request:\n    branches:\n    - master\n    # - rebuild\n    \
+                 paths: ['src/**']\n  workflow_dispatch:\n";
+    assert_eq!(branch_filter(block, "pull_request"), list(&["master"]));
+    assert_eq!(
+        branch_filter("on:\n  push:\n    tags: ['v*']\n", "push"),
+        list(&[])
+    );
+    assert_eq!(
+        branch_filter("on:\n  push:\n    branches: rebuild\n", "push"),
+        list(&["rebuild"])
+    );
+    for unreadable in [
+        "on: [push, pull_request]\n",
+        "on:\n  push: {branches: [master]}\n",
+        "on:\n  push:\n    branches-ignore: [main]\n",
+    ] {
+        assert!(branch_filter(unreadable, "push").is_err(), "{unreadable}");
     }
 }

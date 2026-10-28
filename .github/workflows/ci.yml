@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    # rebuild is a long-lived branch, and merges from master land there
+    # without a pull request, so its pushes are built like master's.
+    branches: [master, main, rebuild]
   pull_request:
 
 permissions:
