@@ -9,14 +9,16 @@
 //! `fixtures/keepassxc-save/ferrispass.kdbx` was written by this app. Each
 //! `keepassxc-<version>.kdbx` is that file after `keepassxc-cli edit` of
 //! that release changed the username of "Live/Kept Entry" to "carol" and
-//! saved. Nothing else was touched.
+//! saved. Each `keepassxc-<version>-markers.kdbx` is the same file after
+//! that release changed the username of "Kunden/SAP PRD" to "dora", the
+//! entry that carries the most markers. Nothing else was touched.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use ferrispass::keepass::merge::{self, Resolutions, Side};
 use keepass::{
     Database, DatabaseKey,
-    db::{CustomDataItem, fields},
+    db::{CustomDataItem, CustomDataValue, EntryId, GroupId, Times, fields},
 };
 
 /// Generated for these fixtures and used nowhere else.
@@ -26,6 +28,12 @@ const KEEPASSXC_SAVES: [&str; 3] = [
     "keepassxc-2.6.6.kdbx",
     "keepassxc-2.7.12.kdbx",
     "keepassxc-2.8.0-beta1.kdbx",
+];
+
+const KEEPASSXC_MARKER_SAVES: [&str; 3] = [
+    "keepassxc-2.6.6-markers.kdbx",
+    "keepassxc-2.7.12-markers.kdbx",
+    "keepassxc-2.8.0-beta1-markers.kdbx",
 ];
 
 fn open(name: &str) -> Database {
@@ -146,5 +154,130 @@ fn assert_united(
             Some(&item.value),
             "{what}: {key} as KeePassXC wrote it"
         );
+    }
+}
+
+/// Markers: the plugin data newer versions of this app keep under
+/// `FerrisPass.` keys. The fixture holds them on two entries, a group and
+/// the database.
+fn is_marker(key: &str) -> bool {
+    key.starts_with("FerrisPass.")
+}
+
+/// Every marker on the current entries, the groups and the database, named
+/// by where it sits.
+fn markers(db: &Database) -> BTreeMap<String, CustomDataItem> {
+    let mut found = BTreeMap::new();
+    let mut take = |place: String, items: &HashMap<String, CustomDataItem>| {
+        for (key, item) in items.iter().filter(|(key, _)| is_marker(key)) {
+            found.insert(format!("{place} {key}"), item.clone());
+        }
+    };
+    take("database".into(), &db.meta.custom_data);
+    for group in db.iter_all_groups() {
+        take(format!("group {:?}", group.name), &group.custom_data);
+    }
+    for entry in db.iter_all_entries() {
+        let title = entry.get(fields::TITLE).unwrap_or_default();
+        take(format!("entry {title:?}"), &entry.custom_data);
+    }
+    found
+}
+
+fn values(
+    markers: &BTreeMap<String, CustomDataItem>,
+) -> BTreeMap<&String, &Option<CustomDataValue>> {
+    markers
+        .iter()
+        .map(|(place, item)| (place, &item.value))
+        .collect()
+}
+
+/// KeePassXC keeps every marker's value exactly and drops its item time,
+/// as it does for any plugin data. A sync with that save asks nothing, takes
+/// the one edit, and keeps every marker with the item time this app gave
+/// it. Where the two copies hold two values, the remote copy's stays,
+/// because one side has no item time left to decide with.
+#[test]
+fn keepassxc_keeps_markers_byte_for_byte() {
+    let ours = open("ferrispass.kdbx");
+    let written = markers(&ours);
+    for place in ["database", "group", "entry"] {
+        assert!(
+            written.keys().any(|key| key.starts_with(place)),
+            "the fixture has a marker on the {place}"
+        );
+    }
+
+    for name in KEEPASSXC_MARKER_SAVES {
+        let theirs = open(name);
+        assert_eq!(
+            values(&markers(&theirs)),
+            values(&written),
+            "{name}: every marker as this app wrote it"
+        );
+
+        for (local, remote, edited) in [
+            (&ours, &theirs, Side::Remote),
+            (&theirs, &ours, Side::Local),
+        ] {
+            let report = merge::diff(local, remote);
+            assert!(!report.needs_a_decision(), "{name}: {report:?}");
+            assert_eq!(
+                report
+                    .auto_resolved
+                    .iter()
+                    .map(|resolved| (resolved.remote.title.as_str(), resolved.winner))
+                    .collect::<Vec<_>>(),
+                vec![("SAP PRD", edited)],
+                "{name}: the one entry KeePassXC changed is taken from where it changed"
+            );
+            let merged = merge::apply_picks(local, remote, &Resolutions::default(), &report)
+                .unwrap_or_else(|err| panic!("{name}: {err}"));
+            assert_eq!(
+                entry(&merged, "SAP PRD").get(fields::USERNAME),
+                Some("dora"),
+                "{name}: the edit lands"
+            );
+            assert_eq!(
+                markers(&merged),
+                written,
+                "{name}: every marker, with the item time this app gave it"
+            );
+        }
+
+        // This copy sets another value on every marker, dated, and KeePassXC
+        // has saved the old ones without a date.
+        let mut changed = ours.clone();
+        let item = CustomDataItem {
+            value: Some(CustomDataValue::String("changed".into())),
+            last_modification_time: Some(Times::now()),
+        };
+        let rewrite = |items: &mut HashMap<String, CustomDataItem>| {
+            for (_, value) in items.iter_mut().filter(|(key, _)| is_marker(key)) {
+                *value = item.clone();
+            }
+        };
+        rewrite(&mut changed.meta.custom_data);
+        let groups: Vec<GroupId> = changed.iter_all_groups().map(|group| group.id()).collect();
+        for id in groups {
+            rewrite(&mut changed.group_mut(id).expect("group").custom_data);
+        }
+        let entries: Vec<EntryId> = changed.iter_all_entries().map(|entry| entry.id()).collect();
+        for id in entries {
+            rewrite(&mut changed.entry_mut(id).expect("entry").custom_data);
+        }
+
+        for (local, remote) in [(&changed, &theirs), (&theirs, &changed)] {
+            let report = merge::diff(local, remote);
+            assert!(!report.needs_a_decision(), "{name}: {report:?}");
+            let merged = merge::apply_picks(local, remote, &Resolutions::default(), &report)
+                .unwrap_or_else(|err| panic!("{name}: {err}"));
+            assert_eq!(
+                values(&markers(&merged)),
+                values(&markers(remote)),
+                "{name}: the remote copy's value stays"
+            );
+        }
     }
 }
