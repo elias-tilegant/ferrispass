@@ -7,7 +7,7 @@
 //! stays, and two values under one key go by the later item time, or to the
 //! remote copy where the item times cannot decide.
 
-use std::ops::Deref as _;
+use std::{ops::Deref as _, sync::OnceLock};
 
 use chrono::{NaiveDateTime, TimeDelta};
 use ferrispass::keepass::merge::{self, ConflictReport, FieldDiff, Resolutions, Side};
@@ -37,8 +37,12 @@ fn base_time() -> NaiveDateTime {
     days_ago(3)
 }
 
+/// Relative to one moment per test run. KDBX times have whole seconds, and
+/// two copies are only tied when both were stamped with the same one, which
+/// separate calls to the clock do not promise.
 fn days_ago(days: i64) -> NaiveDateTime {
-    Times::now() - TimeDelta::days(days)
+    static NOW: OnceLock<NaiveDateTime> = OnceLock::new();
+    *NOW.get_or_init(Times::now) - TimeDelta::days(days)
 }
 
 fn vault() -> (Database, Vault) {
@@ -270,16 +274,41 @@ fn markers_never_appear_in_the_report() {
 
 /// Two copies hold the same archived versions, and only one copy's carry
 /// markers. Neither copy holds a version the other lacks.
+///
+/// Nor does a merge drop anything there. The fork keeps two versions of one
+/// second that differ as two, so each copy's version stays as it was
+/// archived. An archived version is a record, and nothing settles which of
+/// its two values is right.
 #[test]
 fn markers_on_archived_versions_never_appear_in_the_report() {
     let (mut ours, vault) = vault();
     let mut theirs = ours.clone();
-    for (notes, days) in [("first", 5), ("second", 4)] {
-        vault.archive(&mut ours, notes, days_ago(days), None);
-        let marked = Some(marker("sap", Some(days_ago(days))));
-        vault.archive(&mut theirs, notes, days_ago(days), marked);
+    let versions = [("first", days_ago(5)), ("second", days_ago(4))];
+    for (notes, at) in versions {
+        vault.archive(&mut ours, notes, at, None);
+        let marked = Some(marker("sap", Some(at)));
+        vault.archive(&mut theirs, notes, at, marked);
     }
     assert_nothing_reported("archived versions", &ours, &theirs);
+
+    let key = vault.key(Place::Entry);
+    for (local, remote) in [(&ours, &theirs), (&theirs, &ours)] {
+        let merged = merge(local, remote, Side::Local);
+        let entry = merged.entry(vault.entry).expect("entry");
+        let archived = entry.history.as_ref().expect("history").get_entries();
+        for (notes, at) in versions {
+            let kept: Vec<Option<&CustomDataItem>> = archived
+                .iter()
+                .filter(|version| version.get(fields::NOTES) == Some(notes))
+                .map(|version| version.custom_data.get(&key))
+                .collect();
+            assert!(kept.contains(&None), "{notes}: the version without");
+            assert!(
+                kept.contains(&Some(&marker("sap", Some(at)))),
+                "{notes}: the version with the marker"
+            );
+        }
+    }
 }
 
 /// Whether the other copy could have trimmed a version away is decided on
@@ -348,7 +377,7 @@ fn markers_survive_when_the_other_side_wins() {
                         vault.edit(marked_copy, place, "here", base_time());
                         vault.edit(winning_copy, place, "carol", base_time());
                     } else {
-                        vault.edit(winning_copy, place, "carol", Times::now());
+                        vault.edit(winning_copy, place, "carol", days_ago(0));
                     }
 
                     let merged = merge(&local, &remote, other(marked));
@@ -378,8 +407,8 @@ fn merge_two_values(
     vault.mark(&mut local, place, ours);
     vault.mark(&mut remote, place, theirs);
     match settled {
-        Some(Side::Local) => vault.edit(&mut local, place, "carol", Times::now()),
-        Some(Side::Remote) => vault.edit(&mut remote, place, "carol", Times::now()),
+        Some(Side::Local) => vault.edit(&mut local, place, "carol", days_ago(0)),
+        Some(Side::Remote) => vault.edit(&mut remote, place, "carol", days_ago(0)),
         None => assert_nothing_reported(&format!("{place:?}"), &local, &remote),
     }
     let merged = merge(&local, &remote, Side::Local);
@@ -391,12 +420,15 @@ fn merge_two_values(
 
 /// (c): two values, two item times, and the later one stays, whichever copy
 /// holds it and whichever copy won the object. A time nobody could have
-/// written yet decides nothing, and the remote copy's value stays.
+/// written yet decides nothing, and the remote copy's value stays. A few
+/// minutes ahead is clock drift between two machines, the same allowance
+/// every other time in a merge gets, and still counts.
 #[test]
 fn newer_marker_wins_by_item_time() {
     let older = marker("sap", Some(days_ago(2)));
     let newer = marker("hana", Some(days_ago(1)));
-    let future = marker("bw", Some(Times::now() + TimeDelta::days(365)));
+    let future = marker("bw", Some(days_ago(-365)));
+    let drifted = marker("bw", Some(days_ago(0) + TimeDelta::minutes(5)));
     for place in PLACES {
         for settled in SETTLED {
             let what = format!("{place:?}, settled by {settled:?}");
@@ -414,6 +446,11 @@ fn newer_marker_wins_by_item_time() {
                 merge_two_values(place, settled, future.clone(), older.clone()),
                 Some(older.clone()),
                 "{what}: a future time here"
+            );
+            assert_eq!(
+                merge_two_values(place, settled, drifted.clone(), older.clone()),
+                Some(drifted.clone()),
+                "{what}: a drifted clock here"
             );
         }
     }
