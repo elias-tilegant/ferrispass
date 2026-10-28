@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod assets;
 
+pub mod kinds;
 mod recents;
 mod search;
 pub mod settings;
