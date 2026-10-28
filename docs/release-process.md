@@ -223,7 +223,7 @@ Testers install them from the release page; they are never marked latest.
 and stays a pre-release while the test group uses it. Going live is the same
 `gh release edit` on that same release; nothing is rebuilt.
 
-**The pre-release channel.** After publishing, the workflow also copies
+**The pre-release channel.** After publishing, a job of its own copies
 `update.json` and `update.json.minisig` into a permanent release named
 `kanal-vorab`, replacing what was there, but only when the tag's version is
 higher than the one already in the channel. The channel only moves forward:
@@ -241,6 +241,19 @@ gh release create kanal-vorab --prerelease --title "Pre-release channel" \
     --notes "Holds the update manifest of the highest version tagged so far. Do not delete."
 ```
 
+While it is empty, the next tag fills it, whatever its version. After that
+it must hold exactly those two files. The channel job fails, and leaves the
+channel alone, when `kanal-vorab` is missing, holds anything else, or has a
+manifest without a readable version. If `kanal-vorab` was missing, create
+it and re-run the failed channel job; the release itself is already up as a
+pre-release and is not touched again.
+
+Only one channel job runs at a time, so two tags published close together
+cannot both read the channel before either writes it. A channel job that
+finds another one already waiting replaces it, and the replaced one shows
+as cancelled. Re-run it; it compares again and moves the channel if its
+version is the higher one.
+
 The workflow never moves the channel back, and a re-run for the same tag
 leaves it alone. To point it at an older release, for instance after
 withdrawing a test build, or to repair an upload that broke off half-way,
@@ -250,10 +263,6 @@ copy the two files over by hand:
 gh release download vX.Y.Z --pattern 'update.json*' --dir channel
 gh release upload kanal-vorab channel/update.json channel/update.json.minisig --clobber
 ```
-
-If it is missing, the publish job fails at its last step, after the release
-itself is already up as a pre-release. Create `kanal-vorab`, then re-run the
-failed job.
 
 Two things this relies on:
 
@@ -265,9 +274,14 @@ Two things this relies on:
   files to it afterwards, and the channel release is rewritten on every tag;
   an immutable release allows neither.
 
+The same order means that when an upload fails, the run fails with the
+pre-release already visible and some files missing. It reaches no installed
+app, but testers could see it. Re-run the failed publish job, which uploads
+the files again, and check the release page before anyone is pointed at it.
+
 ## What the pipeline does
 
-`release.yml` uses separate build, notes, signing, and publishing jobs. The
+`release.yml` uses separate build, notes, signing, publishing and channel jobs. The
 build and notes jobs never receive the updater private key. The notes job
 puts the tag's hand-written note, if there is one, above the generated list.
 The isolated signing job treats the combined notes as bounded data, verifies
@@ -296,7 +310,8 @@ Stages, with rough timing:
 | 8 | Staple notarization ticket | <5 s | - |
 | 9 | Generate `.app.tar.gz` + unsigned `update.json` with exact payload size | <10 s | `jq` missing or archive creation fails |
 | Sign | Inject notes, sign payload, then the complete manifest, then the disk image; write `SHA256SUMS` | <10 s | minisign key missing, malformed, or payload size mismatch |
-| End | `softprops/action-gh-release@v2` publishes a pre-release with the files, then the manifest is copied into `kanal-vorab` | <30 s | `permissions: contents: write` not granted; a file missing from `signed-release` (the step stops before creating the release); `kanal-vorab` missing (see above) |
+| End | `softprops/action-gh-release@v2` publishes a pre-release with the files | <30 s | `permissions: contents: write` not granted; a file missing from `signed-release` (the step stops before creating the release); an upload failing after the release is created (see above) |
+| Channel | Copy the manifest into `kanal-vorab` if the tag's version is higher, one run at a time | <30 s | `kanal-vorab` missing or holding anything but the manifest and its signature (see above) |
 
 Total wall-clock: usually 8-12 minutes.
 

@@ -1353,9 +1353,9 @@ fn lint_levels_are_read_from_the_lints_table() {
 /// shipping a version to everyone stays a step taken by hand. The signed
 /// artefacts the sign job hands over, `SHA256SUMS` included, are all
 /// attached, and a missing one stops the publishing step. After
-/// publishing, the same job copies the signed manifest into the permanent
-/// `kanal-vorab` release, for every tag whose version is higher than the one
-/// already there: it reads that manifest first and compares the two with
+/// publishing, a job of its own, one run at a time, copies the signed
+/// manifest into the permanent `kanal-vorab` release, for every tag whose
+/// version is higher than the one already there: it reads that manifest first and compares the two with
 /// `scripts/semver-compare.py`, never with `sort -V`, which ranks
 /// `0.10.0-pre.1` above `0.10.0`. No step or job may fail quietly, so a
 /// missing channel release stops the run.
@@ -1504,10 +1504,41 @@ fn release_workflow_problems(workflow: &str) -> Vec<String> {
     match channel[..] {
         [at] => {
             let step = &steps[at];
-            if step.job != steps[publish].job || at < publish {
+            let lines = yaml_lines(workflow);
+            let job = job_block(&lines, &step.job).unwrap_or_default();
+            let key = |name: &str| {
+                entries(job).find(|(_, (_, line))| yaml_entry(line).is_some_and(|(k, _)| k == name))
+            };
+            let needs = key("needs").map_or_else(Vec::new, |(at, (_, line))| {
+                yaml_list(yaml_entry(line).map_or("", |(_, v)| v), children(job, at))
+            });
+            if !needs.contains(&steps[publish].job) {
                 problems.push(format!(
-                    "the upload to {CHANNEL_RELEASE} must follow the publishing step in job {}",
+                    "the upload to {CHANNEL_RELEASE} runs in a job that needs `{}`, after the \
+                     release is up",
                     steps[publish].job
+                ));
+            }
+            let concurrency: Vec<(&str, &str)> =
+                key("concurrency").map_or_else(Vec::new, |(at, _)| {
+                    entries(children(job, at))
+                        .filter_map(|(_, (_, line))| yaml_entry(line))
+                        .map(|(k, v)| (k, unquote(v)))
+                        .collect()
+                });
+            if !concurrency.contains(&("group", CHANNEL_RELEASE))
+                || !concurrency.contains(&("cancel-in-progress", "false"))
+            {
+                problems.push(format!(
+                    "job {} must run alone: `concurrency` with `group: {CHANNEL_RELEASE}` and \
+                     `cancel-in-progress: false`",
+                    step.job
+                ));
+            }
+            if let Some((_, (_, line))) = key("if") {
+                problems.push(format!(
+                    "job {}: the upload to {CHANNEL_RELEASE} runs for every tag, not `{line}`",
+                    step.job
                 ));
             }
             let words = step.words();
@@ -1582,6 +1613,15 @@ fn release_workflow_problems(workflow: &str) -> Vec<String> {
         }
     }
     problems
+}
+
+/// The lines below job `name`'s key, or `None` when the workflow has no
+/// such job.
+fn job_block<'a>(lines: &'a [(usize, &'a str)], name: &str) -> Option<&'a [(usize, &'a str)]> {
+    let jobs = children(lines, top_level(lines, "jobs")?);
+    let (at, _) = entries(jobs)
+        .find(|(_, (_, line))| yaml_entry(line).is_some_and(|(key, _)| key == name))?;
+    Some(children(jobs, at))
 }
 
 /// The branches `event` runs for, from the workflow's `on:` block: `None` for
@@ -1880,7 +1920,6 @@ jobs:
             dist/SHA256SUMS
   release:
     steps:
-      - uses: actions/checkout@v4
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
@@ -1893,6 +1932,13 @@ jobs:
             dist/SHA256SUMS
           fail_on_unmatched_files: true
           prerelease: true
+  channel:
+    needs: release
+    concurrency:
+      group: kanal-vorab
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
       - name: Channel
         run: |
           gh release download kanal-vorab --pattern update.json --output old.json
@@ -2098,7 +2144,25 @@ fn release_rules_catch_a_tag_that_skips_the_channel() {
             channel.into(),
             format!("{channel}        if: startsWith(github.ref, 'refs/tags/v0.10')\n"),
         ),
-        (channel.into(), format!("  channel:\n    steps:\n{channel}")),
+        (channel.into(), format!("  late:\n    steps:\n{channel}")),
+        ("    needs: release\n".into(), String::new()),
+        ("    needs: release\n".into(), "    needs: [sign]\n".into()),
+        (
+            "    concurrency:\n      group: kanal-vorab\n      cancel-in-progress: false\n".into(),
+            String::new(),
+        ),
+        (
+            "group: kanal-vorab".into(),
+            "group: ${{ github.ref }}".into(),
+        ),
+        (
+            "cancel-in-progress: false".into(),
+            "cancel-in-progress: true".into(),
+        ),
+        (
+            "  channel:\n".into(),
+            "  channel:\n    if: ${{ !contains(github.ref_name, '-') }}\n".into(),
+        ),
         (channel.into(), format!("{channel}{step}{channel}")),
         (compare.into(), String::new()),
         (download.into(), String::new()),
