@@ -539,7 +539,7 @@ fn structural_state_differs(local: &Database, remote: &Database) -> bool {
             || local_group.name != remote_group.name
             || local_group.notes != remote_group.notes
             || !group_icons_equivalent(&local_group, &remote_group)
-            || local_group.custom_data != remote_group.custom_data
+            || !custom_data_equivalent(&local_group.custom_data, &remote_group.custom_data)
             || local_group.is_expanded != remote_group.is_expanded
             || local_group.default_autotype_sequence != remote_group.default_autotype_sequence
             || local_group.enable_autotype != remote_group.enable_autotype
@@ -1068,6 +1068,10 @@ fn meta_local_contributes(local: &Database, remote: &Database) -> bool {
         .any(|divergence| divergence.winner == Some(Side::Local))
 }
 
+/// Custom data keys KeePassXC writes on its own and treats as generated
+/// rather than user data.
+const GENERATED_CUSTOM_DATA: [&str; 2] = ["KPXC_RANDOM_SLUG", "_LAST_MODIFIED"];
+
 /// Metadata custom data minus the keys clients regenerate on every save.
 ///
 /// KeePassXC rewrites `KPXC_RANDOM_SLUG` and `_LAST_MODIFIED` each time it
@@ -1075,11 +1079,77 @@ fn meta_local_contributes(local: &Database, remote: &Database) -> bool {
 /// in the comparison they made every sync after a KeePassXC save look like a
 /// local change and ask for an upload, forever.
 fn user_custom_data(meta: &Meta) -> HashMap<&String, &CustomDataItem> {
-    const GENERATED: [&str; 2] = ["KPXC_RANDOM_SLUG", "_LAST_MODIFIED"];
     meta.custom_data
         .iter()
-        .filter(|(key, _)| !GENERATED.contains(&key.as_str()))
+        .filter(|(key, _)| !GENERATED_CUSTOM_DATA.contains(&key.as_str()))
         .collect()
+}
+
+/// Plugin data on an entry or a group, the way two copies of it are
+/// compared: key and value, without the item's own modification time and
+/// without the keys a client regenerates. Sorted, so its rendering is stable
+/// and two sides that hold the same keys read the same.
+///
+/// KeePassXC adds `_LAST_MODIFIED` to every entry and group that carries
+/// plugin data and stamps it afresh each time it loads the file, without
+/// moving the object's own modification time. It never writes the item times
+/// there either, so a value dated here comes back undated. Compared raw,
+/// every such entry and group became a conflict after a KeePassXC save, in
+/// both directions, although nobody had changed anything.
+///
+/// Only what is compared is filtered. The data itself, generated keys and
+/// item times included, is never touched by this.
+fn compared_custom_data(
+    items: &HashMap<String, CustomDataItem>,
+) -> BTreeMap<&String, &Option<CustomDataValue>> {
+    items
+        .iter()
+        .filter(|(key, _)| compared_key(key))
+        .map(|(key, item)| (key, &item.value))
+        .collect()
+}
+
+/// Whether an entry's or a group's plugin data key takes part in the
+/// comparison. Every key does except the generated ones. This is the one
+/// place that decides it, so a key that should be merged by a rule of its own
+/// is left out here and nowhere else.
+fn compared_key(key: &str) -> bool {
+    !GENERATED_CUSTOM_DATA.contains(&key)
+}
+
+fn custom_data_equivalent(
+    local: &HashMap<String, CustomDataItem>,
+    remote: &HashMap<String, CustomDataItem>,
+) -> bool {
+    compared_custom_data(local) == compared_custom_data(remote)
+}
+
+/// Whether two copies of an entry say the same thing about Auto-Type.
+///
+/// This library writes no Auto-Type block for an entry it creates, and
+/// KeePassXC writes its default block on its next save without moving the
+/// entry's modification time. KeePassXC reads a missing block as exactly
+/// that default, so the two mean the same. Only that exact block matches a
+/// missing one: a sequence, a window, obfuscation or a disabled flag is a
+/// setting somebody made, and it still differs.
+fn autotype_equivalent(local: Option<&AutoType>, remote: Option<&AutoType>) -> bool {
+    match (local, remote) {
+        (Some(block), None) | (None, Some(block)) => *block == keepassxc_default_autotype(),
+        (local, remote) => local == remote,
+    }
+}
+
+/// The block KeePassXC writes for an entry whose Auto-Type nobody set up, as
+/// this library reads it back. A new KeePassXC entry starts out like this,
+/// and so does one loaded from a file without the block. The obfuscation flag
+/// is always written out, and an empty sequence reads as none.
+fn keepassxc_default_autotype() -> AutoType {
+    AutoType {
+        enabled: true,
+        default_sequence: None,
+        data_transfer_obfuscation: Some(false),
+        associations: Vec::new(),
+    }
 }
 
 /// What a vault asks its histories to stay inside. Both limits are KeePass's,
@@ -1279,6 +1349,11 @@ fn history_version_bytes(version: &EntryRef<'_>) -> usize {
 /// an expiry date collapsed into one: the fork merged both, this said neither
 /// side was ahead, and the version that existed on one machine was never sent
 /// from it.
+///
+/// Generated plugin data keys and a missing Auto-Type block are hashed as
+/// they are, unlike in `entry_content_eq`. The fork's history merge keeps two
+/// same-second versions that differ there as two, and this has to agree with
+/// it.
 fn history_version_digest(version: &EntryRef<'_>) -> [u8; 32] {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
@@ -1538,7 +1613,8 @@ fn warning_is_policy_resolved(warning: &MergeWarning) -> bool {
 /// byte-identical on both sides would otherwise make every merge attempt
 /// fatal forever - while a genuinely divergent one must stay fatal (the
 /// epoch substitute would silently pick a winner). The comparison mirrors
-/// the pinned fork's own divergence checks: timestamps and history never
+/// the pinned fork's own divergence checks, apart from what `diff` itself
+/// leaves out (see `entry_content_eq`): timestamps and history never
 /// define current-entry content, while group membership and parent location
 /// are merged independently. A parent difference is accepted only when the
 /// location timestamps identify one strictly newer side; missing location
@@ -1656,12 +1732,17 @@ fn normalised_group_uuid(id: Option<uuid::Uuid>) -> Option<uuid::Uuid> {
     id.filter(|id| !id.is_nil())
 }
 
+/// Plugin data and Auto-Type go through the same comparison `diff` uses. A
+/// pair that differs only in what that comparison leaves out was never shown
+/// to the user, and a raw comparison here turned it into a merge that failed
+/// on every retry. On a tie `reconcile_unsurfaced_metadata` has already given
+/// both sides the union, so whichever side the fork keeps loses nothing.
 fn entry_content_eq(local: &EntryRef<'_>, remote: &EntryRef<'_>) -> bool {
     entry_location_is_resolved(local, remote)
         && local.fields == remote.fields
-        && local.autotype == remote.autotype
+        && autotype_equivalent(local.autotype.as_ref(), remote.autotype.as_ref())
         && local.tags == remote.tags
-        && local.custom_data == remote.custom_data
+        && custom_data_equivalent(&local.custom_data, &remote.custom_data)
         && entry_icons_equivalent(local, remote)
         && local.foreground_color == remote.foreground_color
         && local.background_color == remote.background_color
@@ -1707,7 +1788,7 @@ fn group_content_eq(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> bool {
         && local.name == remote.name
         && local.notes == remote.notes
         && group_icons_equivalent(local, remote)
-        && local.custom_data == remote.custom_data
+        && custom_data_equivalent(&local.custom_data, &remote.custom_data)
         && local.is_expanded == remote.is_expanded
         && local.default_autotype_sequence == remote.default_autotype_sequence
         && local.enable_autotype == remote.enable_autotype
@@ -1754,16 +1835,6 @@ fn preflight_fidelity(local: &Database, remote: &Database) -> Result<(), ApplyEr
     Ok(())
 }
 
-/// The pinned fork's `Database::merge` fails closed when two entries or
-/// groups share a last-modification timestamp but differ on *any* field.
-/// Divergences FerrisPass deliberately does not surface as conflicts -
-/// default-icon spelling and previous-parent restore metadata - would
-/// therefore wedge the merge with "have the same modification time but
-/// have diverged". Align them on both sides before merging. Direction:
-/// a real previous-parent UUID wins over an absent one (healing vaults
-/// whose pre-0.7 saves stripped the field), otherwise the local (merged)
-/// representation wins. Pairs whose timestamps differ are left alone -
-/// the fork resolves those wholesale by the newer side.
 /// Groups whose user-authored content diverged and whose timestamps cannot
 /// rank them: tied, missing, or implausibly far in the future.
 ///
@@ -2027,8 +2098,8 @@ fn group_field_diffs(local: &GroupRef<'_>, remote: &GroupRef<'_>) -> Vec<FieldDi
         // a group keeps no history to recover them from.
         diff_row(
             "Plugin data",
-            &ordered_custom_data(&local.custom_data),
-            &ordered_custom_data(&remote.custom_data),
+            &compared_custom_data(&local.custom_data),
+            &compared_custom_data(&remote.custom_data),
             |items| custom_data_summary(items),
         ),
     ]
@@ -2066,14 +2137,6 @@ fn expiry_row(at: Option<NaiveDateTime>) -> String {
         || "Never".to_string(),
         |at| at.format("%Y-%m-%d %H:%M:%S").to_string(),
     )
-}
-
-/// Plugin data in a fixed order, so its `Debug` is stable and two sides that
-/// hold the same keys read the same.
-fn ordered_custom_data(
-    items: &std::collections::HashMap<String, CustomDataItem>,
-) -> BTreeMap<&String, &CustomDataItem> {
-    items.iter().collect()
 }
 
 /// One conflict row, decided on the values and rendered for a person.
@@ -2137,13 +2200,13 @@ impl FieldDiff {
 /// Plugin data as one line, sorted so two sides that hold the same keys read
 /// the same. Values are described rather than dumped: they are opaque to this
 /// application, and the row exists to tell two sets apart.
-fn custom_data_summary(items: &BTreeMap<&String, &CustomDataItem>) -> String {
+fn custom_data_summary(items: &BTreeMap<&String, &Option<CustomDataValue>>) -> String {
     // Quoted, because a key or a value may contain the separators. Without
     // that, one key called `a = 1, b` reads exactly like two keys `a` and
     // `b`, and the row stops telling the two sides apart.
     items
         .iter()
-        .map(|(key, item)| match &item.value {
+        .map(|(key, value)| match value {
             None => format!("{key:?} (not set)"),
             // Redacted, not shown: see `custom_data_value`. Two values of one
             // size then read alike, and the row names its sides instead.
@@ -2164,7 +2227,7 @@ fn custom_data_summary(items: &BTreeMap<&String, &CustomDataItem>) -> String {
 fn group_content_differs(a: &GroupRef<'_>, b: &GroupRef<'_>) -> bool {
     a.name != b.name
         || a.notes != b.notes
-        || a.custom_data != b.custom_data
+        || !custom_data_equivalent(&a.custom_data, &b.custom_data)
         || a.tags != b.tags
         || a.default_autotype_sequence != b.default_autotype_sequence
         || a.enable_autotype != b.enable_autotype
@@ -2257,6 +2320,19 @@ fn reference_to_share(
     }
 }
 
+/// The pinned fork's `Database::merge` fails closed when two entries or
+/// groups share a last-modification timestamp but differ on *any* field.
+/// Divergences FerrisPass deliberately does not surface as conflicts -
+/// default-icon spelling, previous-parent restore metadata, and what
+/// KeePassXC writes on its own (generated plugin data, undated plugin data,
+/// its default Auto-Type block) - would therefore wedge the merge with "have
+/// the same modification time but have diverged". Align them on both sides
+/// before merging. Direction: a real previous-parent UUID wins over an
+/// absent one (healing vaults whose pre-0.7 saves stripped the field),
+/// plugin data and Auto-Type take the union so that neither side loses a
+/// key, an item time or a block, otherwise the local (merged)
+/// representation wins. Pairs whose timestamps differ are left alone - the
+/// fork resolves those wholesale by the newer side.
 fn reconcile_unsurfaced_metadata(
     merged: &mut Database,
     source: &mut Database,
@@ -2286,6 +2362,11 @@ fn reconcile_unsurfaced_metadata(
         let icons_agree = entry_icons_equivalent(&merged_entry, &source_entry);
         let merged_prev = merged_entry.previous_parent_group;
         let source_prev = source_entry.previous_parent_group;
+        let custom_data = united_custom_data(&merged_entry.custom_data, &source_entry.custom_data);
+        let autotype = united_autotype(
+            merged_entry.autotype.as_ref(),
+            source_entry.autotype.as_ref(),
+        );
 
         let canonical_prev = canonical_previous_parent(merged_prev, source_prev);
         if merged_prev != canonical_prev
@@ -2301,6 +2382,18 @@ fn reconcile_unsurfaced_metadata(
 
         if references_differ && icons_agree {
             share_icon(merged, source, id, merged_icon.as_ref())?;
+        }
+
+        for db in [&mut *merged, &mut *source] {
+            let Some(mut entry) = db.entry_mut(id) else {
+                continue;
+            };
+            if let Some(custom_data) = &custom_data {
+                entry.custom_data = custom_data.clone();
+            }
+            if let Some(autotype) = &autotype {
+                entry.autotype = Some(autotype.clone());
+            }
         }
     }
 
@@ -2320,6 +2413,7 @@ fn reconcile_unsurfaced_metadata(
         let icons_agree = group_icons_equivalent(&merged_group, &source_group);
         let merged_prev = merged_group.previous_parent_group;
         let source_prev = source_group.previous_parent_group;
+        let custom_data = united_custom_data(&merged_group.custom_data, &source_group.custom_data);
 
         let canonical_prev = canonical_previous_parent(merged_prev, source_prev);
         if merged_prev != canonical_prev
@@ -2337,6 +2431,14 @@ fn reconcile_unsurfaced_metadata(
             share_icon(merged, source, id, merged_icon.as_ref())?;
         }
 
+        if let Some(custom_data) = custom_data {
+            for db in [&mut *merged, &mut *source] {
+                if let Some(mut group) = db.group_mut(id) {
+                    group.custom_data = custom_data.clone();
+                }
+            }
+        }
+
         // Nothing is stamped as modified here any more. A tied group reaching
         // this point can only differ on bookkeeping: its icon reference was
         // just aligned above, its previous parent normalised, and the fork
@@ -2351,6 +2453,46 @@ fn reconcile_unsurfaced_metadata(
         // rename.
     }
     Ok(())
+}
+
+/// The plugin data both copies of a tied object get when they differ only in
+/// what the comparison leaves out, or `None` when there is nothing to align.
+///
+/// Every key either side holds is kept. Where both hold one, ours stands and
+/// only an item time we lack is taken from theirs: the values agree on every
+/// compared key, so the only value that can be set aside is a generated one,
+/// which KeePassXC writes afresh anyway.
+fn united_custom_data(
+    ours: &HashMap<String, CustomDataItem>,
+    theirs: &HashMap<String, CustomDataItem>,
+) -> Option<HashMap<String, CustomDataItem>> {
+    if ours == theirs || !custom_data_equivalent(ours, theirs) {
+        return None;
+    }
+    let mut united = theirs.clone();
+    for (key, item) in ours {
+        let mut item = item.clone();
+        item.last_modification_time = item.last_modification_time.or_else(|| {
+            theirs
+                .get(key)
+                .and_then(|theirs| theirs.last_modification_time)
+        });
+        united.insert(key.clone(), item);
+    }
+    Some(united)
+}
+
+/// KeePassXC's default Auto-Type block for both copies of a tied entry when
+/// only one of them carries it, or `None` when there is nothing to align. The
+/// side without a block means the same thing, so this adds nothing anybody
+/// set, and the side that has it keeps it.
+fn united_autotype(ours: Option<&AutoType>, theirs: Option<&AutoType>) -> Option<AutoType> {
+    match (ours, theirs) {
+        (Some(block), None) | (None, Some(block)) if *block == keepassxc_default_autotype() => {
+            Some(block.clone())
+        }
+        _ => None,
+    }
 }
 
 /// Settle one group conflict by copying the chosen content onto the merged
@@ -3113,7 +3255,7 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<Me
         });
     };
 
-    if local.view.autotype != remote.view.autotype {
+    if !autotype_equivalent(local.view.autotype.as_ref(), remote.view.autotype.as_ref()) {
         // Described, not dumped: a sequence is free text and can hold a
         // literal the user typed in, which is a credential on a screen whose
         // whole point is that it does not show them.
@@ -3122,13 +3264,14 @@ fn metadata_differences(local: &EntrySnapshot, remote: &EntrySnapshot) -> Vec<Me
             describe_autotype(remote.view.autotype.as_ref()),
         );
     }
-    if local.view.custom_data != remote.view.custom_data {
+    let (ours, theirs) = (
+        compared_custom_data(&local.view.custom_data),
+        compared_custom_data(&remote.view.custom_data),
+    );
+    if ours != theirs {
         // Named, not counted: two different sets of the same size read alike,
         // and the user was then asked to choose between two identical cells.
-        note(
-            custom_data_summary(&ordered_custom_data(&local.view.custom_data)),
-            custom_data_summary(&ordered_custom_data(&remote.view.custom_data)),
-        );
+        note(custom_data_summary(&ours), custom_data_summary(&theirs));
     }
     if local.icon != remote.icon {
         note(icon_label(&local.icon), icon_label(&remote.icon));
@@ -6822,6 +6965,367 @@ mod tests {
             },
         );
         assert!(diff(&local, &remote).structural_writeback_required);
+    }
+
+    fn plugin_text(value: &str, at: Option<NaiveDateTime>) -> CustomDataItem {
+        CustomDataItem {
+            value: Some(CustomDataValue::String(value.into())),
+            last_modification_time: at,
+        }
+    }
+
+    /// What KeePassXC writes into `_LAST_MODIFIED`: a date in the saving
+    /// machine's locale, so nothing that could be ranked.
+    fn keepassxc_stamp() -> CustomDataItem {
+        plugin_text("Thu Oct 15 08:33:10 2026 GMT", None)
+    }
+
+    /// The Auto-Type block KeePassXC writes for an entry nobody set it up on,
+    /// as this library reads it: `Enabled` True, `DataTransferObfuscation` 0
+    /// and an empty `DefaultSequence`.
+    fn keepassxc_autotype() -> AutoType {
+        AutoType {
+            enabled: true,
+            default_sequence: None,
+            data_transfer_obfuscation: Some(false),
+            associations: Vec::new(),
+        }
+    }
+
+    /// An entry and a group with plugin data the way this app writes it:
+    /// every item dated, and the entry without an Auto-Type block. Neither
+    /// value is valid base64, which this library reads back as binary.
+    fn vault_with_plugin_data() -> (Database, EntryId, GroupId) {
+        let dated = keepass::db::Times::now() - chrono::TimeDelta::days(14);
+        let mut db = Database::new();
+        let id = add(&mut db, "SAP PRD", "secret");
+        db.entry_mut(id)
+            .unwrap()
+            .custom_data
+            .insert("Plugin".into(), plugin_text("sap", Some(dated)));
+        let group_id = {
+            let mut root = db.root_mut();
+            let mut group = root.add_group();
+            group.name = "Customers".into();
+            group
+                .custom_data
+                .insert("Plugin".into(), plugin_text("partner", Some(dated)));
+            group.id()
+        };
+        (db, id, group_id)
+    }
+
+    /// From both sides, because the next sync runs from whichever copy saved
+    /// last.
+    fn assert_nothing_to_settle(a: &Database, b: &Database) {
+        for (local, remote) in [(a, b), (b, a)] {
+            let report = diff(local, remote);
+            assert!(report.is_clean(), "{report:?}");
+        }
+    }
+
+    /// KeePassXC adds `_LAST_MODIFIED` to every entry and group that carries
+    /// plugin data and stamps it again on every load, and writes
+    /// `KPXC_RANDOM_SLUG` too, without moving a modification time. Compared
+    /// raw, each of those was a conflict after a KeePassXC save.
+    #[test]
+    fn plugin_data_keys_keepassxc_generates_are_not_a_conflict() {
+        let (local, id, group_id) = vault_with_plugin_data();
+        let mut remote = fork(&local);
+        for key in ["_LAST_MODIFIED", "KPXC_RANDOM_SLUG"] {
+            remote
+                .entry_mut(id)
+                .unwrap()
+                .custom_data
+                .insert(key.into(), keepassxc_stamp());
+            remote
+                .group_mut(group_id)
+                .unwrap()
+                .custom_data
+                .insert(key.into(), keepassxc_stamp());
+        }
+
+        assert_nothing_to_settle(&local, &remote);
+    }
+
+    /// KeePassXC never writes the item times of plugin data on entries and
+    /// groups, so a value this app dated comes back undated. The value is
+    /// what somebody set, and it is the same.
+    #[test]
+    fn plugin_data_that_lost_its_item_times_is_not_a_conflict() {
+        let (local, id, group_id) = vault_with_plugin_data();
+        let mut remote = fork(&local);
+        for item in remote.entry_mut(id).unwrap().custom_data.values_mut() {
+            item.last_modification_time = None;
+        }
+        for item in remote.group_mut(group_id).unwrap().custom_data.values_mut() {
+            item.last_modification_time = None;
+        }
+
+        assert_nothing_to_settle(&local, &remote);
+    }
+
+    /// This library writes no Auto-Type block for an entry it creates, and
+    /// KeePassXC writes its default one on its next save without moving the
+    /// entry's modification time. It reads a missing block as that default.
+    #[test]
+    fn keepassxcs_default_auto_type_block_is_no_block_at_all() {
+        let (local, id, _) = vault_with_plugin_data();
+        let mut remote = fork(&local);
+        remote.entry_mut(id).unwrap().autotype = Some(keepassxc_autotype());
+
+        assert_nothing_to_settle(&local, &remote);
+    }
+
+    /// Only what clients write on their own is left out. A value somebody
+    /// changed or a key somebody added is still asked about on a tie and
+    /// ranked otherwise, and the row names the keys that count.
+    #[test]
+    fn a_real_plugin_data_change_still_conflicts() {
+        let (local, id, group_id) = vault_with_plugin_data();
+
+        let mut remote = fork(&local);
+        for (key, value) in [("Plugin", "hana"), ("_LAST_MODIFIED", "stamp")] {
+            remote
+                .entry_mut(id)
+                .unwrap()
+                .custom_data
+                .insert(key.into(), plugin_text(value, None));
+            remote
+                .group_mut(group_id)
+                .unwrap()
+                .custom_data
+                .insert(key.into(), plugin_text(value, None));
+        }
+        let report = diff(&local, &remote);
+        let entry_row = report
+            .conflicts
+            .first()
+            .and_then(|conflict| {
+                conflict
+                    .fields
+                    .iter()
+                    .find(|field| field.label == "Entry settings")
+            })
+            .expect("a value changed on a tied entry is asked");
+        assert_eq!(
+            (entry_row.local.as_str(), entry_row.remote.as_str()),
+            ("\"Plugin\" = ••• (3 chars)", "\"Plugin\" = ••• (4 chars)"),
+            "the generated key is not part of the question"
+        );
+        let group_row = report
+            .group_conflicts
+            .first()
+            .and_then(|conflict| {
+                conflict
+                    .fields
+                    .iter()
+                    .find(|field| field.label == "Plugin data")
+            })
+            .expect("and on a tied group");
+        assert_eq!(
+            (group_row.local.as_str(), group_row.remote.as_str()),
+            ("\"Plugin\" = ••• (7 chars)", "\"Plugin\" = ••• (4 chars)"),
+        );
+
+        let mut remote = fork(&local);
+        remote
+            .entry_mut(id)
+            .unwrap()
+            .custom_data
+            .insert("Other".into(), plugin_text("1", None));
+        remote
+            .group_mut(group_id)
+            .unwrap()
+            .custom_data
+            .insert("Other".into(), plugin_text("1", None));
+        let report = diff(&local, &remote);
+        assert_eq!(report.conflicts.len(), 1, "a key added on a tied entry");
+        assert_eq!(report.group_conflicts.len(), 1, "and on a tied group");
+
+        remote.entry_mut(id).unwrap().times.last_modification =
+            Some(keepass::db::Times::now() + chrono::TimeDelta::minutes(1));
+        let report = diff(&local, &remote);
+        assert!(report.conflicts.is_empty(), "a newer side is not asked");
+        assert_eq!(
+            report
+                .auto_resolved
+                .iter()
+                .map(|resolved| (resolved.id.clone(), resolved.winner))
+                .collect::<Vec<_>>(),
+            vec![(id.to_string(), Side::Remote)],
+            "it is taken"
+        );
+    }
+
+    /// Only KeePassXC's exact default matches a missing block. Every setting
+    /// somebody can make on it is still a difference: asked on a tie, taken
+    /// from the newer side otherwise.
+    #[test]
+    fn a_real_auto_type_setting_still_conflicts() {
+        let (local, id, _) = vault_with_plugin_data();
+        let settings = [
+            (
+                "disabled",
+                AutoType {
+                    enabled: false,
+                    ..keepassxc_autotype()
+                },
+            ),
+            (
+                "a sequence",
+                AutoType {
+                    default_sequence: Some("{USERNAME}{TAB}{PASSWORD}{ENTER}".into()),
+                    ..keepassxc_autotype()
+                },
+            ),
+            (
+                "a window",
+                AutoType {
+                    associations: vec![keepass::db::AutoTypeAssociation {
+                        window: "SAP Logon*".into(),
+                        sequence: String::new(),
+                    }],
+                    ..keepassxc_autotype()
+                },
+            ),
+            (
+                "obfuscation",
+                AutoType {
+                    data_transfer_obfuscation: Some(true),
+                    ..keepassxc_autotype()
+                },
+            ),
+        ];
+        for (what, setting) in settings {
+            let mut remote = fork(&local);
+            remote.entry_mut(id).unwrap().autotype = Some(setting);
+            for report in [diff(&local, &remote), diff(&remote, &local)] {
+                assert!(
+                    report.conflicts.first().is_some_and(|conflict| conflict
+                        .fields
+                        .iter()
+                        .any(|field| field.label == "Entry settings")),
+                    "{what} on a tied entry is asked: {report:?}"
+                );
+            }
+
+            remote.entry_mut(id).unwrap().times.last_modification =
+                Some(keepass::db::Times::now() + chrono::TimeDelta::minutes(1));
+            let report = diff(&local, &remote);
+            assert!(report.conflicts.is_empty(), "{what} on a newer entry");
+            assert_eq!(report.auto_resolved.len(), 1, "{what} is taken from it");
+        }
+    }
+
+    /// The comparison leaves those differences out, the merge must not drop
+    /// them. A tied pair that differs only there stopped the fork's merge
+    /// ("same modification time but diverged") once nothing asked about it,
+    /// so both copies get the union instead: every key, every item time,
+    /// the Auto-Type block. No modification time moves, and the file written
+    /// afterwards still holds all of it.
+    #[test]
+    fn a_keepassxc_save_merges_without_losing_anything() {
+        let (ours, id, group_id) = vault_with_plugin_data();
+        let dated = ours.entry(id).unwrap().custom_data["Plugin"].last_modification_time;
+        let entry_time = ours.entry(id).unwrap().times.last_modification;
+        let group_time = ours.group(group_id).unwrap().times.last_modification;
+
+        let mut theirs = fork(&ours);
+        {
+            let mut entry = theirs.entry_mut(id).unwrap();
+            for item in entry.custom_data.values_mut() {
+                item.last_modification_time = None;
+            }
+            entry
+                .custom_data
+                .insert("_LAST_MODIFIED".into(), keepassxc_stamp());
+            entry.autotype = Some(keepassxc_autotype());
+        }
+        {
+            let mut group = theirs.group_mut(group_id).unwrap();
+            for item in group.custom_data.values_mut() {
+                item.last_modification_time = None;
+            }
+            group
+                .custom_data
+                .insert("_LAST_MODIFIED".into(), keepassxc_stamp());
+        }
+
+        for (local, remote) in [(&ours, &theirs), (&theirs, &ours)] {
+            let report = diff(local, remote);
+            assert!(!report.needs_a_decision(), "{report:?}");
+            let merged = apply_picks(local, remote, &Resolutions::default(), &report)
+                .expect("a tie that differs only in what nobody set still merges");
+            let mut file = Vec::new();
+            merged.save(&mut file, test_key()).expect("writable");
+            let saved = Database::open(&mut file.as_slice(), test_key()).expect("readable");
+
+            for db in [&merged, &saved] {
+                let entry = db.entry(id).unwrap();
+                assert_eq!(
+                    entry.custom_data.get("Plugin"),
+                    Some(&plugin_text("sap", dated)),
+                    "the value keeps the time this app gave it"
+                );
+                assert_eq!(
+                    entry.custom_data.get("_LAST_MODIFIED"),
+                    Some(&keepassxc_stamp()),
+                    "the key KeePassXC added stays"
+                );
+                assert_eq!(
+                    entry.autotype,
+                    Some(keepassxc_autotype()),
+                    "so does its block"
+                );
+                assert_eq!(
+                    entry.times.last_modification, entry_time,
+                    "nothing was edited"
+                );
+
+                let group = db.group(group_id).unwrap();
+                assert_eq!(
+                    group.custom_data.get("Plugin"),
+                    Some(&plugin_text("partner", dated))
+                );
+                assert_eq!(
+                    group.custom_data.get("_LAST_MODIFIED"),
+                    Some(&keepassxc_stamp())
+                );
+                assert_eq!(group.times.last_modification, group_time);
+            }
+        }
+    }
+
+    /// Without a modification time the fork merges on substitute times, which
+    /// is harmless only when the two copies agree. These agree: they differ in
+    /// nothing anybody set. Judged raw, that failed the merge on every retry,
+    /// with nothing on screen that could unblock it.
+    #[test]
+    fn an_undated_pair_that_differs_only_in_generated_data_merges() {
+        let (mut local, id, group_id) = vault_with_plugin_data();
+        local.entry_mut(id).unwrap().times.last_modification = None;
+        local.group_mut(group_id).unwrap().times.last_modification = None;
+        let mut remote = fork(&local);
+        {
+            let mut entry = remote.entry_mut(id).unwrap();
+            entry
+                .custom_data
+                .insert("_LAST_MODIFIED".into(), keepassxc_stamp());
+            entry.autotype = Some(keepassxc_autotype());
+        }
+        remote
+            .group_mut(group_id)
+            .unwrap()
+            .custom_data
+            .insert("_LAST_MODIFIED".into(), keepassxc_stamp());
+
+        for (local, remote) in [(&local, &remote), (&remote, &local)] {
+            let report = diff(local, remote);
+            assert!(!report.needs_a_decision(), "{report:?}");
+            apply_picks(local, remote, &Resolutions::default(), &report)
+                .expect("whichever side the fork keeps, nothing is lost");
+        }
     }
 
     /// The outer configuration has no change time, so there is no evidence
