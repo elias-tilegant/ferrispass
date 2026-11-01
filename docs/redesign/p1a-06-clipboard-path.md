@@ -12,7 +12,9 @@ Started from `rebuild` at `8980fe9` on 2026-11-01.
 | `6ff7e91` | SECURITY.md and this page |
 | `47cb52f` | Restarting into an update clears before it quits, like Cmd+Q |
 | `ae95e79` | SECURITY.md says which copies the contract covers |
-| the last one | This page and the progress log |
+| `acf3876` | This page and the progress log |
+| `7e726c8` | A test for how each "Paste from Other Apps" value is read |
+| the last one | SECURITY.md back to the clipboard rule as `6ff7e91` wrote it; this page describes hand copies from the editor as open |
 
 ## The one path
 
@@ -20,7 +22,7 @@ Started from `rebuild` at `8980fe9` on 2026-11-01.
 
 If the secret-aware write fails, nothing is written, an earlier copy of ours is cleared, and the caller gets the error. There is no fallback to a plain clipboard item that a history tool or Universal Clipboard would keep. That was already true in the main window and is now a rule of the service.
 
-A secret here is a value FerrisPass copies for you, from a button, a shortcut or a menu: a password, a username, a URL, a TOTP code or a custom field. The entry editor's own text fields are a different matter. The password, the TOTP secret and custom fields marked protected can't be copied out of them by hand at all; that block lives in `SecretInput` and stays. Text selected by hand in an unprotected field (title, username, URL, notes, custom fields not marked protected) goes to the clipboard as an ordinary copy, the same as before this change. SECURITY.md says so next to the contract.
+Every copy FerrisPass makes for you, from a button, a shortcut or a menu, takes this path: passwords, usernames, URLs, TOTP codes and custom fields. Copying by hand out of the entry editor does not. The password, the TOTP secret and custom fields marked protected can't be copied out of the editor at all; that block lives in `SecretInput` and stays. Text selected in one of the editor's unprotected fields (title, username, URL, notes, custom fields not marked protected) and copied with Cmd+C, Cmd+X or the context menu goes to the clipboard as a plain item, as it did before this change: no privacy types, no marker, no clearing. Whether the clipboard rule in SECURITY.md has to cover those copies is not settled yet; see Limits.
 
 The "Copy code" button in the sign-in flow also writes to the clipboard directly. It copies the one-time code Microsoft shows for device sign-in, which the user types into Microsoft's page and which is not a credential.
 
@@ -54,7 +56,7 @@ Each test below was checked by taking out the rule it names, and it failed every
 | Quit with Cmd+Q or the menu, or restart into an update | cleared before macOS is asked to quit | `quit_clears_only_unchanged_own_copy` |
 | Any other quit | cleared in the app's quit handler | `quit_clears_only_unchanged_own_copy` |
 | Launch, with "Paste from Other Apps" set to Always Allow | a copy with our marker is cleared, if nothing was copied during the check | `start_clears_only_own_marked_copy` |
-| Launch, with any other setting | nothing; the clipboard is not looked at | `start_clears_only_own_marked_copy` |
+| Launch, with any other setting | nothing; the clipboard is not looked at | `start_clears_only_own_marked_copy`, `access_behavior_maps_every_appkit_value` |
 
 ## Why the launch check never reads contents
 
@@ -70,13 +72,15 @@ Three things hold this:
 
 `NSPasteboard.accessBehavior` tells an app what the user chose under Privacy & Security, "Paste from Other Apps". The launch check reads it first and goes on only for Always Allow. With Default (FerrisPass never triggered the prompt), Ask or Always Deny it stops there: no types, no generation, no clear. With Always Allow it takes the generation, checks for our marker type, and clears only if the generation hasn't moved since. The decision is `start_action`, a plain function of the setting and a closure for the marker check, so the closure is only called for Always Allow.
 
+`access_behavior_from` in `src/clipboard_macos.rs` turns AppKit's raw value into ours. `access_behavior_maps_every_appkit_value` runs it over the four values Apple defines (0 Default, 1 Ask, 2 Always Allow, 3 Always Deny) and over values it doesn't. Only 2 comes out as Always Allow; anything unknown reads as Default, so a value a later macOS adds keeps the check closed.
+
 On a Mac where `accessBehavior` doesn't exist (before macOS 15.4) the check reports Default and does nothing. FerrisPass requires macOS 26, so this only matters for tests on older machines.
 
 ## Limits
 
 - Most users never change "Paste from Other Apps", so for them the launch check does nothing. A copy left behind by a crash or `kill -9` stays on the clipboard until something else is copied. It is still concealed, transient and kept to this Mac, so a clipboard manager that honours the markers doesn't store it. On a preview build, the relaunch check (copy, `kill -9`, start FerrisPass, `pbpaste` is empty) only passes with FerrisPass set to Always Allow; with the default setting `pbpaste` still shows the password and no prompt appears.
 - The marker type is the only sign of ownership a new launch has, because nothing keeps the generation of an earlier run's write. Any app can put an item with that type on the clipboard, and with Always Allow a launch clears it. That costs the other app the item it labelled as ours. Keeping the last generation on disk would close this and would also let the check work without the marker; it would add state to the app's data folder and is not part of this step.
-- Copying by hand out of the entry editor's unprotected fields is not covered, as described under "The one path". Notes in particular sometimes hold things people would call secret. Routing those copies through the service means changing the editor's text fields, which this step leaves alone.
+- Copying by hand out of the entry editor's unprotected fields goes around the service, as described under "The one path". Notes in particular sometimes hold things people would call secret. Whether the clipboard rule covers those copies is open. Bringing them under it means changing the editor's text fields in `src/ui/legacy/screens/` or `src/ui/widgets/secret_input.rs`, and every such hand copy would then be concealed and cleared after the timer. This step leaves the editor alone.
 - On platforms other than macOS the service falls back to GPUI's plain clipboard, as the main window did before. CI only builds for macOS, so that branch is not compiled there.
 - `private_pasteboard_reports_always_allow` relies on Apple's documented behaviour that every pasteboard except the general one always allows access.
 - `lock_clears_clipboard_ownership` builds the real `AppShell` and reads the real `settings.json`, and the lock and `quit_clears_only_unchanged_own_copy` empty the per-user launch folder, as `automatic_lock_discards_the_draft_and_says_so` already does. No test touches the general pasteboard.
