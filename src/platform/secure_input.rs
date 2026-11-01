@@ -298,6 +298,34 @@ impl Drop for SecureInputGuard {
 #[cfg(doctest)]
 pub fn guard_is_not_send() {}
 
+/// The real Carbon calls, made where the app makes them: on the main thread.
+/// libtest runs unit tests on worker threads, so this is a doctest of its
+/// own, which rustdoc builds as a separate program and runs from `main`. If
+/// another app already holds secure event input, it stays on after the
+/// drop, so the test compares with the state before.
+///
+/// ```standalone_crate
+/// # #[cfg(target_os = "macos")]
+/// # {
+/// use ferrispass::platform::secure_input;
+///
+/// let cx = gpui::TestAppContext::single();
+/// let before = secure_input::system_enabled();
+/// let guard = cx
+///     .update(|cx| secure_input::hold(cx))
+///     .expect("EnableSecureEventInput");
+/// assert!(secure_input::system_enabled(), "Enable did not switch it on");
+/// drop(guard);
+/// assert_eq!(
+///     secure_input::system_enabled(),
+///     before,
+///     "Disable did not switch it off again"
+/// );
+/// # }
+/// ```
+#[cfg(doctest)]
+pub fn carbon_calls_balance() {}
+
 /// Turns secure event input on, or keeps it on, until the guard drops. Main
 /// thread only. On failure nothing is held, and the reason is in the error
 /// and, for a refusal by macOS, in the log.
@@ -360,16 +388,19 @@ fn switch(#[cfg_attr(not(test), allow(unused_variables))] cx: &App) -> &'static 
     &SYSTEM
 }
 
-/// Carbon's secure event input. The current SDK no longer declares these
-/// three functions in a header (older SDKs had them in HIToolbox's
-/// `CarbonEvents.h`), but HIToolbox still exports them; they are listed in
-/// the SDK's `Carbon.tbd`. Their C signatures are `OSStatus
-/// EnableSecureEventInput(void)`, `OSStatus DisableSecureEventInput(void)`
-/// and `Boolean IsSecureEventInputEnabled(void)`, where `OSStatus` is a
-/// 32-bit signed integer and `Boolean` an unsigned char.
+/// Carbon's secure event input, declared in HIToolbox's `CarbonEventsCore.h`
+/// as `OSStatus EnableSecureEventInput(void)`, `OSStatus
+/// DisableSecureEventInput(void)` and `Boolean IsSecureEventInputEnabled(void)`,
+/// where `OSStatus` is a 32-bit signed integer and `Boolean` an unsigned
+/// char. The header marks all three "Not thread safe"; this module calls
+/// them from the main thread only, and each call checks that in debug builds.
 #[cfg(target_os = "macos")]
 mod carbon {
     use super::{HoldError, OsStatus, SecureInputApi};
+
+    fn on_main_thread() -> bool {
+        objc2::MainThreadMarker::new().is_some()
+    }
 
     #[link(name = "Carbon", kind = "framework")]
     unsafe extern "C" {
@@ -382,6 +413,10 @@ mod carbon {
 
     impl SecureInputApi for Carbon {
         fn enable(&self) -> Result<(), HoldError> {
+            debug_assert!(
+                on_main_thread(),
+                "EnableSecureEventInput off the main thread"
+            );
             // SAFETY: no arguments, no pointers, and the declaration above
             // matches the C signature. `Switch::hold` calls this on the main
             // thread only, and only when its count goes from 0 to 1.
@@ -394,6 +429,10 @@ mod carbon {
         }
 
         fn disable(&self) -> Result<(), OsStatus> {
+            debug_assert!(
+                on_main_thread(),
+                "DisableSecureEventInput off the main thread"
+            );
             // SAFETY: as for `EnableSecureEventInput`. `Switch` calls this on
             // the main thread, and only while an Enable of its own is
             // outstanding: when its count goes from 1 to 0, or at
@@ -408,6 +447,10 @@ mod carbon {
         }
 
         fn is_enabled(&self) -> bool {
+            debug_assert!(
+                on_main_thread(),
+                "IsSecureEventInputEnabled off the main thread"
+            );
             // SAFETY: a query without arguments that changes nothing; the
             // declaration matches the C signature. Main thread only, checked
             // by `Switch::system_enabled`.
@@ -415,7 +458,7 @@ mod carbon {
         }
 
         fn is_main_thread(&self) -> bool {
-            objc2::MainThreadMarker::new().is_some()
+            on_main_thread()
         }
 
         fn is_supported(&self) -> bool {
@@ -963,48 +1006,5 @@ mod tests {
         assert!(!switch.system_enabled());
         #[cfg(not(target_os = "macos"))]
         assert!(matches!(SYSTEM.hold(), Err(HoldError::Unsupported)));
-    }
-
-    /// The real Carbon calls. libtest runs every test on a worker thread, and
-    /// there is no way to get onto the main thread from here, so this test
-    /// lets its own thread pass the main-thread check; the app never calls
-    /// Carbon anywhere else. If another app already holds secure event
-    /// input, the system stays on after the drop, so the test compares with
-    /// the state before.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn carbon_calls_balance() {
-        struct CarbonOnThisThread(thread::ThreadId);
-
-        impl SecureInputApi for CarbonOnThisThread {
-            fn enable(&self) -> Result<(), HoldError> {
-                carbon::Carbon.enable()
-            }
-            fn disable(&self) -> Result<(), OsStatus> {
-                carbon::Carbon.disable()
-            }
-            fn is_enabled(&self) -> bool {
-                carbon::Carbon.is_enabled()
-            }
-            fn is_main_thread(&self) -> bool {
-                thread::current().id() == self.0
-            }
-            fn is_supported(&self) -> bool {
-                true
-            }
-        }
-
-        let api: &'static CarbonOnThisThread =
-            Box::leak(Box::new(CarbonOnThisThread(thread::current().id())));
-        let switch: &'static Switch = Box::leak(Box::new(Switch::new(api)));
-        let before = switch.system_enabled();
-        let guard = switch.hold().expect("EnableSecureEventInput");
-        assert!(switch.system_enabled(), "Enable did not switch it on");
-        drop(guard);
-        assert_eq!(
-            switch.system_enabled(),
-            before,
-            "Disable did not switch it off again"
-        );
     }
 }
