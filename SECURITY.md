@@ -24,6 +24,7 @@ In scope:
 - **Update mechanism** - bypassing the minisign signature check, downgrade attacks, replay attacks against the manifest endpoint
 - **Build supply chain** - compromise paths through our pinned dependencies (`keepass-rs` fork in particular) or the GitHub Actions release pipeline
 - **macOS Keychain access** - incorrect ACLs that allow other apps to read FerrisPass-owned items
+- **Clipboard** - any path that puts a secret on the pasteboard without the concealed, transient and current-host markers, or that leaves our own copy behind after the clear timer, a lock, quit or launch. At launch FerrisPass only looks when "Paste from Other Apps" is set to Always Allow for it; see the security contract below
 
 Out of scope (will be acknowledged but won't be patched as security issues):
 
@@ -32,6 +33,14 @@ Out of scope (will be acknowledged but won't be patched as security issues):
 - Memory-dump attacks on a running unlocked vault - the decrypted entries and the composite key are unavoidably in process memory while you're using the app. The master password itself is not: it is reduced to its SHA-256 at unlock, which is the only form KDBX uses. That hash still opens this vault, so the gain is narrow and worth stating plainly: what a dump does not yield is the password itself, which is the thing people reuse elsewhere. The exception is the login keychain when you enable Touch ID
 - Brute-force against weak master passwords - this is a user-side issue, not a FerrisPass bug
 - Denial of service against the update endpoint (GitHub's problem)
+
+## Security contract
+
+What FerrisPass promises from the release in the second column on. A build that breaks one of these has a vulnerability in the sense above.
+
+| Rule | Since |
+|---|---|
+| Every copy of a secret goes through one clipboard path: concealed, transient, this Mac only, cleared after the timer, at lock, at quit and at launch; only unchanged clipboard contents are ever cleared, and the launch check reads types, never contents. The launch check only looks when "Paste from Other Apps" is set to Always Allow for FerrisPass; with any other setting it leaves the clipboard alone, so macOS never asks | the redesign release |
 
 ## Supported versions
 
@@ -65,7 +74,7 @@ So an attacker needs the minisign key to push an update the app installs, and Ap
 | Password sent over the network | **never** - the cloud provider only sees ciphertext |
 | Password stored in Keychain | **only if you enable Touch ID for that vault** - see below |
 | Auto-lock timeout | configurable in Settings; default 4 minutes idle |
-| Clipboard auto-clear after copy | configurable; default 10 seconds |
+| Clipboard auto-clear after copy | configurable; default 10 seconds; also at quit and at launch (at launch only with "Paste from Other Apps" set to Always Allow) |
 
 ### Touch ID and the login keychain
 
