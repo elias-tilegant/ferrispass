@@ -202,6 +202,40 @@ fn touches_secret_needs_an_entry_target() {
     }
 }
 
+#[test]
+fn exactly_these_commands_touch_a_secret() {
+    // Whoever runs a command decides by this flag how carefully to handle
+    // it. A row that lost the flag would still pass the check above, so the
+    // list names every one.
+    let secret: Vec<&str> = commands()
+        .iter()
+        .filter(|spec| spec.touches_secret)
+        .map(id)
+        .collect();
+    assert_eq!(
+        secret,
+        [
+            "entry.primary",
+            "entry.sap_login",
+            "entry.copy_password",
+            "entry.copy_code",
+        ]
+    );
+    // Return runs whichever main action the selected entry has, so it
+    // touches a secret as soon as one of them does.
+    let primary = command(CommandId::ENTRY_PRIMARY).expect("entry.primary is in the table");
+    for kind in KINDS {
+        let main = primary_command(&kind);
+        if command(main).is_some_and(|spec| spec.touches_secret) {
+            assert!(
+                primary.touches_secret,
+                "{} touches a secret and Return runs it",
+                main.as_str()
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------- availability --
 
 const PRD_SELECT_FIRST: Enablement = Enablement::Disabled("quick.footer.prd_select_first");
