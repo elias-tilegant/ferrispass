@@ -18,6 +18,7 @@ use crate::{
     autotype,
     keepass::{KeePassRepository, MutationError, limits::KdfCost},
     launch::{self, LaunchContext, LaunchError, LaunchHandle},
+    platform::secure_input::{self, HoldError, SecureInputGuard},
     ui::errors,
 };
 
@@ -89,6 +90,11 @@ pub struct CustomFieldDraftInputs {
 pub struct AppShell {
     state: Entity<AppState>,
     password_input: Entity<InputState>,
+    /// Keeps secure event input on while the master password field has
+    /// focus, so other programs on this Mac don't see what is typed there.
+    /// Dropped when the field loses focus, when the window stops being the
+    /// active one, and at lock.
+    secure_input: Option<SecureInputGuard>,
     keyfile_input: Entity<InputState>,
     search_input: Entity<InputState>,
     new_entry_title_input: Entity<InputState>,
@@ -417,6 +423,7 @@ impl AppShell {
         // The clipboard countdown lives in the app-wide clipboard service,
         // which notifies once a second while a clear is pending.
         let clipboard = ClipboardService::handle(cx);
+        let password_focus = password_input.read(cx).focus_handle(cx);
 
         let _subscriptions = vec![
             cx.observe_in(&state, window, |shell: &mut AppShell, state, window, cx| {
@@ -476,6 +483,12 @@ impl AppShell {
                 cx.notify();
             }),
             cx.subscribe_in(&password_input, window, Self::on_password_input_event),
+            cx.on_focus_in(&password_focus, window, |shell, window, cx| {
+                shell.hold_secure_input(window, cx);
+            }),
+            cx.on_focus_out(&password_focus, window, |shell, _, _, _| {
+                shell.secure_input = None;
+            }),
             cx.subscribe_in(&keyfile_input, window, Self::on_keyfile_input_event),
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
             cx.subscribe_in(&picker_query_input, window, Self::on_picker_query_event),
@@ -522,9 +535,18 @@ impl AppShell {
             // The automatic Touch ID prompt only runs with the window in
             // front (see `schedule_automatic_biometric_unlock`), so coming
             // back to it is when a held-back or interrupted prompt runs.
-            cx.observe_window_activation(window, |shell: &mut AppShell, window, cx| {
+            //
+            // Secure event input is on for the whole login session while we
+            // hold it, so it goes as soon as another app is in front. GPUI
+            // reports the focus leaving the field too, but only with the next
+            // frame, and a window that is hidden may not draw one.
+            cx.observe_window_activation(window, move |shell: &mut AppShell, window, cx| {
                 if !window.is_window_active() {
+                    shell.secure_input = None;
                     return;
+                }
+                if password_focus.is_focused(window) {
+                    shell.hold_secure_input(window, cx);
                 }
                 shell.automatic_biometric_rearmed = false;
                 if std::mem::take(&mut shell.automatic_biometric_interrupted) {
@@ -564,6 +586,7 @@ impl AppShell {
         let mut shell = Self {
             state,
             password_input,
+            secure_input: None,
             keyfile_input,
             search_input,
             new_entry_title_input,
@@ -763,3 +786,5 @@ fn copy_value_label(kind: CopyValueKind) -> &'static str {
 mod characterization_tests;
 #[cfg(test)]
 mod clipboard_tests;
+#[cfg(test)]
+mod secure_input_tests;

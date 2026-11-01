@@ -190,6 +190,8 @@ fn request_quit(cx: &mut App) {
 pub(super) fn quit(cx: &mut App) {
     crate::launch::sweeper::purge_all();
     super::services::clipboard::clear_owned(cx);
+    // Secure event input as well; its quit hook is the second chance too.
+    crate::platform::secure_input::release_all(cx);
     cx.quit();
 }
 
@@ -199,6 +201,7 @@ pub(super) fn quit(cx: &mut App) {
 pub(super) fn restart(cx: &mut App) {
     crate::launch::sweeper::purge_all();
     super::services::clipboard::clear_owned(cx);
+    crate::platform::secure_input::release_all(cx);
     cx.restart();
 }
 
@@ -396,4 +399,44 @@ fn install_app_menus(cx: &mut App) {
         ]),
         Menu::new("Help").items([MenuItem::action("What's New", OpenWhatsNew)]),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::services::clipboard::ClipboardService;
+    use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
+    use crate::platform::secure_input::{self, fake::FakeApi};
+    use gpui::TestAppContext;
+
+    /// Cmd+Q, the Quit menu item and "Restart to update" let go of secure
+    /// event input before macOS is asked to quit, the way they clear the
+    /// clipboard. The test platform's quit does nothing, so only that direct
+    /// release can have run here.
+    #[gpui::test]
+    fn quitting_releases_secure_input(cx: &mut TestAppContext) {
+        let fake = cx.update(|cx| {
+            ClipboardService::install_for_test(
+                cx,
+                Box::new(FakePasteboard::new(AccessBehavior::Default)),
+            );
+            secure_input::fake::install(cx, FakeApi::new())
+        });
+
+        let guard = cx.update(|cx| secure_input::hold(cx)).expect("hold");
+        cx.update(quit);
+        assert!(!fake.held(), "quitting left secure event input on");
+        drop(guard);
+
+        let guard = cx.update(|cx| secure_input::hold(cx)).expect("hold");
+        cx.update(restart);
+        assert!(
+            !fake.held(),
+            "restarting to update left secure event input on"
+        );
+        drop(guard);
+
+        assert_eq!(fake.api.enables(), 2);
+        assert_eq!(fake.api.disables(), 2);
+    }
 }
