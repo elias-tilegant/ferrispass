@@ -441,6 +441,34 @@ mod tests {
         assert_eq!(mono_in_effect(Some(MONO_FALLBACK)), MONO_FALLBACK);
     }
 
+    /// Once the startup check has fallen back, every mono style names Menlo,
+    /// both as its family and on the element `.text_style` styles. Otherwise
+    /// secrets would ask for a font that did not load and come out in
+    /// Helvetica.
+    #[gpui::test]
+    fn mono_styles_use_the_fallback_the_check_decided(cx: &mut TestAppContext) {
+        // The test platform knows no font, so the check falls back.
+        cx.update(|cx| assert_eq!(mono_family(cx), MONO_FALLBACK));
+        for style in [
+            TextStyle::Secret,
+            TextStyle::Generator,
+            TextStyle::Code,
+            TextStyle::Typing,
+        ] {
+            assert_eq!(style.family(), Family::Mono, "{style:?}");
+        }
+        for style in TextStyle::ALL {
+            let expected = match style.family() {
+                Family::Ui => UI_FAMILY,
+                Family::Mono => MONO_FALLBACK,
+            };
+            assert_eq!(style.family().name(), expected, "{style:?}");
+            let mut element = div().text_style(style);
+            let text = Styled::text_style(&mut element).clone();
+            assert_eq!(text.font_family.as_deref(), Some(expected), "{style:?}");
+        }
+    }
+
     /// The folders with the new UI.
     const NEW_MODULES: [&str; 2] = ["src/ui/ds", "src/ui/windows"];
 
