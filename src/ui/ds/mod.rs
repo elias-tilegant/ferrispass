@@ -14,7 +14,6 @@ use gpui::{App, Window};
 
 pub use a11y_prefs::A11yPrefs;
 pub use tokens::{ActiveTokens, Color, ColorSet, DsTokens, Mode};
-pub use typography::{TextStyle, TextStyled};
 
 use crate::app::settings::ThemeChoice;
 
