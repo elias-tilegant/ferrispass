@@ -1,12 +1,15 @@
 # P1a.01: Design tokens and theme foundation
 
-A step of the redesign on the `rebuild` branch, finished up to the switch-over on 2026-10-28. It gives the design system a single source for its values and puts it into effect: the old screens now draw with the new warm palette, through a shim, until they are rebuilt. One step is still open (see the end).
+A step of the redesign on the `rebuild` branch, switched over on 2026-10-28 and finished after the shell split on 2026-11-01. It gives the design system a single source for its values and puts it into effect: the old screens now draw with the new warm palette, through a shim, until they are rebuilt.
 
 | Commit | What |
 |---|---|
 | `c95bb90` | `design/tokens.json`, the generator and the generated Rust color sets |
 | `8989db9` | Contrast tests and the generated GPUI Kit theme set |
 | `acafb79` | `ui::ds::init` and `apply`, the accessibility settings, the palette shim, the app switched over |
+| `5f275fc` | Lock as a secondary button |
+| `5bab26d` | The old `src/ui/theme.rs` removed, its callers call `ui::ds` |
+| `b66875c` | The palette check narrowed to the one switch in `ds::apply` |
 
 ## Where the values live
 
@@ -41,7 +44,7 @@ In light mode the faintest text in the old screens (`text_faint`) had 2.54:1 on 
 
 ## How the app uses it
 
-`ui::ds::init` runs at startup, after the fonts and `gpui_component::init`, before the first window. `ui::ds::apply_choice` runs on every appearance change, as `theme::apply_choice` did, and the old `theme` module now only forwards to it. Each call:
+`ui::ds::init` runs at startup, after the fonts and `gpui_component::init`, before the first window. `ui::ds::apply_choice` runs on every appearance change: when macOS switches while System is chosen, when an appearance is picked in Settings, and on Toggle Theme (in the menu or with Cmd-Shift-D). The old shell calls it directly; the old `src/ui/theme.rs` is gone. Each call:
 
 1. swaps the Kit's light and dark configs for the normal or increased contrast ones, then changes the theme mode. In this order, because the Kit treats a new config and a new mode in one update as already installed and keeps the old colors,
 2. sets the text size and the focus ring,
@@ -50,7 +53,11 @@ In light mode the faintest text in the old screens (`text_faint`) had 2.54:1 on 
 
 Increase contrast, reduce motion and VoiceOver are read from `NSWorkspace` each time (`src/ui/ds/a11y_prefs.rs`). For now they are read when the appearance changes or the setting is used, not when only the accessibility setting changes.
 
-`src/ui/palette.rs` keeps its 22 accessors, but each returns a token now. The table in `design/README.md` lists which, and a test holds the accessors to that table in all four modes. The module is deprecated, and a test fails if code outside the old shell, screens and widgets names it.
+`src/ui/palette.rs` keeps its 22 accessors, but each returns a token now. The table in `design/README.md` lists which, and a test holds the accessors to that table in all four modes. The module is deprecated, and a test fails if code outside the old shell, screens and widgets names it. The one exception is the line in `ds::apply` that switches the palette mode, and the test also fails if that line is missing or there twice. The tests for the shim are in `src/ui/palette_tests.rs`.
+
+## The toolbar
+
+With a vault open, the toolbar had two filled copper buttons, New entry and Lock. Lock now has the outlined style of Group and Sync, so New entry is the only filled button. Open vault, shown in the same place while the vault is locked, already had the outlined style.
 
 ## Checks
 
@@ -77,19 +84,17 @@ Each probe broke one thing on purpose and ran the tests that should notice:
 | One theme set color off by one step | `kit_theme_matches_tokens` |
 | Theme mode changed before the configs were swapped | `hc_configs_switch_with_theme_change` |
 | Text size not set after the theme change | `hc_configs_switch_with_theme_change` |
-| `ds::apply` without the palette mode | `apply_sets_every_piece` |
+| `ds::apply` without the palette mode | `ds_apply_switches_the_palette`, `no_palette_outside_legacy` |
 | `ds::apply` without reduce motion | `apply_sets_every_piece` |
 | `palette::orange()` returning `accent.fill` | `palette_follows_the_readme_table` |
 | `kit_theme.rs` importing the palette | `no_palette_outside_legacy` |
+| A palette call added to `ds/mod.rs`, once in `apply` and once in its tests | `no_palette_outside_legacy`, naming both lines |
+| The palette switch in `ds::apply` written twice | `no_palette_outside_legacy` |
 | A hex string in `kit_theme.rs` | `no_raw_colors` |
 | A primitive name that doesn't match its lightness | `primitive_names` |
 | A primitive hex three steps from its OKLCH | `primitives_roundtrip` |
 
 ## Not checked yet
 
-- How the old screens look in light and dark with the new colors, and switching the appearance while the app runs. Both need the app on a Mac.
+- How the old screens look in light and dark with the new colors, the toolbar with Lock as a secondary button, and switching the appearance while the app runs. These need the app on a Mac.
 - Increased contrast on screen. The values are tested; how they look is checked later.
-
-## Still open
-
-After the shell split is merged, Lock becomes a secondary button, so the toolbar has a single copper button, and `src/ui/theme.rs` goes away, with its three callers calling `ui::ds::apply_choice` directly.
