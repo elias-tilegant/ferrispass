@@ -8,6 +8,7 @@ pub mod domain;
 pub mod favicon;
 pub mod keepass;
 pub mod launch;
+pub mod platform;
 #[cfg(target_os = "macos")]
 pub(crate) mod session_lock;
 pub mod sync;
