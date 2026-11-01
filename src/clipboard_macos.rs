@@ -78,7 +78,13 @@ pub fn change_count() -> ClipboardChangeCount {
 }
 
 fn access_behavior_of(pasteboard: &NSPasteboard) -> AccessBehavior {
-    match pasteboard.accessBehavior() {
+    access_behavior_from(pasteboard.accessBehavior())
+}
+
+/// AppKit's value as ours. Only `AlwaysAllow` lets the launch check look at
+/// the pasteboard, so nothing else may ever become `AlwaysAllow` here.
+fn access_behavior_from(raw: NSPasteboardAccessBehavior) -> AccessBehavior {
+    match raw {
         NSPasteboardAccessBehavior::Ask => AccessBehavior::Ask,
         NSPasteboardAccessBehavior::AlwaysAllow => AccessBehavior::AlwaysAllow,
         NSPasteboardAccessBehavior::AlwaysDeny => AccessBehavior::AlwaysDeny,
@@ -226,6 +232,29 @@ mod tests {
             text_for_type(&pasteboard, STRING_TYPE).as_deref(),
             Some("a later note")
         );
+    }
+
+    /// The raw values are the ones in Apple's `NSPasteboard.h`: 0 Default,
+    /// 1 Ask, 2 AlwaysAllow, 3 AlwaysDeny. Anything else is a value this
+    /// build doesn't know and must not open the launch check.
+    #[test]
+    fn access_behavior_maps_every_appkit_value() {
+        let cases = [
+            (0, AccessBehavior::Default),
+            (1, AccessBehavior::Ask),
+            (2, AccessBehavior::AlwaysAllow),
+            (3, AccessBehavior::AlwaysDeny),
+            (4, AccessBehavior::Default),
+            (-1, AccessBehavior::Default),
+            (isize::MAX, AccessBehavior::Default),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                access_behavior_from(NSPasteboardAccessBehavior(raw)),
+                expected,
+                "raw accessBehavior {raw}"
+            );
+        }
     }
 
     /// Apple documents every pasteboard other than the general one as always
