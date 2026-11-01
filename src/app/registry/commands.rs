@@ -27,8 +27,8 @@ impl CommandId {
 
 pub(super) static COMMANDS: &[CommandSpec] = &[
     // Return runs the main action of the selected entry, which depends on
-    // its kind. Its own word is for lists of shortcuts; a list of what the
-    // selected entry offers names the main action itself.
+    // its kind. Its own word is for lists of shortcuts; with an entry in
+    // view, primary_label gives the main action's word instead.
     CommandSpec {
         id: CommandId::ENTRY_PRIMARY,
         label_key: "action.primary.label",

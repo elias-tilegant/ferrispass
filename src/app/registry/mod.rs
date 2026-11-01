@@ -8,7 +8,8 @@
 //! two names.
 //!
 //! Return runs the main action of the selected entry, which depends on its
-//! kind ([`primary_command`]). From an empty search it never acts on a
+//! kind ([`primary_command`]), and takes that action's word
+//! ([`primary_label`]). From an empty search it never acts on a
 //! production system the user has not picked; that rule is the availability
 //! of `entry.primary` and is written down nowhere else.
 //!
@@ -24,6 +25,8 @@ mod tests;
 
 use gpui::SharedString;
 use url::{ParseError, Url};
+
+use crate::tr;
 
 /// A command's stable name, `<area>.<verb>`: `entry.copy_password`,
 /// `app.quit`. Its label is `action.<verb>.label`. The names are constants
@@ -192,6 +195,16 @@ pub fn primary_command(kind: &SelectedKind) -> CommandId {
         SelectedKind::Remote => CommandId::ENTRY_COPY_PASSWORD,
         SelectedKind::Web => CommandId::ENTRY_OPEN_WEBSITE,
     }
+}
+
+/// Return's word for an entry of this kind: the word of its main action,
+/// Sign in, Open website or Copy password. Wherever an entry is in view,
+/// Return goes by this word. `entry.primary`'s own word is for lists of
+/// shortcuts, where there is no entry to name an action for.
+pub fn primary_label(kind: &SelectedKind) -> SharedString {
+    // Every main action is a row in the table; the tests make sure of it.
+    command(primary_command(kind))
+        .map_or_else(|| tr!("action.primary.label"), |spec| (spec.label)())
 }
 
 /// The commands `surface` shows in this situation, in table order, each with

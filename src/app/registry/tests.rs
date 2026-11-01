@@ -363,6 +363,29 @@ fn primary_action_by_kind() {
 }
 
 #[test]
+fn primary_label_names_the_main_action() {
+    // With an entry in view, Return goes by the word of what it does there.
+    for (kind, word) in [
+        (
+            SelectedKind::Sap { production: false },
+            "action.sap_login.label",
+        ),
+        (
+            SelectedKind::Sap { production: true },
+            "action.sap_login.label",
+        ),
+        (SelectedKind::Web, "action.open_website.label"),
+        (SelectedKind::Remote, "action.copy_password.label"),
+    ] {
+        assert_eq!(
+            Some(primary_label(&kind).to_string()),
+            catalogue_text(Language::English, word),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
 fn prd_rule_holds_for_every_input() {
     // The rule over the four inputs it reads, for an SAP system.
     for locked in BOTH {

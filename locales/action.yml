@@ -6,8 +6,8 @@ _version: 2
 # The command <area>.<verb> reads action.<verb>.label.
 action:
   # What Return does with the selected entry. Lists of shortcuts show this
-  # word; lists of what an entry offers show the main action of its kind,
-  # one of the three below.
+  # word. With an entry in view, Return shows the word of the entry's main
+  # action instead, one of the three below.
   primary:
     label:
       en: Main action
