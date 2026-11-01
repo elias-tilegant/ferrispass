@@ -193,6 +193,15 @@ pub(super) fn quit(cx: &mut App) {
     cx.quit();
 }
 
+/// Restart into an installed update once nothing holds it back. GPUI quits
+/// this process before the new one starts, so the cleanup is the same as
+/// [`quit`]'s.
+pub(super) fn restart(cx: &mut App) {
+    crate::launch::sweeper::purge_all();
+    super::services::clipboard::clear_owned(cx);
+    cx.restart();
+}
+
 /// Store where the user left the window, so the next launch opens there
 /// instead of centring a fixed default on whatever display is primary.
 fn remember_window_geometry(window: &Window) {
@@ -275,8 +284,7 @@ pub fn init(cx: &mut App) {
         if block_lifecycle_action_over_dirty_editor(None, cx) {
             return;
         }
-        crate::launch::sweeper::purge_all();
-        cx.restart();
+        restart(cx);
     });
 
     cx.bind_keys([

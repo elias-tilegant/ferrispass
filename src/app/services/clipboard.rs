@@ -21,10 +21,10 @@
 //! 4. Clearing always compares the pasteboard generation first. If anyone
 //!    copied something after us, the clipboard stays as it is
 //!    (`clear_leaves_newer_clipboard_alone`).
-//! 5. Quitting clears our copy twice over: `request_quit` calls
-//!    [`clear_owned`] before it asks the platform to quit, and
-//!    [`install_quit_hook`] registers the same clear with `on_app_quit` for
-//!    a quit that does not come through that action
+//! 5. Quitting clears our copy twice over: `request_quit` and the restart
+//!    into an update call [`clear_owned`] before they ask the platform to
+//!    quit, and [`install_quit_hook`] registers the same clear with
+//!    `on_app_quit` for a quit that does not come through either action
 //!    (`quit_clears_only_unchanged_own_copy`).
 //! 6. At launch, before the first window, [`clear_own_copy_on_start`]
 //!    removes a copy an earlier run left behind, a crash or a forced quit
@@ -643,6 +643,15 @@ mod tests {
         pasteboard.foreign_write("a note");
         cx.update(crate::app::actions::quit);
         assert_eq!(text(&pasteboard).as_deref(), Some("a note"));
+
+        // Restarting into an update quits this process the same way.
+        copy(cx, &service, "secret", None).expect("copy");
+        cx.update(crate::app::actions::restart);
+        assert_eq!(
+            text(&pasteboard),
+            None,
+            "restarting to update left our copy behind"
+        );
 
         // Any quit runs the app's quit handlers, and the hook clears there.
         copy(cx, &service, "secret", None).expect("copy");
