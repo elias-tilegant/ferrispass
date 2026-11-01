@@ -17,7 +17,9 @@ Started from `rebuild` at `8980fe9` on 2026-11-01.
 
 If the secret-aware write fails, nothing is written, an earlier copy of ours is cleared, and the caller gets the error. There is no fallback to a plain clipboard item that a history tool or Universal Clipboard would keep. That was already true in the main window and is now a rule of the service.
 
-Two other places write to the clipboard and are not secrets: the "Copy code" button in the sign-in flow copies the one-time code Microsoft shows for device sign-in, and the masked text field writes an empty string when copying out of it is blocked.
+A secret here is a value FerrisPass copies for you, from a button, a shortcut or a menu: a password, a username, a URL, a TOTP code or a custom field. The entry editor's own text fields are a different matter. The password, the TOTP secret and custom fields marked protected can't be copied out of them by hand at all; that block lives in `SecretInput` and stays. Text selected by hand in an unprotected field (title, username, URL, notes, custom fields not marked protected) goes to the clipboard as an ordinary copy, the same as before this change. SECURITY.md says so next to the contract.
+
+The "Copy code" button in the sign-in flow also writes to the clipboard directly. It copies the one-time code Microsoft shows for device sign-in, which the user types into Microsoft's page and which is not a credential.
 
 ## What the markers mean
 
@@ -44,7 +46,7 @@ Clearing always compares the pasteboard generation first: if anything was copied
 | Something else was copied after ours | nothing is cleared, by the timer or by anything else | `clear_leaves_newer_clipboard_alone`, `delayed_clear_does_not_erase_newer_clipboard_contents` |
 | A write fails | the earlier copy is cleared, the caller is told | `write_failure_fails_closed` |
 | Lock, from the button, Cmd+L, closing the window, the idle or screen lock, switching vaults | cleared | `lock_clears_clipboard_ownership` |
-| Quit with Cmd+Q or the menu | cleared before macOS is asked to quit | `quit_clears_only_unchanged_own_copy` |
+| Quit with Cmd+Q or the menu, or restart into an update | cleared before macOS is asked to quit | `quit_clears_only_unchanged_own_copy` |
 | Any other quit | cleared in the app's quit handler | `quit_clears_only_unchanged_own_copy` |
 | Launch, with "Paste from Other Apps" set to Always Allow | a copy with our marker is cleared, if nothing was copied during the check | `start_clears_only_own_marked_copy` |
 | Launch, with any other setting | nothing; the clipboard is not looked at | `start_clears_only_own_marked_copy` |
@@ -69,6 +71,7 @@ On a Mac where `accessBehavior` doesn't exist (before macOS 15.4) the check repo
 
 - Most users never change "Paste from Other Apps", so for them the launch check does nothing. A copy left behind by a crash or `kill -9` stays on the clipboard until something else is copied. It is still concealed, transient and kept to this Mac, so a clipboard manager that honours the markers doesn't store it. On a preview build, the relaunch check (copy, `kill -9`, start FerrisPass, `pbpaste` is empty) only passes with FerrisPass set to Always Allow; with the default setting `pbpaste` still shows the password and no prompt appears.
 - The marker type is the only sign of ownership a new launch has, because nothing keeps the generation of an earlier run's write. Any app can put an item with that type on the clipboard, and with Always Allow a launch clears it. That costs the other app the item it labelled as ours. Keeping the last generation on disk would close this and would also let the check work without the marker; it would add state to the app's data folder and is not part of this step.
+- Copying by hand out of the entry editor's unprotected fields is not covered, as described under "The one path". Notes in particular sometimes hold things people would call secret. Routing those copies through the service means changing the editor's text fields, which this step leaves alone.
 - On platforms other than macOS the service falls back to GPUI's plain clipboard, as the main window did before. CI only builds for macOS, so that branch is not compiled there.
 - `private_pasteboard_reports_always_allow` relies on Apple's documented behaviour that every pasteboard except the general one always allows access.
 - `lock_clears_clipboard_ownership` builds the real `AppShell` and reads the real `settings.json`, and the lock and `quit_clears_only_unchanged_own_copy` empty the per-user launch folder, as `automatic_lock_discards_the_draft_and_says_so` already does. No test touches the general pasteboard.

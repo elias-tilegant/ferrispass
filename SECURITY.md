@@ -24,7 +24,7 @@ In scope:
 - **Update mechanism** - bypassing the minisign signature check, downgrade attacks, replay attacks against the manifest endpoint
 - **Build supply chain** - compromise paths through our pinned dependencies (`keepass-rs` fork in particular) or the GitHub Actions release pipeline
 - **macOS Keychain access** - incorrect ACLs that allow other apps to read FerrisPass-owned items
-- **Clipboard** - any path that puts a secret on the pasteboard without the concealed, transient and current-host markers, or that leaves our own copy behind after the clear timer, a lock, quit or launch. At launch FerrisPass only looks when "Paste from Other Apps" is set to Always Allow for it; see the security contract below
+- **Clipboard** - any path that puts a secret on the pasteboard without the concealed, transient and current-host markers, or that leaves our own copy behind after the clear timer, a lock, quit or launch. What counts as a secret there, and when FerrisPass looks at launch, is in the security contract below
 
 Out of scope (will be acknowledged but won't be patched as security issues):
 
@@ -41,6 +41,8 @@ What FerrisPass promises from the release in the second column on. A build that 
 | Rule | Since |
 |---|---|
 | Every copy of a secret goes through one clipboard path: concealed, transient, this Mac only, cleared after the timer, at lock, at quit and at launch; only unchanged clipboard contents are ever cleared, and the launch check reads types, never contents. The launch check only looks when "Paste from Other Apps" is set to Always Allow for FerrisPass; with any other setting it leaves the clipboard alone, so macOS never asks | the redesign release |
+
+In the clipboard rule, a secret is a value FerrisPass copies for you, from a button, a shortcut or a menu: a password, a username, a URL, a TOTP code or a custom field. The entry editor does not let you copy a password, a TOTP secret or a protected custom field out by hand. Text you select and copy yourself from one of its unprotected fields (title, username, URL, notes, custom fields not marked protected) is an ordinary copy and does not go through this path.
 
 ## Supported versions
 
