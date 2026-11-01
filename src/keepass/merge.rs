@@ -1072,7 +1072,23 @@ fn meta_local_contributes(local: &Database, remote: &Database) -> bool {
 /// rather than user data.
 const GENERATED_CUSTOM_DATA: [&str; 2] = ["KPXC_RANDOM_SLUG", "_LAST_MODIFIED"];
 
-/// Metadata custom data minus the keys clients regenerate on every save.
+/// Whether a plugin data key is a marker: data a newer version of this app
+/// keeps on entries, groups and the database, such as what kind of entry
+/// something is or which entries a person marked as favourites. They all
+/// start with `FerrisPass.`, exactly and case-sensitively.
+///
+/// This version writes no markers and reads none, so a difference there is
+/// never something its user did. Compared, it became a question about
+/// values nobody using this version can judge, and whichever copy won took
+/// its markers along and dropped the other's. So markers take part in no
+/// comparison (see `compared_key`), and a merge keeps them from both copies
+/// (see `carry_markers`).
+fn is_ferrispass_marker(key: &str) -> bool {
+    key.starts_with("FerrisPass.")
+}
+
+/// Metadata custom data minus what takes part in no comparison: the keys
+/// clients regenerate on every save, and markers.
 ///
 /// KeePassXC rewrites `KPXC_RANDOM_SLUG` and `_LAST_MODIFIED` each time it
 /// writes the file and treats both as generated rather than user data. Left
@@ -1081,14 +1097,14 @@ const GENERATED_CUSTOM_DATA: [&str; 2] = ["KPXC_RANDOM_SLUG", "_LAST_MODIFIED"];
 fn user_custom_data(meta: &Meta) -> HashMap<&String, &CustomDataItem> {
     meta.custom_data
         .iter()
-        .filter(|(key, _)| !GENERATED_CUSTOM_DATA.contains(&key.as_str()))
+        .filter(|(key, _)| compared_key(key))
         .collect()
 }
 
 /// Plugin data on an entry or a group, the way two copies of it are
-/// compared: key and value, without the item's own modification time and
-/// without the keys a client regenerates. Sorted, so its rendering is stable
-/// and two sides that hold the same keys read the same.
+/// compared: key and value, without the item's own modification time,
+/// without the keys a client regenerates and without markers. Sorted, so its
+/// rendering is stable and two sides that hold the same keys read the same.
 ///
 /// KeePassXC adds `_LAST_MODIFIED` to every entry and group that carries
 /// plugin data and stamps it afresh each time it loads the file, without
@@ -1097,8 +1113,8 @@ fn user_custom_data(meta: &Meta) -> HashMap<&String, &CustomDataItem> {
 /// every such entry and group became a conflict after a KeePassXC save, in
 /// both directions, although nobody had changed anything.
 ///
-/// Only what is compared is filtered. The data itself, generated keys and
-/// item times included, is never touched by this.
+/// Only what is compared is filtered. The data itself, generated keys,
+/// markers and item times included, is never touched by this.
 fn compared_custom_data(
     items: &HashMap<String, CustomDataItem>,
 ) -> BTreeMap<&String, &Option<CustomDataValue>> {
@@ -1109,12 +1125,12 @@ fn compared_custom_data(
         .collect()
 }
 
-/// Whether an entry's or a group's plugin data key takes part in the
-/// comparison. Every key does except the generated ones. This is the one
-/// place that decides it, so a key that should be merged by a rule of its own
-/// is left out here and nowhere else.
+/// Whether a plugin data key on an entry, a group or the database takes part
+/// in the comparison. Every key does except the generated ones and markers.
+/// This is the one place that decides it, so a key that should be merged by
+/// a rule of its own is left out here and nowhere else.
 fn compared_key(key: &str) -> bool {
-    !GENERATED_CUSTOM_DATA.contains(&key)
+    !GENERATED_CUSTOM_DATA.contains(&key) && !is_ferrispass_marker(key)
 }
 
 fn custom_data_equivalent(
@@ -1314,10 +1330,13 @@ fn history_version_bytes(version: &EntryRef<'_>) -> usize {
         .sum();
     // Everything else a version serializes and a client counts. Leaving these
     // out meant a history trimmed because of them still read as one that had
-    // never seen those versions.
+    // never seen those versions. Markers are the exception, as in the digest:
+    // their size alone must not decide whether the other copy is ahead, and
+    // underestimating errs towards an upload.
     let custom_data: usize = version
         .custom_data
         .iter()
+        .filter(|(key, _)| !is_ferrispass_marker(key))
         .map(|(key, item)| {
             key.len()
                 + match &item.value {
@@ -1354,6 +1373,11 @@ fn history_version_bytes(version: &EntryRef<'_>) -> usize {
 /// they are, unlike in `entry_content_eq`. The fork's history merge keeps two
 /// same-second versions that differ there as two, and this has to agree with
 /// it.
+///
+/// Markers are not hashed. Two same-second versions that differ only there
+/// are still kept as two by the fork, but neither copy is ahead for it: the
+/// merged file holds both and sends them with its next upload, and a marker
+/// on its own never asks for one, here or anywhere else.
 fn history_version_digest(version: &EntryRef<'_>) -> [u8; 32] {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
@@ -1373,7 +1397,11 @@ fn history_version_digest(version: &EntryRef<'_>) -> [u8; 32] {
     for tag in &tags {
         note(tag.as_bytes());
     }
-    let mut custom: Vec<(&String, &CustomDataItem)> = version.custom_data.iter().collect();
+    let mut custom: Vec<(&String, &CustomDataItem)> = version
+        .custom_data
+        .iter()
+        .filter(|(key, _)| !is_ferrispass_marker(key))
+        .collect();
     custom.sort_by_key(|(key, _)| *key);
     for (key, item) in custom {
         note(key.as_bytes());
@@ -1571,6 +1599,7 @@ pub fn apply_picks(
         return Err(ApplyError::DatabaseMergeWarnings(lossy.join("; ")));
     }
 
+    carry_markers(&mut merged, local, remote);
     reunite_recycle_bins(&mut merged, [local, remote]);
 
     // The merged database is saved directly (no document mutation runs in
@@ -2344,7 +2373,9 @@ fn reference_to_share(
 /// rule, so that one rule covers both. A pair dated on one side only is left
 /// alone too: the fork keeps the local copy unless the remote one is dated
 /// in the future, and `entry_content_eq` or `group_content_eq` has checked
-/// that the two agree on everything that is compared.
+/// that the two agree on everything that is compared. Markers are the one
+/// part of plugin data no side may lose, and `carry_markers` brings them
+/// back after the merge, for every pair.
 fn reconcile_unsurfaced_metadata(
     merged: &mut Database,
     source: &mut Database,
@@ -2470,12 +2501,11 @@ fn reconcile_unsurfaced_metadata(
 /// The plugin data both copies of a tied object get when they differ only in
 /// what the comparison leaves out, or `None` when there is nothing to align.
 ///
-/// Every key either side holds is kept. Where both hold one, the item dated
-/// later stands, ours on a tie: the values agree on every compared key, so
-/// there only the item time differs, and the later one is when that value
-/// was last set. Keeping ours regardless made the result depend on which
-/// copy was local. Only a generated key can hold two values, and KeePassXC
-/// writes those afresh anyway.
+/// Every key either side holds is kept, and where both hold one,
+/// `later_item` stands. The values agree on every compared key, so only a
+/// generated key or a marker can hold two values here. KeePassXC writes the
+/// generated ones afresh anyway, and `carry_markers` settles a marker after
+/// the merge.
 fn united_custom_data(
     ours: &HashMap<String, CustomDataItem>,
     theirs: &HashMap<String, CustomDataItem>,
@@ -2485,15 +2515,123 @@ fn united_custom_data(
     }
     let mut united = theirs.clone();
     for (key, item) in ours {
-        // `None` orders before any date, so an undated item never wins.
-        let theirs_is_later = theirs
+        let stands = theirs
             .get(key)
-            .is_some_and(|theirs| theirs.last_modification_time > item.last_modification_time);
-        if !theirs_is_later {
-            united.insert(key.clone(), item.clone());
-        }
+            .map_or(item, |theirs| later_item(item, theirs));
+        united.insert(key.clone(), stands.clone());
     }
     Some(united)
+}
+
+/// The item dated later, ours on a tie. For one value with two item times
+/// the later one is when that value was last set, and keeping ours
+/// regardless made the result depend on which copy was local. `None` orders
+/// before any date, so an undated item never wins.
+fn later_item<'a>(ours: &'a CustomDataItem, theirs: &'a CustomDataItem) -> &'a CustomDataItem {
+    if theirs.last_modification_time > ours.last_modification_time {
+        theirs
+    } else {
+        ours
+    }
+}
+
+/// Which of two items under one marker stands, ours being this copy's and
+/// theirs the remote copy's.
+///
+/// One value keeps its later item time, as everywhere. Two values keep ours
+/// only when its item time is believable and strictly later (see
+/// `timestamp_winner`), and theirs otherwise: on a tie, when either side has
+/// no time, and when one is a time nobody could have written yet. KeePassXC
+/// drops these item times on every save, so after one the remote copy
+/// decides. What that can cost is one of two values of a marker, never
+/// anything this version shows.
+fn standing_marker<'a>(ours: &'a CustomDataItem, theirs: &'a CustomDataItem) -> &'a CustomDataItem {
+    if ours.value == theirs.value {
+        return later_item(ours, theirs);
+    }
+    match timestamp_winner(ours.last_modification_time, theirs.last_modification_time) {
+        Some(Side::Local) => ours,
+        _ => theirs,
+    }
+}
+
+/// Give every entry, every group and the database in the merged result the
+/// markers either copy held.
+///
+/// The merge takes an entry or a group from one copy as a whole: the newer
+/// one, or the one the user picked. That copy need not hold the markers the
+/// other one did, and since nothing compares markers, nothing would ever
+/// have brought them back. The database's own plugin data is merged per key
+/// already, but where the item times cannot decide, the fork keeps this
+/// copy's value and `standing_marker` the remote one. So a key only one copy
+/// holds is kept everywhere, and two items under one key go by
+/// `standing_marker`.
+///
+/// Done after the merge rather than before it, so the fork archives exactly
+/// the versions `diff` saw. A marker added to the older copy beforehand would
+/// make it differ from the version just archived for it, and the fork would
+/// archive it a second time. No modification time moves, and archived
+/// versions keep what they held.
+fn carry_markers(merged: &mut Database, local: &Database, remote: &Database) {
+    let entry_ids: Vec<EntryId> = merged.iter_all_entries().map(|entry| entry.id()).collect();
+    for id in entry_ids {
+        let markers = {
+            let (ours, theirs) = (local.entry(id), remote.entry(id));
+            united_markers(
+                ours.as_ref().map(|entry| &entry.custom_data),
+                theirs.as_ref().map(|entry| &entry.custom_data),
+            )
+        };
+        if let Some(mut entry) = merged.entry_mut(id) {
+            entry.custom_data.extend(markers);
+        }
+    }
+
+    let group_ids: Vec<GroupId> = merged.iter_all_groups().map(|group| group.id()).collect();
+    for id in group_ids {
+        let markers = {
+            let (ours, theirs) = (local.group(id), remote.group(id));
+            united_markers(
+                ours.as_ref().map(|group| &group.custom_data),
+                theirs.as_ref().map(|group| &group.custom_data),
+            )
+        };
+        if let Some(mut group) = merged.group_mut(id) {
+            group.custom_data.extend(markers);
+        }
+    }
+
+    let markers = united_markers(
+        Some(&local.meta.custom_data),
+        Some(&remote.meta.custom_data),
+    );
+    merged.meta.custom_data.extend(markers);
+}
+
+/// Every marker either copy holds, by `standing_marker` where both hold one.
+fn united_markers(
+    ours: Option<&HashMap<String, CustomDataItem>>,
+    theirs: Option<&HashMap<String, CustomDataItem>>,
+) -> Vec<(String, CustomDataItem)> {
+    fn markers(
+        items: Option<&HashMap<String, CustomDataItem>>,
+    ) -> impl Iterator<Item = (&String, &CustomDataItem)> {
+        items
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| is_ferrispass_marker(key))
+    }
+    let mut united: BTreeMap<&String, &CustomDataItem> = markers(theirs).collect();
+    for (key, item) in markers(ours) {
+        let stands = united
+            .get(key)
+            .map_or(item, |&theirs| standing_marker(item, theirs));
+        united.insert(key, stands);
+    }
+    united
+        .into_iter()
+        .map(|(key, item)| (key.clone(), item.clone()))
+        .collect()
 }
 
 /// KeePassXC's default Auto-Type block for both copies of a tied entry when
