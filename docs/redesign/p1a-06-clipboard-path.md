@@ -9,7 +9,10 @@ Started from `rebuild` at `8980fe9` on 2026-11-01.
 | `a09169b` | The clipboard service and the private marker type |
 | `5ea4e07` | Clearing at quit and at launch, and the scan that keeps content reads out |
 | `c48c2eb` | The main window copies, counts down and clears through the service |
-| the last one | SECURITY.md and this page |
+| `6ff7e91` | SECURITY.md and this page |
+| `47cb52f` | Restarting into an update clears before it quits, like Cmd+Q |
+| `ae95e79` | SECURITY.md says which copies the contract covers |
+| the last one | This page and the progress log |
 
 ## The one path
 
@@ -38,6 +41,8 @@ The three `org.nspasteboard` types are a convention that clipboard managers hono
 ## What is cleared when
 
 Clearing always compares the pasteboard generation first: if anything was copied after our copy, the clipboard is left alone. The service keeps that generation, never the secret.
+
+Each test below was checked by taking out the rule it names, and it failed every time. The removed lines and the failing output are in [PR #16](https://github.com/elias-tilegant/ferrispass/pull/16).
 
 | When | What happens | Held by |
 |---|---|---|
