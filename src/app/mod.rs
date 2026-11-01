@@ -3,6 +3,7 @@ pub mod assets;
 
 mod recents;
 mod search;
+pub mod services;
 pub mod settings;
 mod state;
 pub mod sync_history;
