@@ -539,3 +539,48 @@ fn the_text_tier_keeps_the_text_order() {
         assert!(!ranked.is_empty(), "{query:?} should match something");
     }
 }
+
+/// The copy a kind is read from when an entry has protected fields. It must
+/// hold neither a protected value nor the notes, not even for a moment, and
+/// keep everything else the kinds can read.
+#[test]
+fn the_identifier_copy_leaves_out_notes_and_protected_values() {
+    let full = with_fields(
+        VaultEntry {
+            notes: "the door code is 4711".to_string(),
+            username: "nhp-user".to_string(),
+            url: "https://nhp.example".to_string(),
+            tags: vec!["vpn".to_string()],
+            starred: true,
+            group_path: vec!["Root".to_string(), "Nordhafen".to_string()],
+            ..entry("nordhafen", "Nordhafen")
+        },
+        &[
+            ("SAP_SID", "NHP", false),
+            ("SAP_CLIENT", "100", true),
+            ("Recovery code", "hunter2", true),
+        ],
+    );
+
+    let view = identifier_view(&full);
+
+    assert!(view.notes.is_empty(), "the copy carries the notes");
+    assert_eq!(
+        view.custom_fields,
+        [CustomField {
+            key: "SAP_SID".to_string(),
+            value: "NHP".to_string(),
+            protected: false,
+        }],
+        "the copy carries a protected field"
+    );
+    assert_eq!(
+        VaultEntry {
+            notes: full.notes.clone(),
+            custom_fields: full.custom_fields.clone(),
+            ..view
+        },
+        full,
+        "the copy lost something other than the notes and the protected fields"
+    );
+}

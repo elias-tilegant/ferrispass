@@ -172,9 +172,58 @@ pub fn kind_without_protected_fields(entry: &VaultEntry) -> EntryKind {
     if !entry.custom_fields.iter().any(|field| field.protected) {
         return kinds::classify(entry, None);
     }
-    let mut open = entry.clone();
-    open.custom_fields.retain(|field| !field.protected);
-    kinds::classify(&open, None)
+    kinds::classify(&identifier_view(entry), None)
+}
+
+/// A copy of `entry` without its notes and its protected custom fields.
+/// It is built field by field, so neither is ever copied, not even for a
+/// moment. The pattern lists every field on purpose: a new one does not
+/// compile here until someone decides whether an identifier may read it.
+fn identifier_view(entry: &VaultEntry) -> VaultEntry {
+    let VaultEntry {
+        id,
+        title,
+        username,
+        url,
+        notes: _,
+        has_password,
+        password_length,
+        has_otp,
+        updated,
+        tags,
+        starred,
+        favicon,
+        strength,
+        group_path,
+        in_recycle_bin,
+        auto_type_enabled,
+        auto_type_windows,
+        custom_fields,
+    } = entry;
+    VaultEntry {
+        id: id.clone(),
+        title: title.clone(),
+        username: username.clone(),
+        url: url.clone(),
+        notes: String::new(),
+        has_password: *has_password,
+        password_length: *password_length,
+        has_otp: *has_otp,
+        updated: updated.clone(),
+        tags: tags.clone(),
+        starred: *starred,
+        favicon: favicon.clone(),
+        strength: *strength,
+        group_path: group_path.clone(),
+        in_recycle_bin: *in_recycle_bin,
+        auto_type_enabled: *auto_type_enabled,
+        auto_type_windows: auto_type_windows.clone(),
+        custom_fields: custom_fields
+            .iter()
+            .filter(|field| !field.protected)
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Whether `query`, already passed through [`normalize`], names `entry`
