@@ -69,10 +69,10 @@ impl AppShell {
 
     /// Tiny pill in the bottom-right corner that counts down the
     /// remaining seconds until the clipboard auto-clear fires. `None`
-    /// when no clear is pending or the deadline has lapsed (the wipe
-    /// task drops the deadline as part of its cleanup).
-    fn render_clipboard_pill(&self) -> Option<impl gpui::IntoElement> {
-        let deadline = self.clipboard_clear_deadline?;
+    /// when no clear is pending or the deadline has lapsed (the clipboard
+    /// service drops the deadline when it clears).
+    fn render_clipboard_pill(deadline: Option<Instant>) -> Option<impl gpui::IntoElement> {
+        let deadline = deadline?;
         let remaining = deadline.checked_duration_since(Instant::now())?;
         let secs = remaining.as_secs();
         if secs == 0 {
@@ -101,7 +101,8 @@ impl AppShell {
 impl Render for AppShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let body = AppShell::render_body(self, cx);
-        let clipboard_pill = self.render_clipboard_pill();
+        let clipboard_deadline = ClipboardService::handle(cx).read(cx).deadline();
+        let clipboard_pill = Self::render_clipboard_pill(clipboard_deadline);
         let modal_overlay = self.render_modal_overlay(cx);
 
         div()

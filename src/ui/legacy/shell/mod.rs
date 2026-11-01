@@ -2,8 +2,6 @@
 //! constructor are here; the methods are split by concern into the
 //! submodules.
 
-#[cfg(target_os = "macos")]
-use crate::clipboard::{ClipboardChangeCount, clear_if_unchanged, write_secret_text};
 use crate::{
     app::{
         AppSettings, AppState, CopyValueKind, Overlay,
@@ -15,6 +13,7 @@ use crate::{
             OpenVaultSwitcher, OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected,
             RenameGroupOp, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
         },
+        services::clipboard::ClipboardService,
     },
     autotype,
     keepass::{KeePassRepository, MutationError, limits::KdfCost},
@@ -31,8 +30,6 @@ pub enum SettingsTab {
     Sync,
     AutoType,
 }
-#[cfg(not(target_os = "macos"))]
-use gpui::ClipboardItem;
 use gpui::{
     AnyWindowHandle, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement as _, ParentElement as _, PathPromptOptions, Render,
@@ -87,16 +84,6 @@ pub struct CustomFieldDraftInputs {
     /// rather than in the shell's subscription list so it dies with the row:
     /// rows come and go for every entry the user opens.
     _subscriptions: [Subscription; 2],
-}
-
-/// Opaque identity of the clipboard write owned by the current clear timer.
-/// It deliberately contains neither the copied value nor a digest of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PendingClipboardWrite {
-    #[cfg(target_os = "macos")]
-    Native(ClipboardChangeCount),
-    #[cfg(not(target_os = "macos"))]
-    Portable(u64),
 }
 
 pub struct AppShell {
@@ -172,27 +159,6 @@ pub struct AppShell {
     /// changes every 30 s so a coarser tick would also work, but 1 Hz keeps
     /// the "valid for Xs" text moving smoothly.
     totp_tick: Option<Task<()>>,
-    /// Background timer that wipes the clipboard `CLIPBOARD_CLEAR_SECS` after
-    /// a copy. Holding the `Task` here means a new copy replaces (= cancels)
-    /// the previous timer - only the latest copy's clear fires.
-    clipboard_clear_task: Option<Task<()>>,
-    /// Opaque identity of our latest clipboard write. On macOS this is the
-    /// NSPasteboard change count, which lets the timer compare-and-clear
-    /// without retaining the copied secret in application state.
-    pending_clipboard_write: Option<PendingClipboardWrite>,
-    /// Monotonic identity for portable clipboard writes. Only compiled on
-    /// platforms where GPUI cannot expose an OS clipboard generation.
-    #[cfg(not(target_os = "macos"))]
-    next_portable_clipboard_write: u64,
-    /// Wall-clock deadline at which the pending clipboard-clear fires.
-    /// Drives the countdown pill in the bottom-right corner. `None`
-    /// when no clear is scheduled (no active copy, or settings have
-    /// `clipboard_clear_secs = None`).
-    clipboard_clear_deadline: Option<Instant>,
-    /// 1 Hz tick that re-renders the countdown pill while a clear is
-    /// pending. Dropped when the deadline lapses or the user copies
-    /// something else.
-    clipboard_pill_tick: Option<Task<()>>,
     /// Id of the entry whose password is currently revealed in the
     /// detail panel. `None` = masked. Compared against the live selection
     /// in the state observer so switching entries (or locking) auto-masks.
@@ -448,6 +414,10 @@ impl AppShell {
             })
             .detach();
 
+        // The clipboard countdown lives in the app-wide clipboard service,
+        // which notifies once a second while a clear is pending.
+        let clipboard = ClipboardService::handle(cx);
+
         let _subscriptions = vec![
             cx.observe_in(&state, window, |shell: &mut AppShell, state, window, cx| {
                 // Re-render whenever AppState notifies AND keep the
@@ -562,6 +532,7 @@ impl AppShell {
                 }
                 shell.schedule_automatic_biometric_unlock(window, cx);
             }),
+            cx.observe(&clipboard, |_shell: &mut AppShell, _, cx| cx.notify()),
         ];
 
         // Sweep launch payloads orphaned by a previous crash. We only
@@ -615,12 +586,6 @@ impl AppShell {
             pending_group_delete: None,
             disconnect_armed: false,
             totp_tick: None,
-            clipboard_clear_task: None,
-            pending_clipboard_write: None,
-            #[cfg(not(target_os = "macos"))]
-            next_portable_clipboard_write: 0,
-            clipboard_clear_deadline: None,
-            clipboard_pill_tick: None,
             revealed_entry_id: None,
             secret_context_path,
             secret_context_was_open,
@@ -796,3 +761,5 @@ fn copy_value_label(kind: CopyValueKind) -> &'static str {
 
 #[cfg(test)]
 mod characterization_tests;
+#[cfg(test)]
+mod clipboard_tests;

@@ -335,14 +335,12 @@ impl AppShell {
         );
     }
 
-    /// Drop reveal state, cancel timers, and clear the clipboard write owned
-    /// by this shell without retaining or comparing the copied secret.
+    /// Drop reveal state, clear our clipboard copy if it is still the newest
+    /// thing on the clipboard, and delete pending launch payloads. Nothing
+    /// here retains or compares the copied secret.
     pub(super) fn wipe_session_secrets(&mut self, cx: &mut Context<Self>) {
         self.revealed_entry_id = None;
-        self.clear_owned_clipboard(cx);
-        self.clipboard_clear_task = None;
-        self.clipboard_clear_deadline = None;
-        self.clipboard_pill_tick = None;
+        crate::app::services::clipboard::clear_owned(cx);
         // Drop any pending launch payloads - each handle's Drop unlinks
         // its file. Cancel the cleanup timers since we just did the
         // cleanup ourselves. Then purge the launch tempdir for good
@@ -351,24 +349,5 @@ impl AppShell {
         self.pending_launches.clear();
         self.launch_cleanup_tasks.clear();
         crate::launch::sweeper::purge_all();
-    }
-
-    pub(super) fn clear_owned_clipboard(&mut self, _cx: &mut Context<Self>) {
-        let Some(write) = self.pending_clipboard_write.take() else {
-            return;
-        };
-        match write {
-            #[cfg(target_os = "macos")]
-            PendingClipboardWrite::Native(change_count) => {
-                let _ = clear_if_unchanged(change_count);
-            }
-            #[cfg(not(target_os = "macos"))]
-            PendingClipboardWrite::Portable(_) => {
-                // GPUI has no portable clipboard generation. Clearing is
-                // unconditional here, but only while our opaque write token
-                // is still current; no secret is retained for comparison.
-                _cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-            }
-        }
     }
 }

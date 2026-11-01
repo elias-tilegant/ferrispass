@@ -39,6 +39,11 @@
 //!    counts every read (`start_path_never_reads_content`), and a scan in
 //!    `tests/architecture.rs` keeps the content readers of `NSPasteboard`
 //!    out of the clipboard code outside its tests.
+//! 8. Every lock ends in [`clear_owned`]: the main window's lock, and the
+//!    shell's state observer, which wipes whenever the open vault closes or
+//!    changes. Closing the window and the idle and screen locks get there
+//!    through the observer (`lock_clears_clipboard_ownership` in
+//!    `src/ui/legacy/shell/clipboard_tests.rs`).
 //!
 //! The service remembers the generation its write created, never the secret.
 //!
@@ -47,7 +52,15 @@
 //! prompt at every launch teaches people to click it away. Asking for types
 //! and the access setting shows nothing, and with any setting other than
 //! "Always Allow" the check does not even do that much. A copy left behind
-//! under those settings is still concealed, transient and kept to this Mac.
+//! under those settings stays until something else is copied; it is still
+//! concealed, transient and kept to this Mac.
+//!
+//! The marker type is the only sign of ownership a new launch has: the
+//! generation of an earlier run's write is not kept anywhere. Any app can put
+//! an item with that type on the clipboard, and with "Always Allow" a launch
+//! clears it. That costs the other app the item it labelled as ours and
+//! nothing else, and a clipboard history tool that puts one of our items
+//! back gets it cleared, which is the point.
 
 use crate::clipboard::{
     AccessBehavior, ClipboardChangeCount, ClipboardError, Pasteboard, SystemPasteboard,
