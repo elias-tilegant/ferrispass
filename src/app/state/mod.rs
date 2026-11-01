@@ -167,6 +167,11 @@ pub(crate) fn stalled_save_vault() -> Option<String> {
 #[derive(Debug)]
 pub struct AppState {
     vault: VaultStatus,
+    /// The entry the user last picked by hand, with the list it was picked
+    /// in; see `selection_is_explicit`. Cleared when the app selects a first
+    /// row itself and when the active vault changes (`park_active`,
+    /// `begin_open`), so nothing carries over to another vault or session.
+    explicit_selection: Option<select::ExplicitChoice>,
     /// Identity of the currently-active `VaultStatus::Open`. Kept outside the
     /// public enum so this internal race guard does not widen its public API.
     active_vault_session_id: Option<VaultSessionId>,
@@ -602,6 +607,7 @@ impl Default for AppState {
         // this in `with_resume` via `default_store()`.
         Self {
             vault: VaultStatus::default(),
+            explicit_selection: None,
             active_vault_session_id: None,
             auto_type_cancellation: CancellationToken::new(),
             overlay: Overlay::default(),
@@ -1268,6 +1274,9 @@ mod biometric_tests;
 
 #[cfg(test)]
 mod selection_tests;
+
+#[cfg(test)]
+mod search_tests;
 
 #[cfg(test)]
 mod characterization_tests;

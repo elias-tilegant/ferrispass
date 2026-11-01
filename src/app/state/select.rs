@@ -1,7 +1,26 @@
 //! Selection, search, copying values, and the model the vault browser
 //! renders.
+//!
+//! Most of the time the app picks the selected row itself: the first row on
+//! opening a vault, on a new group or library view and on every new or
+//! changed search, and after edits and sync merges the row it had or else
+//! the first. Only `select_entry` records a row the user picked by hand, and
+//! `selection_is_explicit` tells the two apart.
+
+use std::rc::Weak;
 
 use super::*;
+
+/// An entry the user picked by hand, and the list they picked it in.
+#[derive(Debug)]
+pub(super) struct ExplicitChoice {
+    entry_id: String,
+    /// The `visible_entries` list the choice was made in. Every place that
+    /// rebuilds the list puts a new `Rc` there, so a rebuilt list never
+    /// matches. Holding a `Weak` keeps the old allocation, so its address
+    /// cannot be reused by a later list while the choice is held.
+    list: Weak<Vec<VaultEntry>>,
+}
 
 impl AppState {
     pub fn select_group(&mut self, group_id: impl Into<String>, cx: &mut Context<Self>) {
@@ -34,6 +53,7 @@ impl AppState {
             .as_deref()
             .and_then(|id| document.strength_for_entry(id));
         *visible_entries = Rc::new(entries);
+        self.explicit_selection = None;
         cx.notify();
     }
 
@@ -62,15 +82,20 @@ impl AppState {
             .as_deref()
             .and_then(|id| document.strength_for_entry(id));
         *visible_entries = Rc::new(entries);
+        self.explicit_selection = None;
         cx.notify();
     }
 
+    /// Select an entry the user picked by hand: a click on its row, and later
+    /// the arrow keys and Command-1 to 9. The choice counts as explicit until
+    /// the list it was made in is rebuilt or the active vault changes.
     pub fn select_entry(&mut self, entry_id: impl Into<String>, cx: &mut Context<Self>) {
         let entry_id = entry_id.into();
 
         let VaultStatus::Open {
             document,
             selected_entry_id,
+            visible_entries,
             selected_strength,
             ..
         } = &mut self.vault
@@ -80,9 +105,42 @@ impl AppState {
 
         if document.snapshot().find_entry(&entry_id).is_some() {
             *selected_strength = document.strength_for_entry(&entry_id);
+            self.explicit_selection = Some(ExplicitChoice {
+                entry_id: entry_id.clone(),
+                list: Rc::downgrade(visible_entries),
+            });
             *selected_entry_id = Some(entry_id);
             cx.notify();
         }
+    }
+
+    /// Whether the row the list shows as selected is one the user picked by
+    /// hand, rather than the first row the app selected for them. Anything
+    /// that acts on the selection without asking, like Return on a
+    /// production system, can tell the two apart with this.
+    ///
+    /// True only when all three hold:
+    ///
+    /// - a vault is open and the list shows a selected row. With nothing
+    ///   shown there is nothing to have chosen, even when no choice is
+    ///   recorded either;
+    /// - that row is the entry the user picked. The row shown is what counts,
+    ///   not `selected_entry_id`, which can point at an entry that left the
+    ///   list while the first row is shown in its place (`shown_entry_id`);
+    /// - the list is the very one the choice was made in. Whatever rebuilds
+    ///   the list (a search, a group, an edit, a sync merge) makes the first
+    ///   row the app's pick again, even when it is the same entry.
+    pub fn selection_is_explicit(&self) -> bool {
+        let VaultStatus::Open {
+            visible_entries, ..
+        } = &self.vault
+        else {
+            return false;
+        };
+        let (Some(shown), Some(choice)) = (self.shown_entry_id(), &self.explicit_selection) else {
+            return false;
+        };
+        choice.entry_id == shown && Weak::ptr_eq(&choice.list, &Rc::downgrade(visible_entries))
     }
 
     pub fn set_search_query(&mut self, query: impl Into<String>, cx: &mut Context<Self>) {
@@ -109,18 +167,15 @@ impl AppState {
         *search_query = query;
         let entries =
             entries_for_selection(document.snapshot(), selection, search_query, last_used);
-        let selected_entry_is_visible = selected_entry_id
+        // Every new query starts on its best match, even when the entry
+        // selected before is still in the list: typing more is asking for
+        // something else.
+        *selected_entry_id = entries.first().map(|entry| entry.id.clone());
+        *selected_strength = selected_entry_id
             .as_deref()
-            .is_some_and(|id| entries.iter().any(|entry| entry.id == id));
-
-        if !selected_entry_is_visible {
-            *selected_entry_id = entries.first().map(|entry| entry.id.clone());
-            *selected_strength = selected_entry_id
-                .as_deref()
-                .and_then(|id| document.strength_for_entry(id));
-        }
-
+            .and_then(|id| document.strength_for_entry(id));
         *visible_entries = Rc::new(entries);
+        self.explicit_selection = None;
         cx.notify();
     }
 
@@ -150,6 +205,7 @@ impl AppState {
             .as_deref()
             .and_then(|id| document.strength_for_entry(id));
         *visible_entries = Rc::new(entries);
+        self.explicit_selection = None;
         cx.notify();
     }
 
