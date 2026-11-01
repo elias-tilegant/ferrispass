@@ -2,6 +2,7 @@ pub mod actions;
 pub mod assets;
 
 mod recents;
+pub mod registry;
 mod search;
 pub mod settings;
 mod state;
