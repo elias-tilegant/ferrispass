@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use gpui::Keystroke;
 
+use super::Enablement::{Enabled, Hidden};
 use super::*;
 use crate::i18n::{Language, catalogue_text};
 
@@ -198,5 +199,420 @@ fn touches_secret_needs_an_entry_target() {
             "{}: a command that touches a secret acts on the selected entry",
             id(spec)
         );
+    }
+}
+
+// ---------------------------------------------------------- availability --
+
+const PRD_SELECT_FIRST: Enablement = Enablement::Disabled("quick.footer.prd_select_first");
+
+const KINDS: [SelectedKind; 4] = [
+    SelectedKind::Sap { production: false },
+    SelectedKind::Sap { production: true },
+    SelectedKind::Remote,
+    SelectedKind::Web,
+];
+const URLS: [UrlKind; 3] = [UrlKind::Empty, UrlKind::Web, UrlKind::Other];
+const BOTH: [bool; 2] = [false, true];
+
+/// An entry of this kind with everything a command could ask for, selected
+/// because it came first.
+fn full(kind: SelectedKind) -> Selection {
+    Selection {
+        kind,
+        explicit: false,
+        url: UrlKind::Web,
+        has_otp: true,
+        has_username: true,
+    }
+}
+
+fn ctx(locked: bool, query_empty: bool, selection: Option<Selection>) -> CommandCtx {
+    CommandCtx {
+        locked,
+        query_empty,
+        selection,
+    }
+}
+
+/// Every selection the context can describe, and none.
+fn every_selection() -> Vec<Option<Selection>> {
+    let mut all = vec![None];
+    for kind in KINDS {
+        for explicit in BOTH {
+            for url in URLS {
+                for has_otp in BOTH {
+                    for has_username in BOTH {
+                        all.push(Some(Selection {
+                            kind,
+                            explicit,
+                            url,
+                            has_otp,
+                            has_username,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    all
+}
+
+/// Every context: each selection, locked or not, with and without a search.
+fn every_ctx() -> Vec<CommandCtx> {
+    let mut all = Vec::new();
+    for locked in BOTH {
+        for query_empty in BOTH {
+            for selection in every_selection() {
+                all.push(ctx(locked, query_empty, selection));
+            }
+        }
+    }
+    all
+}
+
+fn enablement(command_id: CommandId, ctx: &CommandCtx) -> Enablement {
+    let spec = command(command_id)
+        .unwrap_or_else(|| panic!("{} is not in the table", command_id.as_str()));
+    (spec.enabled)(ctx)
+}
+
+fn shown(surface: Surface, ctx: &CommandCtx) -> Vec<(&'static str, Enablement)> {
+    for_surface(surface, ctx)
+        .map(|(spec, enablement)| (id(spec), enablement))
+        .collect()
+}
+
+fn entry_commands() -> Vec<&'static CommandSpec> {
+    commands()
+        .iter()
+        .filter(|spec| spec.target == TargetKind::Entry)
+        .collect()
+}
+
+#[test]
+fn primary_action_by_kind() {
+    for (kind, main) in [
+        (
+            SelectedKind::Sap { production: false },
+            CommandId::ENTRY_SAP_LOGIN,
+        ),
+        (
+            SelectedKind::Sap { production: true },
+            CommandId::ENTRY_SAP_LOGIN,
+        ),
+        (SelectedKind::Web, CommandId::ENTRY_OPEN_WEBSITE),
+        (SelectedKind::Remote, CommandId::ENTRY_COPY_PASSWORD),
+    ] {
+        assert_eq!(primary_command(&kind), main, "{kind:?}");
+        assert_eq!(
+            command(main).map(|spec| spec.target),
+            Some(TargetKind::Entry)
+        );
+        // Picked from a search, the main action is there, and the other
+        // kinds' main actions are not.
+        let picked = ctx(false, false, Some(full(kind)));
+        assert_eq!(enablement(main, &picked), Enabled, "{kind:?}");
+        let sap = matches!(kind, SelectedKind::Sap { .. });
+        let web = kind == SelectedKind::Web;
+        assert_eq!(
+            enablement(CommandId::ENTRY_SAP_LOGIN, &picked),
+            if sap { Enabled } else { Hidden },
+            "{kind:?}"
+        );
+        assert_eq!(
+            enablement(CommandId::ENTRY_OPEN_WEBSITE, &picked),
+            if web { Enabled } else { Hidden },
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn prd_rule_holds_for_every_input() {
+    // The rule over the four inputs it reads, for an SAP system.
+    for locked in BOTH {
+        for query_empty in BOTH {
+            for production in BOTH {
+                for explicit in BOTH {
+                    let expected = match (locked, query_empty, production, explicit) {
+                        (true, _, _, _) => Hidden,
+                        (false, true, true, false) => PRD_SELECT_FIRST,
+                        _ => Enabled,
+                    };
+                    let selection = Selection {
+                        explicit,
+                        ..full(SelectedKind::Sap { production })
+                    };
+                    assert_eq!(
+                        enablement(
+                            CommandId::ENTRY_PRIMARY,
+                            &ctx(locked, query_empty, Some(selection))
+                        ),
+                        expected,
+                        "locked {locked}, empty search {query_empty}, \
+                         production {production}, picked {explicit}"
+                    );
+                }
+            }
+        }
+    }
+    // Nothing else changes the outcome: not the kind, the address, the code
+    // or the user name. Without a selection there is nothing to act on.
+    for ctx in every_ctx() {
+        let expected = match ctx.selection {
+            _ if ctx.locked => Hidden,
+            None => Hidden,
+            Some(selection)
+                if ctx.query_empty
+                    && matches!(selection.kind, SelectedKind::Sap { production: true })
+                    && !selection.explicit =>
+            {
+                PRD_SELECT_FIRST
+            }
+            Some(_) => Enabled,
+        };
+        assert_eq!(
+            enablement(CommandId::ENTRY_PRIMARY, &ctx),
+            expected,
+            "{ctx:?}"
+        );
+    }
+}
+
+#[test]
+fn only_entry_primary_takes_return() {
+    // The rule for production systems sits on entry.primary. Any other
+    // command on plain Return would get past it.
+    let enter = Keystroke::parse("enter").expect("enter parses");
+    for spec in commands() {
+        for key in spec.keys {
+            if parsed(spec, key) == enter {
+                assert_eq!(
+                    spec.id,
+                    CommandId::ENTRY_PRIMARY,
+                    "{} takes Return",
+                    id(spec)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_disabled_reason_exists() {
+    let mut reasons = BTreeSet::new();
+    for ctx in every_ctx() {
+        for spec in commands() {
+            if let Enablement::Disabled(reason) = (spec.enabled)(&ctx) {
+                reasons.insert(reason);
+            }
+        }
+    }
+    assert!(!reasons.is_empty(), "no command is ever disabled");
+    for reason in reasons {
+        for language in Language::ALL {
+            let text = catalogue_text(language, reason)
+                .unwrap_or_else(|| panic!("`{reason}` is not in locales/"));
+            // A surface shows the reason as it is, with nothing to fill in.
+            assert!(!text.contains("%{"), "`{reason}` has a placeholder");
+        }
+    }
+}
+
+#[test]
+fn locked_hides_every_entry_command() {
+    let entry_commands = entry_commands();
+    assert!(!entry_commands.is_empty());
+    for ctx in every_ctx().into_iter().filter(|ctx| ctx.locked) {
+        for spec in &entry_commands {
+            assert_eq!((spec.enabled)(&ctx), Hidden, "{} while locked", id(spec));
+        }
+        // What a locked panel still offers.
+        assert_eq!(
+            shown(Surface::Panel, &ctx),
+            [("app.settings", Enabled), ("panel.close", Enabled)],
+            "{ctx:?}"
+        );
+    }
+}
+
+#[test]
+fn no_selection_hides_every_entry_command() {
+    for query_empty in BOTH {
+        let nothing = ctx(false, query_empty, None);
+        for spec in entry_commands() {
+            assert_eq!((spec.enabled)(&nothing), Hidden, "{}", id(spec));
+        }
+        assert_eq!(
+            shown(Surface::Panel, &nothing),
+            [
+                ("app.lock_all", Enabled),
+                ("app.settings", Enabled),
+                ("panel.close", Enabled)
+            ]
+        );
+    }
+}
+
+#[test]
+fn copy_code_needs_otp() {
+    for kind in KINDS {
+        for has_otp in BOTH {
+            let selection = Selection {
+                has_otp,
+                ..full(kind)
+            };
+            assert_eq!(
+                enablement(
+                    CommandId::ENTRY_COPY_CODE,
+                    &ctx(false, false, Some(selection))
+                ),
+                if has_otp { Enabled } else { Hidden },
+                "{kind:?}, one-time code {has_otp}"
+            );
+        }
+    }
+}
+
+#[test]
+fn copy_username_needs_a_user_name() {
+    for kind in KINDS {
+        for has_username in BOTH {
+            let selection = Selection {
+                has_username,
+                ..full(kind)
+            };
+            assert_eq!(
+                enablement(
+                    CommandId::ENTRY_COPY_USERNAME,
+                    &ctx(false, false, Some(selection))
+                ),
+                if has_username { Enabled } else { Hidden },
+                "{kind:?}, user name {has_username}"
+            );
+        }
+    }
+}
+
+#[test]
+fn open_url_needs_http_or_https() {
+    for (url, kind) in [
+        ("https://example.com", UrlKind::Web),
+        ("http://example.com/login", UrlKind::Web),
+        ("HTTPS://EXAMPLE.COM", UrlKind::Web),
+        ("  https://example.com  ", UrlKind::Web),
+        // Without a scheme it opens as https, as in the main window.
+        ("github.com/login", UrlKind::Web),
+        ("ftp://example.com", UrlKind::Other),
+        ("javascript:alert(1)", UrlKind::Other),
+        ("file:///etc/hosts", UrlKind::Other),
+        ("mailto:it@example.com", UrlKind::Other),
+        ("http://", UrlKind::Other),
+        ("not an address", UrlKind::Other),
+        ("", UrlKind::Empty),
+        ("   ", UrlKind::Empty),
+    ] {
+        assert_eq!(UrlKind::of(url), kind, "{url:?}");
+        let selection = Selection {
+            url: UrlKind::of(url),
+            ..full(SelectedKind::Web)
+        };
+        let picked = ctx(false, false, Some(selection));
+        assert_eq!(
+            enablement(CommandId::ENTRY_OPEN_URL, &picked),
+            if kind == UrlKind::Web {
+                Enabled
+            } else {
+                Hidden
+            },
+            "open {url:?}"
+        );
+        // Any address can be copied.
+        assert_eq!(
+            enablement(CommandId::ENTRY_COPY_URL, &picked),
+            if kind == UrlKind::Empty {
+                Hidden
+            } else {
+                Enabled
+            },
+            "copy {url:?}"
+        );
+    }
+}
+
+#[test]
+fn status_menu_has_exactly_the_five_items() {
+    let five = [
+        ("app.quick_access", Enabled),
+        ("app.open", Enabled),
+        ("app.lock_all", Enabled),
+        ("app.settings", Enabled),
+        ("app.quit", Enabled),
+    ];
+    for query_empty in BOTH {
+        for selection in every_selection() {
+            assert_eq!(
+                shown(Surface::StatusMenu, &ctx(false, query_empty, selection)),
+                five
+            );
+        }
+    }
+    // Locked, there is nothing to lock.
+    let locked: Vec<(&str, Enablement)> = five
+        .into_iter()
+        .filter(|(command_id, _)| *command_id != "app.lock_all")
+        .collect();
+    for selection in every_selection() {
+        assert_eq!(
+            shown(Surface::StatusMenu, &ctx(true, true, selection)),
+            locked
+        );
+    }
+}
+
+#[test]
+fn panel_more_lists_every_panel_command() {
+    let panel: Vec<&str> = commands()
+        .iter()
+        .filter(|spec| spec.surfaces.contains(&Surface::Panel))
+        .map(id)
+        .collect();
+    assert_eq!(
+        panel,
+        [
+            "entry.primary",
+            "entry.copy_password",
+            "entry.copy_username",
+            "entry.copy_code",
+            "entry.copy_url",
+            "entry.open_url",
+            "entry.show_in_app",
+            "app.lock_all",
+            "app.settings",
+            "panel.close",
+        ]
+    );
+    // For an entry that has everything, the panel's list of all commands
+    // offers every one of them, picked or not, with or without a search.
+    // Only the main action can be disabled, by the rule for production
+    // systems.
+    for kind in KINDS {
+        for explicit in BOTH {
+            for query_empty in BOTH {
+                let selection = Selection {
+                    explicit,
+                    ..full(kind)
+                };
+                let listed = shown(Surface::Panel, &ctx(false, query_empty, Some(selection)));
+                let ids: Vec<&str> = listed.iter().map(|(command_id, _)| *command_id).collect();
+                assert_eq!(ids, panel, "{selection:?}, empty search {query_empty}");
+                for (command_id, enablement) in listed {
+                    if command_id != "entry.primary" {
+                        assert_eq!(enablement, Enabled, "{command_id}, {selection:?}");
+                    }
+                }
+            }
+        }
     }
 }

@@ -1,7 +1,10 @@
 //! The table. A new command gets a name below, a row in `COMMANDS` and a
 //! label in `locales/action.yml`; the tests check that the three agree.
 
-use super::{CommandId, CommandSpec, Surface, TargetKind};
+use super::{
+    CommandCtx, CommandId, CommandSpec, Enablement, SelectedKind, Selection, Surface, TargetKind,
+    UrlKind,
+};
 use crate::tr;
 
 impl CommandId {
@@ -33,6 +36,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["enter"],
         surfaces: &[Surface::Panel],
         target: TargetKind::Entry,
+        enabled: primary,
         touches_secret: true,
     },
     // The main actions of SAP systems and web logins. They have no keys and
@@ -45,6 +49,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &[],
         surfaces: &[],
         target: TargetKind::Entry,
+        enabled: sap_system,
         touches_secret: true,
     },
     CommandSpec {
@@ -54,6 +59,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &[],
         surfaces: &[],
         target: TargetKind::Entry,
+        enabled: web_login,
         touches_secret: false,
     },
     CommandSpec {
@@ -63,6 +69,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["cmd-c"],
         surfaces: &[Surface::Panel],
         target: TargetKind::Entry,
+        enabled: any_entry,
         touches_secret: true,
     },
     CommandSpec {
@@ -72,6 +79,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["cmd-shift-c"],
         surfaces: &[Surface::Panel],
         target: TargetKind::Entry,
+        enabled: with_username,
         touches_secret: false,
     },
     CommandSpec {
@@ -81,6 +89,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["alt-cmd-c"],
         surfaces: &[Surface::Panel],
         target: TargetKind::Entry,
+        enabled: with_one_time_code,
         touches_secret: true,
     },
     CommandSpec {
@@ -90,6 +99,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["cmd-shift-l"],
         surfaces: &[Surface::Panel],
         target: TargetKind::Entry,
+        enabled: with_address,
         touches_secret: false,
     },
     CommandSpec {
@@ -99,6 +109,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["alt-enter"],
         surfaces: &[Surface::Panel],
         target: TargetKind::Entry,
+        enabled: with_web_address,
         touches_secret: false,
     },
     CommandSpec {
@@ -108,6 +119,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["cmd-o"],
         surfaces: &[Surface::Panel],
         target: TargetKind::Entry,
+        enabled: any_entry,
         touches_secret: false,
     },
     // The menu bar item's menu lists the commands it offers in this order.
@@ -118,6 +130,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &[],
         surfaces: &[Surface::StatusMenu],
         target: TargetKind::None,
+        enabled: always,
         touches_secret: false,
     },
     CommandSpec {
@@ -127,8 +140,11 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &[],
         surfaces: &[Surface::StatusMenu],
         target: TargetKind::None,
+        enabled: always,
         touches_secret: false,
     },
+    // Hidden rather than disabled while everything is locked: there is
+    // nothing to lock, and nothing to explain.
     CommandSpec {
         id: CommandId::APP_LOCK_ALL,
         label_key: "action.lock_all.label",
@@ -136,6 +152,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["cmd-l"],
         surfaces: &[Surface::Panel, Surface::StatusMenu],
         target: TargetKind::None,
+        enabled: unlocked,
         touches_secret: false,
     },
     CommandSpec {
@@ -145,6 +162,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["cmd-,"],
         surfaces: &[Surface::Panel, Surface::StatusMenu],
         target: TargetKind::None,
+        enabled: always,
         touches_secret: false,
     },
     CommandSpec {
@@ -154,6 +172,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["cmd-q"],
         surfaces: &[Surface::StatusMenu],
         target: TargetKind::None,
+        enabled: always,
         touches_secret: false,
     },
     CommandSpec {
@@ -163,6 +182,82 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         keys: &["cmd-w", "escape"],
         surfaces: &[Surface::Panel],
         target: TargetKind::Window,
+        enabled: always,
         touches_secret: false,
     },
 ];
+
+/// The reason Return does nothing on a production system from an empty
+/// search. Quick Access shows it in its footer.
+const SELECT_PRODUCTION_FIRST: &str = "quick.footer.prd_select_first";
+
+/// From an empty search, Return never acts on a production system the user
+/// has not picked. Typing in the search lifts the rule, and so does picking
+/// the row with the arrow keys or Cmd+1 to Cmd+9. A production system that
+/// is selected because it came first, or because it is the only match,
+/// stays behind it.
+fn primary(ctx: &CommandCtx) -> Enablement {
+    let Some(selection) = entry(ctx) else {
+        return Enablement::Hidden;
+    };
+    if ctx.query_empty && selection.kind.is_production() && !selection.explicit {
+        Enablement::Disabled(SELECT_PRODUCTION_FIRST)
+    } else {
+        Enablement::Enabled
+    }
+}
+
+/// The selected entry, while the app is unlocked. Every command on an entry
+/// starts here, so none of them is offered while the app is locked.
+fn entry(ctx: &CommandCtx) -> Option<&Selection> {
+    if ctx.locked {
+        None
+    } else {
+        ctx.selection.as_ref()
+    }
+}
+
+fn shown_if(applies: bool) -> Enablement {
+    if applies {
+        Enablement::Enabled
+    } else {
+        Enablement::Hidden
+    }
+}
+
+fn sap_system(ctx: &CommandCtx) -> Enablement {
+    shown_if(entry(ctx).is_some_and(|selection| matches!(selection.kind, SelectedKind::Sap { .. })))
+}
+
+fn web_login(ctx: &CommandCtx) -> Enablement {
+    shown_if(entry(ctx).is_some_and(|selection| selection.kind == SelectedKind::Web))
+}
+
+fn any_entry(ctx: &CommandCtx) -> Enablement {
+    shown_if(entry(ctx).is_some())
+}
+
+fn with_username(ctx: &CommandCtx) -> Enablement {
+    shown_if(entry(ctx).is_some_and(|selection| selection.has_username))
+}
+
+fn with_one_time_code(ctx: &CommandCtx) -> Enablement {
+    shown_if(entry(ctx).is_some_and(|selection| selection.has_otp))
+}
+
+fn with_address(ctx: &CommandCtx) -> Enablement {
+    shown_if(entry(ctx).is_some_and(|selection| selection.url != UrlKind::Empty))
+}
+
+/// Only http and https addresses are opened.
+fn with_web_address(ctx: &CommandCtx) -> Enablement {
+    shown_if(entry(ctx).is_some_and(|selection| selection.url == UrlKind::Web))
+}
+
+fn unlocked(ctx: &CommandCtx) -> Enablement {
+    shown_if(!ctx.locked)
+}
+
+fn always(_: &CommandCtx) -> Enablement {
+    Enablement::Enabled
+}
