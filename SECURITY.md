@@ -41,6 +41,8 @@ What FerrisPass promises from the release in the second column on. A build that 
 | Rule | Since |
 |---|---|
 | Every copy of a secret goes through one clipboard path: concealed, transient, this Mac only, cleared after the timer, at lock, at quit and at launch; only unchanged clipboard contents are ever cleared, and the launch check reads types, never contents. The launch check only looks when "Paste from Other Apps" is set to Always Allow for FerrisPass; with any other setting it leaves the clipboard alone, so macOS never asks | the redesign release |
+| While the master password field has focus, secure event input is on, so other programs do not see the keystrokes; it is released on blur, window deactivation, lock, quit and panic | the redesign release |
+| New `unsafe` code lives only in audited modules under `src/platform/`, listed under [Unsafe code](#unsafe-code) | the redesign release |
 
 ## Supported versions
 
@@ -64,6 +66,21 @@ The two signatures cover different things and different routes. A DMG downloaded
 An update the running app installs is the other way round: the archive's minisign signature is checked before anything is unpacked, and the staged bundle is then checked for shape, not for an Apple signature. Gatekeeper checks the replacement on the next launch, so a bundle that is not properly signed fails then rather than at install time. Verifying it at install time is in the backlog.
 
 So an attacker needs the minisign key to push an update the app installs, and Apple's signing infrastructure to get past Gatekeeper afterwards. Neither key alone gets a malicious build both installed and running.
+
+## Unsafe code
+
+The crate denies `unsafe_code`. The places below opt in, each for a system API that our dependencies offer no safe way to call. `tests/architecture.rs` keeps the same list and fails the build when an opt-in appears or disappears without it. New `unsafe` code goes only into its own module under `src/platform/`, with the reason in the module header.
+
+| Where | Why |
+|---|---|
+| `src/platform/secure_input.rs` | Carbon secure event input around the master password field; a guard that releases on blur, window deactivation, lock, quit and panic |
+| `src/biometric/macos.rs` | the LocalAuthentication bindings mark ordinary calls `unsafe`: creating the context, `evaluatePolicy` for the Touch ID prompt, and reading the error in its reply |
+| `src/session_lock.rs` | an Objective-C observer for the screen lock, sleep and user switch notifications, so the vault locks when the Mac does |
+| `src/update/macos_installer.rs` | `renamex_np` with `RENAME_SWAP`, which swaps the old and the new app bundle in one step, so an interrupted update never leaves the user with neither |
+| `src/launch/tempfile.rs`, `process_uid` | `getuid`, to check that the folder for launch payloads belongs to the current user |
+| `src/keepass/document.rs`, `publish_new_no_clobber` | `renamex_np` with `RENAME_EXCL`, which puts a new vault file in place without replacing a file that appeared in the meantime |
+| `src/keepass/document.rs`, `macos_full_sync` | `fcntl` with `F_FULLFSYNC`, so a saved vault is on the disk and not only in the drive's cache |
+| `src/sync/icloud.rs`, `platform` | resolving a stored bookmark and using the URL `NSFileCoordinator` hands to its block, for vaults in iCloud Drive; the bindings mark both `unsafe` |
 
 ## Master-password handling - what FerrisPass does and doesn't do
 
