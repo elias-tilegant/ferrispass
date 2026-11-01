@@ -21,7 +21,7 @@ There is no build script. A golden test generates each file again and compares i
 - `primitives`: the raw colors. A name is the color family plus its OKLCH lightness times 1000, so `sand.974` has lightness 0.974 and the names sort from dark to light. Each one has its hex value, which is what ships, and its OKLCH coordinates, where new steps are designed: move the lightness, keep chroma and hue, lower the chroma if the color leaves sRGB, then freeze it as hex. A test checks that both describe the same color.
 - `semantic`: what UI code reads, per mode. The modes are `light`, `dark`, `light-hc` and `dark-hc` (increased contrast in macOS). A token without its own `-hc` value keeps the value of its base mode.
 - `aliases`, `brand`, `components`: fixed names for one use, colors for brand graphics only, and the places where a component departs from the semantic layer.
-- `elevation`, `dimensions`, `typography`: shadows, sizes in points at text size 13, and the text styles. The typography is data only for now.
+- `elevation`, `dimensions`, `typography`: shadows, sizes in points at text size 13, and the text styles. `src/ui/ds/typography.rs` spells the text styles out as `TextStyle`, and a test holds it to this section.
 - `contrast`, `exempt`, `neutral_family`, `hue_separation`: what the tests in `src/ui/ds/tokens/contrast.rs` hold the colors to.
 - `kit`: how the tokens map onto the color keys of GPUI Kit.
 - `css_aliases`: the variable names the HTML mockups use for some tokens.
@@ -53,10 +53,26 @@ The vault colors follow the same table: `team.teal` is `team.petrol` in the desi
 - The Kit's `accent` is its hover color in menus and lists, not an accent color. Copper is `primary`.
 - `switch.background` is the track of a switch that is off. The Kit paints a switch that is on in `primary` unless the control sets its own color, and a switch that is on is never copper here, so a Kit switch has to be given `switch.on.bg` where it is used.
 
-Two settings stay out of the theme set for now:
+`font.size` stays out of the theme set. The Kit applies it on every theme change, over whatever text size the app set. The app sets the text size after each change instead.
 
-- `font.size`. The Kit applies it on every theme change, over whatever text size the app set. The app sets the text size after each change instead.
-- The mono font is still JetBrains Mono, because it is the only monospace font the app ships today. GPUI gives up on the first layout in a font family that isn't there, so the theme can only name Atkinson Hyperlegible Mono once the app loads it.
+## Fonts
+
+The UI font is `.SystemUIFont`, which GPUI maps to the macOS system font. The theme set names it as `font.family`.
+
+Secrets, generated passwords and one-time codes are set in Atkinson Hyperlegible Mono, which the app bundles. It is the theme set's `mono_font.family`. The files are the static TTFs from `fonts/ttf/` of [googlefonts/atkinson-hyperlegible-next-mono](https://github.com/googlefonts/atkinson-hyperlegible-next-mono) at commit `154d50362016cc3e873eb21d242cd0772384c8f9`, unchanged:
+
+| File in `assets/fonts/` | Git blob in the upstream repository |
+|---|---|
+| `AtkinsonHyperlegibleMono-Regular.ttf` | `a55ce8b42877d04efc0d3b85b2477c06217f0f44` |
+| `AtkinsonHyperlegibleMono-Medium.ttf` | `9fe029edc20dcef55c0416a7a08025197aaaf11f` |
+
+`git hash-object` on a file gives its blob, so a copy can be checked against the repository. The license is the `OFL.txt` of the same commit, in `assets/licenses/OFL-AtkinsonHyperlegibleMono.txt`. It names no Reserved Font Name. The repository also has a variable font, but GPUI gets only one weight out of it, so the app ships one static file per weight and only the two weights the design uses.
+
+To move to a newer release, replace both files with the ones from `fonts/ttf/` at the new commit, without converting or subsetting them, take the `OFL.txt` of that commit, and update the commit and blobs above.
+
+If the font does not load, the app says so on stderr at startup and sets mono text in Menlo, which every Mac has. Without that, GPUI would draw it in Helvetica. The old screens still use JetBrains Mono, which the app also bundles until they are rebuilt.
+
+After changing `kit.settings` in `tokens.json`, `FP_UPDATE_GOLDEN=1 cargo test golden` writes the theme set again, like for any other value.
 
 ## The old screens
 

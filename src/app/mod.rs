@@ -84,8 +84,12 @@ pub fn run() {
 
     application.run(|cx| {
         let fonts = assets::font_bytes();
-        if !fonts.is_empty() {
-            let _ = cx.text_system().add_fonts(fonts);
+        if !fonts.is_empty()
+            && let Err(error) = cx.text_system().add_fonts(fonts)
+        {
+            // The app still starts: `ui::ds::init` below checks whether the
+            // mono font is there and falls back to Menlo if it is not.
+            eprintln!("ferrispass: could not load the bundled fonts: {error:#}");
         }
 
         gpui_component::init(cx);

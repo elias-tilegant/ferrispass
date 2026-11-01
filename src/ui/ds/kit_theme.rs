@@ -11,6 +11,7 @@ use gpui::{App, Global, Window, px};
 use gpui_component::{Theme, ThemeConfig, ThemeMode, ThemeSet};
 
 use super::tokens::Mode;
+use super::typography;
 use crate::app::settings::ThemeChoice;
 
 /// The theme set as the golden test wrote it.
@@ -85,10 +86,14 @@ pub(super) fn switch(
         ThemeChoice::Dark => Theme::change(ThemeMode::Dark, window, cx),
     }
     // A font size in the config would win on every change, so the theme set
-    // has none and the size goes in after the change.
+    // has none and the size goes in after the change. The theme set names
+    // Atkinson Hyperlegible Mono; if the app could not load it, the fallback
+    // goes in here too, or Kit controls would draw mono text in Helvetica.
+    let mono_family = typography::mono_family(cx);
     Theme::update(cx, |theme| {
         theme.font_size = px(text_size);
         theme.focus_ring = true;
+        theme.mono_font_family = mono_family.into();
     });
     Mode::new(Theme::global(cx).mode.is_dark(), increased_contrast)
 }
@@ -227,6 +232,29 @@ mod tests {
             );
             assert!(mode.increased_contrast());
             assert_kit_shows(mode, cx);
+        });
+    }
+
+    /// The theme set names Atkinson Hyperlegible Mono, and the test platform
+    /// knows no font at all. After a switch the Kit must not be left with a
+    /// mono family the text system does not have.
+    #[gpui::test]
+    fn a_missing_mono_font_never_reaches_the_kit(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            assert_eq!(typography::mono_family(cx), typography::MONO_FALLBACK);
+            for (choice, increased_contrast) in [
+                (ThemeChoice::Light, false),
+                (ThemeChoice::Dark, true),
+                (ThemeChoice::System, false),
+            ] {
+                switch(choice, increased_contrast, 13., None, cx);
+                assert_ne!(
+                    Theme::global(cx).mono_font_family.as_ref(),
+                    typography::MONO_FAMILY,
+                    "{choice:?}"
+                );
+            }
         });
     }
 }
