@@ -6,7 +6,6 @@ pub mod icons;
 #[allow(deprecated)]
 mod legacy;
 pub mod palette;
-pub mod theme;
 #[allow(deprecated)]
 pub mod widgets;
 

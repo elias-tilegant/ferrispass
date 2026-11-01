@@ -54,7 +54,7 @@ pub fn apply(cx: &mut App, appearance: Appearance) {
 
 /// Switches to `choice` with the current accessibility settings. `System`
 /// reads the appearance again, so this also handles a change in macOS while
-/// the app runs. Takes the same arguments as the old `theme::apply_choice`.
+/// the app runs.
 pub fn apply_choice(choice: ThemeChoice, window: Option<&mut Window>, cx: &mut App) {
     apply_in(Appearance::current(choice), window, cx);
 }

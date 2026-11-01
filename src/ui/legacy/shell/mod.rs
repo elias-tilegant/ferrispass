@@ -443,7 +443,7 @@ impl AppShell {
             .observe_window_appearance(|window, cx| {
                 let choice = crate::app::settings::load().theme;
                 if choice == crate::app::settings::ThemeChoice::System {
-                    crate::ui::theme::apply_choice(choice, Some(window), cx);
+                    crate::ui::ds::apply_choice(choice, Some(window), cx);
                 }
             })
             .detach();
