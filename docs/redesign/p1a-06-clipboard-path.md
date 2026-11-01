@@ -14,7 +14,8 @@ Started from `rebuild` at `8980fe9` on 2026-11-01.
 | `ae95e79` | SECURITY.md says which copies the contract covers |
 | `acf3876` | This page and the progress log |
 | `7e726c8` | A test for how each "Paste from Other Apps" value is read |
-| the last one | SECURITY.md back to the clipboard rule as `6ff7e91` wrote it; this page describes hand copies from the editor as open |
+| `5da7f72` | SECURITY.md back to the clipboard rule as `6ff7e91` wrote it; this page describes hand copies from the editor as open |
+| the last one | How to check by hand, and which check holds under which "Paste from Other Apps" setting |
 
 ## The one path
 
@@ -44,7 +45,7 @@ The three `org.nspasteboard` types are a convention that clipboard managers hono
 
 Clearing always compares the pasteboard generation first: if anything was copied after our copy, the clipboard is left alone. The service keeps that generation, never the secret.
 
-Each test below was checked by taking out the rule it names, and it failed every time. The removed lines and the failing output are in [PR #16](https://github.com/elias-tilegant/ferrispass/pull/16).
+Each test below was checked by breaking the rule it names, and it failed every time. The changed lines and the failing output are in [PR #16](https://github.com/elias-tilegant/ferrispass/pull/16).
 
 | When | What happens | Held by |
 |---|---|---|
@@ -76,9 +77,22 @@ Three things hold this:
 
 On a Mac where `accessBehavior` doesn't exist (before macOS 15.4) the check reports Default and does nothing. FerrisPass requires macOS 26, so this only matters for tests on older machines.
 
+## How to check by hand
+
+On a preview build, with the clear delay at its default of 10 seconds. `pbpaste` in Terminal shows what is on the clipboard.
+
+- Copy a password and wait 10 seconds: `pbpaste` prints nothing. Holds under every "Paste from Other Apps" setting.
+- Copy a password and quit with Cmd+Q before the 10 seconds are up: `pbpaste` prints nothing. Holds under every setting.
+- Copy a password, end FerrisPass with `kill -9` and start it again: with Always Allow, `pbpaste` prints nothing once FerrisPass is up. With Default, Ask or Always Deny it still prints the password. That is the gap described under Limits, not a failure.
+- Copy a word in TextEdit and start FerrisPass: `pbpaste` still prints the word. Holds under every setting.
+
+None of these should bring up a paste prompt for FerrisPass. Under Ask that is untested (SP13 in `docs/gpui-matrix.md` could not set it), so a prompt there is worth writing down.
+
+System Settings lists an app under "Paste from Other Apps" only after it has asked for access (also SP13), so FerrisPass may not show up there. In that case the third check shows which value FerrisPass reads: `pbpaste` comes back empty only with Always Allow.
+
 ## Limits
 
-- Most users never change "Paste from Other Apps", so for them the launch check does nothing. A copy left behind by a crash or `kill -9` stays on the clipboard until something else is copied. It is still concealed, transient and kept to this Mac, so a clipboard manager that honours the markers doesn't store it. On a preview build, the relaunch check (copy, `kill -9`, start FerrisPass, `pbpaste` is empty) only passes with FerrisPass set to Always Allow; with the default setting `pbpaste` still shows the password and no prompt appears.
+- Most users never change "Paste from Other Apps", so for them the launch check does nothing. A copy left behind by a crash or `kill -9` stays on the clipboard until something else is copied. It is still concealed, transient and kept to this Mac, so a clipboard manager that honours the markers doesn't store it. "How to check by hand" says what the relaunch check shows under each setting.
 - The marker type is the only sign of ownership a new launch has, because nothing keeps the generation of an earlier run's write. Any app can put an item with that type on the clipboard, and with Always Allow a launch clears it. That costs the other app the item it labelled as ours. Keeping the last generation on disk would close this and would also let the check work without the marker; it would add state to the app's data folder and is not part of this step.
 - Copying by hand out of the entry editor's unprotected fields goes around the service, as described under "The one path". Notes in particular sometimes hold things people would call secret. Whether the clipboard rule covers those copies is open. Bringing them under it means changing the editor's text fields in `src/ui/legacy/screens/` or `src/ui/widgets/secret_input.rs`, and every such hand copy would then be concealed and cleared after the timer. This step leaves the editor alone.
 - On platforms other than macOS the service falls back to GPUI's plain clipboard, as the main window did before. CI only builds for macOS, so that branch is not compiled there.
