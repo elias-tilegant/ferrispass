@@ -19,12 +19,15 @@
 //!
 //! 1. At most one Enable is outstanding, however many guards are alive. The
 //!    guards of the current generation are counted; Enable runs only when the
-//!    count goes from 0 to 1, Disable only when it goes from 1 to 0.
+//!    count goes from 0 to 1 and no Enable is outstanding, Disable only when
+//!    it goes from 1 to 0.
 //! 2. Every Enable gets its Disable: when the last guard drops, in
 //!    [`release_all`] (lock, quit), and in the panic hook. `release_all` sets
 //!    the count to zero and starts a new generation, and a guard from an
 //!    earlier generation does nothing when it drops, so it cannot switch off
-//!    a hold taken after the release.
+//!    a hold taken after the release. A Disable that fails leaves its Enable
+//!    outstanding: the next hold does not add another, and the next release
+//!    tries the Disable again.
 //! 3. Carbon is called on the main thread only. [`hold`] refuses on any other
 //!    thread, `release_all` does nothing there, and the panic hook releases
 //!    only when the panic is on the main thread. A panic on another thread
@@ -92,11 +95,17 @@ pub(crate) trait SecureInputApi: Sync {
     fn is_supported(&self) -> bool;
 }
 
-/// The count of live guards and the generation they belong to. Only ever
-/// read or written under the switch's lock.
+/// The count of live guards, the generation they belong to, and whether an
+/// Enable of ours is outstanding. Only ever read or written under the
+/// switch's lock.
 struct State {
     holders: usize,
     generation: u64,
+    /// An Enable that no successful Disable has matched yet. The same as
+    /// `holders > 0`, except after a Disable failed: then it stays set, so
+    /// the next hold does not stack a second Enable and the next release
+    /// tries the Disable again.
+    enabled: bool,
 }
 
 /// Counts the holders for one `SecureInputApi` and turns it on and off.
@@ -121,15 +130,16 @@ impl Switch {
             state: Mutex::new(State {
                 holders: 0,
                 generation: 0,
+                enabled: false,
             }),
             #[cfg(test)]
             notes: Mutex::new(Vec::new()),
         }
     }
 
-    /// Nothing panics while the lock is held, but if something ever did, the
-    /// count is still the last one written: every step changes it only after
-    /// the system call it stands for has returned.
+    /// Taken as it is even after a panic poisoned it. Nothing in this module
+    /// panics while holding the lock, and refusing every later hold and
+    /// release over a poisoned lock would be the worse outcome.
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -140,16 +150,17 @@ impl Switch {
             return Err(HoldError::OffMainThread);
         }
         let mut state = self.lock();
-        if state.holders == 0
-            && let Err(error) = self.api.enable()
-        {
-            drop(state);
-            if let HoldError::Os(status) = error {
-                self.note(&format!(
-                    "EnableSecureEventInput failed with {status}; the field is not protected"
-                ));
+        if !state.enabled {
+            if let Err(error) = self.api.enable() {
+                drop(state);
+                if let HoldError::Os(status) = error {
+                    self.note(&format!(
+                        "EnableSecureEventInput failed with {status}; the field is not protected"
+                    ));
+                }
+                return Err(error);
             }
-            return Err(error);
+            state.enabled = true;
         }
         state.holders += 1;
         Ok(SecureInputGuard {
@@ -171,7 +182,9 @@ impl Switch {
         // wrapping around and calls no Disable.
         let remaining = state.holders.checked_sub(1);
         state.holders = remaining.unwrap_or(0);
-        let disabled = (remaining == Some(0)).then(|| self.api.disable());
+        let disabled = (remaining == Some(0))
+            .then(|| self.disable(&mut state))
+            .flatten();
         drop(state);
         self.note_disable(disabled);
         debug_assert!(
@@ -211,15 +224,29 @@ impl Switch {
     }
 
     /// Sets the count to zero, starts a new generation and calls Disable if
-    /// anything was held. Returns that Disable's result.
+    /// an Enable is outstanding. Returns that Disable's result.
     fn release_everything(&self, state: &mut State) -> Option<Result<(), OsStatus>> {
         state.generation = state.generation.wrapping_add(1);
-        let held = std::mem::take(&mut state.holders);
-        (held > 0).then(|| self.api.disable())
+        state.holders = 0;
+        self.disable(state)
     }
 
+    /// Calls Disable for the outstanding Enable, if there is one. Only a
+    /// Disable that succeeded clears it; see `State::enabled`.
+    fn disable(&self, state: &mut State) -> Option<Result<(), OsStatus>> {
+        if !state.enabled {
+            return None;
+        }
+        let result = self.api.disable();
+        state.enabled = result.is_err();
+        Some(result)
+    }
+
+    /// A guard is alive, or a Disable failed and its Enable is still
+    /// outstanding.
     fn held(&self) -> bool {
-        self.lock().holders > 0
+        let state = self.lock();
+        state.holders > 0 || state.enabled
     }
 
     fn system_enabled(&self) -> bool {
@@ -228,7 +255,9 @@ impl Switch {
 
     fn note_disable(&self, disabled: Option<Result<(), OsStatus>>) {
         if let Some(Err(status)) = disabled {
-            self.note(&format!("DisableSecureEventInput failed with {status}"));
+            self.note(&format!(
+                "DisableSecureEventInput failed with {status}; the next release tries again"
+            ));
         }
     }
 
@@ -366,9 +395,10 @@ mod carbon {
 
         fn disable(&self) -> Result<(), OsStatus> {
             // SAFETY: as for `EnableSecureEventInput`. `Switch` calls this on
-            // the main thread, once for each Enable that succeeded: when its
-            // count goes from 1 to 0, or when `release_all` finds a count
-            // above zero.
+            // the main thread, and only while an Enable of its own is
+            // outstanding: when its count goes from 1 to 0, or at
+            // `release_all`. After a failed Disable it calls it again at the
+            // next release, never for an Enable that was not made.
             let status = unsafe { DisableSecureEventInput() };
             if status == 0 {
                 Ok(())
@@ -445,6 +475,8 @@ pub(crate) mod fake {
         refusal: Option<HoldError>,
         enables: AtomicUsize,
         disables: AtomicUsize,
+        most_outstanding: AtomicUsize,
+        refuse_next_disable: Mutex<Option<OsStatus>>,
         during_disable: Mutex<Option<DisableHook>>,
     }
 
@@ -455,6 +487,8 @@ pub(crate) mod fake {
                 refusal: None,
                 enables: AtomicUsize::new(0),
                 disables: AtomicUsize::new(0),
+                most_outstanding: AtomicUsize::new(0),
+                refuse_next_disable: Mutex::new(None),
                 during_disable: Mutex::new(None),
             }
         }
@@ -471,8 +505,22 @@ pub(crate) mod fake {
             self.enables.load(Ordering::SeqCst)
         }
 
+        /// Disables that succeeded.
         pub(crate) fn disables(&self) -> usize {
             self.disables.load(Ordering::SeqCst)
+        }
+
+        /// The most Enables that were ever outstanding at once.
+        pub(crate) fn most_outstanding(&self) -> usize {
+            self.most_outstanding.load(Ordering::SeqCst)
+        }
+
+        /// The next Disable fails with `status` and changes nothing.
+        pub(crate) fn refuse_next_disable(&self, status: OsStatus) {
+            *self
+                .refuse_next_disable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(status);
         }
 
         /// Runs `hook` inside the next Disable, while the switch still holds
@@ -490,11 +538,21 @@ pub(crate) mod fake {
             if let Some(error) = self.refusal {
                 return Err(error);
             }
-            self.enables.fetch_add(1, Ordering::SeqCst);
+            let enables = self.enables.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most_outstanding
+                .fetch_max(enables - self.disables(), Ordering::SeqCst);
             Ok(())
         }
 
         fn disable(&self) -> Result<(), OsStatus> {
+            let refused = self
+                .refuse_next_disable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(status) = refused {
+                return Err(status);
+            }
             self.disables.fetch_add(1, Ordering::SeqCst);
             let hook = self
                 .during_disable
@@ -686,6 +744,46 @@ mod tests {
         drop(b);
         assert!(!fake.held());
         assert_eq!(fake.api.disables(), 2);
+    }
+
+    /// A Disable that fails leaves our Enable counted by the system. The
+    /// next hold must not add a second one on top, and the next release
+    /// tries the Disable again.
+    #[test]
+    fn a_failed_disable_is_retried_and_never_stacks_an_enable() {
+        let fake = fake();
+        let guard = fake.hold().expect("hold");
+        fake.api.refuse_next_disable(OsStatus(-50));
+        drop(guard);
+        assert!(fake.api.is_enabled(), "the fake keeps a refused Disable on");
+        assert!(
+            fake.notes()
+                .iter()
+                .any(|line| line.contains("DisableSecureEventInput failed with OSStatus -50")),
+            "the failed Disable was not logged: {:?}",
+            fake.notes()
+        );
+        let guard = fake.hold().expect("hold");
+        assert_eq!(
+            fake.api.enables(),
+            1,
+            "a second Enable on top of one that was never disabled"
+        );
+        drop(guard);
+        assert!(
+            !fake.api.is_enabled(),
+            "the failed Disable was not tried again"
+        );
+
+        // The same through release_all.
+        let guard = fake.hold().expect("hold");
+        fake.api.refuse_next_disable(OsStatus(-50));
+        fake.switch.release_all();
+        drop(guard);
+        let again = fake.hold().expect("hold");
+        drop(again);
+        assert_eq!(fake.api.most_outstanding(), 1);
+        assert!(!fake.api.is_enabled());
     }
 
     #[test]
