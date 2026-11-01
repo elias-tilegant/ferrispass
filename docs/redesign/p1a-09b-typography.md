@@ -64,7 +64,7 @@ The test platform behind `#[gpui::test]` knows no fonts at all and gives every f
 - `atkinson_loads_and_digits_are_tabular`: the text system lists Atkinson Hyperlegible Mono, the startup check did not fall back, the Kit theme names it, Regular and Medium load as two faces, and in the `Code` style every digit and the characters `O`, `1`, `l`, `I` and `|` are as wide as `0`.
 - `system_font_medium_is_its_own_face`: `.SystemUIFont` loads by name and is not Helvetica, the Kit kept the name, and 400, 530 and 600 are three faces. The Kit renames the UI family, and writes a line about it to its log, only when the font lands on another family. The app installs no logger for the Kit, so a Helvetica in that line would never be seen; this check is where it shows.
 
-macOS lets the platform be created on the main thread only, and libtest runs each test on a thread of its own. So the file has `harness = false` in `Cargo.toml` and runs the two checks from its own `main`. It prints the same lines as libtest and takes test names, `--skip` and `--list` the same way, so `cargo test golden` leaves it alone.
+macOS lets the platform be created on the main thread only, and libtest runs each test on a thread of its own, even with `--test-threads=1`. So the file has `harness = false` in `Cargo.toml` and runs its checks from its own `main`. It prints the same lines as libtest and takes test names, `--skip` and `--list` the same way, so `cargo test golden` leaves it alone.
 
 ## Checks
 
@@ -93,7 +93,7 @@ Each probe broke one thing on purpose and ran the tests that should notice:
 | A `"JetBrains Mono"` constant in `kit_theme.rs` | `no_mono_literal_in_new_modules`, naming the line |
 | A `to_uppercase()` call in `kit_theme.rs` | `no_uppercase_in_new_modules`, naming the line |
 
-The two checks on the real text system also ran on the CI runner and passed there, so neither had to be set aside.
+The checks on the real text system also run on the CI runner and pass there, so none of them is marked as ignored.
 
 ## Not checked yet
 
