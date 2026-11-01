@@ -6,6 +6,9 @@ pub mod icons;
 #[allow(deprecated)]
 mod legacy;
 pub mod palette;
+#[cfg(test)]
+#[allow(deprecated)]
+mod palette_tests;
 #[allow(deprecated)]
 pub mod widgets;
 
