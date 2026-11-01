@@ -9,7 +9,9 @@ Started from `p1a-04-entry-kinds` at `f26d44d` on 2026-11-01, because the rankin
 | `bba3837` | The four tiers, ties, and the main window's list using them |
 | `047832d` | A new search selects its first match; explicit selection |
 | `4809c01` | The copy an identifier is read from leaves out notes and protected fields from the start |
-| the last one | This page, and "favorite" spelled the same way everywhere in the new code |
+| `02da559` | This page, and "favorite" spelled the same way everywhere in the new code |
+| `9bf129f` | The time recorded in the progress line |
+| `docs(search): explain how a title starting with a SID and client ranks` | The open question on such titles below, and this table |
 
 ## The four tiers
 
@@ -65,6 +67,8 @@ The old main window looks no different for it. It has no arrow-key navigation in
 ## Open
 
 Whether the entry list and the detail panel should show a kind that only protected fields establish is not decided here. The ranking ignores protected fields; display still classifies the whole entry.
+
+The entry kinds read a title that starts with a SID and a client as that system, whatever follows, so "NHP 100 Nordhafen alt" is NHP 100 just as "NHP 100 PRD" is. For "nhp 100" both are exact identifiers, and inside that tier a favorite comes first: a starred "NHP 100 Nordhafen alt" is listed above an unstarred "NHP 100 PRD" and is the row a new search selects, and `tie_count` counts it with the other NHP 100 entries. Whether a title with more text after the client should name the system for the ranking, or the identifier tier should order its entries by something other than favorites first, is not decided here. The sample vaults in the tests title the old entry "Nordhafen alt (NHP 100)", which does not start with the SID and so is not read as a system.
 
 ## Checks
 
