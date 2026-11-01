@@ -1,11 +1,11 @@
-//! The commands the new surfaces offer, in one table.
+//! The commands the new surfaces will offer, in one table.
 //!
-//! Quick Access and the menu bar item's menu take their commands from here,
-//! and the main window's menus and the command palette will too: what a
-//! command is called, its keys, where it appears, what it acts on and when
-//! it is available. Every surface shows the same word for a command,
-//! `action.<verb>.label` in `locales/action.yml`, so a command never goes by
-//! two names.
+//! Quick Access, the menu bar item's menu, the main window's menus and the
+//! command palette will take their commands from here once they are built:
+//! what a command is called, its keys, where it appears, what it acts on and
+//! when it is available. Each of them will show the same word for a
+//! command, `action.<verb>.label` in `locales/action.yml`, so a command
+//! never goes by two names.
 //!
 //! Return runs the main action of the selected entry, which depends on its
 //! kind ([`primary_command`]), and takes that action's word

@@ -122,7 +122,7 @@ pub(super) static COMMANDS: &[CommandSpec] = &[
         enabled: any_entry,
         touches_secret: false,
     },
-    // The menu bar item's menu lists the commands it offers in this order.
+    // The menu bar item's menu will list the commands it offers in this order.
     CommandSpec {
         id: CommandId::APP_QUICK_ACCESS,
         label_key: "action.quick_access.label",

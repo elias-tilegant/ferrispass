@@ -1,6 +1,6 @@
 # P1a.03: Command table
 
-Quick Access, the menu bar item's menu and later the main window's menus and the command palette all offer commands. This step puts them in one table, `src/app/registry/`, so a command has one name, one word and one set of keys wherever it appears, and whether it is available is decided in one place. Nothing is bound or shown yet: the old main window keeps its bindings and menus in `src/app/actions.rs` until the new surfaces take the table over.
+Quick Access, the menu bar item's menu, the main window's menus and the command palette will all offer commands once they are built. This step puts those commands in one table, `src/app/registry/`, so a command has one name, one word and one set of keys wherever it appears, and whether it is available is decided in one place. Nothing is bound or shown yet: the old main window keeps its bindings and menus in `src/app/actions.rs` until the new surfaces take the table over.
 
 Started from `p1a-02-i18n` at `2a437c6` on 2026-11-01, because the words are text keys.
 
@@ -12,7 +12,9 @@ Started from `p1a-02-i18n` at `2a437c6` on 2026-11-01, because the words are tex
 | `c01da34` | A test that names every command touching a password or one-time code |
 | `28782da` | Return takes the word of the selected entry's main action |
 | `d80a26f` | Return's word and what the types leave out, on this page |
-| the last one | Return's word shows once Quick Access is built, not before |
+| `46ecd86` | Return's word shows once Quick Access is built, not before |
+| `6e39271` | Open address is tested with smb, ssh and vnc addresses, which have a host |
+| the last one | This page and the module comment say what will read the table, not what does |
 
 ## What the table holds
 
@@ -50,7 +52,7 @@ The commands so far:
 
 ## How the words are keyed
 
-`locales/action.yml` holds one word or short phrase per command, in English and German. The command `<area>.<verb>` reads `action.<verb>.label`, and no screen names a command with words of its own. The menu bar item's menu had five words of its own (`menubar.menu.*`); they are gone, and its menu shows the command words.
+`locales/action.yml` holds one word or short phrase per command, in English and German. The command `<area>.<verb>` reads `action.<verb>.label`, and no screen names a command with words of its own. `locales/menubar.yml` held five words for the menu bar item's menu (`menubar.menu.*`), reserved until the menu is built. They are gone: once it is built, the menu will show the command words.
 
 Each row reads its word with `tr!("action.<verb>.label")` in a small function, so the key scans in `src/i18n/tests.rs` treat it like any other text: `used_keys_exist` checks the key exists, and `no_unused_keys` counts it as read. The row also holds the key as text, `label_key`, and `label_key_matches_label` checks that the two name the same key. To read the catalogues from that test, `src/i18n/mod.rs` has a test-only `catalogue_text(language, key)`.
 
@@ -78,7 +80,7 @@ The rule is the availability of `entry.primary` and is written down nowhere else
 
 ## What the types leave out
 
-Quick Access and the menu bar item build on these types. Three things they do not have are left out on purpose:
+Quick Access and the menu bar item will build on these types. Three things the types do not have are left out on purpose:
 
 - `CommandCtx` has no surface. No command's availability depends on where it is shown: `for_surface` takes the surface and picks the rows, and `enabled` sees only the situation. A command that is available on one surface and not on another brings the field with it.
 - `TargetKind` has no session target, because no command acts on a single vault's session yet. The first one that does adds it.
