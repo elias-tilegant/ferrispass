@@ -248,7 +248,7 @@ fn the_sample_vault_ranks_by_tier() {
 #[test]
 fn exact_identifier_beats_everything() {
     let vault = sample_vault();
-    // The old entry is a favourite, was used a minute ago and matches both
+    // The old entry is a favorite, was used a minute ago and matches both
     // words; both systems the query names still come first.
     let last_used = used(&[("nhp-old", 1)]);
     assert_eq!(
@@ -264,7 +264,7 @@ fn exact_identifier_beats_everything() {
 #[test]
 fn nhq_finds_nhq_100_first() {
     let vault = sample_vault();
-    // A favourite and a recently used entry that do not match the word stay
+    // A favorite and a recently used entry that do not match the word stay
     // out, and so do the NHP and NHD systems next to it.
     let last_used = used(&[("brenner-vpn", 1), ("nhp-prd", 2)]);
     assert_eq!(
@@ -290,7 +290,7 @@ fn favorites_beat_recent_beat_text() {
         ])
     );
     // By text alone it is the other way round: both NHP titles start with
-    // the word, the favourite only contains it.
+    // the word, the favorite only contains it.
     let by_text: Vec<&str> = ranked_entries(&vault, "nhp")
         .into_iter()
         .map(|entry| entry.id.as_str())
@@ -339,7 +339,7 @@ fn tie_same_sid_two_customers() {
     // Recently used comes before the title.
     let prd_used = used(&[("nhp-prd", 1)]);
     assert_eq!(first_two(&vault, &prd_used), ["nhp-prd", "brenner-nhp"]);
-    // A favourite comes before recently used.
+    // A favorite comes before recently used.
     set_starred(&mut vault, "brenner-nhp", true);
     assert_eq!(first_two(&vault, &prd_used), ["brenner-nhp", "nhp-prd"]);
 
@@ -375,7 +375,7 @@ fn vault_of_two_salesforce_logins() -> VaultSnapshot {
 #[test]
 fn notes_never_match() {
     let vault = sample_vault();
-    // The weekly notes are a favourite and were just used, and their notes
+    // The weekly notes are a favorite and were just used, and their notes
     // and a custom field hold every word searched for here. Neither is
     // search text, and notes never name a system.
     let last_used = used(&[("notes", 1)]);
@@ -416,7 +416,7 @@ fn whitespace_and_case_do_not_matter_for_identifiers() {
 #[test]
 fn empty_query_returns_nothing() {
     let vault = sample_vault();
-    // Favourites and recently used entries need a query to match too.
+    // Favorites and recently used entries need a query to match too.
     let last_used = used(&[("brenner-vpn", 1)]);
     for query in ["", "   ", "\t"] {
         assert!(rows(&vault, query, &last_used).is_empty(), "{query:?}");

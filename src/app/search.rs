@@ -11,7 +11,7 @@
 //!
 //! This module decides whether an entry matches and how well its text
 //! matches. The order the app lists results in is decided by [`rank`], which
-//! puts exact identifiers, favourites and recently used entries ahead of the
+//! puts exact identifiers, favorites and recently used entries ahead of the
 //! text score. `rank` is also the one place that looks at custom fields: the
 //! SID and client of an SAP system count as an identifier, never as text, and
 //! only when the fields are not protected.
@@ -118,7 +118,7 @@ impl Field {
 
 /// The text order alone: every live entry that matches `query`, best match
 /// first. The app lists results through [`rank::rank`], which keeps this
-/// order for everything that is not an identifier, a favourite or recently
+/// order for everything that is not an identifier, a favorite or recently
 /// used.
 #[cfg(test)]
 pub(crate) fn ranked_entries<'a>(snapshot: &'a VaultSnapshot, query: &str) -> Vec<&'a VaultEntry> {

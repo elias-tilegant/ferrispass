@@ -9,12 +9,12 @@
 //!    "nhp 100" for NHP 100, or the whole title of an entry. Case and runs of
 //!    whitespace do not matter. A SID alone is not an identifier: "nhp" names
 //!    every NHP system, so it ranks like any other text.
-//! 2. **Favourites** whose text matches.
+//! 2. **Favorites** whose text matches.
 //! 3. **Recently used** entries whose text matches, the most recent first.
 //! 4. **Text quality**: every other match, best match first, in exactly the
 //!    order the text search alone gives.
 //!
-//! Inside a tier, favourites come first, then recently used entries (the
+//! Inside a tier, favorites come first, then recently used entries (the
 //! most recent first), then entries by title, then by id. The text score
 //! only orders the last tier. The first three hold entries the user has
 //! singled out by naming, starring or using them; they keep an order the

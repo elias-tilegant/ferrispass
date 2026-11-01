@@ -22,7 +22,7 @@ fn add_entry(group: &mut GroupMut<'_>, title: &str, starred: bool) {
     }
 }
 
-/// Two customers with the same production system, NHP 100, and a favourite
+/// Two customers with the same production system, NHP 100, and a favorite
 /// of the user's own. NHP 100 PRD is the first row of the Nordhafen group.
 fn sample_database() -> Database {
     let mut database = Database::new();
@@ -454,7 +454,7 @@ fn ranked_order_reaches_the_browser_model(cx: &mut TestAppContext) {
             Some("NHQ 100 QAS")
         );
 
-        // Starred and recently used reach the ranking: the favourite first,
+        // Starred and recently used reach the ranking: the favorite first,
         // then the entry just used, then the rest by text.
         let prd = id_of(state, "NHP 100 PRD");
         state.mark_entry_used(&prd);
