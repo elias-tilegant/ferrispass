@@ -150,6 +150,23 @@ jobs:
           # already a per-release context.
           "$BIN" --config cliff.toml --latest --strip header --output RELEASE_NOTES.md
 
+      # The generated list says what changed; a hand-written note says what
+      # it means for the people using the app. When the tagged commit has one
+      # for this tag, it goes above the list. The result is the one file that
+      # becomes both the release page and the notes in update.json, so the
+      # size check in the sign job covers the note too.
+      - name: Prepend the hand-written release note
+        run: |
+          set -euo pipefail
+          NOTE="docs/release-notes/${RELEASE_TAG}.md"
+          if [ -f "${NOTE}" ]; then
+            { cat "${NOTE}"; printf '\n'; cat RELEASE_NOTES.md; } > RELEASE_NOTES.md.tmp
+            mv RELEASE_NOTES.md.tmp RELEASE_NOTES.md
+            echo "Prepended ${NOTE}"
+          else
+            echo "No ${NOTE}; the notes are the generated list only"
+          fi
+
       - name: Upload release notes
         uses: actions/upload-artifact@v4
         with:
@@ -228,6 +245,7 @@ jobs:
             dist/*.tar.gz
             dist/*.minisig
             dist/update.json
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 1
 
@@ -257,17 +275,75 @@ jobs:
           # Attach everything the project needs:
           # - .dmg          : human-friendly first download
           # - .app.tar.gz   : payload the in-app updater fetches
-          # - .minisig      : detached signature paired with the tar.gz
+          # - .minisig      : detached signatures for both archives and the .dmg
           # - update.json + .minisig: signed manifest binding version, URL and payload
+          # - SHA256SUMS    : sums of the .dmg and both archives, for downloads by hand
           files: |
             dist/*.dmg
             dist/*.tar.gz
             dist/*.minisig
             dist/update.json
+            dist/SHA256SUMS
+          # A pattern that matches nothing stops the step before the release
+          # is created, instead of publishing it without that file.
+          fail_on_unmatched_files: true
           # Body comes from git-cliff's isolated notes job instead of GitHub's
           # generate_release_notes - the latter only produces a Full
           # Changelog link when there are no PRs/labels to categorise.
           body_path: RELEASE_NOTES.md
           generate_release_notes: false
           draft: false
-          prerelease: false
+          # Every tag goes out as a pre-release: test builds, release
+          # candidates and 0.9.x fixes alike. The in-app updater reads
+          # releases/latest, which GitHub resolves to the newest release
+          # without this flag, so nothing here reaches existing installs.
+          # Clearing the flag by hand (gh release edit vX.Y.Z
+          # --prerelease=false --latest) is the deliberate step that ships a
+          # version to everyone, and it is never done for a tag with a hyphen.
+          prerelease: true
+          # GitHub never makes a pre-release latest, but this says so outright,
+          # so the step stays harmless if the flag above is ever changed.
+          make_latest: false
+
+  # The permanent release kanal-vorab (no v, so it never starts this
+  # workflow) holds the manifest of the highest version released so far. The
+  # app does not read it yet. Test builds will, to find the next test build;
+  # builds without a pre-release suffix keep reading only releases/latest.
+  #
+  # scripts/update-channel.sh finds the highest version, by SemVer precedence
+  # (sort -V ranks 0.10.0-pre.3 above 0.10.0), among all published v*
+  # releases that carry update.json and update.json.minisig, and copies that
+  # pair into kanal-vorab. The channel only moves forward, so a 0.9.x fix
+  # after a test build leaves it as it is. Because every run looks at every
+  # release, any run puts right what an earlier run left behind, an upload
+  # that broke off included. The script fails when kanal-vorab is missing,
+  # is not a pre-release (it could then become latest and hand test builds
+  # to everyone) or holds a file it does not expect; its header lists the
+  # rest.
+  #
+  # A job of its own, so that one run at a time reads and writes the
+  # channel: two runs close together could otherwise both read it before
+  # either writes. A channel job that finds another one already waiting
+  # replaces it, and the replaced one shows as cancelled; the next run
+  # catches up on it.
+  channel:
+    name: Update the pre-release channel
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: kanal-vorab
+      cancel-in-progress: false
+    steps:
+      # The script comes from the commit this workflow runs from: the tag on
+      # a push, the branch on a manual run, which may name an older tag.
+      # Without credentials, because nothing here pushes.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Point kanal-vorab at the highest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/update-channel.sh "${GITHUB_REPOSITORY}"

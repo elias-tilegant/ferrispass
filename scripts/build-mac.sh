@@ -16,15 +16,23 @@
 #   6. Codesign the DMG
 #   7. Submit to Apple's notarization service (--wait)
 #   8. Staple notarization ticket onto DMG
-#   9. Tarball + update manifest (optionally minisign-sign both)
+#   9. Tarball + update manifest (optionally minisign-sign both, the DMG
+#      too, and write SHA256SUMS)
 #  10. Final spctl Gatekeeper assessment
 #
 # Flags:
-#   --skip-notarize    Stop after step 6. Useful for local iteration where
-#                      waiting ~3 min for Apple is friction.
+#   --skip-notarize    Skip steps 7, 8 and 10. Useful for local iteration where
+#                      waiting ~3 min for Apple is friction. Step 9 still runs,
+#                      so the updater artefacts exist, but they stay unsigned
+#                      unless `--sign-update` is run on them.
 #   --sign-update      Sign existing updater artefacts only. This deliberately
 #                      runs separately from `cargo build` in CI so build scripts
-#                      cannot read the updater signing key or passphrase.
+#                      cannot read the updater signing key or passphrase. It
+#                      signs only when the disk image carries a valid
+#                      notarization ticket; a dry run with a throwaway key
+#                      sets FERRISPASS_ALLOW_UNSTAPLED=1 to skip that check,
+#                      which it refuses unless MINISIGN_KEY names a key other
+#                      than ~/.ferrispass/minisign.key.
 #
 # Requirements:
 #   - Xcode Command Line Tools (lipo, sips, iconutil, codesign, notarytool)
@@ -76,8 +84,22 @@ if [ -z "${VERSION}" ]; then
     echo "✗ Could not parse version from Cargo.toml" >&2
     exit 1
 fi
+# Info.plist takes numbers only: CFBundleShortVersionString and
+# CFBundleVersion are one to three integers separated by periods. A
+# pre-release such as 0.10.0-pre.3 is therefore 0.10.0 in both keys. The
+# full version stays in the binary, which the updater compares and the About
+# box shows, and in the file names, the manifest and the download URL.
+BUNDLE_VERSION="${VERSION%%[-+]*}"
+if ! [[ "${BUNDLE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "✗ Version ${VERSION} does not start with MAJOR.MINOR.PATCH" >&2
+    exit 1
+fi
 
-MINISIGN_KEY="${MINISIGN_KEY:-${HOME}/.ferrispass/minisign.key}"
+# The release key's usual place. FERRISPASS_ALLOW_UNSTAPLED only works with a
+# key named explicitly somewhere else, so it never signs with this one.
+DEFAULT_MINISIGN_KEY="${HOME}/.ferrispass/minisign.key"
+MINISIGN_KEY_GIVEN="${MINISIGN_KEY:-}"
+MINISIGN_KEY="${MINISIGN_KEY:-${DEFAULT_MINISIGN_KEY}}"
 TAR_NAME="${APP_NAME}-${VERSION}-arm64.app.tar.gz"
 TAR_PATH="${DIST_DIR}/${TAR_NAME}"
 SIG_PATH="${TAR_PATH}.minisig"
@@ -86,8 +108,32 @@ MANIFEST_SIG="${MANIFEST}.minisig"
 CLI_TAR_NAME="FerrisPass-CLI-${VERSION}-aarch64-apple-darwin.tar.gz"
 CLI_TAR_PATH="${DIST_DIR}/${CLI_TAR_NAME}"
 CLI_SIG_PATH="${CLI_TAR_PATH}.minisig"
+DMG_NAME="${APP_NAME}-${VERSION}-arm64.dmg"
+DMG_PATH="${DIST_DIR}/${DMG_NAME}"
+DMG_SIG_PATH="${DMG_PATH}.minisig"
+SUMS_PATH="${DIST_DIR}/SHA256SUMS"
+
+# Signs one file with the updater key. The passphrase comes from
+# MINISIGN_PASSWORD when it is set (CI), otherwise minisign asks for it.
+minisign_sign() {
+    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+        printf '%s\n' "${MINISIGN_PASSWORD}" \
+            | minisign -S -s "${MINISIGN_KEY}" -m "$1" >/dev/null
+    else
+        minisign -S -s "${MINISIGN_KEY}" -m "$1"
+    fi
+}
 
 sign_update_artifacts() {
+    # Checked first, before anything touches a key.
+    if [ "${FERRISPASS_ALLOW_UNSTAPLED:-}" = "1" ] && {
+        [ -z "${MINISIGN_KEY_GIVEN}" ] || [ "${MINISIGN_KEY}" = "${DEFAULT_MINISIGN_KEY}" ] \
+            || [ "${MINISIGN_KEY}" -ef "${DEFAULT_MINISIGN_KEY}" ]
+    }; then
+        echo "✗ FERRISPASS_ALLOW_UNSTAPLED=1 is for a throwaway key; set MINISIGN_KEY to one" >&2
+        echo "  that is not ${DEFAULT_MINISIGN_KEY}" >&2
+        exit 1
+    fi
     if ! command -v minisign >/dev/null 2>&1; then
         echo "✗ minisign is required to sign updater artefacts" >&2
         exit 1
@@ -100,8 +146,19 @@ sign_update_artifacts() {
         echo "✗ Minisign private key not found: ${MINISIGN_KEY}" >&2
         exit 1
     fi
-    if [ ! -f "${TAR_PATH}" ] || [ ! -f "${CLI_TAR_PATH}" ] || [ ! -f "${MANIFEST}" ]; then
+    if [ ! -f "${TAR_PATH}" ] || [ ! -f "${CLI_TAR_PATH}" ] || [ ! -f "${MANIFEST}" ] \
+        || [ ! -f "${DMG_PATH}" ]; then
         echo "✗ Missing updater artefacts in ${DIST_DIR}; run a release build first" >&2
+        exit 1
+    fi
+    # Installed apps accept whatever this key signs, so it signs only what
+    # Apple has notarized, and the stapled ticket on the disk image is the
+    # proof. Only a dry run with a throwaway key may skip this.
+    if [ "${FERRISPASS_ALLOW_UNSTAPLED:-}" = "1" ]; then
+        echo "    ! FERRISPASS_ALLOW_UNSTAPLED=1: signing without a notarization ticket" >&2
+    elif ! xcrun stapler validate -q "${DMG_PATH}"; then
+        echo "✗ ${DMG_NAME} carries no valid notarization ticket; refusing to sign" >&2
+        echo "  (a dry run with a throwaway key may set FERRISPASS_ALLOW_UNSTAPLED=1)" >&2
         exit 1
     fi
 
@@ -125,19 +182,9 @@ sign_update_artifacts() {
         exit 1
     fi
 
-    rm -f "${SIG_PATH}" "${CLI_SIG_PATH}" "${MANIFEST_SIG}"
-    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
-        printf '%s\n' "${MINISIGN_PASSWORD}" \
-            | minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}" >/dev/null
-    else
-        minisign -S -s "${MINISIGN_KEY}" -m "${TAR_PATH}"
-    fi
-    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
-        printf '%s\n' "${MINISIGN_PASSWORD}" \
-            | minisign -S -s "${MINISIGN_KEY}" -m "${CLI_TAR_PATH}" >/dev/null
-    else
-        minisign -S -s "${MINISIGN_KEY}" -m "${CLI_TAR_PATH}"
-    fi
+    rm -f "${SIG_PATH}" "${CLI_SIG_PATH}" "${MANIFEST_SIG}" "${DMG_SIG_PATH}" "${SUMS_PATH}"
+    minisign_sign "${TAR_PATH}"
+    minisign_sign "${CLI_TAR_PATH}"
 
     # cargo-packager-updater expects base64(contents-of-.minisig) in the
     # platform record. Updating only that field preserves signed release notes.
@@ -150,19 +197,26 @@ sign_update_artifacts() {
 
     # Sign the final manifest bytes after every field, including release notes
     # and the payload signature, has been fixed.
-    if [ -n "${MINISIGN_PASSWORD:-}" ]; then
-        printf '%s\n' "${MINISIGN_PASSWORD}" \
-            | minisign -S -s "${MINISIGN_KEY}" -m "${MANIFEST}" >/dev/null
-    else
-        minisign -S -s "${MINISIGN_KEY}" -m "${MANIFEST}"
-    fi
+    minisign_sign "${MANIFEST}"
+
+    # For people who download the disk image by hand rather than through the
+    # updater, which reads neither: a signature with the same key, and the
+    # sums of everything they might download. Relative names, so
+    # `shasum -a 256 -c SHA256SUMS` works in the download folder.
+    minisign_sign "${DMG_PATH}"
+    (cd "${DIST_DIR}" && shasum -a 256 "${DMG_NAME}" "${TAR_NAME}" "${CLI_TAR_NAME}") \
+        > "${SUMS_PATH}"
 
     minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${TAR_PATH}"
     minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${CLI_TAR_PATH}"
     minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${MANIFEST}"
+    minisign -V -q -p "${PROJECT_ROOT}/bundle/minisign-pub.txt" -m "${DMG_PATH}"
+    (cd "${DIST_DIR}" && shasum -a 256 -c -s SHA256SUMS)
     echo "    ✓ ${TAR_NAME}.minisig"
     echo "    ✓ ${CLI_TAR_NAME}.minisig"
     echo "    ✓ update.json.minisig"
+    echo "    ✓ ${DMG_NAME}.minisig"
+    echo "    ✓ SHA256SUMS"
 }
 
 if [ "${SIGN_UPDATE_ONLY}" = "true" ]; then
@@ -184,6 +238,7 @@ if ! security find-identity -v -p codesigning | grep -q "${SIGNING_IDENTITY}"; t
 fi
 
 echo "▸ ${APP_NAME} ${VERSION}"
+echo "  Info.plist:  ${BUNDLE_VERSION}"
 echo "  bundle id:   ${BUNDLE_ID}"
 echo "  team id:     ${TEAM_ID}"
 echo "  min macOS:   ${MIN_MACOS}"
@@ -214,8 +269,12 @@ cargo build --release --target aarch64-apple-darwin
 
 BIN_PATH="${DIST_DIR}/${BINARY_NAME}"
 CLI_BIN_PATH="${DIST_DIR}/${CLI_BINARY_NAME}"
-cp "${PROJECT_ROOT}/target/aarch64-apple-darwin/release/${BINARY_NAME}" "${BIN_PATH}"
-cp "${PROJECT_ROOT}/target/aarch64-apple-darwin/release/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}"
+# Cargo writes to CARGO_TARGET_DIR when it is set, so the binaries are read
+# from there too; a relative path means the same to both, since both run in
+# the current directory.
+RELEASE_DIR="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}/aarch64-apple-darwin/release"
+cp "${RELEASE_DIR}/${BINARY_NAME}" "${BIN_PATH}"
+cp "${RELEASE_DIR}/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}"
 echo "    ✓ $(file "${BIN_PATH}" | sed 's|.*: ||')"
 
 # ---------- 2. icon ----------
@@ -243,7 +302,7 @@ mv "${DIST_DIR}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 mkdir -p "${APP_BUNDLE}/Contents/Resources/Licenses"
 cp "${PROJECT_ROOT}/assets/licenses/"*.txt "${APP_BUNDLE}/Contents/Resources/Licenses/"
 echo "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
-sed "s/__VERSION__/${VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
+sed "s/__VERSION__/${BUNDLE_VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
     > "${APP_BUNDLE}/Contents/Info.plist"
 
 # ---------- 4. codesign ----------
@@ -260,8 +319,6 @@ codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}" 2>&1 | tail -3
 
 # ---------- 5. DMG ----------
 echo "▸ [5/9] Building DMG"
-DMG_NAME="${APP_NAME}-${VERSION}-arm64.dmg"
-DMG_PATH="${DIST_DIR}/${DMG_NAME}"
 
 if command -v create-dmg >/dev/null 2>&1; then
     create-dmg \
@@ -286,29 +343,26 @@ echo "▸ [6/9] Code-signing DMG"
 codesign --force --sign "${SIGNING_IDENTITY}" --timestamp "${DMG_PATH}"
 
 if [ "${SKIP_NOTARIZE}" = "true" ]; then
-    echo ""
-    echo "✓ Local build complete (unnotarized - Gatekeeper will warn on first open)"
-    echo "  ${DMG_PATH}"
-    ls -lh "${DMG_PATH}"
-    exit 0
+    echo "▸ [7-8/9] Skipping notarization and stapling (--skip-notarize)"
+else
+    # ---------- 7. notarize ----------
+    echo "▸ [7/9] Submitting to Apple notarization (typically 1-5 min)"
+    xcrun notarytool submit "${DMG_PATH}" \
+        --keychain-profile "${NOTARIZE_PROFILE}" \
+        --wait
+
+    # ---------- 8. staple ----------
+    echo "▸ [8/9] Stapling notarization ticket"
+    xcrun stapler staple "${DMG_PATH}"
 fi
-
-# ---------- 7. notarize ----------
-echo "▸ [7/9] Submitting to Apple notarization (typically 1-5 min)"
-xcrun notarytool submit "${DMG_PATH}" \
-    --keychain-profile "${NOTARIZE_PROFILE}" \
-    --wait
-
-# ---------- 8. staple ----------
-echo "▸ [8/9] Stapling notarization ticket"
-xcrun stapler staple "${DMG_PATH}"
 
 # ---------- 9. update tarball + manifest ----------
 # Produces the artefacts the in-app auto-updater fetches:
 #   - ${APP_NAME}-${VERSION}-arm64.app.tar.gz   (the bundle to install)
 #   - update.json                               (manifest read by the updater)
-# When a minisign key is available locally, this also signs the payload and
-# complete manifest. CI calls `--sign-update` in a later secret-bearing step.
+# When a minisign key is available locally and the build is notarized, this
+# also signs the payload, the complete manifest and the disk image, and writes
+# SHA256SUMS. CI calls `--sign-update` in a later secret-bearing step.
 #
 echo "▸ [9/9] Generating .app.tar.gz + update manifest"
 
@@ -345,10 +399,23 @@ jq -n \
 echo "    ✓ ${TAR_NAME}"
 echo "    ✓ update.json (unsigned)"
 
-if command -v minisign >/dev/null 2>&1 && [ -f "${MINISIGN_KEY}" ]; then
+# An unnotarized build is not signed for the updater automatically, even
+# with a key at the default path: installed apps accept a signed manifest,
+# and one should only exist for a build Apple has checked. `--sign-update`
+# refuses it as well, unless a dry run with a throwaway key sets
+# FERRISPASS_ALLOW_UNSTAPLED=1.
+if [ "${SKIP_NOTARIZE}" != "true" ] \
+    && command -v minisign >/dev/null 2>&1 && [ -f "${MINISIGN_KEY}" ]; then
     sign_update_artifacts
 else
     echo "    (updater signing deferred; run '$0 --sign-update')"
+fi
+
+if [ "${SKIP_NOTARIZE}" = "true" ]; then
+    echo ""
+    echo "✓ Local build complete (unnotarized - Gatekeeper will warn on first open)"
+    ls -lh "${DMG_PATH}" "${TAR_PATH}" "${CLI_TAR_PATH}" "${MANIFEST}"
+    exit 0
 fi
 
 # ---------- final verification ----------
@@ -361,4 +428,5 @@ echo "✓ ${APP_NAME} ${VERSION} ready for distribution"
 ls -lh "${DIST_DIR}/"*.dmg 2>/dev/null || true
 ls -lh "${DIST_DIR}/"*.tar.gz 2>/dev/null || true
 ls -lh "${DIST_DIR}/"update.json 2>/dev/null || true
-ls -lh "${DIST_DIR}/"update.json.minisig 2>/dev/null || true
+ls -lh "${DIST_DIR}/"*.minisig 2>/dev/null || true
+ls -lh "${SUMS_PATH}" 2>/dev/null || true
