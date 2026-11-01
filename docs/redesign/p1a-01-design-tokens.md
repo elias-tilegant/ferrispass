@@ -44,7 +44,7 @@ In light mode the faintest text in the old screens (`text_faint`) had 2.54:1 on 
 
 ## How the app uses it
 
-`ui::ds::init` runs at startup, after the fonts and `gpui_component::init`, before the first window. `ui::ds::apply_choice` runs on every appearance change: when macOS switches while System is chosen, when an appearance is picked in Settings, and on Toggle Theme (in the menu or with Cmd-Shift-D). The old shell calls it directly; the old `src/ui/theme.rs` is gone. Each call:
+`ui::ds::init` runs at startup, after the fonts and `gpui_component::init`, before the first window. `ui::ds::apply_choice` runs on every appearance change: when macOS switches while System is chosen, when an appearance is picked in Settings, and on Toggle Theme (in the menu or with Cmd-Shift-D). The old shell calls it directly; the old `src/ui/theme.rs` is gone. Whether System is chosen comes from the settings in memory, not from the settings file: the file is written in the background, so right after a change it can still hold the previous choice, and after a failed write it keeps it. Each call:
 
 1. swaps the Kit's light and dark configs for the normal or increased contrast ones, then changes the theme mode. In this order, because the Kit treats a new config and a new mode in one update as already installed and keeps the old colors,
 2. sets the text size and the focus ring,
@@ -90,6 +90,8 @@ Each probe broke one thing on purpose and ran the tests that should notice:
 | `kit_theme.rs` importing the palette | `no_palette_outside_legacy` |
 | A palette call added to `ds/mod.rs`, once in `apply` and once in its tests | `no_palette_outside_legacy`, naming both lines |
 | The palette switch in `ds::apply` written twice | `no_palette_outside_legacy` |
+| The appearance observer reading the theme from a settings file that says Light | `appearance_change_follows_the_choice_in_memory`, the System case |
+| The appearance observer reading System, as from a missing settings file | `appearance_change_follows_the_choice_in_memory`, the Dark case |
 | A hex string in `kit_theme.rs` | `no_raw_colors` |
 | A primitive name that doesn't match its lightness | `primitive_names` |
 | A primitive hex three steps from its OKLCH | `primitives_roundtrip` |

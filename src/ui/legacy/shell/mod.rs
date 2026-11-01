@@ -437,17 +437,6 @@ impl AppShell {
             )
         };
 
-        // "System" has to mean "follow the system", not "read it once at
-        // startup": macOS switches appearance at sunset for a lot of people.
-        window
-            .observe_window_appearance(|window, cx| {
-                let choice = crate::app::settings::load().theme;
-                if choice == crate::app::settings::ThemeChoice::System {
-                    crate::ui::ds::apply_choice(choice, Some(window), cx);
-                }
-            })
-            .detach();
-
         let _subscriptions = vec![
             cx.observe_in(&state, window, |shell: &mut AppShell, state, window, cx| {
                 // Re-render whenever AppState notifies AND keep the
@@ -561,6 +550,17 @@ impl AppShell {
                     shell.automatic_biometric_attempted_for = None;
                 }
                 shell.schedule_automatic_biometric_unlock(window, cx);
+            }),
+            // "System" has to mean "follow the system", not "read it once at
+            // startup": macOS switches appearance at sunset for a lot of
+            // people. The choice comes from memory, not from the settings
+            // file, which is written in the background and may still hold
+            // the previous one.
+            cx.observe_window_appearance(window, |shell: &mut AppShell, window, cx| {
+                let choice = shell.settings.theme;
+                if choice == crate::app::settings::ThemeChoice::System {
+                    crate::ui::ds::apply_choice(choice, Some(window), cx);
+                }
             }),
         ];
 
@@ -794,5 +794,7 @@ fn copy_value_label(kind: CopyValueKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod appearance_tests;
 #[cfg(test)]
 mod characterization_tests;
