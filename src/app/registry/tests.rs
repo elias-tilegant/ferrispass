@@ -562,6 +562,12 @@ fn open_url_needs_http_or_https() {
         // Without a scheme it opens as https, as in the main window.
         ("github.com/login", UrlKind::Web),
         ("ftp://example.com", UrlKind::Other),
+        // Other schemes with a host open another app: a file share, a
+        // terminal, screen sharing. Only http and https are let through,
+        // so a scheme nobody thought to list stays out as well.
+        ("smb://fileserver/share", UrlKind::Other),
+        ("ssh://host", UrlKind::Other),
+        ("vnc://host", UrlKind::Other),
         ("javascript:alert(1)", UrlKind::Other),
         ("file:///etc/hosts", UrlKind::Other),
         ("mailto:it@example.com", UrlKind::Other),
