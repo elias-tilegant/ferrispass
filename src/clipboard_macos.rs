@@ -11,7 +11,8 @@
 //!
 //! Outside the tests this file never calls a method that reads contents
 //! (`stringForType`, `dataForType`, `propertyListForType`, `pasteboardItems`,
-//! `readObjectsForClasses`).
+//! `readObjectsForClasses`). `clipboard_code_never_reads_pasteboard_content`
+//! in `tests/architecture.rs` holds that.
 
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_app_kit::{

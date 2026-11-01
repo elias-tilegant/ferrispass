@@ -21,13 +21,40 @@
 //! 4. Clearing always compares the pasteboard generation first. If anyone
 //!    copied something after us, the clipboard stays as it is
 //!    (`clear_leaves_newer_clipboard_alone`).
+//! 5. Quitting clears our copy twice over: `request_quit` calls
+//!    [`clear_owned`] before it asks the platform to quit, and
+//!    [`install_quit_hook`] registers the same clear with `on_app_quit` for
+//!    a quit that does not come through that action
+//!    (`quit_clears_only_unchanged_own_copy`).
+//! 6. At launch, before the first window, [`clear_own_copy_on_start`]
+//!    removes a copy an earlier run left behind, a crash or a forced quit
+//!    for example. It reads the access setting first and goes no further
+//!    unless the user chose "Always Allow" for FerrisPass: with any other
+//!    setting it does not even ask for the types on the pasteboard. With
+//!    "Always Allow" it clears only when our marker type is there, and only
+//!    if nothing was copied between that check and the clear. The decision
+//!    is [`start_action`] (`start_clears_only_own_marked_copy`).
+//! 7. Neither the service nor the launch check reads what is on the
+//!    clipboard. [`Pasteboard`] has no method for it, a test pasteboard
+//!    counts every read (`start_path_never_reads_content`), and a scan in
+//!    `tests/architecture.rs` keeps the content readers of `NSPasteboard`
+//!    out of the clipboard code outside its tests.
 //!
 //! The service remembers the generation its write created, never the secret.
+//!
+//! Why the launch check is this careful: macOS asks the user before an app
+//! reads another app's clipboard contents. A password manager that shows that
+//! prompt at every launch teaches people to click it away. Asking for types
+//! and the access setting shows nothing, and with any setting other than
+//! "Always Allow" the check does not even do that much. A copy left behind
+//! under those settings is still concealed, transient and kept to this Mac.
 
-use crate::clipboard::{ClipboardChangeCount, ClipboardError, Pasteboard, SystemPasteboard};
+use crate::clipboard::{
+    AccessBehavior, ClipboardChangeCount, ClipboardError, Pasteboard, SystemPasteboard,
+};
 #[cfg(not(target_os = "macos"))]
 use gpui::ClipboardItem;
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -67,8 +94,23 @@ pub struct ClipboardService {
     clear_task: Option<Task<()>>,
     /// Notifies observers once a second while a clear is pending.
     countdown_tick: Option<Task<()>>,
+    /// The `on_app_quit` registration from [`install_quit_hook`].
+    quit_hook: Option<Subscription>,
     #[cfg(not(target_os = "macos"))]
     next_portable_copy: u64,
+}
+
+/// What the launch check does with the clipboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartAction {
+    /// The access setting is not "Always Allow": nothing past the setting
+    /// was looked at.
+    Untouched,
+    /// "Always Allow", but our marker type is not on the clipboard.
+    NotOurs,
+    /// "Always Allow" and our marker type is there: clear it, unless
+    /// something was copied meanwhile.
+    ClearOwnCopy,
 }
 
 /// The one service, reachable from anywhere that has an `App`.
@@ -86,6 +128,7 @@ impl ClipboardService {
             deadline: None,
             clear_task: None,
             countdown_tick: None,
+            quit_hook: None,
             #[cfg(not(target_os = "macos"))]
             next_portable_copy: 0,
         }
@@ -256,6 +299,59 @@ pub fn clear_owned(cx: &mut App) {
     service.update(cx, |service, cx| service.clear_owned(cx));
 }
 
+/// Clear our copy when the app quits, however the quit started. GPUI runs
+/// the hook from the platform's terminate callback; installing it twice
+/// registers it once.
+pub fn install_quit_hook(cx: &mut App) {
+    ClipboardService::handle(cx).update(cx, |service, cx| {
+        if service.quit_hook.is_none() {
+            service.quit_hook = Some(cx.on_app_quit(|service, cx| {
+                service.clear_owned(cx);
+                async {}
+            }));
+        }
+    });
+}
+
+/// Remove a copy an earlier run left on the clipboard. Runs once at launch,
+/// before the first window; see rule 6 at the top of this file.
+pub fn clear_own_copy_on_start(cx: &mut App) -> StartAction {
+    ClipboardService::handle(cx).update(cx, |service, _| check_at_launch(&mut *service.pasteboard))
+}
+
+/// The launch decision. Only "Always Allow" lets the check look at the
+/// clipboard at all, so `has_own_marker` is called for that setting alone.
+pub fn start_action(
+    behavior: AccessBehavior,
+    has_own_marker: impl FnOnce() -> bool,
+) -> StartAction {
+    if behavior != AccessBehavior::AlwaysAllow {
+        return StartAction::Untouched;
+    }
+    if has_own_marker() {
+        StartAction::ClearOwnCopy
+    } else {
+        StartAction::NotOurs
+    }
+}
+
+/// The launch check over any pasteboard: [`start_action`] with the marker
+/// check, then the clear it asks for.
+fn check_at_launch(pasteboard: &mut dyn Pasteboard) -> StartAction {
+    let behavior = pasteboard.access_behavior();
+    let mut generation = None;
+    let action = start_action(behavior, || {
+        // Taken before the marker check. A copy made between the two moves
+        // the generation on, and the clear below then leaves it alone.
+        generation = Some(pasteboard.change_count());
+        pasteboard.has_own_marker()
+    });
+    if let (StartAction::ClearOwnCopy, Some(generation)) = (action, generation) {
+        pasteboard.clear_if_unchanged(generation);
+    }
+    action
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +491,154 @@ mod tests {
         assert_eq!(pasteboard.ledger().clears, 0);
         assert_eq!(pasteboard.ledger().clear_attempts, 2);
         assert!(!pending(cx, &service));
+    }
+
+    const EVERY_BEHAVIOR: [AccessBehavior; 4] = [
+        AccessBehavior::Default,
+        AccessBehavior::Ask,
+        AccessBehavior::AlwaysAllow,
+        AccessBehavior::AlwaysDeny,
+    ];
+
+    /// The clipboard as a launch finds it: a copy an earlier run left behind,
+    /// or another app's text.
+    fn at_launch(behavior: AccessBehavior, ours: bool) -> FakePasteboard {
+        let pasteboard = FakePasteboard::new(behavior);
+        if ours {
+            pasteboard.leave_own_copy("left-behind-secret");
+        } else {
+            pasteboard.foreign_write("someone else's text");
+        }
+        pasteboard
+    }
+
+    #[test]
+    fn start_path_never_reads_content() {
+        // The ledger does count reads: one through the test pasteboard shows.
+        let witness = FakePasteboard::new(AccessBehavior::AlwaysAllow);
+        witness.read_content();
+        assert_eq!(witness.ledger().content_reads, 1);
+
+        for behavior in EVERY_BEHAVIOR {
+            for ours in [true, false] {
+                let pasteboard = at_launch(behavior, ours);
+                check_at_launch(&mut pasteboard.clone());
+                let ledger = pasteboard.ledger();
+                assert_eq!(ledger.content_reads, 0, "{behavior:?}, ours: {ours}");
+                assert_eq!(
+                    ledger.writes, 0,
+                    "{behavior:?}, ours: {ours}: the launch check never writes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn start_clears_only_own_marked_copy() {
+        // "Always Allow" and our marker: cleared.
+        let pasteboard = at_launch(AccessBehavior::AlwaysAllow, true);
+        assert_eq!(
+            check_at_launch(&mut pasteboard.clone()),
+            StartAction::ClearOwnCopy
+        );
+        assert_eq!(text(&pasteboard), None);
+        assert_eq!(pasteboard.ledger().clears, 1);
+
+        // "Always Allow" and another app's text: looked at, left alone.
+        let pasteboard = at_launch(AccessBehavior::AlwaysAllow, false);
+        assert_eq!(
+            check_at_launch(&mut pasteboard.clone()),
+            StartAction::NotOurs
+        );
+        assert_eq!(
+            text(&pasteboard).as_deref(),
+            Some("someone else's text"),
+            "another app's clipboard was cleared at launch"
+        );
+        assert_eq!(pasteboard.ledger().has_own_marker_calls, 1);
+        assert_eq!(pasteboard.ledger().clear_attempts, 0);
+
+        // Our marker, but another app copies right after the check: the
+        // generation taken before the check no longer matches.
+        let pasteboard = at_launch(AccessBehavior::AlwaysAllow, true);
+        pasteboard.copy_after_marker_check("copied during the check");
+        assert_eq!(
+            check_at_launch(&mut pasteboard.clone()),
+            StartAction::ClearOwnCopy
+        );
+        assert_eq!(
+            text(&pasteboard).as_deref(),
+            Some("copied during the check")
+        );
+        assert_eq!(pasteboard.ledger().clears, 0);
+
+        // Any other setting: the setting is read and nothing else, whatever
+        // is on the clipboard.
+        for behavior in [
+            AccessBehavior::Default,
+            AccessBehavior::Ask,
+            AccessBehavior::AlwaysDeny,
+        ] {
+            for ours in [true, false] {
+                let pasteboard = at_launch(behavior, ours);
+                let before = text(&pasteboard);
+                assert_eq!(
+                    check_at_launch(&mut pasteboard.clone()),
+                    StartAction::Untouched,
+                    "{behavior:?}, ours: {ours}"
+                );
+                assert_eq!(text(&pasteboard), before, "{behavior:?}, ours: {ours}");
+                let ledger = pasteboard.ledger();
+                assert_eq!(ledger.access_behavior_calls, 1);
+                assert_eq!(
+                    ledger.has_own_marker_calls, 0,
+                    "{behavior:?}, ours: {ours}: asked for the pasteboard types"
+                );
+                assert_eq!(ledger.change_count_calls, 0, "{behavior:?}, ours: {ours}");
+                assert_eq!(ledger.clear_attempts, 0, "{behavior:?}, ours: {ours}");
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn launch_check_uses_the_service_pasteboard(cx: &mut TestAppContext) {
+        let pasteboard = at_launch(AccessBehavior::AlwaysAllow, true);
+        install(cx, &pasteboard);
+        assert_eq!(
+            cx.update(clear_own_copy_on_start),
+            StartAction::ClearOwnCopy
+        );
+        assert_eq!(text(&pasteboard), None);
+    }
+
+    #[gpui::test]
+    fn quit_clears_only_unchanged_own_copy(cx: &mut TestAppContext) {
+        let pasteboard = FakePasteboard::new(AccessBehavior::Default);
+        let service = install(cx, &pasteboard);
+        cx.update(install_quit_hook);
+
+        // Cmd+Q and the Quit menu item end in `actions::quit`, which clears
+        // before it asks the platform to quit. The test platform's quit does
+        // nothing, so only that direct clear can have run here.
+        copy(cx, &service, "secret", None).expect("copy");
+        cx.update(crate::app::actions::quit);
+        assert_eq!(text(&pasteboard), None, "quitting left our copy behind");
+        assert!(!pending(cx, &service));
+
+        // Something copied after us stays.
+        copy(cx, &service, "secret", None).expect("copy");
+        pasteboard.foreign_write("a note");
+        cx.update(crate::app::actions::quit);
+        assert_eq!(text(&pasteboard).as_deref(), Some("a note"));
+
+        // Any quit runs the app's quit handlers, and the hook clears there.
+        copy(cx, &service, "secret", None).expect("copy");
+        cx.quit();
+        assert_eq!(
+            text(&pasteboard),
+            None,
+            "the quit hook left our copy behind"
+        );
     }
 
     #[gpui::test]

@@ -178,10 +178,18 @@ fn request_quit(cx: &mut App) {
     if block_lifecycle_action_over_dirty_editor(None, cx) {
         return;
     }
+    quit(cx);
+}
 
-    // Wipe cleartext launch payloads before the platform starts tearing down
-    // windows. GPUI schedules the macOS terminate call asynchronously.
+/// Quit once nothing holds it back.
+///
+/// Wipe cleartext launch payloads and our own clipboard copy before the
+/// platform starts tearing down windows. GPUI schedules the macOS terminate
+/// call asynchronously; the clipboard's quit hook runs at its end and is the
+/// second chance, not the only one.
+pub(super) fn quit(cx: &mut App) {
     crate::launch::sweeper::purge_all();
+    super::services::clipboard::clear_owned(cx);
     cx.quit();
 }
 

@@ -1341,3 +1341,132 @@ fn lint_levels_are_read_from_the_lints_table() {
     assert!(level("[lints.rust]\nunsafe_code = \"loud\"\n").is_err());
     assert!(level("[lints.rust]\n").is_err());
 }
+
+// ---------------------------------------------- clipboard content reads --
+
+/// `NSPasteboard` and `NSPasteboardItem` methods that return what is on the
+/// clipboard. Reading another app's contents is what shows the "paste from
+/// other apps" prompt. The clipboard code writes, clears and asks for types,
+/// and names these only in its tests. A name matches with any suffix, so
+/// `readObjectsForClasses_options` counts.
+const PASTEBOARD_CONTENT_READERS: &[&str] = &[
+    "stringForType",
+    "dataForType",
+    "propertyListForType",
+    "pasteboardItems",
+    "readObjectsForClasses",
+];
+
+/// The clipboard service, the pasteboard surface it works through, and both
+/// backends.
+const CLIPBOARD_SOURCES: &[&str] = &[
+    "src/app/services/clipboard.rs",
+    "src/clipboard.rs",
+    "src/clipboard_macos.rs",
+    "src/clipboard_portable.rs",
+];
+
+#[test]
+fn clipboard_code_never_reads_pasteboard_content() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found = Vec::new();
+    for rel in CLIPBOARD_SOURCES {
+        let source = fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|err| panic!("cannot read {rel}: {err}"));
+        let reads = content_reads_outside_tests(&source)
+            .unwrap_or_else(|err| panic!("cannot tokenize {rel}: {err}"));
+        for (line, name) in reads {
+            found.push(format!("{rel}:{line}: {name}"));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "the clipboard code reads pasteboard contents outside its tests:\n{}",
+        found.join("\n")
+    );
+}
+
+/// Every name from [`PASTEBOARD_CONTENT_READERS`] in code, with its line,
+/// except inside items switched off by `#[cfg(test)]`.
+fn content_reads_outside_tests(source: &str) -> Result<Vec<(usize, String)>, String> {
+    let p = parse(source)?;
+    let test_items = cfg_test_items(&p);
+    Ok(p.tokens
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !test_items.iter().any(|item| item.contains(i)))
+        .filter_map(|(_, token)| {
+            let name = token.name()?;
+            PASTEBOARD_CONTENT_READERS
+                .iter()
+                .any(|reader| name.starts_with(reader))
+                .then(|| (token.line, name.to_string()))
+        })
+        .collect())
+}
+
+/// Token ranges of what an outer `#[cfg(test)]` switches off. Only that exact
+/// attribute counts; `cfg(any(test, ..))` and the like are scanned, which errs
+/// on the side of a finding.
+fn cfg_test_items(p: &Parsed) -> Vec<std::ops::RangeInclusive<usize>> {
+    let t = &p.tokens;
+    attributes(p)
+        .into_iter()
+        .filter(|attr| {
+            let inside = &t[attr.open + 1..attr.close];
+            !attr.inner
+                && inside.len() == 4
+                && inside[0].is_keyword("cfg")
+                && inside[1].is_punct('(')
+                && inside[2].is_keyword("test")
+                && inside[3].is_punct(')')
+        })
+        .map(|attr| attr.hash..=item_end(p, attr.close + 1))
+        .collect()
+}
+
+/// The last token of the item, statement, field or arm that starts at
+/// `start`: the `}` closing its first brace block, or the `;` or `,` that ends
+/// it. Parentheses and brackets on the way are skipped whole, and a closing
+/// delimiter means the enclosing block ended first.
+fn item_end(p: &Parsed, start: usize) -> usize {
+    let t = &p.tokens;
+    let mut i = start;
+    while i < t.len() {
+        match t[i].tok {
+            Tok::Punct('{') => return p.partner[i].expect("balanced brace"),
+            Tok::Punct(';' | ',') => return i,
+            Tok::Punct('(' | '[') => i = p.partner[i].expect("balanced delimiter"),
+            Tok::Punct('}' | ')' | ']') => return i.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    t.len().saturating_sub(1)
+}
+
+#[test]
+fn content_reads_are_found_outside_tests_only() {
+    let source = r##"
+        // p.stringForType(&t) in a comment
+        fn real(p: &NSPasteboard) { let _ = p.stringForType(&t); }
+        const NOTE: &str = "dataForType( in a string";
+        #[cfg(test)]
+        mod tests { fn helper(p: &NSPasteboard) { p.dataForType(&t); } }
+        #[cfg(test)]
+        #[allow(dead_code)]
+        fn another(p: &NSPasteboard) -> Vec<[u8; 2]> { p.pasteboardItems(); vec![] }
+        struct S { #[cfg(test)] field: u8, other: Kind }
+        fn after(p: &NSPasteboard) { p.readObjectsForClasses_options(&a, None); }
+        #[cfg(not(test))]
+        fn live(p: &NSPasteboard) { p.propertyListForType(&t); }
+    "##;
+    assert_eq!(
+        content_reads_outside_tests(source).expect("scan"),
+        vec![
+            (3, "stringForType".to_string()),
+            (11, "readObjectsForClasses_options".to_string()),
+            (13, "propertyListForType".to_string()),
+        ]
+    );
+}

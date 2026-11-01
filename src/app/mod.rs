@@ -105,6 +105,10 @@ pub fn run() {
         });
 
         actions::init(cx);
+        // A secret an earlier run left on the clipboard (a crash, a forced
+        // quit) goes before the first window opens.
+        services::clipboard::clear_own_copy_on_start(cx);
+        services::clipboard::install_quit_hook(cx);
         // Held globally so a window closed with Cmd+W can be reopened from
         // the Dock against the same state, rather than restarting the app.
         cx.set_global(SharedAppState(app_state.clone()));

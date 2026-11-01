@@ -134,6 +134,10 @@ impl Pasteboard for SystemPasteboard {
 }
 
 /// A pasteboard for tests that keeps a ledger of every call.
+///
+/// It also has [`FakePasteboard::read_content`], which is not part of
+/// [`Pasteboard`]. Code that only holds a `dyn Pasteboard` cannot reach it,
+/// and `content_reads` staying at zero shows that no other route exists.
 #[cfg(test)]
 pub(crate) mod fake {
     use super::{
@@ -155,6 +159,9 @@ pub(crate) mod fake {
         pub writes: usize,
         pub clear_attempts: usize,
         pub clears: usize,
+        pub content_reads: usize,
+        /// Copied by "another app" right after the next marker check.
+        pub copy_after_marker_check: Option<String>,
     }
 
     /// Clones share one ledger, so a test keeps a handle while the service
@@ -176,6 +183,8 @@ pub(crate) mod fake {
                 writes: 0,
                 clear_attempts: 0,
                 clears: 0,
+                content_reads: 0,
+                copy_after_marker_check: None,
             })))
         }
 
@@ -191,8 +200,29 @@ pub(crate) mod fake {
             ledger.marked = false;
         }
 
+        /// What an earlier run of FerrisPass left behind after a crash.
+        pub(crate) fn leave_own_copy(&self, text: &str) {
+            let mut ledger = self.0.borrow_mut();
+            ledger.generation += 1;
+            ledger.text = Some(text.to_string());
+            ledger.marked = true;
+        }
+
+        /// Another app copies `text` just after the next marker check.
+        pub(crate) fn copy_after_marker_check(&self, text: &str) {
+            self.0.borrow_mut().copy_after_marker_check = Some(text.to_string());
+        }
+
         pub(crate) fn fail_writes(&self, fail: bool) {
             self.0.borrow_mut().fail_writes = fail;
+        }
+
+        /// Reads the contents and counts the read. Not reachable through
+        /// [`Pasteboard`].
+        pub(crate) fn read_content(&self) -> Option<String> {
+            let mut ledger = self.0.borrow_mut();
+            ledger.content_reads += 1;
+            ledger.text.clone()
         }
     }
 
@@ -206,7 +236,13 @@ pub(crate) mod fake {
         fn has_own_marker(&self) -> bool {
             let mut ledger = self.0.borrow_mut();
             ledger.has_own_marker_calls += 1;
-            ledger.marked
+            let marked = ledger.marked;
+            if let Some(text) = ledger.copy_after_marker_check.take() {
+                ledger.generation += 1;
+                ledger.text = Some(text);
+                ledger.marked = false;
+            }
+            marked
         }
 
         fn change_count(&self) -> ClipboardChangeCount {
