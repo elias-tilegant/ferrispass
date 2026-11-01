@@ -8,7 +8,10 @@ Started from `p1a-02-i18n` at `2a437c6` on 2026-11-01, because the words are tex
 |---|---|
 | `888c35f` | The table, the words in `locales/action.yml`, the keys |
 | `7d51c3f` | Availability, the main action per entry kind, Return and production systems |
-| the last one | This page |
+| `ec1ccf6` | This page |
+| `c01da34` | A test that names every command touching a password or one-time code |
+| `28782da` | Return takes the word of the selected entry's main action |
+| the last one | Return's word and what the types leave out, on this page |
 
 ## What the table holds
 
@@ -22,7 +25,7 @@ One `CommandSpec` per command:
 | `surfaces` | Where the command appears: `Panel` (Quick Access, its list of all commands and its `[...]` menu) or `StatusMenu` (the menu bar item's right-click menu). The main window, its menus, the Dock and the command palette join when they are built |
 | `target` | What it acts on: the selected entry, the app, or the window it is given in |
 | `enabled` | Whether it can be used in a given situation, see below |
-| `touches_secret` | Whether it reads or hands on a password or one-time code. Every such command acts on the selected entry |
+| `touches_secret` | Whether it reads or hands on a password or one-time code: Return, Sign in, Copy password and Copy code. Every such command acts on the selected entry |
 
 The commands so far:
 
@@ -50,7 +53,7 @@ The commands so far:
 
 Each row reads its word with `tr!("action.<verb>.label")` in a small function, so the key scans in `src/i18n/tests.rs` treat it like any other text: `used_keys_exist` checks the key exists, and `no_unused_keys` counts it as read. The row also holds the key as text, `label_key`, and `label_key_matches_label` checks that the two name the same key. To read the catalogues from that test, `src/i18n/mod.rs` has a test-only `catalogue_text(language, key)`.
 
-`entry.primary` has a word of its own, Main action, for lists of shortcuts. A list of what the selected entry offers shows the word of the main action itself, Sign in or Open website.
+`entry.primary` has a word of its own, Main action, for lists of shortcuts, where no entry is in view. Wherever an entry is in view, Return goes by what it does there: `primary_label(kind)` gives the word of the entry's main action, Sign in, Open website or Copy password. Quick Access shows that word in its footer and in its list of all commands.
 
 ## When a command is available
 
@@ -72,9 +75,17 @@ Mixing up a test system and a production system is the most expensive mistake a 
 
 The rule is the availability of `entry.primary` and is written down nowhere else. `prd_rule_holds_for_every_input` checks it for every combination of locked, empty search, production and picked, and that nothing else in the context changes the answer. Which row the user picked is up to the search; the context takes it as a plain flag.
 
+## What the types leave out
+
+Quick Access and the menu bar item build on these types. Three things they do not have are left out on purpose:
+
+- `CommandCtx` has no surface. No command's availability depends on where it is shown: `for_surface` takes the surface and picks the rows, and `enabled` sees only the situation. A command that is available on one surface and not on another brings the field with it.
+- `TargetKind` has no session target, because no command acts on a single vault's session yet. The first one that does adds it.
+- `Selection` says what the address field holds, as a `UrlKind` (empty, an http or https address, anything else), rather than only whether there is one. Copy address takes any address and Open address only http and https, so a yes or no would not be enough.
+
 ## What later steps add
 
-- Quick Access binds its keys from the table, runs the commands, shows the main action and the reason in its footer, and lists all commands for the selected entry. It works out the context from the entry it shows.
+- Quick Access binds its keys from the table, runs the commands, shows the main action (`primary_label`) and the reason in its footer, and lists all commands for the selected entry. It works out the context from the entry it shows.
 - The menu bar item builds its menu from `for_surface(Surface::StatusMenu, ..)`.
 - The main window's menus, the Dock menu and the command palette get their surfaces and rows, and the old main window's shortcuts move into the table.
 - Letters are bound by character and punctuation by the key of the active keyboard layout, so `cmd-,` follows the layout, and keycaps show that layout.
@@ -100,7 +111,9 @@ All five gates pass on every commit: `cargo fmt --all --check`, `cargo clippy --
 | `no_shortcut_takes_an_option_character` | a key uses Option with a character and without Cmd or Ctrl. On a Mac that types a character (Option-L is @ on a German keyboard), and the shortcut would take it away from every text field |
 | `no_keystroke_collision_per_surface` | two commands on one surface share a key |
 | `touches_secret_needs_an_entry_target` | a command that touches a secret acts on something other than the selected entry |
+| `exactly_these_commands_touch_a_secret` | a command gains or loses the mark for touching a password or one-time code, or Return lacks it while a main action it runs has it |
 | `primary_action_by_kind` | an entry kind gets the wrong main action |
+| `primary_label_names_the_main_action` | Return's word for an entry is not the word of that entry's main action |
 | `prd_rule_holds_for_every_input` | Return and production systems, see above |
 | `only_entry_primary_takes_return` | another command sits on Return |
 | `every_disabled_reason_exists` | a reason key is missing or has a placeholder |
