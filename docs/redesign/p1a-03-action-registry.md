@@ -11,7 +11,8 @@ Started from `p1a-02-i18n` at `2a437c6` on 2026-11-01, because the words are tex
 | `ec1ccf6` | This page |
 | `c01da34` | A test that names every command touching a password or one-time code |
 | `28782da` | Return takes the word of the selected entry's main action |
-| the last one | Return's word and what the types leave out, on this page |
+| `d80a26f` | Return's word and what the types leave out, on this page |
+| the last one | Return's word shows once Quick Access is built, not before |
 
 ## What the table holds
 
@@ -53,7 +54,7 @@ The commands so far:
 
 Each row reads its word with `tr!("action.<verb>.label")` in a small function, so the key scans in `src/i18n/tests.rs` treat it like any other text: `used_keys_exist` checks the key exists, and `no_unused_keys` counts it as read. The row also holds the key as text, `label_key`, and `label_key_matches_label` checks that the two name the same key. To read the catalogues from that test, `src/i18n/mod.rs` has a test-only `catalogue_text(language, key)`.
 
-`entry.primary` has a word of its own, Main action, for lists of shortcuts, where no entry is in view. Wherever an entry is in view, Return goes by what it does there: `primary_label(kind)` gives the word of the entry's main action, Sign in, Open website or Copy password. Quick Access shows that word in its footer and in its list of all commands.
+`entry.primary` has a word of its own, Main action, for lists of shortcuts, where no entry is in view. Wherever an entry is in view, Return goes by what it does there: `primary_label(kind)` gives the word of the entry's main action, Sign in, Open website or Copy password. Once Quick Access is built, its footer and its list of all commands show that word.
 
 ## When a command is available
 
