@@ -96,8 +96,8 @@ pub(crate) mod tests {
     }
 
     /// `ds::apply` sets the Kit theme, `cx.ds()` and reduce motion for each
-    /// combination it can be given. The colors of the old screens are
-    /// checked where they are defined, in `ui::palette`.
+    /// combination it can be given. That it also switches the colors of the
+    /// old screens is checked next to them, in `ui::palette_tests`.
     #[gpui::test]
     fn apply_sets_every_piece(cx: &mut TestAppContext) {
         let _lock = lock_mode();
