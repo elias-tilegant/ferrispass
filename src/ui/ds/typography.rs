@@ -55,14 +55,21 @@ pub enum Family {
 
 impl Family {
     /// The family name to draw with. For [`Family::Mono`] that is what
-    /// [`mono_family`] decided at startup; before that, the fallback, which
-    /// is always there.
+    /// [`mono_family`] decided at startup. Before the check it is the bundled
+    /// font, which is what the design and the theme set name: `ds::init`
+    /// runs the check before the first window opens, and only the check
+    /// falls back.
     pub fn name(self) -> &'static str {
         match self {
             Self::Ui => UI_FAMILY,
-            Self::Mono => MONO.get().copied().unwrap_or(MONO_FALLBACK),
+            Self::Mono => mono_in_effect(MONO.get().copied()),
         }
     }
+}
+
+/// The mono family to draw with, given what the startup check decided.
+fn mono_in_effect(decided: Option<&'static str>) -> &'static str {
+    decided.unwrap_or(MONO_FAMILY)
 }
 
 /// A step of the type scale. Not to be confused with `gpui::TextStyle`, the
@@ -423,6 +430,15 @@ mod tests {
             );
             assert_eq!(check_mono_family(cx), MONO_FALLBACK);
         });
+    }
+
+    /// Menlo is what the startup check answers when the font is missing,
+    /// never a guess made before the check.
+    #[test]
+    fn the_fallback_comes_only_from_the_check() {
+        assert_eq!(mono_in_effect(None), MONO_FAMILY, "before the check");
+        assert_eq!(mono_in_effect(Some(MONO_FAMILY)), MONO_FAMILY);
+        assert_eq!(mono_in_effect(Some(MONO_FALLBACK)), MONO_FALLBACK);
     }
 
     /// The folders with the new UI.
