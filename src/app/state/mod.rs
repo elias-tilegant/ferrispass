@@ -1124,9 +1124,10 @@ fn entries_for_selection(
     let query = search_query.trim();
 
     if !query.is_empty() {
-        return super::search::ranked_entries(snapshot, query)
+        use super::search::rank::{RankInput, rank};
+        return rank(RankInput::new(snapshot, query, last_used))
             .into_iter()
-            .cloned()
+            .map(|ranked| ranked.entry.clone())
             .collect();
     }
 

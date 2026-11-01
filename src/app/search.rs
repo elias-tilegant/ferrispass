@@ -9,6 +9,13 @@
 //! server-side index: in-memory, per-keystroke, no plaintext metadata ever
 //! touches disk.
 //!
+//! This module decides whether an entry matches and how well its text
+//! matches. The order the app lists results in is decided by [`rank`], which
+//! puts exact identifiers, favourites and recently used entries ahead of the
+//! text score. `rank` is also the one place that looks at custom fields: the
+//! SID and client of an SAP system count as an identifier, never as text, and
+//! only when the fields are not protected.
+//!
 //! Match classes by needle length, ordered by priority:
 //!
 //! | needle chars | exact | prefix | substring | typo  | fuzzy |
@@ -42,9 +49,15 @@
 //! match, the entry drops out. False matches feel worse than empty results
 //! when the user can just edit the query.
 
+pub(crate) mod rank;
+
+use std::cmp::Ordering;
+
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
-use crate::domain::{VaultEntry, VaultSnapshot};
+use crate::domain::VaultEntry;
+#[cfg(test)]
+use crate::domain::VaultSnapshot;
 
 const SCORE_EXACT: u32 = 1000;
 const SCORE_PREFIX: u32 = 700;
@@ -103,32 +116,63 @@ impl Field {
     }
 }
 
+/// The text order alone: every live entry that matches `query`, best match
+/// first. The app lists results through [`rank::rank`], which keeps this
+/// order for everything that is not an identifier, a favourite or recently
+/// used.
+#[cfg(test)]
 pub(crate) fn ranked_entries<'a>(snapshot: &'a VaultSnapshot, query: &str) -> Vec<&'a VaultEntry> {
-    let tokens: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    if tokens.is_empty() {
+    let Some(mut text) = TextQuery::new(query) else {
         return Vec::new();
-    }
+    };
 
-    let mut matcher = Matcher::new(Config::DEFAULT);
     // Deleted entries never surface here. Finding one, copying its password
     // and never learning it was deleted months ago is the failure this
     // prevents; the Trash view is the one place that shows them.
-    let entries = snapshot.live_entries();
-    let mut scored: Vec<(u32, &VaultEntry)> = Vec::new();
-    for entry in &entries {
-        let haystacks = build_haystacks(entry);
-        if let Some(score) = score_entry(&tokens, &haystacks, &mut matcher) {
-            scored.push((score, *entry));
-        }
-    }
+    let mut scored: Vec<(u32, &VaultEntry)> = snapshot
+        .live_entries()
+        .into_iter()
+        .filter_map(|entry| text.score(entry).map(|score| (score, entry)))
+        .collect();
 
-    scored.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase()))
-            .then_with(|| a.1.id.cmp(&b.1.id))
-    });
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| by_title(a.1, b.1)));
 
     scored.into_iter().map(|(_, e)| e).collect()
+}
+
+/// The words of a query, lowercased, with the matcher that scores entries
+/// against them.
+struct TextQuery {
+    tokens: Vec<String>,
+    matcher: Matcher,
+}
+
+impl TextQuery {
+    /// `None` for a query without any words, which matches nothing.
+    fn new(query: &str) -> Option<Self> {
+        let tokens: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if tokens.is_empty() {
+            return None;
+        }
+        Some(Self {
+            tokens,
+            matcher: Matcher::new(Config::DEFAULT),
+        })
+    }
+
+    /// How well `entry` matches, or `None` when any word misses it.
+    fn score(&mut self, entry: &VaultEntry) -> Option<u32> {
+        score_entry(&self.tokens, &build_haystacks(entry), &mut self.matcher)
+    }
+}
+
+/// The order of entries that match equally well: by title ignoring case, then
+/// by id, so the order never depends on where the entries sit in the vault.
+fn by_title(a: &VaultEntry, b: &VaultEntry) -> Ordering {
+    a.title
+        .to_lowercase()
+        .cmp(&b.title.to_lowercase())
+        .then_with(|| a.id.cmp(&b.id))
 }
 
 struct Haystacks {
