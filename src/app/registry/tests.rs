@@ -183,6 +183,46 @@ fn no_keystroke_collision_per_surface() {
     }
 }
 
+#[test]
+fn every_command_has_its_keys() {
+    // Each command's keys, written out once more. The tests above check
+    // that keys parse and do not collide, which a key that went missing or
+    // changed would still pass. The keys are written the way GPUI writes
+    // them back, as in the table.
+    let agreed: &[(&str, &[&str])] = &[
+        ("entry.primary", &["enter"]),
+        // Return reaches these two through entry.primary.
+        ("entry.sap_login", &[]),
+        ("entry.open_website", &[]),
+        ("entry.copy_password", &["cmd-c"]),
+        ("entry.copy_username", &["cmd-shift-c"]),
+        ("entry.copy_code", &["alt-cmd-c"]),
+        ("entry.copy_url", &["cmd-shift-l"]),
+        ("entry.open_url", &["alt-enter"]),
+        ("entry.show_in_app", &["cmd-o"]),
+        ("app.quick_access", &[]),
+        ("app.open", &[]),
+        ("app.lock_all", &["cmd-l"]),
+        ("app.settings", &["cmd-,"]),
+        ("app.quit", &["cmd-q"]),
+        ("panel.close", &["cmd-w", "escape"]),
+    ];
+    for spec in commands() {
+        let keys = agreed
+            .iter()
+            .find(|(name, _)| *name == id(spec))
+            .map(|(_, keys)| *keys)
+            .unwrap_or_else(|| panic!("{}: not in the list of keys", id(spec)));
+        assert_eq!(spec.keys, keys, "{}", id(spec));
+    }
+    for (name, _) in agreed {
+        assert!(
+            commands().iter().any(|spec| id(spec) == *name),
+            "{name} is not in the table"
+        );
+    }
+}
+
 // --------------------------------------------------------------- secrets --
 
 #[test]
