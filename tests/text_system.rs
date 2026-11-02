@@ -152,7 +152,9 @@ mod macos {
             let text = platform.text_system();
             let cx =
                 TestAppContext::build_with_text_system(TestDispatcher::new(0), None, text.clone());
-            // What the app does at startup, in the same order.
+            // What the app does at startup, in the same order. That order is
+            // repeated here, not taken from `app::run`; a unit test next to
+            // the text styles holds `app::run` to it.
             cx.update(|cx| {
                 cx.text_system()
                     .add_fonts(font_bytes())

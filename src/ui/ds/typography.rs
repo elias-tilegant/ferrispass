@@ -474,6 +474,46 @@ mod tests {
         }
     }
 
+    /// The first call of [`mono_family`] decides for the whole process, and
+    /// `ui::ds::init` makes it. So `app::run` adds the bundled fonts before
+    /// anything of `ui::ds` runs; the other way round, every start would
+    /// fall back to Menlo. `tests/text_system.rs` goes through the startup
+    /// steps itself, in its own order, so it would not notice.
+    #[test]
+    fn the_app_adds_its_fonts_before_the_design_system_starts() {
+        let path = repo_file("src/app/mod.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let start = source.find("\npub fn run()").expect("app::run");
+        let run = &source[start..];
+        let run = &run[..run.find("\n}\n").expect("the end of app::run")];
+        // The first place `name` starts a word, so `fields::` is no `ds::`.
+        let first = |name: &str| {
+            run.match_indices(name)
+                .map(|(index, _)| index)
+                .find(|&index| {
+                    !run[..index]
+                        .chars()
+                        .next_back()
+                        .is_some_and(is_identifier_char)
+                })
+        };
+        let fonts = first(".add_fonts(").expect("app::run adds the bundled fonts");
+        first("ui::ds::init(").expect("app::run starts the design system");
+        let design_system = ["ds::", "typography::", "mono_family("]
+            .into_iter()
+            .filter_map(first)
+            .min()
+            .expect("app::run names the design system");
+        let line = |index: usize| source[..start + index].matches('\n').count() + 1;
+        assert!(
+            fonts < design_system,
+            "src/app/mod.rs:{} reaches ui::ds before src/app/mod.rs:{} adds the fonts",
+            line(design_system),
+            line(fonts)
+        );
+    }
+
     /// The folders with the new UI.
     const NEW_MODULES: [&str; 2] = ["src/ui/ds", "src/ui/windows"];
 
