@@ -24,7 +24,7 @@ In scope:
 - **Update mechanism** - bypassing the minisign signature check, downgrade attacks, replay attacks against the manifest endpoint
 - **Build supply chain** - compromise paths through our pinned dependencies (`keepass-rs` fork in particular) or the GitHub Actions release pipeline
 - **macOS Keychain access** - incorrect ACLs that allow other apps to read FerrisPass-owned items
-- **Clipboard** - any path that puts a secret on the pasteboard without the concealed, transient and current-host markers, or that leaves our own copy behind after the clear timer, a lock, quit or launch. At launch FerrisPass only looks when "Paste from Other Apps" is set to Always Allow for it; see the security contract below
+- **Clipboard** - any path on which FerrisPass copies a secret for you without the concealed, transient and current-host markers, or leaves its own copy behind after the clear timer, a lock, quit or launch. Which copies count, and when FerrisPass looks at launch, is in the security contract below
 
 Out of scope (will be acknowledged but won't be patched as security issues):
 
@@ -40,9 +40,11 @@ What FerrisPass promises from the release in the second column on. A build that 
 
 | Rule | Since |
 |---|---|
-| Every copy of a secret goes through one clipboard path: concealed, transient, this Mac only, cleared after the timer, at lock, at quit and at launch; only unchanged clipboard contents are ever cleared, and the launch check reads types, never contents. The launch check only looks when "Paste from Other Apps" is set to Always Allow for FerrisPass; with any other setting it leaves the clipboard alone, so macOS never asks | the redesign release |
+| Every secret FerrisPass copies for you goes through one clipboard path: concealed, transient, this Mac only, cleared after the timer, at lock, at quit and at launch; only unchanged clipboard contents are ever cleared, and the launch check reads types, never contents. The launch check only looks when "Paste from Other Apps" is set to Always Allow for FerrisPass; with any other setting it leaves the clipboard alone, so macOS never asks | the redesign release |
 | While the master password field has focus, secure event input is on, so other programs do not see the keystrokes; it is released on blur, window deactivation, lock, quit and panic | the redesign release |
 | New `unsafe` code lives only in audited modules under `src/platform/`, listed under [Unsafe code](#unsafe-code) | the redesign release |
+
+In the clipboard rule, a secret FerrisPass copies for you is a password, a username, a URL, a TOTP code or a custom field that you copy with a button, a shortcut or a menu item. Text you select yourself in one of the entry editor's unprotected fields (title, username, URL, notes, custom fields not marked protected) and copy with Cmd+C, Cmd+X or the context menu is an ordinary copy, as it always was: it does not go through this path, carries none of the markers and is not cleared. The password, the TOTP secret and custom fields marked protected can't be copied out of the editor by hand at all.
 
 ## Supported versions
 
@@ -91,7 +93,7 @@ The crate denies `unsafe_code`. The places below opt in, each for a system API t
 | Password sent over the network | **never** - the cloud provider only sees ciphertext |
 | Password stored in Keychain | **only if you enable Touch ID for that vault** - see below |
 | Auto-lock timeout | configurable in Settings; default 4 minutes idle |
-| Clipboard auto-clear after copy | configurable; default 10 seconds; also at quit and at launch (at launch only with "Paste from Other Apps" set to Always Allow) |
+| Clipboard auto-clear after copy | for what FerrisPass copies for you: configurable, default 10 seconds; also at quit and at launch (at launch only with "Paste from Other Apps" set to Always Allow). Text you copy by hand out of the entry editor is an ordinary copy and is not cleared |
 
 ### Touch ID and the login keychain
 

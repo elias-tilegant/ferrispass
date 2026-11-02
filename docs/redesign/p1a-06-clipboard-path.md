@@ -15,7 +15,8 @@ Started from `rebuild` at `8980fe9` on 2026-11-01.
 | `acf3876` | This page and the progress log |
 | `7e726c8` | A test for how each "Paste from Other Apps" value is read |
 | `5da7f72` | SECURITY.md back to the clipboard rule as `6ff7e91` wrote it; this page describes hand copies from the editor as open |
-| the last one | How to check by hand, and which check holds under which "Paste from Other Apps" setting |
+| `3b140de` | How to check by hand, and which check holds under which "Paste from Other Apps" setting |
+| the last one | SECURITY.md, the service's module doc and this page say which copies the clipboard rule covers, as `ae95e79` did: what FerrisPass copies for you, not hand copies out of the editor. The launch check under the default setting is listed as a known gap |
 
 ## The one path
 
@@ -23,7 +24,7 @@ Started from `rebuild` at `8980fe9` on 2026-11-01.
 
 If the secret-aware write fails, nothing is written, an earlier copy of ours is cleared, and the caller gets the error. There is no fallback to a plain clipboard item that a history tool or Universal Clipboard would keep. That was already true in the main window and is now a rule of the service.
 
-Every copy FerrisPass makes for you, from a button, a shortcut or a menu, takes this path: passwords, usernames, URLs, TOTP codes and custom fields. Copying by hand out of the entry editor does not. The password, the TOTP secret and custom fields marked protected can't be copied out of the editor at all; that block lives in `SecretInput` and stays. Text selected in one of the editor's unprotected fields (title, username, URL, notes, custom fields not marked protected) and copied with Cmd+C, Cmd+X or the context menu goes to the clipboard as a plain item, as it did before this change: no privacy types, no marker, no clearing. Whether the clipboard rule in SECURITY.md has to cover those copies is not settled yet; see Limits.
+Every copy FerrisPass makes for you, from a button, a shortcut or a menu, takes this path: passwords, usernames, URLs, TOTP codes and custom fields. Copying by hand out of the entry editor does not. The password, the TOTP secret and custom fields marked protected can't be copied out of the editor at all; that block lives in `SecretInput` and stays. Text selected in one of the editor's unprotected fields (title, username, URL, notes, custom fields not marked protected) and copied with Cmd+C, Cmd+X or the context menu goes to the clipboard as a plain item, as it always has: no privacy types, no marker, no clearing. Those are ordinary copies, and the clipboard rule in SECURITY.md does not cover them; the paragraph below its contract table says so.
 
 The "Copy code" button in the sign-in flow also writes to the clipboard directly. It copies the one-time code Microsoft shows for device sign-in, which the user types into Microsoft's page and which is not a credential.
 
@@ -61,7 +62,7 @@ Each test below was checked by breaking the rule it names, and it failed every t
 
 ## Why the launch check never reads contents
 
-Since macOS 15.4 an app that reads what another app put on the clipboard can trigger a prompt asking the user to allow it. A password manager that shows that prompt at every launch teaches people to click it away, and the launch check has no reason to see the contents anyway: it only needs to know whether the item on the clipboard is ours. Asking for one type with `availableTypeFromArray` answers that. Reading the generation and the access setting doesn't show anything either.
+Since macOS 15.4 an app that reads what another app put on the clipboard can trigger a prompt asking the user to allow it. A password manager that shows that prompt at every launch teaches people to click it away, and the launch check has no reason to see the contents anyway: it only needs to know whether the item on the clipboard is ours. Asking for one type with `availableTypeFromArray` answers that. Reading the generation and the access setting doesn't expose the contents either.
 
 Three things hold this:
 
@@ -92,9 +93,9 @@ System Settings lists an app under "Paste from Other Apps" only after it has ask
 
 ## Limits
 
-- Most users never change "Paste from Other Apps", so for them the launch check does nothing. A copy left behind by a crash or `kill -9` stays on the clipboard until something else is copied. It is still concealed, transient and kept to this Mac, so a clipboard manager that honours the markers doesn't store it. "How to check by hand" says what the relaunch check shows under each setting.
+- Under the default "Paste from Other Apps" setting, which most users never change, the launch check reads the setting and stops. A copy left behind by a crash or `kill -9` stays on the clipboard until something else is copied. It is still concealed, transient and kept to this Mac, so a clipboard manager that honours the markers doesn't store it. Keeping the last generation on disk (next point) could close this gap without asking for types, but only if reading the pasteboard's change count brings up no paste prompt under that setting. That has not been measured on a Mac yet, and until it is, the launch check does nothing under the default setting. "How to check by hand" says what the relaunch check shows under each setting.
 - The marker type is the only sign of ownership a new launch has, because nothing keeps the generation of an earlier run's write. Any app can put an item with that type on the clipboard, and with Always Allow a launch clears it. That costs the other app the item it labelled as ours. Keeping the last generation on disk would close this and would also let the check work without the marker; it would add state to the app's data folder and is not part of this step.
-- Copying by hand out of the entry editor's unprotected fields goes around the service, as described under "The one path". Notes in particular sometimes hold things people would call secret. Whether the clipboard rule covers those copies is open. Bringing them under it means changing the editor's text fields in `src/ui/legacy/screens/` or `src/ui/widgets/secret_input.rs`, and every such hand copy would then be concealed and cleared after the timer. This step leaves the editor alone.
+- Copying by hand out of the entry editor's unprotected fields is an ordinary copy and outside the clipboard rule, as described under "The one path". Notes in particular sometimes hold things people would call secret, and such a copy stays on the clipboard as a plain item until something else is copied. Routing hand copies through the service would mean changing the editor's text fields in `src/ui/legacy/screens/` or `src/ui/widgets/secret_input.rs`. This step leaves the editor alone.
 - On platforms other than macOS the service falls back to GPUI's plain clipboard, as the main window did before. CI only builds for macOS, so that branch is not compiled there.
 - `private_pasteboard_reports_always_allow` relies on Apple's documented behaviour that every pasteboard except the general one always allows access.
 - `lock_clears_clipboard_ownership` builds the real `AppShell` and reads the real `settings.json`, and the lock and `quit_clears_only_unchanged_own_copy` empty the per-user launch folder, as `automatic_lock_discards_the_draft_and_says_so` already does. No test touches the general pasteboard.
