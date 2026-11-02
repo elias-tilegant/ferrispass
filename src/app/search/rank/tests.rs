@@ -599,6 +599,46 @@ fn fields_name_the_system_whatever_the_title() {
     }
 }
 
+/// "NHP 100 PRD" with one open SAP field that contradicts the title. The
+/// entry kinds take the other half from the title, so to them the entry is
+/// `mixed`. Neither the fields alone nor the title alone say so, and the
+/// title no longer says what the entry is, so no query is an exact
+/// identifier for it: not `mixed`, and not "nhp 100".
+fn assert_contradicted_title_names_no_system(field: (&str, &str, bool), mixed: &str) {
+    let vault = alone(with_fields(entry("system", "NHP 100 PRD"), &[field]));
+    assert!(
+        exact_ids(&vault, mixed).is_empty(),
+        "a field {field:?} and the title named {mixed:?}"
+    );
+    assert_eq!(
+        rows(&vault, "nhp 100", &HashMap::new()),
+        expect(&[("system", Text)]),
+        "the title named NHP 100 against a field {field:?}"
+    );
+}
+
+#[test]
+fn a_sid_field_against_the_title_names_no_system() {
+    // BRQ 100 to the entry kinds: the SID from the field, the client from
+    // the title.
+    assert_contradicted_title_names_no_system(("SAP_SID", "BRQ", false), "brq 100");
+}
+
+#[test]
+fn a_client_field_against_the_title_names_no_system() {
+    // NHP 200 to the entry kinds: the SID from the title, the client from
+    // the field.
+    assert_contradicted_title_names_no_system(("SAP_CLIENT", "200", false), "nhp 200");
+}
+
+#[test]
+fn a_field_that_agrees_with_the_title_keeps_it_naming_the_system() {
+    for field in [("SAP_SID", "NHP", false), ("SAP_CLIENT", "100", false)] {
+        let vault = alone(with_fields(entry("system", "NHP 100 PRD"), &[field]));
+        assert_eq!(exact_ids(&vault, "nhp 100"), ["system"], "{field:?}");
+    }
+}
+
 #[test]
 fn protected_sap_fields_do_not_make_an_identifier() {
     let nobody = HashMap::new();
