@@ -1,0 +1,97 @@
+# Text keys that no code reads yet, each with what will read it.
+#
+# no_unused_keys in src/i18n/tests.rs fails for an unused key that is not
+# listed here, for a line whose key is not in the catalogues, and for a key
+# that code reads by now: once a screen uses a key, its line goes. A plural
+# key is listed once, without .one and .other. GPUI Kit reads the keys under
+# gpui_component itself, so they are not listed.
+#
+# key                                read by
+
+common.cancel                        dialog and onboarding buttons
+common.later                         dialog and onboarding buttons
+common.back                          dialog and onboarding buttons
+common.done                          dialog and onboarding buttons
+common.why                           the "Why?" links next to settings and hints
+
+msg.wrong_master_password            unlocking
+msg.file_incomplete                  unlocking
+msg.offline                          sync status
+msg.signin_expired                   sync status
+msg.consent_missing                  sync status and team onboarding
+msg.no_access_read                   sync status
+msg.no_access_write                  sync status
+msg.decision_needed                  sync status
+msg.concurrent_change                sync decisions
+msg.own_version_replaced             sync status
+msg.folder_no_history                sync decisions
+msg.team_password_changed            unlocking a team vault
+msg.protection_raised                unlocking
+msg.protection_lowered               unlocking
+msg.sap_missing_sysnr                SAP sign-in
+msg.sap_no_launch_file               SAP sign-in
+msg.sap_quit_immediately             SAP sign-in
+msg.type_nothing_remembered          typing into other apps
+msg.type_browser_explicit            typing into other apps
+msg.type_permission_managed          typing into other apps
+msg.update_needs_admin               updates
+msg.window_closed_locked             closing the main window
+msg.delete_permanently               the trash
+msg.security_model                   security settings and help
+
+glossary.type.sap_system             entry kinds in lists, labels and accessible names
+glossary.type.remote_access          entry kinds in lists, labels and accessible names
+glossary.type.web_login              entry kinds in lists, labels and accessible names
+glossary.type.server                 entry kinds in lists, labels and accessible names
+glossary.type.secure_note            entry kinds in lists, labels and accessible names
+glossary.vault.personal              vault kinds in the sidebar and in labels
+glossary.vault.team                  vault kinds in the sidebar and in labels
+glossary.vault.other_vault           vault kinds in the sidebar and in labels
+glossary.password.master             unlocking and settings
+glossary.password.team               unlocking a team vault
+glossary.password.saved_team         unlocking a team vault
+glossary.favorite                    entry lists and quick access
+glossary.pinned_for_everyone         entry lists and quick access
+glossary.one_time_code               entry details and quick access
+glossary.sap_client                  SAP entry details
+glossary.system_number               SAP entry details
+glossary.earlier_versions            entry history
+glossary.trash                       the trash
+
+quick.search.placeholder             the quick access panel
+quick.footer.sap_login               the quick access panel
+quick.footer.open_website            the quick access panel
+quick.footer.copy_password           the quick access panel
+quick.footer.prd_select_first        the quick access panel
+quick.footer.copied.password         the quick access panel
+quick.footer.copied.user             the quick access panel
+quick.footer.copied.one_time_code    the quick access panel
+quick.footer.other_vaults            the quick access panel
+quick.results.same_matches           the quick access panel
+quick.preview.user                   the quick access panel
+quick.preview.password               the quick access panel
+quick.no_match.text                  the quick access panel
+quick.no_match.unlock                the quick access panel
+quick.no_match.new_entry             the quick access panel
+quick.locked.search_pending          the quick access panel, locked
+quick.locked.typed_ahead             the quick access panel, locked
+quick.locked.unlock_touch_id         the quick access panel, locked
+quick.locked.still_unlocking         the quick access panel, locked
+quick.locked.needs_main_window       the quick access panel, locked
+quick.locked.unlock_mac_password     the quick access panel, locked
+quick.locked.not_set_up              the quick access panel, locked
+quick.locked.set_up                  the quick access panel, locked
+quick.locked.file_missing            the quick access panel, locked
+quick.error.website_failed           the quick access panel
+quick.error.copy_failed              the quick access panel
+
+menubar.menu.quick_access            the menu bar item
+menubar.menu.open_app                the menu bar item
+menubar.menu.lock_all                the menu bar item
+menubar.menu.settings                the menu bar item
+menubar.menu.quit                    the menu bar item
+menubar.notch.hidden                 the menu bar item, when the notch hides it
+menubar.notch.practice               the menu bar item, when the notch hides it
+
+a11y.copy_password                   copy buttons next to a password
+a11y.reveal_password                 show buttons next to a password
