@@ -167,7 +167,7 @@ mod tests {
         TextRun, VisualTestContext, font,
     };
 
-    use super::super::probe;
+    use super::super::{Button, probe};
     use super::*;
     use crate::app::settings::ThemeChoice;
     use crate::ui::ds::tokens::{LIGHT, TEXT_SIZE_LARGE, TEXT_SIZE_STANDARD};
@@ -295,9 +295,10 @@ mod tests {
         );
     }
 
-    /// Tab shows the ring around the input and a click does not. The Kit's
-    /// own ring, which tints the edge and lays a band at half opacity around
-    /// it, is off, so the ring is the only edge focus adds.
+    /// Tab shows the ring around the input and takes it to the button after
+    /// the field, and a click does not show it. The Kit's own ring, which
+    /// tints the edge and lays a band at half opacity around it, is off, so
+    /// the ring is the only edge focus adds.
     #[gpui::test]
     fn the_text_field_shows_the_focus_ring_for_the_keyboard_only(cx: &mut TestAppContext) {
         let state: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
@@ -309,6 +310,7 @@ mod tests {
             div()
                 .p(px(8.))
                 .child(TextField::new("server", &state, text("Server")))
+                .child(Button::secondary("connect", text("Connect")))
                 .into_any_element()
         });
         probe::assert_keyboard_focus_ring(cx, "fp-text-field-input");

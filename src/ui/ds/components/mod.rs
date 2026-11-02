@@ -209,13 +209,43 @@ pub(in crate::ui::ds) mod probe {
         })
     }
 
-    /// Takes the first tab stop of the window, as Tab does, and checks the
-    /// ring around the element marked `control`: it ends 3 px out, it is the
-    /// only edge focus adds to the frame, 2 px wide in `focus_ring`, and
-    /// 1 px lies between it and the control. A ring the GPUI Kit draws, a
-    /// tinted edge or a wider band, is an edge focus adds too. Then clicks
-    /// the middle of the control and checks that focus from a click shows
-    /// no ring. Returns the bounds of the control.
+    /// The edges `cx` paints now that it did not paint in `before`.
+    fn added_edges(
+        cx: &mut VisualTestContext,
+        before: &[(Bounds<Pixels>, Hsla, Edges<Pixels>)],
+    ) -> Vec<(Bounds<Pixels>, Hsla, Edges<Pixels>)> {
+        edges(cx)
+            .into_iter()
+            .filter(|edge| !before.contains(edge))
+            .collect()
+    }
+
+    /// Whether two bounds lie within a pixel of each other: painting snaps
+    /// to device pixels.
+    fn near(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+        [
+            (a.left(), b.left()),
+            (a.top(), b.top()),
+            (a.right(), b.right()),
+            (a.bottom(), b.bottom()),
+        ]
+        .into_iter()
+        .all(|(x, y)| (x - y).abs() <= px(1.))
+    }
+
+    /// Checks the keyboard focus ring of the element marked `control`, the
+    /// first tab stop of the window, which holds a second tab stop after
+    /// it.
+    ///
+    /// A key press while nothing has focus shows no ring. Taking the first
+    /// tab stop, as Tab does, shows one ring, around the control: it ends
+    /// 3 px out, it is the only edge focus adds to the frame, 2 px wide in
+    /// `focus_ring`, and 1 px lies between it and the control. A ring the
+    /// GPUI Kit draws, a tinted edge or a wider band, is an edge focus adds
+    /// too, and so is a ring around a control without focus. Taking the
+    /// next tab stop takes the ring off the control. Then clicks the middle
+    /// of the control and checks that focus from a click shows no ring.
+    /// Returns the bounds of the control.
     pub fn assert_keyboard_focus_ring(
         cx: &mut VisualTestContext,
         control: &'static str,
@@ -230,18 +260,21 @@ pub(in crate::ui::ds) mod probe {
         // first tab stop is taken directly after it, as Tab would.
         cx.simulate_keystrokes("tab");
         cx.update(|window, cx| {
-            window.focus_next(cx);
             assert!(window.last_input_was_keyboard());
+            assert!(window.focused(cx).is_none(), "a key press takes no focus");
+            window.draw(cx).clear(cx);
         });
+        assert_eq!(
+            cx.debug_bounds("fp-focus-ring"),
+            None,
+            "a key press shows no ring while no control has focus"
+        );
+        cx.update(|window, cx| window.focus_next(cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let bounds = cx.debug_bounds(control).expect("the control");
         let ring = cx.debug_bounds("fp-focus-ring").expect("a ring after Tab");
-        assert_eq!(ring, bounds.dilate(px(3.)), "the ring ends 3 px out");
         let color = cx.update(|_, cx| cx.ds().colors.focus_ring.hsla);
-        let added: Vec<_> = edges(cx)
-            .into_iter()
-            .filter(|edge| !unfocused.contains(edge))
-            .collect();
+        let added = added_edges(cx, &unfocused);
         assert!(!added.is_empty(), "the ring is painted");
         assert!(
             added
@@ -249,7 +282,12 @@ pub(in crate::ui::ds) mod probe {
                 .all(|(_, painted, width)| *painted == color && *width == Edges::all(px(2.))),
             "focus adds the ring alone, 2 px wide in focus_ring: {added:?}"
         );
-        let (_, _, width) = &added[0];
+        let (first, _, width) = &added[0];
+        assert!(
+            added.iter().all(|(painted, _, _)| near(*painted, *first)),
+            "focus adds one ring, around the control that has focus: {added:?}"
+        );
+        assert_eq!(ring, bounds.dilate(px(3.)), "the ring ends 3 px out");
         let gaps = [
             bounds.left() - (ring.left() + width.left),
             bounds.top() - (ring.top() + width.top),
@@ -259,6 +297,20 @@ pub(in crate::ui::ds) mod probe {
         assert!(
             gaps.iter().all(|gap| (*gap - px(1.)).abs() < px(0.01)),
             "1 px between the control and the ring: {gaps:?}"
+        );
+
+        let focused = cx.update(|window, cx| window.focused(cx));
+        cx.update(|window, cx| window.focus_next(cx));
+        let moved = cx.update(|window, cx| window.focused(cx)) != focused;
+        assert!(moved, "the window has a second tab stop after the control");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let left: Vec<_> = added_edges(cx, &unfocused)
+            .into_iter()
+            .filter(|(painted, _, _)| near(*painted, ring))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "the control shows no ring once focus moves on: {left:?}"
         );
 
         cx.simulate_click(bounds.center(), Modifiers::default());

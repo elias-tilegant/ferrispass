@@ -174,7 +174,7 @@ mod tests {
 
     use gpui::{Hsla, Modifiers, TestAppContext, px, size};
 
-    use super::super::probe;
+    use super::super::{Button, probe};
     use super::*;
     use crate::app::settings::ThemeChoice;
     use crate::ui::ds::tokens::{Mode, TEXT_SIZE_STANDARD};
@@ -278,15 +278,17 @@ mod tests {
         assert_eq!(asked.get(), Some(false), "a click asks for off");
     }
 
-    /// Tab shows the ring around the track and a click does not. The Kit's
-    /// own ring, which tints the track's edge and lays a band at half
-    /// opacity around it, is off, so the ring is the only edge focus adds.
+    /// Tab shows the ring around the track and takes it to the button after
+    /// the switch, and a click does not show it. The Kit's own ring, which
+    /// tints the track's edge and lays a band at half opacity around it, is
+    /// off, so the ring is the only edge focus adds.
     #[gpui::test]
     fn the_switch_shows_the_focus_ring_for_the_keyboard_only(cx: &mut TestAppContext) {
         let cx = probe::window(cx, |_, _| {
             div()
                 .p(px(8.))
                 .child(Switch::new("autolock", text("Lock when idle")).checked(true))
+                .child(Button::secondary("done", text("Done")))
                 .into_any_element()
         });
         let track = probe::assert_keyboard_focus_ring(cx, "fp-switch-track");

@@ -1023,8 +1023,9 @@ mod tests {
         cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
     }
 
-    /// Tab shows the ring around the button, 1 px away and 2 px wide; a
-    /// click on a focused button does not.
+    /// Tab shows the ring around the button, 1 px away and 2 px wide, and
+    /// takes it to the next button; a click on a focused button does not
+    /// show it.
     #[gpui::test]
     fn the_focus_ring_shows_for_the_keyboard_only(cx: &mut TestAppContext) {
         let cx = probe::window(cx, |_, _| {
@@ -1035,6 +1036,7 @@ mod tests {
                         .debug_selector(|| "fp-test-button".into())
                         .child(Button::secondary("save", label("Save")).on_click(|_, _, _| {})),
                 )
+                .child(Button::secondary("cancel", label("Cancel")).on_click(|_, _, _| {}))
                 .into_any_element()
         });
         probe::assert_keyboard_focus_ring(cx, "fp-test-button");
