@@ -343,6 +343,42 @@ pub(in crate::ui::ds) mod probe {
         &code[open..]
     }
 
+    /// The arguments of the call whose opening parenthesis is at `open` in
+    /// `code`, trimmed, up to the parenthesis that closes it. A comma splits
+    /// arguments only outside nested brackets and outside literals; a
+    /// trailing comma adds no argument. Meant for code without comments.
+    pub fn call_arguments(code: &str, open: usize) -> Vec<&str> {
+        let parts = parts(code);
+        let bytes = code.as_bytes();
+        let mut arguments = Vec::new();
+        let mut depth = 0usize;
+        let mut start = open + 1;
+        for at in open..bytes.len() {
+            if parts[at] != Part::Code {
+                continue;
+            }
+            match bytes[at] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        arguments.push(code[start..at].trim());
+                        break;
+                    }
+                }
+                b',' if depth == 1 => {
+                    arguments.push(code[start..at].trim());
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        if arguments.last().is_some_and(|last| last.is_empty()) {
+            arguments.pop();
+        }
+        arguments
+    }
+
     /// Every `.rs` file under `dir`, for the scans over the source.
     pub fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -591,36 +627,61 @@ mod tests {
     use super::*;
 
     /// Calls that hand a text to VoiceOver or show it, beside the `.child(`
-    /// and `aria_label(` that `no_literals_in_render_code` looks at.
-    const TEXT_CALLS: &[&str] = &[
-        "accessibility_label(",
-        "aria_description(",
-        "aria_value(",
-        "aria_placeholder(",
-        "tooltip(",
-        "Label::new(",
+    /// and `aria_label(` that `no_literals_in_render_code` looks at, each
+    /// with the place of that text among its arguments, counted from 0.
+    /// The other arguments, such as an element id or a key string, may be
+    /// literals.
+    const TEXT_CALLS: &[(&str, usize)] = &[
+        ("accessibility_label(", 0),
+        ("aria_description(", 0),
+        ("aria_value(", 0),
+        ("aria_placeholder(", 0),
+        ("tooltip(", 0),
+        ("Label::new(", 0),
+        // The label or name of a component.
+        ("Button::new(", 2),
+        ("Button::primary(", 1),
+        ("Button::secondary(", 1),
+        ("Button::quiet(", 1),
+        ("Button::ghost(", 1),
+        ("Button::danger(", 1),
+        ("Button::large(", 1),
+        ("IconButton::new(", 2),
+        ("Shortcut::from_keystroke(", 1),
+        ("TextField::new(", 2),
+        ("Switch::new(", 1),
+        // The sentences a component adds to its name.
+        ("description(", 0),
+        ("note(", 0),
+        ("error(", 0),
     ];
 
-    /// The string literals `source` hands straight to one of `TEXT_CALLS`,
-    /// with their line. Comments and inline test modules are left out.
+    /// The string literals `source` hands straight to one of `TEXT_CALLS`
+    /// as its text, with the line of the call. Comments and inline test
+    /// modules are left out.
     fn literal_texts(source: &str) -> Vec<(usize, String)> {
         let code = probe::code_only(source);
         let mut found = Vec::new();
-        for call in TEXT_CALLS {
+        for (call, place) in TEXT_CALLS {
             for (at, _) in code.match_indices(call) {
                 let part_of_a_longer_name = code[..at]
                     .chars()
                     .next_back()
                     .is_some_and(|c| c.is_alphanumeric() || c == '_');
-                let argument = code[at + call.len()..].trim_start();
+                if part_of_a_longer_name {
+                    continue;
+                }
+                let arguments = probe::call_arguments(&code, at + call.len() - 1);
+                let Some(argument) = arguments.get(*place) else {
+                    continue;
+                };
                 let literal = argument.starts_with('"')
                     || argument.starts_with("r\"")
                     || argument.starts_with("r#");
-                if literal && !part_of_a_longer_name {
+                if literal {
                     let line = code[..at].matches('\n').count() + 1;
                     let first_line = argument.lines().next().unwrap_or_default();
-                    let text = first_line.trim_end_matches([')', ',', ';']);
-                    found.push((line, text.to_string()));
+                    found.push((line, first_line.to_string()));
                 }
             }
         }
@@ -628,8 +689,9 @@ mod tests {
         found
     }
 
-    /// A name, description, value or tooltip in `ui::ds` comes from a
-    /// parameter or a text key, never from a literal in the code.
+    /// A label, name, description, sentence, value or tooltip in `ui::ds`
+    /// comes from a parameter or a text key, never from a literal in the
+    /// code.
     #[test]
     fn no_literal_names_descriptions_or_tooltips() {
         let ds = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds");
@@ -671,6 +733,32 @@ mod tests {
 mod tests {
     fn sample() { div().aria_description("in a test"); }
 }
+            Button::new("open", ButtonKind::Primary, "Open website");
+            Button::primary("sign-in", "Sign in");
+            Button::secondary("other", "Other vault");
+            Button::quiet("why", "Why?");
+            Button::ghost("open", "Open");
+            Button::danger("forget", "Forget");
+            super::Button::large("unlock", "Unlock");
+            IconButton::new("copy", IconName::Copy, "Copy password");
+            Shortcut::from_keystroke("cmd-c", "Password");
+            TextField::new("server", &state, "Server");
+            Switch::new("autolock", "Lock when idle");
+            Button::primary("save", label).description("Production system");
+            Switch::new("autolock", label).note("After four minutes without input.");
+            TextField::new("server", &state, label).error("The address needs a port.");
+            TextField::new(
+                "server",
+                &state,
+                "Server address",
+            );
+            Button::primary("sign-in", tr!("quick.sign_in")).shortcut("enter");
+            IconButton::new("copy", IconName::Copy, name);
+            Shortcut::from_keystroke("cmd-c", word);
+            KitSwitch::new("autolock");
+            gpui_base::Button::new("save");
+            Button::primary("row,", label).my_note("not this one");
+            fn note(mut self, sentence: impl Into<SharedString>) -> Self { self }
         "##;
         assert_eq!(
             literal_texts(source),
@@ -679,6 +767,21 @@ mod tests {
                 (3, "r#\"Copy\"#".to_string()),
                 (10, "\"Server\"".to_string()),
                 (11, "\"Open the link\"".to_string()),
+                (16, "\"Open website\"".to_string()),
+                (17, "\"Sign in\"".to_string()),
+                (18, "\"Other vault\"".to_string()),
+                (19, "\"Why?\"".to_string()),
+                (20, "\"Open\"".to_string()),
+                (21, "\"Forget\"".to_string()),
+                (22, "\"Unlock\"".to_string()),
+                (23, "\"Copy password\"".to_string()),
+                (24, "\"Password\"".to_string()),
+                (25, "\"Server\"".to_string()),
+                (26, "\"Lock when idle\"".to_string()),
+                (27, "\"Production system\"".to_string()),
+                (28, "\"After four minutes without input.\"".to_string()),
+                (29, "\"The address needs a port.\"".to_string()),
+                (30, "\"Server address\"".to_string()),
             ]
         );
     }
