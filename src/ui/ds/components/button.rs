@@ -289,7 +289,8 @@ impl Button {
         self
     }
 
-    /// While loading, the label stays, a click does nothing, and after
+    /// While loading, the label stays, a click does nothing, the pointer
+    /// gets no hand, no hover surface and no fade, and after
     /// [`SPINNER_DELAY`] a spinner appears next to the label.
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
@@ -334,12 +335,15 @@ impl Button {
             super::copper::note(window, cx);
         }
 
+        // Only a button that takes a click shows the pointing hand, its
+        // hover surface and the fade while held; a loading one keeps its
+        // colors but answers the pointer no more than a disabled one.
         let (surface, hover, text) = if self.disabled {
             let (surface, text) = self.kind.disabled_colors(colors);
             (surface, None, text)
         } else {
             let (surface, hover, text) = self.kind.colors(colors);
-            (surface, Some(hover), text)
+            (surface, self.takes_clicks().then_some(hover), text)
         };
         let description = if self.disabled {
             Some(tr!("a11y.not_available"))
@@ -543,7 +547,8 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{
-        Bounds, Edges, Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point,
+        Bounds, CursorStyle, Edges, Modifiers, MouseButton, Pixels, TestAppContext,
+        VisualTestContext, point,
     };
     use gpui_component::IconName;
 
@@ -761,6 +766,78 @@ mod tests {
         assert_eq!(spinner(cx), None, "no spinner before the delay is over");
         cx.executor().advance_clock(Duration::from_millis(1));
         assert!(spinner(cx).is_some(), "the spinner once the delay is over");
+    }
+
+    /// The copper surface a window painted, with full opacity, and the
+    /// opacity it was painted with.
+    fn copper_paint(cx: &mut VisualTestContext) -> (Hsla, f32) {
+        let copper = [
+            LIGHT.button_primary_bg.hsla,
+            LIGHT.button_primary_hover.hsla,
+        ];
+        cx.update(|window, _| {
+            window
+                .painted_quads()
+                .into_iter()
+                .filter_map(|quad| quad.background.as_solid())
+                .find(|color| copper.contains(&Hsla { a: 1.0, ..*color }))
+                .map(|color| (Hsla { a: 1.0, ..color }, color.a))
+                .expect("the copper surface")
+        })
+    }
+
+    /// A loading button takes no click, so it answers the pointer no more
+    /// than a disabled one: no pointing hand, no hover surface, no fade
+    /// while held. A button that takes clicks shows all three.
+    #[gpui::test]
+    fn a_loading_button_does_not_answer_the_pointer(cx: &mut TestAppContext) {
+        let cursors = probe::in_frame(cx, |window, cx| {
+            [("ready", false), ("busy", true)].map(|(id, loading)| {
+                let mut base = Button::primary(id, label("Save"))
+                    .loading(loading)
+                    .on_click(|_, _, _| {})
+                    .into_base(window, cx);
+                Styled::style(&mut base).mouse_cursor
+            })
+        });
+        assert_eq!(
+            cursors,
+            [Some(CursorStyle::PointingHand), None],
+            "the pointing hand, ready and loading"
+        );
+
+        for loading in [false, true] {
+            let cx = probe::window(cx, move |_, _| {
+                Button::primary("save", label("Save"))
+                    .loading(loading)
+                    .on_click(|_, _, _| {})
+                    .into_any_element()
+            });
+            let at = point(px(10.), px(10.));
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let (hovered, _) = copper_paint(cx);
+            cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let (_, held) = copper_paint(cx);
+            cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+            if loading {
+                assert_eq!(
+                    hovered, LIGHT.button_primary_bg.hsla,
+                    "loading: no hover surface"
+                );
+                assert_eq!(held, 1.0, "loading: no fade while held");
+            } else {
+                assert_eq!(
+                    hovered, LIGHT.button_primary_hover.hsla,
+                    "ready: the hover surface"
+                );
+                assert!(
+                    (held - PRESSED_OPACITY).abs() < 1e-6,
+                    "ready: the fade while held, {held}"
+                );
+            }
+        }
     }
 
     #[gpui::test]
