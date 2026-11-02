@@ -29,11 +29,14 @@ pub struct Shortcut {
 impl Shortcut {
     /// `keys` is a GPUI key string such as `cmd-shift-c`, or several
     /// separated by spaces for a sequence. `label` is the word for what they
-    /// do, from a text key or from the caller.
+    /// do, from a text key or from the caller. Panics if it is empty.
     pub fn from_keystroke(keys: &str, label: impl Into<SharedString>) -> Self {
+        let label = label.into();
+        // Without its word the pair would be keycaps alone.
+        assert!(!label.is_empty(), "a shortcut needs its word");
         Self {
             keys: parse_keys(keys),
-            label: label.into(),
+            label,
             style: StyleRefinement::default(),
         }
     }
@@ -108,6 +111,14 @@ mod tests {
             Shortcut::from_keystroke("escape", word("Close")).keys_text(),
             "Esc"
         );
+    }
+
+    /// Without its word a pair is keycaps alone, so an empty word is a
+    /// mistake in the code, in a release build too.
+    #[test]
+    #[should_panic(expected = "a shortcut needs its word")]
+    fn a_shortcut_needs_its_word_in_every_build() {
+        let _ = Shortcut::from_keystroke("cmd-c", SharedString::default());
     }
 
     /// Every keycap has a parent with a name: the word of its pair, or the
