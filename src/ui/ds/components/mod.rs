@@ -10,9 +10,13 @@
 pub mod button;
 pub(in crate::ui::ds) mod keycap;
 pub mod shortcut;
+pub mod switch;
+pub mod text_field;
 
 pub use button::{Button, ButtonKind, ButtonSize, IconButton};
 pub use shortcut::Shortcut;
+pub use switch::Switch;
+pub use text_field::TextField;
 
 use gpui::SharedString;
 
