@@ -259,12 +259,19 @@ impl Button {
     /// Marks the button Return presses: VoiceOver announces it as the
     /// default button, and unless the button has a shortcut of its own it
     /// shows ⏎. A danger button can never be it: Return never triggers
-    /// something that cannot be undone.
-    pub fn default_button(mut self) -> Self {
+    /// something that cannot be undone. Asking for it fails in a debug
+    /// build and leaves the button as it was in a release build.
+    pub fn default_button(self) -> Self {
         debug_assert!(
             self.kind != ButtonKind::Danger,
             "a danger button is never the default button"
         );
+        self.make_default()
+    }
+
+    /// What [`Button::default_button`] does after its debug check, so the
+    /// tests reach the release behavior in a debug build too.
+    fn make_default(mut self) -> Self {
         if self.kind == ButtonKind::Danger {
             return self;
         }
@@ -602,6 +609,27 @@ mod tests {
     #[should_panic(expected = "a danger button is never the default button")]
     fn danger_is_never_the_default_button() {
         let _ = Button::danger("delete", label("Delete")).default_button();
+    }
+
+    /// In a release build `default_button` leaves a danger button as it
+    /// was. In a debug build its check panics first, so the test calls what
+    /// follows the check, which is the same in every build.
+    #[gpui::test]
+    fn a_danger_button_never_becomes_the_default_button(cx: &mut TestAppContext) {
+        let (role, node) = node_of(cx, || {
+            Button::danger("delete", label("Delete")).make_default()
+        });
+        assert_eq!(role, Some(Role::Button), "a danger button stays a button");
+        assert_eq!(node.keyboard_shortcut(), None, "and shows no ⏎");
+        for kind in ButtonKind::ALL
+            .into_iter()
+            .filter(|kind| *kind != ButtonKind::Danger)
+        {
+            let (role, _) = node_of(cx, move || {
+                Button::new("b", kind, label("B")).make_default()
+            });
+            assert_eq!(role, Some(Role::DefaultButton), "{kind:?}");
+        }
     }
 
     /// VoiceOver reads a button by its name, so a button without one is a
