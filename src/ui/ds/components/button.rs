@@ -528,9 +528,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{
-        Modifiers, MouseButton, ParentElement as _, TestAppContext, VisualTestContext, div, point,
-    };
+    use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point};
     use gpui_component::IconName;
 
     #[cfg(debug_assertions)]

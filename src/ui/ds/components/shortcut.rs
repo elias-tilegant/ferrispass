@@ -78,7 +78,7 @@ impl RenderOnce for Shortcut {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Bounds, ParentElement as _, Pixels, Role, TestAppContext, px};
+    use gpui::{Bounds, Pixels, Role, TestAppContext, px};
 
     use super::super::{Button, probe};
     use super::*;
