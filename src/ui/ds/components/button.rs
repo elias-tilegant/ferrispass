@@ -179,6 +179,7 @@ impl Content {
 /// A button with a label. Its label is also its name for VoiceOver, so it
 /// should say what happens and to what ("Sign in to NHP, client 100"), and
 /// it comes from a text key or from the caller, never from a literal here.
+/// The constructors panic on an empty label or name.
 #[derive(IntoElement)]
 pub struct Button {
     id: ElementId,
@@ -224,7 +225,9 @@ impl Button {
     }
 
     fn with_content(id: ElementId, kind: ButtonKind, content: Content) -> Self {
-        debug_assert!(!content.name().is_empty(), "a button needs a name");
+        // VoiceOver reads a button by its name; one without is a mistake in
+        // the code, in a release build too.
+        assert!(!content.name().is_empty(), "a button needs a name");
         Self {
             id,
             kind,
@@ -530,6 +533,7 @@ mod tests {
     };
     use gpui_component::IconName;
 
+    #[cfg(debug_assertions)]
     use super::super::copper;
     use super::super::probe;
     use super::*;
@@ -591,6 +595,20 @@ mod tests {
     #[should_panic(expected = "a danger button is never the default button")]
     fn danger_is_never_the_default_button() {
         let _ = Button::danger("delete", label("Delete")).default_button();
+    }
+
+    /// VoiceOver reads a button by its name, so a button without one is a
+    /// mistake in every build, not only in a debug build.
+    #[test]
+    #[should_panic(expected = "a button needs a name")]
+    fn a_button_needs_a_name_in_every_build() {
+        let _ = Button::secondary("unnamed", SharedString::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "a button needs a name")]
+    fn an_icon_button_needs_a_name_in_every_build() {
+        let _ = IconButton::new("unnamed", IconName::Copy, SharedString::default());
     }
 
     /// Clicks the middle of the first button in a window that holds only
@@ -657,6 +675,7 @@ mod tests {
             !surfaces.contains(&LIGHT.button_primary_bg.hsla),
             "{surfaces:?}"
         );
+        #[cfg(debug_assertions)]
         assert_eq!(cx.update(|window, cx| copper::surfaces(window, cx)), 0);
     }
 
@@ -721,7 +740,9 @@ mod tests {
         assert_eq!(pressed, 1);
     }
 
-    /// How many copper surfaces a window with `buttons` drew.
+    /// How many copper surfaces a window with `buttons` drew. The count
+    /// exists in debug builds only.
+    #[cfg(debug_assertions)]
     fn copper_drawn(
         cx: &mut TestAppContext,
         buttons: impl Fn() -> Vec<AnyElement> + 'static,
@@ -736,6 +757,7 @@ mod tests {
     /// A view has at most one copper surface. The counter sees every copper
     /// button a window draws, so a view with a second one fails here.
     #[gpui::test]
+    #[cfg(debug_assertions)]
     fn one_copper_per_view(cx: &mut TestAppContext) {
         let drawn = copper_drawn(cx, || {
             vec![
@@ -753,6 +775,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[cfg(debug_assertions)]
     fn the_copper_counter_sees_both_copper_kinds(cx: &mut TestAppContext) {
         let drawn = copper_drawn(cx, || {
             vec![

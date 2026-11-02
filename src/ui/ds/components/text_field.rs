@@ -42,13 +42,14 @@ pub struct TextField {
 
 impl TextField {
     /// `label` stands above the field and is its name for VoiceOver.
+    /// Panics if it is empty.
     pub fn new(
         id: impl Into<ElementId>,
         state: &Entity<InputState>,
         label: impl Into<SharedString>,
     ) -> Self {
         let label = label.into();
-        debug_assert!(!label.is_empty(), "a text field needs a name");
+        assert!(!label.is_empty(), "a text field needs a name");
         Self {
             id: id.into(),
             state: state.clone(),
@@ -184,6 +185,15 @@ mod tests {
         });
         let bounds = cx.debug_bounds("fp-text-field-input").expect("the input");
         f32::from(bounds.size.height)
+    }
+
+    #[gpui::test]
+    #[should_panic(expected = "a text field needs a name")]
+    fn a_text_field_needs_a_name_in_every_build(cx: &mut TestAppContext) {
+        probe::in_frame(cx, |window, cx| {
+            let state = cx.new(|cx| InputState::new(window, cx));
+            let _ = TextField::new("unnamed", &state, SharedString::default());
+        });
     }
 
     #[gpui::test]

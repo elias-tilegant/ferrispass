@@ -38,9 +38,10 @@ pub struct Switch {
 
 impl Switch {
     /// `label` stands next to the switch and is its name for VoiceOver.
+    /// Panics if it is empty.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         let label = label.into();
-        debug_assert!(!label.is_empty(), "a switch needs a name");
+        assert!(!label.is_empty(), "a switch needs a name");
         Self {
             id: id.into(),
             label,
@@ -174,6 +175,12 @@ mod tests {
                 .map(|color| Hsla { a: 1.0, ..color })
                 .collect()
         })
+    }
+
+    #[test]
+    #[should_panic(expected = "a switch needs a name")]
+    fn a_switch_needs_a_name_in_every_build() {
+        let _ = Switch::new("unnamed", SharedString::default());
     }
 
     #[gpui::test]
