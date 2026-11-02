@@ -1,0 +1,10 @@
+_version: 2
+# Accessible names for controls that show no text of their own, such as icon
+# buttons. VoiceOver reads them; nobody sees them.
+a11y:
+  copy_password:
+    en: Copy password
+    de: Passwort kopieren
+  reveal_password:
+    en: Show password
+    de: Passwort zeigen

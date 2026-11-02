@@ -1,0 +1,27 @@
+_version: 2
+# The menu bar item: its right-click menu and the one-time hint when the notch
+# hides it. English menu items follow the macOS title case.
+menubar:
+  menu:
+    quick_access:
+      en: Quick Access
+      de: Schnellzugriff
+    open_app:
+      en: Open FerrisPass
+      de: FerrisPass öffnen
+    lock_all:
+      en: Lock All
+      de: Alles sperren
+    settings:
+      en: Settings…
+      de: Einstellungen …
+    quit:
+      en: Quit FerrisPass
+      de: FerrisPass beenden
+  notch:
+    hidden:
+      en: The notch hides the FerrisPass icon in the menu bar. You can open Quick Access with %{shortcut} at any time.
+      de: Die Notch verdeckt das FerrisPass-Symbol in der Menüleiste. Den Schnellzugriff öffnest du jederzeit mit %{shortcut}.
+    practice:
+      en: Practice the shortcut
+      de: Kürzel üben

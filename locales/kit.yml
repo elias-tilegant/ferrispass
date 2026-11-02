@@ -1,0 +1,39 @@
+_version: 2
+# Texts that GPUI Kit draws itself. The Kit ships no German, so the app adds
+# it here; i18n::init() hands this namespace to the Kit with
+# rust_i18n::extend!. The English must stay the Kit's own (a test compares
+# them), and a Kit key missing here falls back to the Kit's English.
+gpui_component:
+  Input:
+    # The text field's context menu.
+    Cut:
+      en: Cut
+      de: Ausschneiden
+    Copy:
+      en: Copy
+      de: Kopieren
+    Paste:
+      en: Paste
+      de: Einsetzen
+    Select All:
+      en: Select All
+      de: Alles auswählen
+  Dialog:
+    ok:
+      en: OK
+      de: OK
+    cancel:
+      en: Cancel
+      de: Abbrechen
+  Select:
+    placeholder:
+      en: Please select
+      de: Bitte auswählen
+  List:
+    search_placeholder:
+      en: Search...
+      de: Suchen ...
+  ComboBox:
+    empty:
+      en: No results
+      de: Keine Treffer

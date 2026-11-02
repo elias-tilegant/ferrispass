@@ -1,0 +1,83 @@
+_version: 2
+# The standard messages. Each situation has exactly one wording, and every
+# screen that meets the situation uses this key instead of its own sentence.
+# A message says what happened in at most two sentences before the action.
+# The action itself (a button such as "Open backup") is not part of the
+# message; it comes from the action registry or the screen.
+msg:
+  wrong_master_password:
+    en: That password doesn't match, or the file is damaged. Check upper and lower case and the spaces between the words.
+    de: Das Passwort passt nicht, oder die Datei ist beschädigt. Achte auf Groß- und Kleinschreibung und die Leerzeichen zwischen den Wörtern.
+  file_incomplete:
+    en: This file is incomplete, probably cut off while it was being copied.
+    de: Diese Datei ist unvollständig, vermutlich beim Kopieren abgebrochen.
+  offline:
+    en: Offline. Your changes are saved on this Mac and go out as soon as SharePoint is reachable. Check your VPN. FerrisPass uses the proxy from System Settings.
+    de: Offline. Deine Änderungen sind auf diesem Mac gesichert und gehen raus, sobald SharePoint erreichbar ist. Prüf dein VPN. FerrisPass nutzt den Proxy aus den Systemeinstellungen.
+  signin_expired:
+    en: Please sign in to Microsoft again. Your data on this Mac is safe.
+    de: Bitte melde dich erneut bei Microsoft an. Deine Daten auf diesem Mac sind sicher.
+  consent_missing:
+    en: Your company has to allow FerrisPass once to access SharePoint.
+    de: Deine Firma muss FerrisPass einmal erlauben, auf SharePoint zuzugreifen.
+  no_access_read:
+    en: You don't have access to the SharePoint site '%{site}'. Ask the person who invited you to add you.
+    de: Du hast keinen Zugriff auf die SharePoint-Seite '%{site}'. Bitte die Person, die dich eingeladen hat, dich hinzuzufügen.
+  no_access_write:
+    en: You can only read %{vault}. Your change to '%{entry}' is only on this Mac.
+    de: Du darfst %{vault} nur lesen. Deine Änderung an '%{entry}' liegt nur auf diesem Mac.
+  decision_needed:
+    en: Two versions need your decision. Until that is settled, %{vault} does not sync.
+    de: Zwei Fassungen brauchen deine Entscheidung. Solange das offen ist, gleicht %{vault} nicht ab.
+  concurrent_change:
+    en: If two people change the same entry at the same time, we ask you. Otherwise the newer version counts, and the older one stays under Earlier versions.
+    de: Haben zwei denselben Eintrag zur selben Zeit geändert, fragen wir dich. Sonst gilt die neuere Fassung, die ältere bleibt unter Frühere Versionen.
+  own_version_replaced:
+    en: Your change to '%{entry}' from %{time} was replaced by a newer one. It is under Earlier versions.
+    de: Deine Änderung von %{time} an '%{entry}' wurde durch eine neuere ersetzt. Sie liegt unter Frühere Versionen.
+  folder_no_history:
+    en: Folders have no earlier versions. The other version is gone afterwards.
+    de: Für Ordner gibt es keine frühere Version. Die andere Fassung ist danach weg.
+  team_password_changed:
+    en: The file in SharePoint no longer unlocks with the saved team password. Last saved by %{person}, %{time}. Usually the team password was changed. If you didn't get the new one from this person, ask.
+    de: Die Datei in SharePoint lässt sich mit dem gemerkten Team-Passwort nicht mehr entsperren. Zuletzt gespeichert von %{person}, %{time}. Meist wurde das Team-Passwort geändert. Hast du das neue nicht von dieser Person, frag nach.
+  protection_raised:
+    one:
+      en: From now on, unlocking takes about %{count} second. If this is news to you, ask around.
+      de: Entsperren dauert künftig etwa %{count} Sekunde. Weißt du nichts davon, frag kurz nach.
+    other:
+      en: From now on, unlocking takes about %{count} seconds. If this is news to you, ask around.
+      de: Entsperren dauert künftig etwa %{count} Sekunden. Weißt du nichts davon, frag kurz nach.
+  protection_lowered:
+    en: The team vault is now less well protected. That rarely happens on purpose. Ask before you keep working.
+    de: Der Team-Tresor ist jetzt schwächer gesichert. Das passiert selten absichtlich. Frag nach, bevor du weiterarbeitest.
+  sap_missing_sysnr:
+    en: Signing in still needs the system number.
+    de: Zum Anmelden fehlt noch die Systemnummer.
+  sap_no_launch_file:
+    en: SAP GUI can't take this password through a launch file.
+    de: SAP GUI kann dieses Passwort nicht per Startdatei übernehmen.
+  sap_quit_immediately:
+    en: SAP GUI quit right away. This is a known bug in SAP GUI %{gui_version} on macOS %{macos_version}.
+    de: SAP GUI hat sich gleich wieder beendet. Das ist ein bekannter Fehler von SAP GUI %{gui_version} unter macOS %{macos_version}.
+  type_nothing_remembered:
+    en: Nothing is remembered for '%{app}' yet. Choose the login and press ⌘⏎.
+    de: Für '%{app}' ist noch nichts gemerkt. Wähl den Zugang und drück ⌘⏎.
+  type_browser_explicit:
+    en: Over a browser, I only type when you choose the entry yourself.
+    de: Über einem Browser tippe ich nur, wenn du den Eintrag ausdrücklich wählst.
+  type_permission_managed:
+    en: Your company manages the permission to type. Ask IT whether FerrisPass is approved.
+    de: Deine Firma verwaltet die Erlaubnis zum Tippen. Frag die IT, ob FerrisPass freigegeben ist.
+  update_needs_admin:
+    en: This update needs an admin password or IT.
+    de: Dieses Update braucht ein Admin-Passwort oder die IT.
+  window_closed_locked:
+    en: "Window closed and locked. To keep working in the background: minimize or ⌘H."
+    de: "Fenster zu und gesperrt. Im Hintergrund weiterarbeiten: minimieren oder ⌘H."
+  delete_permanently:
+    en: Delete '%{entry}' from this vault for good? Older copies (SharePoint versions, backups) may still contain it. If it has to stay secret, change the password in the system.
+    de: "'%{entry}' endgültig aus diesem Tresor löschen? Ältere Kopien (SharePoint-Versionen, Sicherungskopien) können ihn noch enthalten. Muss er geheim bleiben, ändere das Passwort im System."
+  security_model:
+    en: Every vault is a KeePass file that is decrypted only on its members' devices. SharePoint holds the encrypted file, its name, its versions and who saved it last. The master password never leaves the Mac; with Touch ID it is kept in the keychain on this Mac. Team passwords are stored encrypted in each member's personal vault. FerrisPass uses the Files.ReadWrite.All permission.
+    de: Jeder Tresor ist eine KeePass-Datei, die nur auf den Geräten der Mitglieder entschlüsselt wird. In SharePoint liegen die verschlüsselte Datei, ihr Name, ihre Versionen und wer sie zuletzt gespeichert hat. Das Master-Passwort verlässt den Mac nie, mit Touch ID liegt es im lokalen Schlüsselbund. Team-Passwörter liegen verschlüsselt im persönlichen Tresor jedes Mitglieds. FerrisPass nutzt die Berechtigung Files.ReadWrite.All.
