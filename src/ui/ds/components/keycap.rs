@@ -3,8 +3,10 @@
 //! A keycap never stands alone. Only `ui::ds` can build one, and it does so
 //! in two places: in a [`Shortcut`](super::Shortcut), next to the word for
 //! what the keys do, and in a [`Button`](super::Button), whose name says it.
-//! For VoiceOver the keys go into the parent's `aria_keyshortcuts`, never
-//! into a name, and the keycap has no node of its own.
+//! For VoiceOver the keys go into `aria_keyshortcuts` on the control they act
+//! on, never into a name: on the button itself, and for a shortcut pair on
+//! the control the screen binds the keys to. The keycap has no node of its
+//! own.
 //!
 //! The glyphs are set here rather than taken from GPUI's `Display` for
 //! `Keystroke`, which writes `^` for Control, puts ⌘ before ⇧ and spells out
