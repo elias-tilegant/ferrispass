@@ -570,6 +570,16 @@ fn copy_code_needs_otp() {
             );
         }
     }
+    // In every situation, Copy code is there exactly when the app is
+    // unlocked and the selected entry has a one-time code.
+    for ctx in every_ctx() {
+        let offered = !ctx.locked && ctx.selection.is_some_and(|selection| selection.has_otp);
+        assert_eq!(
+            enablement(CommandId::ENTRY_COPY_CODE, &ctx),
+            if offered { Enabled } else { Hidden },
+            "copy code, {ctx:?}"
+        );
+    }
 }
 
 #[test]
@@ -589,6 +599,19 @@ fn copy_username_needs_a_user_name() {
                 "{kind:?}, user name {has_username}"
             );
         }
+    }
+    // In every situation, Copy user name is there exactly when the app is
+    // unlocked and the selected entry has a user name.
+    for ctx in every_ctx() {
+        let offered = !ctx.locked
+            && ctx
+                .selection
+                .is_some_and(|selection| selection.has_username);
+        assert_eq!(
+            enablement(CommandId::ENTRY_COPY_USERNAME, &ctx),
+            if offered { Enabled } else { Hidden },
+            "copy user name, {ctx:?}"
+        );
     }
 }
 
@@ -643,9 +666,9 @@ fn open_url_needs_http_or_https() {
         );
     }
     // In every situation, Open address is there exactly when the app is
-    // unlocked and the selected entry has an http or https address. Picking
-    // the row, the search, the kind of entry and what else it has change
-    // nothing about that.
+    // unlocked and the selected entry has an http or https address, and Copy
+    // address exactly when it has any address. Picking the row, the search,
+    // the kind of entry and what else it has change nothing about that.
     for ctx in every_ctx() {
         let web_address = ctx
             .selection
@@ -655,6 +678,15 @@ fn open_url_needs_http_or_https() {
             enablement(CommandId::ENTRY_OPEN_URL, &ctx),
             if offered { Enabled } else { Hidden },
             "open, {ctx:?}"
+        );
+        let any_address = ctx
+            .selection
+            .is_some_and(|selection| selection.url != UrlKind::Empty);
+        let copyable = !ctx.locked && any_address;
+        assert_eq!(
+            enablement(CommandId::ENTRY_COPY_URL, &ctx),
+            if copyable { Enabled } else { Hidden },
+            "copy address, {ctx:?}"
         );
     }
 }
