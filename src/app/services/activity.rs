@@ -99,7 +99,8 @@ fn with_last_input<R>(f: impl FnOnce(&LastInput) -> R) -> R {
 /// Unit tests run side by side in one process, each on a thread of its own,
 /// and the GPUI test executor runs a test's tasks on that thread. With one
 /// clock per thread, a test that types into its window cannot reset the clock
-/// another test is watching. Integration tests and the app use the static.
+/// another test is watching. Integration tests and the app use the static;
+/// `tests/idle_clock.rs` checks it.
 #[cfg(test)]
 fn with_last_input<R>(f: impl FnOnce(&LastInput) -> R) -> R {
     thread_local! {
@@ -114,8 +115,10 @@ mod tests {
 
     const FOUR_MINUTES: Duration = Duration::from_secs(240);
 
-    /// Every source. `only_listed_sources_exist` fails to compile until a new
-    /// variant is added here.
+    /// Every source, for the tests that go through them all. A new variant
+    /// stops `only_listed_sources_exist` from compiling until it gets an arm
+    /// in its `match`, but that arm does not add it here. Add it here too, or
+    /// `touch_resets_idle` never tries it; nothing checks that second step.
     const ALL_SOURCES: [ActivitySource; 4] = [
         ActivitySource::WindowInput,
         ActivitySource::Panel,
@@ -171,8 +174,10 @@ mod tests {
 
     #[test]
     fn only_listed_sources_exist() {
-        // No `_` arm: a new source does not compile here until it is added to
-        // `ALL_SOURCES`, and given its call sites in tests/architecture.rs.
+        // No `_` arm, so this test does not compile with a source the `match`
+        // leaves out. A new source needs its arm here, a place in
+        // `ALL_SOURCES` (the arm alone does not put it there) and its call
+        // sites in tests/architecture.rs.
         let mut seen = [false; ALL_SOURCES.len()];
         for source in ALL_SOURCES {
             let slot = match source {
