@@ -3,6 +3,7 @@
 //! secrets.
 
 use super::*;
+use crate::app::services::activity;
 
 impl AppShell {
     /// Start the per-second TOTP refresh loop only when the currently-selected
@@ -49,8 +50,9 @@ impl AppShell {
     /// Mirror of `sync_totp_tick` for the idle-timeout auto-lock
     /// checker. Runs only while a vault is open AND `auto_lock_secs`
     /// is configured; cancelled (= dropped) otherwise. The task wakes
-    /// every `AUTO_LOCK_TICK_SECS` and triggers a lock once
-    /// `last_activity` has been silent for the configured threshold.
+    /// every `AUTO_LOCK_TICK_SECS` and triggers a lock once the app-wide
+    /// idle clock (`services::activity`) has been silent for the
+    /// configured threshold. It only reads the clock; input moves it.
     /// Reads the threshold inside the loop so settings changes apply
     /// at the next tick without restarting the task.
     pub(super) fn sync_auto_lock_task(&mut self, cx: &mut Context<Self>) {
@@ -67,7 +69,7 @@ impl AppShell {
                 // Reset the activity baseline at vault-open so a stale
                 // timestamp from earlier in the session doesn't trip an
                 // immediate lock.
-                self.last_activity = SystemTime::now();
+                activity::reset(SystemTime::now());
                 let window_handle = self.window_handle;
                 self.auto_lock_task = Some(cx.spawn(async move |this, cx| {
                     loop {
@@ -81,16 +83,12 @@ impl AppShell {
                                 return None; // settings disabled - exit.
                             };
                             // A backwards clock jump must not postpone a
-                            // lock, so an unreadable elapsed time counts as
-                            // "long enough".
-                            let idle = SystemTime::now()
-                                .duration_since(shell.last_activity)
-                                .unwrap_or(Duration::MAX);
-                            if idle >= Duration::from_secs(threshold) {
-                                Some(true)
-                            } else {
-                                Some(false)
-                            }
+                            // lock; `idle_for` reads it as idle long enough.
+                            let idle = activity::idle_for(SystemTime::now());
+                            Some(activity::lock_is_due(
+                                idle,
+                                Some(Duration::from_secs(threshold)),
+                            ))
                         });
                         match decision {
                             Ok(Some(false)) => continue,

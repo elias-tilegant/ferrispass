@@ -2,6 +2,7 @@
 //! clipboard pill.
 
 use super::*;
+use crate::app::services::activity::{self, ActivitySource};
 
 impl AppShell {
     fn render_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -108,16 +109,19 @@ impl Render for AppShell {
         div()
             .key_context(APP_CONTEXT)
             .track_focus(&self.focus_handle)
-            // Reset the idle clock on any user input. Setting an
-            // `Instant` is cheap and we deliberately don't `cx.notify`
-            // here - only the auto-lock checker reads the field, and
-            // it does so on its own schedule.
-            .on_mouse_move(cx.listener(|shell: &mut AppShell, _, _, _| {
-                shell.last_activity = SystemTime::now();
-            }))
-            .on_key_down(cx.listener(|shell: &mut AppShell, _, _, _| {
-                shell.last_activity = SystemTime::now();
-            }))
+            // A key press, or the pointer moving over the window while it
+            // is in front, holds off the auto-lock. With another app in
+            // front macOS still reports the pointer passing over, but that
+            // is not input to FerrisPass. No `cx.notify`: only the auto-lock
+            // task reads the clock, on its own schedule.
+            .on_mouse_move(|_, window, _| {
+                if window.is_window_active() {
+                    activity::touch(ActivitySource::WindowInput);
+                }
+            })
+            .on_key_down(|_, _, _| {
+                activity::touch(ActivitySource::WindowInput);
+            })
             .on_action(cx.listener(Self::on_action_open_vault))
             .on_action(cx.listener(Self::on_action_open_vault_switcher))
             .on_action(cx.listener(Self::on_action_open_add_vault))

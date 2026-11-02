@@ -190,18 +190,11 @@ pub struct AppShell {
     /// Validation or save failure for the entry editor, shown next to the
     /// form rather than as a toast that floats away from the field it means.
     entry_form_error: Option<String>,
-    /// Wall-clock timestamp of the last user input event (mouse-move,
-    /// click, key-down). Updated cheaply on every event without
-    /// triggering a re-render - only the auto-lock checker reads it.
-    /// `SystemTime`, not `Instant`: `Instant` does not advance while macOS
-    /// sleeps, so a machine asleep for hours accrued no idle time and the
-    /// auto-lock threshold was measured in awake-seconds only. `AppState`
-    /// documents the same hazard for `last_unlock_at`.
-    last_activity: SystemTime,
-    /// Periodic checker that locks the vault after the configured
-    /// auto-lock timeout. Only running while a vault is open AND a
-    /// non-`None` timeout is configured (managed alongside `totp_tick`
-    /// via the state observer). Drop = cancel.
+    /// Periodic checker that locks the vault once the app-wide idle clock
+    /// (`services::activity`) has passed the configured auto-lock timeout.
+    /// Only running while a vault is open AND a non-`None` timeout is
+    /// configured (managed alongside `totp_tick` via the state observer).
+    /// Drop = cancel.
     auto_lock_task: Option<Task<()>>,
     /// Retains the native macOS notification registrations for the lifetime
     /// of this window and the GPUI task that consumes their coalesced events.
@@ -304,7 +297,7 @@ pub struct AppShell {
     _subscriptions: Vec<Subscription>,
 }
 
-/// How often the auto-lock checker wakes to compare `last_activity`
+/// How often the auto-lock checker wakes to compare the idle clock
 /// against the configured timeout. Coarser than the typical timeout
 /// so the lock always fires within this window of crossing the
 /// threshold.
@@ -616,7 +609,6 @@ impl AppShell {
             entry_form_baseline: None,
             entry_discard_armed: false,
             entry_form_error: None,
-            last_activity: SystemTime::now(),
             auto_lock_task: None,
             #[cfg(target_os = "macos")]
             _session_lock_monitor: crate::session_lock::SessionLockMonitor::new(),
@@ -782,6 +774,8 @@ fn copy_value_label(kind: CopyValueKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod activity_tests;
 #[cfg(test)]
 mod characterization_tests;
 #[cfg(test)]

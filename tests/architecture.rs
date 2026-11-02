@@ -1470,3 +1470,191 @@ fn content_reads_are_found_outside_tests_only() {
         ]
     );
 }
+
+// ------------------------------------------------------------- idle clock --
+
+/// Files that may call `activity::touch`, with the source each call names.
+/// The idle clock behind the auto-lock counts only input the user gives
+/// FerrisPass (see `src/app/services/activity.rs`), so every new caller is a
+/// line here and stands out in review.
+const ACTIVITY_CALL_SITES: &[(&str, &str)] = &[("src/ui/legacy/shell/render.rs", "WindowInput")];
+
+#[test]
+fn activity_is_touched_only_where_listed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found = Vec::new();
+    let mut problems = Vec::new();
+    for (rel, path) in rust_sources(root) {
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+        let touches =
+            activity_touches(&source).unwrap_or_else(|err| panic!("cannot tokenize {rel}: {err}"));
+        for (line, touch) in touches {
+            match touch {
+                Ok(source) => found.push((rel.clone(), source, line)),
+                Err(problem) => problems.push(format!("{rel}:{line}: {problem}")),
+            }
+        }
+    }
+
+    for (file, source, line) in &found {
+        if !ACTIVITY_CALL_SITES.contains(&(file.as_str(), source.as_str())) {
+            problems.push(format!(
+                "{file}:{line}: touches the idle clock as `{source}`, which is not on the \
+                 list. Only input the user gives FerrisPass holds off the auto-lock; if this \
+                 is such input, add the file and source to ACTIVITY_CALL_SITES."
+            ));
+        }
+    }
+    for (file, source) in ACTIVITY_CALL_SITES {
+        if !found.iter().any(|(f, s, _)| f == file && s == source) {
+            problems.push(format!(
+                "{file}: listed as touching the idle clock as `{source}`, but no such call \
+                 is left. Remove the entry."
+            ));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "the idle clock is touched outside the list of call sites:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// A line, and the source the call there names or what is wrong with it.
+type FoundTouch = (usize, Result<String, String>);
+
+/// Each `activity::touch` in code, with its line, outside items switched off
+/// by `#[cfg(test)]`: `Ok` with the source a call names, or a problem. Ways a
+/// call could go by another name are problems too: `touch` imported or used
+/// as a value, a glob import from the module, the module renamed with `as`.
+fn activity_touches(source: &str) -> Result<Vec<FoundTouch>, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    let path_sep = |i: usize| {
+        t.get(i).is_some_and(|tok| tok.is_punct(':'))
+            && t.get(i + 1).is_some_and(|tok| tok.is_punct(':'))
+    };
+    let mut found = Vec::new();
+    for i in 0..t.len() {
+        if t[i].name() != Some("activity") || test_items.iter().any(|item| item.contains(&i)) {
+            continue;
+        }
+        let line = t[i].line;
+        if t.get(i + 1).is_some_and(|tok| tok.is_keyword("as")) {
+            found.push((
+                line,
+                Err("renames the activity module, so its calls go unseen".to_string()),
+            ));
+            continue;
+        }
+        if !path_sep(i + 1) {
+            continue;
+        }
+        let Some(next) = t.get(i + 3) else {
+            continue;
+        };
+        if next.name() == Some("touch") {
+            if !t.get(i + 4).is_some_and(|tok| tok.is_punct('(')) {
+                found.push((
+                    line,
+                    Err(
+                        "`activity::touch` is imported or passed around; call it as \
+                         `activity::touch(ActivitySource::..)`"
+                            .to_string(),
+                    ),
+                ));
+                continue;
+            }
+            let close = p.partner[i + 4].expect("balanced parenthesis");
+            found.push((line, named_source(&t[i + 5..close])));
+        } else if next.is_punct('*') {
+            found.push((
+                line,
+                Err("glob import from the activity module".to_string()),
+            ));
+        } else if next.is_punct('{') {
+            let close = p.partner[i + 3].expect("balanced brace");
+            let group = &t[i + 4..close];
+            if group
+                .iter()
+                .any(|tok| tok.name() == Some("touch") || tok.is_punct('*') || tok.is_keyword("as"))
+            {
+                found.push((
+                    line,
+                    Err("imports `touch` from the activity module, or renames it".to_string()),
+                ));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The source a call of `activity::touch` names. The argument has to be
+/// `ActivitySource::<name>`, with or without a path in front, so the call
+/// site says which source it is.
+fn named_source(argument: &[Token]) -> Result<String, String> {
+    let unnamed = || {
+        Err("calls `activity::touch` without naming the source; pass \
+             `ActivitySource::<name>` directly"
+            .to_string())
+    };
+    let Some(split) = argument.len().checked_sub(4) else {
+        return unnamed();
+    };
+    let (path, tail) = argument.split_at(split);
+    let path_is_plain = path.len() % 3 == 0
+        && path.chunks(3).all(|segment| {
+            segment[0].name().is_some() && segment[1].is_punct(':') && segment[2].is_punct(':')
+        });
+    match tail {
+        [ty, colon, colon2, variant]
+            if path_is_plain
+                && ty.name() == Some("ActivitySource")
+                && colon.is_punct(':')
+                && colon2.is_punct(':') =>
+        {
+            match variant.name() {
+                Some(name) => Ok(name.to_string()),
+                None => unnamed(),
+            }
+        }
+        _ => unnamed(),
+    }
+}
+
+#[test]
+fn activity_touches_are_found_with_their_source() {
+    let source = r##"
+        use crate::app::services::activity::{self, ActivitySource};
+        // activity::touch(ActivitySource::Timer) in a comment
+        fn input() { activity::touch(ActivitySource::WindowInput); }
+        const NOTE: &str = "activity::touch(ActivitySource::Timer)";
+        fn full() { crate::app::services::activity::touch(crate::app::services::activity::ActivitySource::Panel); }
+        fn forwarded(source: ActivitySource) { activity::touch(source); }
+        #[cfg(test)]
+        mod tests { fn helper() { activity::touch(ActivitySource::Hotkey); } }
+        fn reads() { let _ = activity::idle_for(now); activity::reset(now); }
+        use crate::app::services::activity::touch;
+        use crate::app::services::activity::{touch as poke};
+        use crate::app::services::activity::*;
+        use crate::app::services::activity as clock;
+        fn pointer() { let f = activity::touch; }
+    "##;
+    let found = activity_touches(source).expect("scan");
+    let named: Vec<(usize, String)> = found
+        .iter()
+        .filter_map(|(line, touch)| touch.as_ref().ok().map(|s| (*line, s.clone())))
+        .collect();
+    let problems: Vec<usize> = found
+        .iter()
+        .filter(|(_, touch)| touch.is_err())
+        .map(|(line, _)| *line)
+        .collect();
+    assert_eq!(
+        named,
+        vec![(4, "WindowInput".to_string()), (6, "Panel".to_string())]
+    );
+    assert_eq!(problems, vec![7, 11, 12, 13, 14, 15]);
+}
