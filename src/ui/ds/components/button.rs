@@ -652,7 +652,10 @@ mod tests {
         assert_eq!(role, Some(Role::Button));
         assert_eq!(node.label(), Some("Save"));
         assert!(!node.supports_action(accesskit::Action::Click));
-        assert_eq!(node.description(), Some(tr!("a11y.not_available").as_ref()));
+        // The English of `a11y.not_available`, written out instead of read
+        // with `tr!`: the button stays the only code that reads the key, so
+        // `no_unused_keys` fails if a literal ever takes the key's place.
+        assert_eq!(node.description(), Some("not available"));
 
         // It loses its color: no copper, the disabled surface instead.
         let cx = probe::window(cx, |_, _| {
@@ -689,7 +692,8 @@ mod tests {
         );
         let (_, node) = node_of(cx, || Button::primary("save", label("Save")).loading(true));
         assert_eq!(node.label(), Some("Save"));
-        assert_eq!(node.description(), Some(tr!("a11y.in_progress").as_ref()));
+        // The English of `a11y.in_progress`, written out for the same reason.
+        assert_eq!(node.description(), Some("in progress"));
 
         let start = Instant::now();
         assert!(!shows_spinner(start, start));
@@ -705,13 +709,13 @@ mod tests {
         // There is no constructor without a name; the name is what VoiceOver
         // reads, the glyph adds nothing to it.
         let (role, node) = probe::in_frame(cx, |window, cx| {
-            let button = IconButton::new("copy", IconName::Copy, tr!("a11y.copy_password"))
+            let button = IconButton::new("copy", IconName::Copy, label("Copy password"))
                 .on_click(|_, _, _| {})
                 .into_base(window, cx);
             probe::node(RenderOnce::render(button, window, cx))
         });
         assert_eq!(role, Some(Role::Button));
-        assert_eq!(node.label(), Some(tr!("a11y.copy_password").as_ref()));
+        assert_eq!(node.label(), Some("Copy password"));
         assert!(node.supports_action(accesskit::Action::Click));
     }
 
