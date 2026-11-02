@@ -108,11 +108,14 @@ mod tests {
     }
 
     /// What follows a plain string literal and the comma after it, when
-    /// `text` starts with them.
+    /// `text` starts with them. An escaped quote does not end the literal.
     fn literal_then_comma(text: &str) -> Option<&str> {
-        let rest = text.trim_start().strip_prefix('"')?;
-        let end = rest.find('"')?;
-        rest[end + 1..].trim_start().strip_prefix(',')
+        let text = text.trim_start();
+        if !text.starts_with('"') {
+            return None;
+        }
+        let end = probe::string_end(text.as_bytes(), 1);
+        text.get(end..)?.trim_start().strip_prefix(',')
     }
 
     /// The calls to `AccessibilityId::new` in `source` that do not pass
@@ -212,6 +215,7 @@ mod tests {
 #[cfg(test)]
 mod tests;
             let i = AccessibilityId::new(window, "copy", 0);
+            let j = AccessibilityId::new("main", "\",".replace(',', title).leak(), 0);
         "#;
         assert_eq!(
             ids_from_other_than_literals(source),
@@ -241,6 +245,11 @@ mod tests;
                 (
                     22,
                     r#"let i = AccessibilityId::new(window, "copy", 0);"#.to_string()
+                ),
+                (
+                    23,
+                    r#"let j = AccessibilityId::new("main", "\",".replace(',', title).leak(), 0);"#
+                        .to_string()
                 ),
             ]
         );

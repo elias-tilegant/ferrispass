@@ -322,8 +322,8 @@ pub(in crate::ui::ds) mod probe {
     }
 
     /// Where the string whose text starts at `i` ends, after its closing
-    /// quote.
-    fn string_end(bytes: &[u8], mut i: usize) -> usize {
+    /// quote. An escaped quote does not end it.
+    pub fn string_end(bytes: &[u8], mut i: usize) -> usize {
         while i < bytes.len() {
             match bytes[i] {
                 b'\\' => i += 2,
