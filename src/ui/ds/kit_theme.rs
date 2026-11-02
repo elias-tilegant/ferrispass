@@ -238,6 +238,13 @@ mod tests {
     /// The theme set names Atkinson Hyperlegible Mono, and the test platform
     /// knows no font at all. After a switch the Kit must not be left with a
     /// mono family the text system does not have.
+    ///
+    /// Which family the Kit ends up with cannot be checked here. The switch
+    /// hands it Menlo, which is also the Kit's own default for mono text, so
+    /// the Kit looks for Menlo among the installed fonts. The test platform
+    /// has none, and the Kit takes `.SystemUIFont`. A Mac has Menlo, and the
+    /// Kit keeps it: `tests/text_system.rs` starts the app without the
+    /// bundled fonts on the real text system and checks for Menlo exactly.
     #[gpui::test]
     fn a_missing_mono_font_never_reaches_the_kit(cx: &mut TestAppContext) {
         cx.update(|cx| {
