@@ -24,6 +24,10 @@ fn add_entry(group: &mut GroupMut<'_>, title: &str, starred: bool) {
 
 /// Two customers with the same production system, NHP 100, and a favorite
 /// of the user's own. NHP 100 PRD is the first row of the Nordhafen group.
+/// The old NHP 100 entry the user starred sits in an archive below it: its
+/// title starts with the SID and client but goes on, and as the group lists
+/// its own entries before those of its subgroups, it stays out of the first
+/// row.
 fn sample_database() -> Database {
     let mut database = Database::new();
     {
@@ -34,7 +38,9 @@ fn sample_database() -> Database {
             nordhafen.name = "Nordhafen".into();
             add_entry(&mut nordhafen, "NHP 100 PRD", false);
             add_entry(&mut nordhafen, "NHQ 100 QAS", false);
-            add_entry(&mut nordhafen, "Nordhafen alt (NHP 100)", true);
+            let mut archive = nordhafen.add_group();
+            archive.name = "Archive".into();
+            add_entry(&mut archive, "NHP 100 Nordhafen alt", true);
         }
         {
             let mut brenner = root.add_group();
@@ -143,7 +149,7 @@ fn new_query_selects_the_first_row(cx: &mut TestAppContext) {
         state.set_search_query("nhp 100", cx);
         assert_eq!(
             listed(state),
-            ["NHP 100", "NHP 100 PRD", "Nordhafen alt (NHP 100)"]
+            ["NHP 100", "NHP 100 PRD", "NHP 100 Nordhafen alt"]
         );
         assert_eq!(selected(state).as_deref(), Some("NHP 100"));
         assert_eq!(shown(state).as_deref(), Some("NHP 100"));
@@ -166,7 +172,7 @@ fn typing_more_moves_the_selection_to_row_one_even_if_the_old_entry_is_still_lis
         state.set_search_query("nhp", cx);
         assert_eq!(
             listed(state),
-            ["Nordhafen alt (NHP 100)", "NHP 100", "NHP 100 PRD"]
+            ["NHP 100 Nordhafen alt", "NHP 100", "NHP 100 PRD"]
         );
         pick(state, "NHP 100 PRD", cx);
 
@@ -461,13 +467,13 @@ fn ranked_order_reaches_the_browser_model(cx: &mut TestAppContext) {
         state.set_search_query("nhp", cx);
         assert_eq!(
             listed(state),
-            ["Nordhafen alt (NHP 100)", "NHP 100 PRD", "NHP 100"]
+            ["NHP 100 Nordhafen alt", "NHP 100 PRD", "NHP 100"]
         );
 
         state.set_search_query("nhp 100", cx);
         assert_eq!(
             listed(state),
-            ["NHP 100 PRD", "NHP 100", "Nordhafen alt (NHP 100)"]
+            ["NHP 100 PRD", "NHP 100", "NHP 100 Nordhafen alt"]
         );
     });
 }

@@ -70,13 +70,17 @@ fn snapshot(groups: Vec<VaultGroup>, entries: Vec<VaultEntry>) -> VaultSnapshot 
 /// user's own:
 ///
 /// - Nordhafen: NHP 100 PRD, NHQ 100 QAS, NHD 100, and an old entry for
-///   NHP 100 the user starred. Its title carries the SID and client but does
-///   not start with them, so it matches the words "nhp 100" without being
-///   that system.
+///   NHP 100 the user starred. Its title starts with the SID and client but
+///   goes on, so it matches the words "nhp 100" without naming the system.
 /// - Brenner: its own NHP 100, and Brenner VPN.
 /// - The user's own: Salesforce, starred, and weekly notes, also starred,
 ///   whose notes and custom field hold the words the tests search for.
 fn sample_vault() -> VaultSnapshot {
+    sample_vault_with(Vec::new())
+}
+
+/// The sample vault with more entries of the user's own.
+fn sample_vault_with(more: Vec<VaultEntry>) -> VaultSnapshot {
     snapshot(
         vec![
             group(
@@ -85,7 +89,7 @@ fn sample_vault() -> VaultSnapshot {
                     entry("nhp-prd", "NHP 100 PRD"),
                     entry("nhq-qas", "NHQ 100 QAS"),
                     entry("nhd-dev", "NHD 100"),
-                    starred(entry("nhp-old", "Nordhafen alt (NHP 100)")),
+                    starred(entry("nhp-old", "NHP 100 Nordhafen alt")),
                 ],
             ),
             group(
@@ -105,7 +109,10 @@ fn sample_vault() -> VaultSnapshot {
                 },
                 &[("Remark", "NHP 100 nhq salesforce brenner", false)],
             )),
-        ],
+        ]
+        .into_iter()
+        .chain(more)
+        .collect(),
     )
 }
 
@@ -248,8 +255,8 @@ fn the_sample_vault_ranks_by_tier() {
 #[test]
 fn exact_identifier_beats_everything() {
     let vault = sample_vault();
-    // The old entry is a favorite, was used a minute ago and matches both
-    // words; both systems the query names still come first.
+    // The old entry is a favorite, was used a minute ago and its title even
+    // starts with the words; both systems the query names still come first.
     let last_used = used(&[("nhp-old", 1)]);
     assert_eq!(
         rows(&vault, "nhp 100", &last_used),
@@ -289,13 +296,13 @@ fn favorites_beat_recent_beat_text() {
             ("nhp-prd", Text),
         ])
     );
-    // By text alone it is the other way round: both NHP titles start with
-    // the word, the favorite only contains it.
+    // By text alone all three titles start with the word, so they go by
+    // title, and the favorite is not first.
     let by_text: Vec<&str> = ranked_entries(&vault, "nhp")
         .into_iter()
         .map(|entry| entry.id.as_str())
         .collect();
-    assert_eq!(by_text, ["brenner-nhp", "nhp-prd", "nhp-old"]);
+    assert_eq!(by_text, ["brenner-nhp", "nhp-old", "nhp-prd"]);
 }
 
 #[test]
@@ -321,6 +328,10 @@ fn tie_same_sid_two_customers() {
     let nobody = HashMap::new();
     let first_two = |vault: &VaultSnapshot, last_used: &HashMap<String, DateTime<Local>>| {
         let ranked = rank(RankInput::new(vault, "nhp 100", last_used));
+        assert!(
+            ranked.iter().any(|ranked| ranked.entry.id == "nhp-old"),
+            "the old entry matches the words and is listed"
+        );
         assert_eq!(
             tie_count(&ranked),
             2,
@@ -450,14 +461,114 @@ fn identifier_needs_sid_and_client() {
     }
 }
 
+fn alone(entry: VaultEntry) -> VaultSnapshot {
+    snapshot(Vec::new(), vec![entry])
+}
+
+#[test]
+fn a_title_with_a_role_word_names_the_system() {
+    // Each of these is one word longer than the query, so none is found by
+    // its whole title. The role words are the ones the entry kinds know, in
+    // any case.
+    for title in [
+        "NHP 100 PRD",
+        "NHP 100 prd",
+        "NHP  100\tQAS",
+        "NHP 100 DEV",
+        "NHP 100 SBX",
+    ] {
+        assert_eq!(
+            rows(&alone(entry("system", title)), "nhp 100", &HashMap::new()),
+            expect(&[("system", ExactIdentifier)]),
+            "{title:?}"
+        );
+    }
+}
+
+#[test]
+fn a_title_with_other_text_after_the_client_does_not_name_the_system() {
+    for title in [
+        "NHP 100 Nordhafen alt",
+        "NHP 100 PRD alt",
+        "NHP 100 PROD",
+        "NHP 100 old",
+        "NHP 100-PRD",
+        "NHP 100 (PRD)",
+    ] {
+        // A favorite that matches the words, and no more than that.
+        assert_eq!(
+            rows(
+                &alone(starred(entry("old", title))),
+                "nhp 100",
+                &HashMap::new()
+            ),
+            expect(&[("old", Favorite)]),
+            "{title:?}"
+        );
+    }
+
+    // The entry kinds still read such a title as the system; only the
+    // ranking does not take it for one.
+    let EntryKind::Sap(system) = kinds::classify(&entry("old", "NHP 100 Nordhafen alt"), None)
+    else {
+        panic!("the kinds no longer read the title as an SAP system");
+    };
+    assert_eq!(
+        (
+            system.sid.as_ref().map(Sid::as_str),
+            system.client.as_deref()
+        ),
+        (Some("NHP"), Some("100"))
+    );
+}
+
+#[test]
+fn fields_name_the_system_whatever_the_title() {
+    let fields = [("SAP_SID", "NHP", false), ("SAP_CLIENT", "100", false)];
+    for title in [
+        "Nordhafen production",
+        "NHP 100 Nordhafen alt",
+        "NHP 100-PRD",
+        "NHQ 200 QAS",
+    ] {
+        assert_eq!(
+            exact_ids(
+                &alone(with_fields(entry("system", title), &fields)),
+                "nhp 100"
+            ),
+            ["system"],
+            "{title:?}"
+        );
+    }
+
+    // Both have to come from the fields. A SID or a client from a title that
+    // goes on after the client does not count, and neither does a host and
+    // an instance, which make an entry an SAP system without naming it.
+    for fields in [
+        &[("SAP_SID", "NHP", false)][..],
+        &[("SAP_CLIENT", "100", false)],
+        &[
+            ("SAP_HOST", "nhp.example", false),
+            ("SAP_INSTANCE", "00", false),
+        ],
+    ] {
+        let vault = alone(with_fields(entry("old", "NHP 100 Nordhafen alt"), fields));
+        assert_eq!(
+            rows(&vault, "nhp 100", &HashMap::new()),
+            expect(&[("old", Text)]),
+            "{fields:?}"
+        );
+    }
+}
+
 #[test]
 fn protected_sap_fields_do_not_make_an_identifier() {
     let nobody = HashMap::new();
-    let system = |sid_protected: bool, client_protected: bool| {
+    let system = |title: &str, sid_protected: bool, client_protected: bool| {
         snapshot(
             Vec::new(),
             vec![with_fields(
-                entry("nordhafen", "Nordhafen"),
+                entry("nordhafen", title),
                 &[
                     ("SAP_SID", "NHP", sid_protected),
                     ("SAP_CLIENT", "100", client_protected),
@@ -468,13 +579,38 @@ fn protected_sap_fields_do_not_make_an_identifier() {
 
     // Open fields name the system although the title does not.
     assert_eq!(
-        rows(&system(false, false), "nhp 100", &nobody),
+        rows(&system("Nordhafen", false, false), "nhp 100", &nobody),
         expect(&[("nordhafen", ExactIdentifier)])
     );
     for (sid_protected, client_protected) in [(true, true), (true, false), (false, true)] {
         assert!(
-            rows(&system(sid_protected, client_protected), "nhp 100", &nobody).is_empty(),
+            rows(
+                &system("Nordhafen", sid_protected, client_protected),
+                "nhp 100",
+                &nobody
+            )
+            .is_empty(),
             "SAP_SID protected: {sid_protected}, SAP_CLIENT protected: {client_protected}"
+        );
+    }
+
+    // Under a title that starts with the SID and client and goes on, only
+    // the fields could name the system, and protected ones do not. The
+    // entry still matches as text.
+    let title = "NHP 100 Nordhafen alt";
+    assert_eq!(
+        rows(&system(title, false, false), "nhp 100", &nobody),
+        expect(&[("nordhafen", ExactIdentifier)])
+    );
+    for (sid_protected, client_protected) in [(true, true), (true, false), (false, true)] {
+        assert_eq!(
+            rows(
+                &system(title, sid_protected, client_protected),
+                "nhp 100",
+                &nobody
+            ),
+            expect(&[("nordhafen", Text)]),
+            "{title:?}, SAP_SID protected: {sid_protected}, SAP_CLIENT protected: {client_protected}"
         );
     }
 
