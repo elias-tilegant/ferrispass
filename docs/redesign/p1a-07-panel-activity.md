@@ -8,7 +8,8 @@ Started from `p1a-08-secure-input` at `5031d12` on 2026-11-02.
 |---|---|
 | `d85c0c7` | `src/app/services/activity.rs`, the auto-lock and the window reading it, the list of call sites and the tests |
 | `8a7b1cc` | SECURITY.md and this page |
-| the last one | Shortcuts, clicks, scrolling and the pointer over a dialog count as input in the window |
+| `506310e` | Shortcuts, clicks, scrolling and the pointer over a dialog count as input in the window |
+| the last one | This list and the time in the progress log |
 
 ## What counts as activity
 
