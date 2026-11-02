@@ -14,12 +14,14 @@ The second part of P1a.09b, on the branch `p1a-09b-components`, which is stacked
 | `da9609c` | The VoiceOver press test also checks that the press is registered next to the click |
 | `44011ac` | A test that a text field with an error draws its sentence below the input |
 | `4322fe7` | A test that every accessibility id is built from string literals |
+| `6723141` | `AccessibilityId` in a file of its own, so that only its constructor can build one |
+| `6ad4a86` | A test that a keycap on a copper button has only its edge |
 
 ## What every component does
 
 - **A name that is never a literal in the component.** Visible text, accessible names and descriptions come in as parameters, from a text key (`tr!`) or from the caller. `no_literals_in_render_code` in `src/i18n/tests.rs` scans every file under `src/ui/ds` for a literal handed to `.child(` or `aria_label(`, and `no_literal_names_descriptions_or_tooltips` does the same for `accessibility_label(`, `aria_description(`, `aria_value(`, `aria_placeholder(`, `tooltip(` and `Label::new(`. Neither finds one. The only literals a component shows are keycap glyphs and the word "Esc". The descriptions the button adds itself are text keys: `a11y.not_available` and `a11y.in_progress` in `locales/a11y.yml`. The button is the only code that reads them, its tests included, so `no_unused_keys` fails if a literal ever takes the place of either.
 - **A name in every build.** A button, icon button, switch or text field with an empty name panics in its constructor, in release builds as well, because VoiceOver can only call such a control "button". So does a shortcut pair with an empty word, which would be keycaps alone.
-- **A stable element id** as the first argument of every constructor, and an optional `AccessibilityId`, the identifier assistive technology and UI tests see (`fp.<window>.<component>.<index>`). It is built from names fixed in the code and a number, so an entry title, a user name or a host cannot end up in it. `AccessibilityId::new` takes `&'static str` for the names, which keeps a borrowed title out but not a leaked one, since `Box::leak` turns any text into a `&'static str`. So `an_accessibility_id_takes_literal_names_only` reads the source: the names are still `&'static str`, and every call under `src/` and `examples/`, outside the test modules, passes string literals for both.
+- **A stable element id** as the first argument of every constructor, and an optional `AccessibilityId`, the identifier assistive technology and UI tests see (`fp.<window>.<component>.<index>`). It is built from names fixed in the code and a number, so that no entry title, user name or host ends up in it. The type has a file of its own, `src/ui/ds/components/accessibility_id.rs`, and its field is private to that file: a tuple construction anywhere else, in the other components too, does not compile, and `AccessibilityId::new` is the only constructor. It takes `&'static str` for the names, which keeps a borrowed title out but not a leaked one, since `Box::leak` turns any text into a `&'static str`. So `an_accessibility_id_takes_literal_names_only` reads the source: the names are still `&'static str`, and every call written `AccessibilityId::new` under `src/` and `examples/`, outside the test modules, passes string literals for both. What neither the compiler nor the test sees is under Limits.
 - **Sizes in points at text size 13**, set with `u()`, so the larger text size (15) scales heights, spacing and text together. Radii, strokes and the focus ring stay in pixels.
 
 ## The button
@@ -54,7 +56,7 @@ A keycap shows one keystroke as a Mac prints it: 18 high, at least 18 wide, radi
 A keycap never stands alone. `Keycap` is visible inside `ui::ds` only, and a scan (`keycap_cannot_be_built_outside_ds`) keeps it from being named anywhere else in `src/`, `tests/` or `examples/`, in case the visibility is ever widened. Inside the design system it is built in two places:
 
 - A `Shortcut` pair: keycaps followed by the word for what they do, as in the panel footer ("⌘C Password"). Its constructor takes the word and panics on an empty one, in every build. The pair is plain text for VoiceOver, like the footer it sits in; `keys_text()` gives the keys for the `aria_keyshortcuts` of the element they act on.
-- A `Button` with `.shortcut(keys)`: the keycaps follow the label, and the button's `aria_keyshortcuts` holds them. On the copper button a keycap has no surface of its own, only an edge in `keycap.on_accent.border`.
+- A `Button` with `.shortcut(keys)`: the keycaps follow the label, and the button's `aria_keyshortcuts` holds them. On a copper button, `Primary` or `Large`, a keycap has no surface of its own, only an edge in `keycap.on_accent.border`. `a_keycap_on_copper_has_no_surface_of_its_own` reads the quads painted in the place of the keycap on a button of each kind: no fill and that edge on the two copper kinds, `keycap.bg` with `keycap.border` on the others.
 
 `aria_keyshortcuts` gets the same glyphs as the keycap, so VoiceOver reads them in the user's language.
 
@@ -84,7 +86,7 @@ Password fields stay `SecretInput`.
 
 The headless tests draw each component in a window under the Kit's `Root`, which sets the rem size from the text size as the app does. What a component tells VoiceOver is read from the accessibility node its element writes, because the test platform builds no accessibility tree.
 
-What a component shows as text is read from the painted frame. The test platform paints no glyphs, but it paints underlines, so `an_error_shows_its_sentence_below_the_input` draws the text field under an underline its texts inherit: each underline in the frame is a line of text, as wide as the line. With an error there is exactly one below the input, in the danger color and as wide as the sentence set in `Callout`; without one there is none.
+Only the text field's error test, `an_error_shows_its_sentence_below_the_input`, reads text from the painted frame. The test platform paints no glyphs, but it paints underlines, so the test draws the text field under an underline its texts inherit: each underline in the frame is a line of text, as wide as the line. With an error there is exactly one below the input, in the danger color and as wide as the sentence set in `Callout`; without one there is none.
 
 Three things the node cannot show are checked on the source. GPUI lists the press for any element with a click handler, so the node looks the same whether the button registered its own press or not; `button_click_reaches_voiceover` reads the code in `button.rs` where the handler goes to the base button and checks that the press is registered there next to the click. A node shows a text but not where it came from, which the two literal scans and `no_unused_keys` look at. And an accessibility id shows its names but not where they came from, which `an_accessibility_id_takes_literal_names_only` looks at.
 
@@ -92,7 +94,7 @@ Three things the node cannot show are checked on the source. GPUI lists the pres
 |---|---|
 | Button | `button_has_role_and_name`, `return_button_is_the_default_button`, `danger_is_never_the_default_button`, `a_button_needs_a_name_in_every_build`, `an_icon_button_needs_a_name_in_every_build`, `disabled_button_has_no_handler_and_says_so`, `loading_keeps_the_label_and_takes_no_click`, `icon_button_requires_a_name`, `button_click_reaches_voiceover`, `pressed_uses_opacity_not_scale`, `the_focus_ring_shows_for_the_keyboard_only`, `sizes_are_the_design_heights` |
 | Copper | `one_copper_per_view`, `the_copper_counter_sees_both_copper_kinds` |
-| Keycap | `keycap_order_is_control_option_shift_command`, `keys_show_as_a_mac_prints_them`, `a_key_string_gpui_cannot_read_is_loud`, `keycap_cannot_be_built_outside_ds` |
+| Keycap | `keycap_order_is_control_option_shift_command`, `keys_show_as_a_mac_prints_them`, `a_key_string_gpui_cannot_read_is_loud`, `keycap_cannot_be_built_outside_ds`, `a_keycap_on_copper_has_no_surface_of_its_own` |
 | Shortcut | `shortcut_reads_the_keystroke_text`, `a_shortcut_needs_its_word_in_every_build`, `shortcut_has_a_named_parent`, `a_button_keycap_sits_inside_its_named_button` |
 | Text field | `a_text_field_needs_a_name_in_every_build`, `text_field_is_28_high_at_13_and_32_at_15`, `text_field_has_its_own_name_not_the_placeholder`, `an_error_turns_the_edge_carmine_and_is_read_after_the_field`, `an_error_shows_its_sentence_below_the_input` |
 | Switch | `a_switch_needs_a_name_in_every_build`, `switch_on_is_never_copper` (all four modes), `switch_has_role_name_and_state` |
@@ -125,8 +127,11 @@ Each probe changed one thing on a clean tree, ran the tests that should notice, 
 | The text field without its error line, `error_line` taken out of `TextField::render` | `an_error_shows_its_sentence_below_the_input` (`one line of text below the input, the sentence`, `left: 0`, `right: 1`) |
 | The error line with its glyph but without the sentence | `an_error_shows_its_sentence_below_the_input` (`left: 0`, `right: 1`) |
 | The error sentence in `Body` instead of `Callout` | `an_error_shows_its_sentence_below_the_input` (`the line is the sentence in Callout: 240px wide, not 221.53851px`) |
-| `AccessibilityId::new` taking `&str` instead of `&'static str` | `an_accessibility_id_takes_literal_names_only` (`left: ["&str", "&str", "usize"]`) |
-| A call that passes a leaked title, `AccessibilityId::new(Box::leak(title.to_owned().into_boxed_str()), "field", 0)` in `text_field.rs` | `an_accessibility_id_takes_literal_names_only` (`text_field.rs:152: AccessibilityId::new(Box::leak(`...); the call compiles, because the leaked string is a `&'static str` |
+| An id built as a tuple, `AccessibilityId(format!("fp.main.{title}.0").into())`, in a function in `text_field.rs`, and the same in `components/mod.rs` | does not compile: `error[E0423]: cannot initialize a tuple struct which contains private fields`, `constructor is not visible here due to private fields` |
+| `AccessibilityId::new` in `accessibility_id.rs` taking `&str` instead of `&'static str` | `an_accessibility_id_takes_literal_names_only` (`left: ["&str", "&str", "usize"]`) |
+| A call that passes a leaked title, `AccessibilityId::new(Box::leak(title.to_owned().into_boxed_str()), "field", 0)` in `text_field.rs` | `an_accessibility_id_takes_literal_names_only` (`text_field.rs:29: AccessibilityId::new(Box::leak(`...); the call compiles, because the leaked string is a `&'static str` |
+| The keycaps of a copper button drawn with their own surface, `keycaps_on_copper` set to `false` in `Button::into_base` | `a_keycap_on_copper_has_no_surface_of_its_own` (`Primary: the keycap's fill`, `left: [Hsla { h: 0.1060606, s: 0.28205118, l: 0.9235294, a: 1.0 }]`, `right: []`) |
+| Every keycap drawn as on copper, `keycaps_on_copper` set to `true` | `a_keycap_on_copper_has_no_surface_of_its_own` (`Secondary: the keycap's fill`, `left: []`) |
 
 ## Limits
 
@@ -135,6 +140,6 @@ Each probe changed one thing on a clean tree, ran the tests that should notice, 
 - GPUI has no disabled flag for assistive technology. A disabled button says "not available" in its description; the Kit text field and switch take no description, so a disabled field or switch is only greyed out and does nothing.
 - The Kit switch and input take an accessibility id only where the Kit offers one: the text field passes it on, the switch has none.
 - The literal scans see a literal handed straight to a call. One that reaches a call through a variable is past them; for the button's own descriptions `no_unused_keys` notices, because nothing else reads their keys.
-- The accessibility id check reads text, not types. A call through a renamed import or a macro, or a second constructor added next to `AccessibilityId::new`, is past it.
+- Only code in `accessibility_id.rs` can build an `AccessibilityId` as a tuple, and the source check reads text, not types. A second constructor added in that file, or a call to `new` through a renamed import, `Self::new` or a macro, is past both.
 - The test platform paints no glyphs, so the error sentence test knows a painted line by its place, its color and its width, not by its letters. Another text exactly as wide as the sentence would pass it; the accessibility node of the error line holds the sentence itself.
 - The test platform builds no accessibility tree and cannot deliver VoiceOver's press, so the tests read each element's node, check in the source that the press is registered next to the click, and call the press directly. The source check reads the code, not what GPUI does with it: that the press arrives on a real Mac, and how every component looks against the component board, need the gallery and a device session. They come later.
