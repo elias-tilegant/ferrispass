@@ -8,11 +8,15 @@ The second part of P1a.09b, on the branch `p1a-09b-components`, which is stacked
 | `f088c58` | Keycaps and shortcut pairs; a button can show its shortcut |
 | `56518bf` | The text field and the switch on the GPUI Kit controls |
 | `0cbf6bd` | A control without a name is refused in release builds too, not only in debug builds |
+| `1c606e5` | A shortcut pair without its word is refused the same way |
+| `448ceee` | The tests write the English of the button's texts out, so only the button reads its keys; `a11y.copy_password` stays reserved |
+| `36ac9e2` | A scan for literal names, descriptions, values and tooltips in the design system |
+| `da9609c` | The VoiceOver press test also checks that the press is registered next to the click |
 
 ## What every component does
 
-- **A name that is never a literal in the component.** Visible text, accessible names and descriptions come in as parameters, from a text key (`tr!`) or from the caller. `no_literals_in_render_code` in `src/i18n/tests.rs` scans every file under `src/ui/ds` for a literal handed to `.child(` or `aria_label(` and finds none. The only literals a component shows are keycap glyphs and the word "Esc". The descriptions the button adds itself are text keys: `a11y.not_available` and `a11y.in_progress` in `locales/a11y.yml`.
-- **A name in every build.** A button, icon button, switch or text field with an empty name panics in its constructor, in release builds as well, because VoiceOver can only call such a control "button".
+- **A name that is never a literal in the component.** Visible text, accessible names and descriptions come in as parameters, from a text key (`tr!`) or from the caller. `no_literals_in_render_code` in `src/i18n/tests.rs` scans every file under `src/ui/ds` for a literal handed to `.child(` or `aria_label(`, and `no_literal_names_descriptions_or_tooltips` does the same for `accessibility_label(`, `aria_description(`, `aria_value(`, `aria_placeholder(`, `tooltip(` and `Label::new(`. Neither finds one. The only literals a component shows are keycap glyphs and the word "Esc". The descriptions the button adds itself are text keys: `a11y.not_available` and `a11y.in_progress` in `locales/a11y.yml`. The button is the only code that reads them, its tests included, so `no_unused_keys` fails if a literal ever takes the place of either.
+- **A name in every build.** A button, icon button, switch or text field with an empty name panics in its constructor, in release builds as well, because VoiceOver can only call such a control "button". So does a shortcut pair with an empty word, which would be keycaps alone.
 - **A stable element id** as the first argument of every constructor, and an optional `AccessibilityId`, the identifier assistive technology and UI tests see (`fp.<window>.<component>.<index>`). It is built from names fixed in the code and a number, so an entry title, a user name or a host cannot end up in it.
 - **Sizes in points at text size 13**, set with `u()`, so the larger text size (15) scales heights, spacing and text together. Radii, strokes and the focus ring stay in pixels.
 
@@ -35,7 +39,7 @@ The sizes are 24, 28, 32 and the 44 capsule, which stays fully rounded at any te
 - **VoiceOver.** The role is `Button`, or `DefaultButton` for the button Return presses (`default_button()`). The name is the label, so a label says what happens and to what. A description can add to it, such as "Production system"; a disabled button says "not available" there instead, because GPUI has no disabled flag for assistive technology yet, and a loading one "in progress". The keys of a shortcut go into `aria_keyshortcuts`, never into the name.
 - **VoiceOver's press.** GPUI answers a press by clicking the middle of the button with a synthetic mouse, which misses when something covers the button. The button registers its own press, which calls the handler directly, as a click from the keyboard would.
 - **The default button** shows the Return keycap unless it has a shortcut of its own. A danger button can never be it: Return never triggers something that cannot be undone. Asking for it fails in a debug build and does nothing in a release build.
-- **The icon button** (`IconButton`, 28 by 28) shows a glyph instead of a label. It has no constructor without a name, which is what VoiceOver reads, for example `tr!("a11y.copy_password")`. Until the app's own glyphs arrive, it takes a GPUI Kit icon.
+- **The icon button** (`IconButton`, 28 by 28) shows a glyph instead of a label. It has no constructor without a name, which is what VoiceOver reads, for example `tr!("a11y.copy_password")`. No code reads that key yet, so it stays in `locales/_reserved.txt` until the copy button of the secret field does. Until the app's own glyphs arrive, the icon button takes a GPUI Kit icon.
 
 ### One copper surface per view
 
@@ -47,7 +51,7 @@ A keycap shows one keystroke as a Mac prints it: 18 high, at least 18 wide, radi
 
 A keycap never stands alone. `Keycap` is visible inside `ui::ds` only, and a scan (`keycap_cannot_be_built_outside_ds`) keeps it from being named anywhere else in `src/`, `tests/` or `examples/`, in case the visibility is ever widened. Inside the design system it is built in two places:
 
-- A `Shortcut` pair: keycaps followed by the word for what they do, as in the panel footer ("⌘C Password"). There is no constructor without the word. The pair is plain text for VoiceOver, like the footer it sits in; `keys_text()` gives the keys for the `aria_keyshortcuts` of the element they act on.
+- A `Shortcut` pair: keycaps followed by the word for what they do, as in the panel footer ("⌘C Password"). Its constructor takes the word and panics on an empty one, in every build. The pair is plain text for VoiceOver, like the footer it sits in; `keys_text()` gives the keys for the `aria_keyshortcuts` of the element they act on.
 - A `Button` with `.shortcut(keys)`: the keycaps follow the label, and the button's `aria_keyshortcuts` holds them. On the copper button a keycap has no surface of its own, only an edge in `keycap.on_accent.border`.
 
 `aria_keyshortcuts` gets the same glyphs as the keycap, so VoiceOver reads them in the user's language.
@@ -78,14 +82,17 @@ Password fields stay `SecretInput`.
 
 The headless tests draw each component in a window under the Kit's `Root`, which sets the rem size from the text size as the app does. What a component tells VoiceOver is read from the accessibility node its element writes, because the test platform builds no accessibility tree.
 
+Two things the node cannot show are checked on the source. GPUI lists the press for any element with a click handler, so the node looks the same whether the button registered its own press or not; `button_click_reaches_voiceover` reads the code in `button.rs` where the handler goes to the base button and checks that the press is registered there next to the click. And a node shows a text but not where it came from, which the two literal scans and `no_unused_keys` look at.
+
 | Component | Tests |
 |---|---|
-| Button | `button_has_role_and_name`, `return_button_is_the_default_button`, `danger_is_never_the_default_button`, `disabled_button_has_no_handler_and_says_so`, `loading_keeps_the_label_and_takes_no_click`, `icon_button_requires_a_name`, `button_click_reaches_voiceover`, `pressed_uses_opacity_not_scale`, `the_focus_ring_shows_for_the_keyboard_only`, `sizes_are_the_design_heights` |
+| Button | `button_has_role_and_name`, `return_button_is_the_default_button`, `danger_is_never_the_default_button`, `a_button_needs_a_name_in_every_build`, `an_icon_button_needs_a_name_in_every_build`, `disabled_button_has_no_handler_and_says_so`, `loading_keeps_the_label_and_takes_no_click`, `icon_button_requires_a_name`, `button_click_reaches_voiceover`, `pressed_uses_opacity_not_scale`, `the_focus_ring_shows_for_the_keyboard_only`, `sizes_are_the_design_heights` |
 | Copper | `one_copper_per_view`, `the_copper_counter_sees_both_copper_kinds` |
 | Keycap | `keycap_order_is_control_option_shift_command`, `keys_show_as_a_mac_prints_them`, `a_key_string_gpui_cannot_read_is_loud`, `keycap_cannot_be_built_outside_ds` |
-| Shortcut | `shortcut_reads_the_keystroke_text`, `shortcut_has_a_named_parent`, `a_button_keycap_sits_inside_its_named_button` |
-| Text field | `text_field_is_28_high_at_13_and_32_at_15`, `text_field_has_its_own_name_not_the_placeholder`, `an_error_turns_the_edge_carmine_and_is_read_after_the_field` |
-| Switch | `switch_on_is_never_copper` (all four modes), `switch_has_role_name_and_state` |
+| Shortcut | `shortcut_reads_the_keystroke_text`, `a_shortcut_needs_its_word_in_every_build`, `shortcut_has_a_named_parent`, `a_button_keycap_sits_inside_its_named_button` |
+| Text field | `a_text_field_needs_a_name_in_every_build`, `text_field_is_28_high_at_13_and_32_at_15`, `text_field_has_its_own_name_not_the_placeholder`, `an_error_turns_the_edge_carmine_and_is_read_after_the_field` |
+| Switch | `a_switch_needs_a_name_in_every_build`, `switch_on_is_never_copper` (all four modes), `switch_has_role_name_and_state` |
+| Texts | `no_literal_names_descriptions_or_tooltips`, `the_text_scan_finds_literals_in_code_only`, and in `src/i18n/tests.rs` `no_literals_in_render_code` and `no_unused_keys` |
 
 ## Mutation probes
 
@@ -102,6 +109,12 @@ Each probe changed one thing on a clean tree, ran the tests that should notice, 
 | The focus ring for any focus, not only from the keyboard | `the_focus_ring_shows_for_the_keyboard_only` (`a click shows no ring`) |
 | `Large` not counted as copper | `the_copper_counter_sees_both_copper_kinds` (`left: 1`, `right: 2`) |
 | VoiceOver's press not calling the handler | `button_click_reaches_voiceover` (`left: 0`, `right: 1`) |
+| VoiceOver's press no longer registered, only the click handler | `button_click_reaches_voiceover` (`VoiceOver's press is not registered with the click handler`) |
+| `SharedString::new_static("not available")` in place of `tr!("a11y.not_available")` | `no_unused_keys` (`a11y.not_available: nothing reads it`) |
+| The same for `a11y.in_progress` | `no_unused_keys` (`a11y.in_progress: nothing reads it`) |
+| A literal name for the switch, `accessibility_label("Lock when idle")` | `no_literal_names_descriptions_or_tooltips` (`switch.rs:85: "Lock when idle"`); `switch_has_role_name_and_state` stays green, since the name reads the same |
+| The shortcut pair without the check for its word | `a_shortcut_needs_its_word_in_every_build` (`test did not panic as expected`) |
+| `a11y.copy_password` taken off `locales/_reserved.txt` | `no_unused_keys` (`a11y.copy_password: nothing reads it`) |
 | A keycap built in `src/ui/mod.rs` | does not compile: `module keycap is private`, `associated function new is private` |
 | The name check in debug builds only (`cargo test --release`) | `a_button_needs_a_name_in_every_build`, `an_icon_button_needs_a_name_in_every_build` (`test did not panic as expected`) |
 
@@ -111,4 +124,5 @@ Each probe changed one thing on a clean tree, ran the tests that should notice, 
 - The macOS adapter of AccessKit (0.26.3) does not pass `aria_keyshortcuts` on to VoiceOver yet. The buttons set it anyway, so it arrives with the adapter.
 - GPUI has no disabled flag for assistive technology. A disabled button says "not available" in its description; the Kit text field and switch take no description, so a disabled field or switch is only greyed out and does nothing.
 - The Kit switch and input take an accessibility id only where the Kit offers one: the text field passes it on, the switch has none.
-- The test platform builds no accessibility tree and cannot deliver VoiceOver's press, so the tests read each element's node and call the press directly. That the press arrives on a real Mac, and how every component looks against the component board, need the gallery and a device session. They come later.
+- The literal scans see a literal handed straight to a call. One that reaches a call through a variable is past them; for the button's own descriptions `no_unused_keys` notices, because nothing else reads their keys.
+- The test platform builds no accessibility tree and cannot deliver VoiceOver's press, so the tests read each element's node, check in the source that the press is registered next to the click, and call the press directly. The source check reads the code, not what GPUI does with it: that the press arrives on a real Mac, and how every component looks against the component board, need the gallery and a device session. They come later.
