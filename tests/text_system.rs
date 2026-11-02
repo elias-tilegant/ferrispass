@@ -1,6 +1,7 @@
 //! Checks that need the real macOS text system: the bundled mono font loads
-//! and sets every digit at the same width, and Medium of the system font is
-//! a face of its own rather than Regular again.
+//! and sets every digit at the same width, Medium of the system font is a
+//! face of its own rather than Regular again, and without the bundled fonts
+//! secrets and the Kit theme fall back to Menlo.
 //!
 //! The test platform behind `#[gpui::test]` has a text system that knows no
 //! fonts and gives every font the same id, so these checks build the macOS
@@ -31,7 +32,7 @@ mod macos {
     use ferrispass::app::settings::ThemeChoice;
     use ferrispass::ui::ds;
     use ferrispass::ui::ds::typography::{
-        self, Family, MEDIUM, MONO_FAMILY, MONO_MEDIUM, TextStyle, UI_FAMILY,
+        self, Family, MEDIUM, MONO_FALLBACK, MONO_FAMILY, MONO_MEDIUM, TextStyle, UI_FAMILY,
     };
     use gpui::{
         App, Font, FontFeatures, FontId, FontRun, FontWeight, PlatformTextSystem, SharedString,
@@ -46,7 +47,7 @@ mod macos {
         run: fn(&mut App, &Arc<dyn PlatformTextSystem>),
     }
 
-    const CHECKS: [Check; 2] = [
+    const CHECKS: [Check; 3] = [
         Check {
             name: "atkinson_loads_and_digits_are_tabular",
             ignored: None,
@@ -57,7 +58,15 @@ mod macos {
             ignored: None,
             run: system_font_medium_is_its_own_face,
         },
+        Check {
+            name: "without_the_mono_font_the_kit_gets_menlo",
+            ignored: None,
+            run: without_the_mono_font_the_kit_gets_menlo,
+        },
     ];
+
+    /// Set for the copy of this binary that starts without the bundled fonts.
+    const WITHOUT_BUNDLED_FONTS: &str = "FERRISPASS_TEXT_SYSTEM_WITHOUT_BUNDLED_FONTS";
 
     /// What the command line asks for.
     #[derive(Default)]
@@ -106,6 +115,10 @@ mod macos {
     }
 
     pub fn run() {
+        if std::env::var_os(WITHOUT_BUNDLED_FONTS).is_some() {
+            start_without_bundled_fonts();
+            return;
+        }
         let selection = Selection::from_args();
         let checks: Vec<&Check> = CHECKS.iter().filter(|c| selection.matches(c)).collect();
         if selection.list {
@@ -303,5 +316,62 @@ mod macos {
             };
             assert_eq!(face(style.weight()), expected, "{style:?}");
         }
+    }
+
+    /// The mono family is decided once per process, and in this one the
+    /// bundled fonts are in. So the check starts this binary again, without
+    /// them, and that copy runs [`start_without_bundled_fonts`].
+    fn without_the_mono_font_the_kit_gets_menlo(_: &mut App, _: &Arc<dyn PlatformTextSystem>) {
+        let program = std::env::current_exe().expect("the path of this test binary");
+        let output = std::process::Command::new(program)
+            .env(WITHOUT_BUNDLED_FONTS, "1")
+            .output()
+            .expect("start this test binary again");
+        assert!(
+            output.status.success(),
+            "the start without the bundled fonts failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The startup of an app whose bundled fonts did not load: the same steps
+    /// as in `run`, without adding the fonts. Secrets fall back to Menlo, and
+    /// so does the Kit theme after every change. Menlo is also the Kit's own
+    /// default for mono text, which the Kit replaces when a Mac does not have
+    /// it, so this is the one place the family the Kit ends up with shows. A
+    /// failed assertion ends the process with an error, which the check
+    /// reports with this process's stderr.
+    fn start_without_bundled_fonts() {
+        let platform = gpui_platform::current_platform(true);
+        let cx = TestAppContext::build_with_text_system(
+            TestDispatcher::new(0),
+            None,
+            platform.text_system(),
+        );
+        cx.update(|cx| {
+            assert!(
+                !cx.text_system()
+                    .all_font_names()
+                    .iter()
+                    .any(|name| name == MONO_FAMILY),
+                "{MONO_FAMILY} is installed on this Mac, so it cannot go missing"
+            );
+            gpui_component::init(cx);
+            ds::init(ThemeChoice::Light, cx);
+            assert_eq!(
+                typography::mono_family(cx),
+                MONO_FALLBACK,
+                "the startup check"
+            );
+            assert_eq!(TextStyle::Secret.family().name(), MONO_FALLBACK);
+            for choice in [ThemeChoice::Light, ThemeChoice::Dark] {
+                ds::apply_choice(choice, None, cx);
+                assert_eq!(
+                    Theme::global(cx).mono_font_family.as_ref(),
+                    MONO_FALLBACK,
+                    "the Kit theme's mono font, {choice:?}"
+                );
+            }
+        });
     }
 }
