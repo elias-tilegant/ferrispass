@@ -43,6 +43,7 @@ What FerrisPass promises from the release in the second column on. A build that 
 | Every secret FerrisPass copies for you goes through one clipboard path: concealed, transient, this Mac only, cleared after the timer, at lock, at quit and at launch; only unchanged clipboard contents are ever cleared, and the launch check reads types, never contents. The launch check only looks when "Paste from Other Apps" is set to Always Allow for FerrisPass; with any other setting it leaves the clipboard alone, so macOS never asks | the redesign release |
 | While the master password field has focus, secure event input is on, so other programs do not see the keystrokes; it is released on blur, window deactivation, lock, quit and panic | the redesign release |
 | New `unsafe` code lives only in audited modules under `src/platform/`, listed under [Unsafe code](#unsafe-code) | the redesign release |
+| Activity for the auto-lock is input in a FerrisPass window, in the quick access panel, a global shortcut or a click on the menu bar item, and nothing that happens in other apps | the redesign release |
 
 In the clipboard rule, a secret FerrisPass copies for you is a password, a username, a URL, a TOTP code or a custom field that you copy with a button, a shortcut or a menu item. Text you select yourself in one of the entry editor's unprotected fields (title, username, URL, notes, custom fields not marked protected) and copy with Cmd+C, Cmd+X or the context menu is an ordinary copy, as it always was: it does not go through this path, carries none of the markers and is not cleared. The password, the TOTP secret and custom fields marked protected can't be copied out of the editor by hand at all.
 
@@ -92,7 +93,7 @@ The crate denies `unsafe_code`. The places below opt in, each for a system API t
 | Password persisted to disk | **never** |
 | Password sent over the network | **never** - the cloud provider only sees ciphertext |
 | Password stored in Keychain | **only if you enable Touch ID for that vault** - see below |
-| Auto-lock timeout | configurable in Settings; default 4 minutes idle |
+| Auto-lock timeout | configurable in Settings; default 4 minutes without input in a FerrisPass window, the quick access panel, the global shortcuts or the menu bar item. Input in other apps does not count |
 | Clipboard auto-clear after copy | for what FerrisPass copies for you: configurable, default 10 seconds; also at quit and at launch (at launch only with "Paste from Other Apps" set to Always Allow). Text you copy by hand out of the entry editor is an ordinary copy and is not cleared |
 
 ### Touch ID and the login keychain
