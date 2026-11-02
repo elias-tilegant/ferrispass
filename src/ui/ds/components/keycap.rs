@@ -121,8 +121,10 @@ pub(in crate::ui::ds) fn keycap_text(keystroke: &Keystroke) -> String {
     text
 }
 
-/// The keys as VoiceOver gets them in `aria_keyshortcuts`: the keycap texts,
-/// separated by spaces. The glyphs read in the user's language.
+/// The keys for `aria_keyshortcuts`: the keycap texts, separated by spaces.
+/// Whether VoiceOver reads the glyphs in the user's language is unconfirmed
+/// until the macOS adapter of AccessKit passes the value on and a device
+/// session hears it.
 pub(in crate::ui::ds) fn keys_text(keys: &[Keystroke]) -> SharedString {
     keys.iter()
         .map(keycap_text)

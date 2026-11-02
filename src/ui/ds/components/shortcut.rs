@@ -2,9 +2,14 @@
 //! panel footer ("⌘C Password").
 //!
 //! A pair cannot be built without its word, so a keycap never stands alone
-//! on a screen. The pair is plain text for VoiceOver, like the footer it sits
-//! in: the element the keys act on carries them in its `aria_keyshortcuts`,
-//! and [`Shortcut::keys_text`] gives the text for it.
+//! on a screen. The pair is not in the accessibility tree at all: it has no
+//! id and no role, and neither have its keycaps and its word, so GPUI writes
+//! no node for any of them. The keys reach VoiceOver only through
+//! `aria_keyshortcuts` on the control they act on, for which
+//! [`Shortcut::keys_text`] gives the text, and the macOS adapter of AccessKit
+//! in `Cargo.lock` (0.26.3) does not pass that on. A hint row of shortcut
+//! pairs that VoiceOver users are to hear has to put its text into the
+//! description of the focused element.
 
 use gpui::{
     App, InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Refineable as _,
