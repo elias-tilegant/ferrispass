@@ -973,7 +973,7 @@ fn workspace_toolbar(
             } else {
                 AppIcon::Unlock
             }),
-            is_open,
+            false,
             !is_lock_pending,
             cx.listener(move |_: &mut AppShell, _: &ClickEvent, window, cx| {
                 if is_open {

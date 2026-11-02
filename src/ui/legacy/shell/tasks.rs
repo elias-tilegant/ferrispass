@@ -3,6 +3,7 @@
 //! secrets.
 
 use super::*;
+use crate::app::services::activity;
 
 impl AppShell {
     /// Start the per-second TOTP refresh loop only when the currently-selected
@@ -49,8 +50,9 @@ impl AppShell {
     /// Mirror of `sync_totp_tick` for the idle-timeout auto-lock
     /// checker. Runs only while a vault is open AND `auto_lock_secs`
     /// is configured; cancelled (= dropped) otherwise. The task wakes
-    /// every `AUTO_LOCK_TICK_SECS` and triggers a lock once
-    /// `last_activity` has been silent for the configured threshold.
+    /// every `AUTO_LOCK_TICK_SECS` and triggers a lock once the app-wide
+    /// idle clock (`services::activity`) has been silent for the
+    /// configured threshold. It only reads the clock; input moves it.
     /// Reads the threshold inside the loop so settings changes apply
     /// at the next tick without restarting the task.
     pub(super) fn sync_auto_lock_task(&mut self, cx: &mut Context<Self>) {
@@ -67,7 +69,7 @@ impl AppShell {
                 // Reset the activity baseline at vault-open so a stale
                 // timestamp from earlier in the session doesn't trip an
                 // immediate lock.
-                self.last_activity = SystemTime::now();
+                activity::reset(SystemTime::now());
                 let window_handle = self.window_handle;
                 self.auto_lock_task = Some(cx.spawn(async move |this, cx| {
                     loop {
@@ -81,16 +83,12 @@ impl AppShell {
                                 return None; // settings disabled - exit.
                             };
                             // A backwards clock jump must not postpone a
-                            // lock, so an unreadable elapsed time counts as
-                            // "long enough".
-                            let idle = SystemTime::now()
-                                .duration_since(shell.last_activity)
-                                .unwrap_or(Duration::MAX);
-                            if idle >= Duration::from_secs(threshold) {
-                                Some(true)
-                            } else {
-                                Some(false)
-                            }
+                            // lock; `idle_for` reads it as idle long enough.
+                            let idle = activity::idle_for(SystemTime::now());
+                            Some(activity::lock_is_due(
+                                idle,
+                                Some(Duration::from_secs(threshold)),
+                            ))
                         });
                         match decision {
                             Ok(Some(false)) => continue,
@@ -335,14 +333,12 @@ impl AppShell {
         );
     }
 
-    /// Drop reveal state, cancel timers, and clear the clipboard write owned
-    /// by this shell without retaining or comparing the copied secret.
+    /// Drop reveal state, clear our clipboard copy if it is still the newest
+    /// thing on the clipboard, and delete pending launch payloads. Nothing
+    /// here retains or compares the copied secret.
     pub(super) fn wipe_session_secrets(&mut self, cx: &mut Context<Self>) {
         self.revealed_entry_id = None;
-        self.clear_owned_clipboard(cx);
-        self.clipboard_clear_task = None;
-        self.clipboard_clear_deadline = None;
-        self.clipboard_pill_tick = None;
+        crate::app::services::clipboard::clear_owned(cx);
         // Drop any pending launch payloads - each handle's Drop unlinks
         // its file. Cancel the cleanup timers since we just did the
         // cleanup ourselves. Then purge the launch tempdir for good
@@ -351,24 +347,5 @@ impl AppShell {
         self.pending_launches.clear();
         self.launch_cleanup_tasks.clear();
         crate::launch::sweeper::purge_all();
-    }
-
-    pub(super) fn clear_owned_clipboard(&mut self, _cx: &mut Context<Self>) {
-        let Some(write) = self.pending_clipboard_write.take() else {
-            return;
-        };
-        match write {
-            #[cfg(target_os = "macos")]
-            PendingClipboardWrite::Native(change_count) => {
-                let _ = clear_if_unchanged(change_count);
-            }
-            #[cfg(not(target_os = "macos"))]
-            PendingClipboardWrite::Portable(_) => {
-                // GPUI has no portable clipboard generation. Clearing is
-                // unconditional here, but only while our opaque write token
-                // is still current; no secret is retained for comparison.
-                _cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-            }
-        }
     }
 }
