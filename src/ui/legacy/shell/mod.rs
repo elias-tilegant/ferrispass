@@ -402,17 +402,6 @@ impl AppShell {
             )
         };
 
-        // "System" has to mean "follow the system", not "read it once at
-        // startup": macOS switches appearance at sunset for a lot of people.
-        window
-            .observe_window_appearance(|window, cx| {
-                let choice = crate::app::settings::load().theme;
-                if choice == crate::app::settings::ThemeChoice::System {
-                    crate::ui::theme::apply_choice(choice, Some(window), cx);
-                }
-            })
-            .detach();
-
         // The clipboard countdown lives in the app-wide clipboard service,
         // which notifies once a second while a clear is pending.
         let clipboard = ClipboardService::handle(cx);
@@ -546,6 +535,17 @@ impl AppShell {
                     shell.automatic_biometric_attempted_for = None;
                 }
                 shell.schedule_automatic_biometric_unlock(window, cx);
+            }),
+            // "System" has to mean "follow the system", not "read it once at
+            // startup": macOS switches appearance at sunset for a lot of
+            // people. The choice comes from memory, not from the settings
+            // file, which is written in the background and may still hold
+            // the previous one.
+            cx.observe_window_appearance(window, |shell: &mut AppShell, window, cx| {
+                let choice = shell.settings.theme;
+                if choice == crate::app::settings::ThemeChoice::System {
+                    crate::ui::ds::apply_choice(choice, Some(window), cx);
+                }
             }),
             cx.observe(&clipboard, |_shell: &mut AppShell, _, cx| cx.notify()),
             Self::count_key_presses(window, cx),
@@ -777,6 +777,8 @@ fn copy_value_label(kind: CopyValueKind) -> &'static str {
 
 #[cfg(test)]
 mod activity_tests;
+#[cfg(test)]
+mod appearance_tests;
 #[cfg(test)]
 mod characterization_tests;
 #[cfg(test)]
