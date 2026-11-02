@@ -12,7 +12,8 @@ Started from `p1a-06-clipboard-path` at `5da7f72` on 2026-11-01. Two merges took
 | `0a989da` | The test with the real Carbon calls runs on a real main thread, and the calls check for it |
 | `aab10f4` | SECURITY.md and this page |
 | `a5c2d5e` | The check by hand as steps that work with the guard in place, and the time in the progress log |
-| the last one | The note on the second merge above |
+| `d945e97` | The note on the second merge above |
+| the last one | The panic tests go through the hook `install_hooks` sets, with a real panic, instead of calling its release directly |
 
 ## How the guard works
 

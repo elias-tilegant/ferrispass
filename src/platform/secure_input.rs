@@ -374,10 +374,21 @@ pub fn install_hooks(cx: &mut App) {
     PANIC_HOOK.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            SYSTEM.release_after_panic();
+            panic_switch().release_after_panic();
             previous(info);
         }));
     });
+}
+
+/// The switch the panic hook releases. A panic has no `App` to look a fake
+/// up in, so a test names its fake for the thread it panics on
+/// (`Fake::take_panics_on_this_thread`); everything else gets the system's.
+fn panic_switch() -> &'static Switch {
+    #[cfg(test)]
+    if let Some(fake) = fake::panic_switch() {
+        return fake;
+    }
+    &SYSTEM
 }
 
 fn switch(#[cfg_attr(not(test), allow(unused_variables))] cx: &App) -> &'static Switch {
@@ -504,12 +515,24 @@ mod noop {
 
 #[cfg(test)]
 pub(crate) mod fake {
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::{self, ThreadId};
 
     use super::*;
 
     type DisableHook = Box<dyn FnOnce() + Send>;
+
+    thread_local! {
+        /// The switch the panic hook releases for a panic on this thread,
+        /// when a test named one.
+        static PANIC_SWITCH: Cell<Option<&'static Switch>> = const { Cell::new(None) };
+    }
+
+    /// The switch a test named for this thread's panics, if any.
+    pub(super) fn panic_switch() -> Option<&'static Switch> {
+        PANIC_SWITCH.try_with(Cell::get).ok().flatten()
+    }
 
     /// Stands in for Carbon: counts the calls, refuses when told to, and
     /// treats the thread that made it as the main thread.
@@ -651,6 +674,13 @@ pub(crate) mod fake {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
+        }
+
+        /// From here on, a panic on the calling thread makes the hook from
+        /// `install_hooks` release this switch instead of the system's.
+        /// Panics on other threads are not affected.
+        pub(crate) fn take_panics_on_this_thread(&self) {
+            PANIC_SWITCH.with(|slot| slot.set(Some(self.switch)));
         }
     }
 
@@ -829,29 +859,46 @@ mod tests {
         assert!(!fake.api.is_enabled());
     }
 
-    #[test]
-    fn panic_hook_releases_on_the_main_thread() {
-        let fake = fake();
-        let first = fake.hold().expect("hold");
-        let second = fake.hold().expect("hold");
-        fake.switch.release_after_panic();
+    /// A real panic, caught again, on the fake's main thread. The hook that
+    /// runs is the one `install_hooks` set, so this goes the way a panic in
+    /// the app goes. Its message shows up in the test's output.
+    #[gpui::test]
+    fn panic_hook_releases_on_the_main_thread(cx: &mut gpui::TestAppContext) {
+        let fake = cx.update(|cx| fake::install(cx, FakeApi::new()));
+        cx.update(install_hooks);
+        let first = cx.update(|cx| hold(cx)).expect("hold");
+        let second = cx.update(|cx| hold(cx)).expect("hold");
+
+        fake.take_panics_on_this_thread();
+        let panicked: thread::Result<()> =
+            catch_unwind(|| panic!("a panic on the main thread, on purpose"));
+        assert!(panicked.is_err());
+
         assert!(!fake.held(), "the panic hook left secure input held");
         assert_eq!(fake.api.disables(), 1);
         drop(first);
         drop(second);
         assert_eq!(fake.api.disables(), 1);
-        let again = fake.hold().expect("hold after the panic hook");
+        let again = cx.update(|cx| hold(cx)).expect("hold after the panic hook");
         assert_eq!(fake.api.enables(), 2);
         drop(again);
     }
 
-    #[test]
-    fn panic_hook_off_the_main_thread_touches_nothing() {
-        let fake = fake();
-        let guard = fake.hold().expect("hold");
-        thread::spawn(move || fake.switch.release_after_panic())
-            .join()
-            .expect("hook thread");
+    /// A thread other than the fake's main thread ends in a panic, with the
+    /// hook from `install_hooks` in place.
+    #[gpui::test]
+    fn panic_hook_off_the_main_thread_touches_nothing(cx: &mut gpui::TestAppContext) {
+        let fake = cx.update(|cx| fake::install(cx, FakeApi::new()));
+        cx.update(install_hooks);
+        let guard = cx.update(|cx| hold(cx)).expect("hold");
+
+        let ended = thread::spawn(move || {
+            fake.take_panics_on_this_thread();
+            panic!("a panic on another thread, on purpose");
+        })
+        .join();
+        assert!(ended.is_err(), "the other thread did not panic");
+
         assert_eq!(
             fake.api.disables(),
             0,
@@ -861,7 +908,9 @@ mod tests {
         assert!(fake.held());
         drop(guard);
         assert_eq!(fake.api.disables(), 1);
-        let again = fake.hold().expect("hold after a background panic");
+        let again = cx
+            .update(|cx| hold(cx))
+            .expect("hold after a background panic");
         assert_eq!(fake.api.enables(), 2);
         drop(again);
     }
