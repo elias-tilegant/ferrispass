@@ -178,11 +178,31 @@ fn request_quit(cx: &mut App) {
     if block_lifecycle_action_over_dirty_editor(None, cx) {
         return;
     }
+    quit(cx);
+}
 
-    // Wipe cleartext launch payloads before the platform starts tearing down
-    // windows. GPUI schedules the macOS terminate call asynchronously.
+/// Quit once nothing holds it back.
+///
+/// Wipe cleartext launch payloads and our own clipboard copy before the
+/// platform starts tearing down windows. GPUI schedules the macOS terminate
+/// call asynchronously; the clipboard's quit hook runs at its end and is the
+/// second chance, not the only one.
+pub(super) fn quit(cx: &mut App) {
     crate::launch::sweeper::purge_all();
+    super::services::clipboard::clear_owned(cx);
+    // Secure event input as well; its quit hook is the second chance too.
+    crate::platform::secure_input::release_all(cx);
     cx.quit();
+}
+
+/// Restart into an installed update once nothing holds it back. GPUI quits
+/// this process before the new one starts, so the cleanup is the same as
+/// [`quit`]'s.
+pub(super) fn restart(cx: &mut App) {
+    crate::launch::sweeper::purge_all();
+    super::services::clipboard::clear_owned(cx);
+    crate::platform::secure_input::release_all(cx);
+    cx.restart();
 }
 
 /// Store where the user left the window, so the next launch opens there
@@ -267,8 +287,7 @@ pub fn init(cx: &mut App) {
         if block_lifecycle_action_over_dirty_editor(None, cx) {
             return;
         }
-        crate::launch::sweeper::purge_all();
-        cx.restart();
+        restart(cx);
     });
 
     cx.bind_keys([
@@ -380,4 +399,44 @@ fn install_app_menus(cx: &mut App) {
         ]),
         Menu::new("Help").items([MenuItem::action("What's New", OpenWhatsNew)]),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::services::clipboard::ClipboardService;
+    use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
+    use crate::platform::secure_input::{self, fake::FakeApi};
+    use gpui::TestAppContext;
+
+    /// Cmd+Q, the Quit menu item and "Restart to update" let go of secure
+    /// event input before macOS is asked to quit, the way they clear the
+    /// clipboard. The test platform's quit does nothing, so only that direct
+    /// release can have run here.
+    #[gpui::test]
+    fn quitting_releases_secure_input(cx: &mut TestAppContext) {
+        let fake = cx.update(|cx| {
+            ClipboardService::install_for_test(
+                cx,
+                Box::new(FakePasteboard::new(AccessBehavior::Default)),
+            );
+            secure_input::fake::install(cx, FakeApi::new())
+        });
+
+        let guard = cx.update(|cx| secure_input::hold(cx)).expect("hold");
+        cx.update(quit);
+        assert!(!fake.held(), "quitting left secure event input on");
+        drop(guard);
+
+        let guard = cx.update(|cx| secure_input::hold(cx)).expect("hold");
+        cx.update(restart);
+        assert!(
+            !fake.held(),
+            "restarting to update left secure event input on"
+        );
+        drop(guard);
+
+        assert_eq!(fake.api.enables(), 2);
+        assert_eq!(fake.api.disables(), 2);
+    }
 }

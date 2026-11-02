@@ -24,6 +24,7 @@ In scope:
 - **Update mechanism** - bypassing the minisign signature check, downgrade attacks, replay attacks against the manifest endpoint
 - **Build supply chain** - compromise paths through our pinned dependencies (`keepass-rs` fork in particular) or the GitHub Actions release pipeline
 - **macOS Keychain access** - incorrect ACLs that allow other apps to read FerrisPass-owned items
+- **Clipboard** - a secret that one of FerrisPass's own copy actions puts on the clipboard without the concealed, transient and current-host markers, or that stays behind after the clear timer, a lock, quit or launch. Which copy actions count, and when FerrisPass looks at launch, is in the security contract below
 
 Out of scope (will be acknowledged but won't be patched as security issues):
 
@@ -32,6 +33,19 @@ Out of scope (will be acknowledged but won't be patched as security issues):
 - Memory-dump attacks on a running unlocked vault - the decrypted entries and the composite key are unavoidably in process memory while you're using the app. The master password itself is not: it is reduced to its SHA-256 at unlock, which is the only form KDBX uses. That hash still opens this vault, so the gain is narrow and worth stating plainly: what a dump does not yield is the password itself, which is the thing people reuse elsewhere. The exception is the login keychain when you enable Touch ID
 - Brute-force against weak master passwords - this is a user-side issue, not a FerrisPass bug
 - Denial of service against the update endpoint (GitHub's problem)
+
+## Security contract
+
+What FerrisPass promises from the release in the second column on. A build that breaks one of these has a vulnerability in the sense above.
+
+| Rule | Since |
+|---|---|
+| Every secret you copy with one of FerrisPass's own copy actions goes through one clipboard path: concealed, transient, this Mac only, cleared after the timer, at lock, at quit and at launch; only unchanged clipboard contents are ever cleared, and the launch check reads types, never contents. The launch check only looks when "Paste from Other Apps" is set to Always Allow for FerrisPass; with any other setting it leaves the clipboard alone, so macOS never asks | the redesign release |
+| While the master password field has focus, secure event input is on, so other programs do not see the keystrokes; it is released on blur, window deactivation, lock, quit and panic | the redesign release |
+| New `unsafe` code lives only in audited modules under `src/platform/`, listed under [Unsafe code](#unsafe-code) | the redesign release |
+| Activity for the auto-lock is input in a FerrisPass window, in the quick access panel, a global shortcut or a click on the menu bar item, and nothing that happens in other apps | the redesign release |
+
+In the clipboard rule, FerrisPass's own copy actions are the ones that copy a value out of an entry for you: the copy buttons at the bottom of an entry's details and a click on its username, password, TOTP code or a custom field there; Cmd+Shift+U, Cmd+Shift+L, and Cmd+C while no text field has focus; and Copy Username, Copy Password and Copy URL in the Edit menu. The standard editing commands on text you select in a field are not among them. Text you select in one of the entry editor's unprotected fields (title, username, URL, notes, custom field names and the values of custom fields not marked protected) and copy or cut with Cmd+C, Cmd+X, Edit > Copy, Edit > Cut or the field's context menu is an ordinary copy, as it always was: it does not go through this path, carries none of the markers and is not cleared. The password, the TOTP secret and the values of custom fields marked protected can't be copied or cut out of the editor at all.
 
 ## Supported versions
 
@@ -56,6 +70,21 @@ An update the running app installs is the other way round: the archive's minisig
 
 So an attacker needs the minisign key to push an update the app installs, and Apple's signing infrastructure to get past Gatekeeper afterwards. Neither key alone gets a malicious build both installed and running.
 
+## Unsafe code
+
+The crate denies `unsafe_code`. The places below opt in, each for a system API that our dependencies offer no safe way to call. `tests/architecture.rs` keeps the same list and fails the build when an opt-in appears or disappears without it. New `unsafe` code goes only into its own module under `src/platform/`, with the reason in the module header.
+
+| Where | Why |
+|---|---|
+| `src/platform/secure_input.rs` | Carbon secure event input around the master password field; a guard that releases on blur, window deactivation, lock, quit and panic |
+| `src/biometric/macos.rs` | the LocalAuthentication bindings mark ordinary calls `unsafe`: creating the context, `evaluatePolicy` for the Touch ID prompt, and reading the error in its reply |
+| `src/session_lock.rs` | an Objective-C observer for the screen lock, sleep and user switch notifications, so the vault locks when the Mac does |
+| `src/update/macos_installer.rs` | `renamex_np` with `RENAME_SWAP`, which swaps the old and the new app bundle in one step, so an interrupted update never leaves the user with neither |
+| `src/launch/tempfile.rs`, `process_uid` | `getuid`, to check that the folder for launch payloads belongs to the current user |
+| `src/keepass/document.rs`, `publish_new_no_clobber` | `renamex_np` with `RENAME_EXCL`, which puts a new vault file in place without replacing a file that appeared in the meantime |
+| `src/keepass/document.rs`, `macos_full_sync` | `fcntl` with `F_FULLFSYNC`, so a saved vault is on the disk and not only in the drive's cache |
+| `src/sync/icloud.rs`, `platform` | resolving a stored bookmark and using the URL `NSFileCoordinator` hands to its block, for vaults in iCloud Drive; the bindings mark both `unsafe` |
+
 ## Master-password handling - what FerrisPass does and doesn't do
 
 | | |
@@ -64,8 +93,8 @@ So an attacker needs the minisign key to push an update the app installs, and Ap
 | Password persisted to disk | **never** |
 | Password sent over the network | **never** - the cloud provider only sees ciphertext |
 | Password stored in Keychain | **only if you enable Touch ID for that vault** - see below |
-| Auto-lock timeout | configurable in Settings; default 4 minutes idle |
-| Clipboard auto-clear after copy | configurable; default 10 seconds |
+| Auto-lock timeout | configurable in Settings; default 4 minutes without input in a FerrisPass window, the quick access panel, the global shortcuts or the menu bar item. Input in other apps does not count |
+| Clipboard auto-clear after copy | for what you copy with FerrisPass's own copy actions: configurable, default 10 seconds; also at quit and at launch (at launch only with "Paste from Other Apps" set to Always Allow). Text you copy or cut out of an editor field with the standard editing commands is an ordinary copy and is not cleared |
 
 ### Touch ID and the login keychain
 
