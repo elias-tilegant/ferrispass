@@ -719,16 +719,49 @@ mod tests {
         assert!(node.supports_action(accesskit::Action::Click));
     }
 
+    /// Where `into_base` hands the click handler to the base button: the
+    /// code from `.when_some(handler,` to the end of its closure, without
+    /// whitespace.
+    fn handler_registration() -> String {
+        let source = include_str!("button.rs");
+        let end = source
+            .find("#[cfg(test)]\nmod tests")
+            .expect("the test module");
+        let code: String = source[..end].split_whitespace().collect();
+        let start = code
+            .find(".when_some(handler,")
+            .expect("into_base hands the handler to the base button");
+        let length = code[start..].find("})").expect("the end of the closure");
+        code[start..start + length].to_string()
+    }
+
+    /// VoiceOver's press reaches the handler. The test platform never turns
+    /// accessibility on, so it cannot deliver a press, and GPUI lists the
+    /// press for any element with a click handler, so the node alone cannot
+    /// show that the button registered its own. The test checks the three
+    /// parts it is made of instead.
     #[gpui::test]
     fn button_click_reaches_voiceover(cx: &mut TestAppContext) {
-        // VoiceOver sees the press...
+        // VoiceOver is offered the press...
         let (_, node) = node_of(cx, || {
             Button::secondary("lock", label("Lock")).on_click(|_, _, _| {})
         });
         assert!(node.supports_action(accesskit::Action::Click));
         assert!(node.supports_action(accesskit::Action::Focus));
 
-        // ...and the press runs the handler, without a synthetic mouse click.
+        // ...the handler a click gets is registered for the press too, or
+        // GPUI answers the press with a synthetic click in the middle of the
+        // button, which misses when something covers it...
+        let registration = handler_registration();
+        assert!(
+            registration.contains(
+                ".on_a11y_action(accesskit::Action::Click,voiceover_press(handler.clone()))"
+            ),
+            "VoiceOver's press is not registered with the click handler: {registration}"
+        );
+        assert!(registration.contains(".on_click("), "{registration}");
+
+        // ...and the press runs the handler, as a click from the keyboard.
         let pressed = probe::in_frame(cx, |window, cx| {
             let pressed = Rc::new(Cell::new(0));
             let counted = pressed.clone();
