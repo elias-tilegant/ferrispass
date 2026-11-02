@@ -164,8 +164,9 @@ fn key_text(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
+    use super::super::probe;
     use super::*;
 
     fn cap(source: &str) -> String {
@@ -218,20 +219,6 @@ mod tests {
         parse_keys("cmd-k-x");
     }
 
-    fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries {
-            let path = entry.expect("directory entry").path();
-            if path.is_dir() {
-                rust_files(&path, files);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                files.push(path);
-            }
-        }
-    }
-
     /// `Keycap` is visible inside `ui::ds` only, so code elsewhere cannot
     /// name it. This scan backs that up for every folder with Rust in it,
     /// in case the visibility is ever widened.
@@ -242,7 +229,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
         for dir in ["src", "tests", "examples"] {
-            rust_files(&root.join(dir), &mut files);
+            probe::rust_files(&root.join(dir), &mut files);
         }
         assert!(
             files.len() > 50,

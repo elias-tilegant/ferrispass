@@ -132,6 +132,7 @@ pub mod copper {
 #[cfg(test)]
 pub(in crate::ui::ds) mod probe {
     use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
     use gpui::{
@@ -205,10 +206,27 @@ pub(in crate::ui::ds) mod probe {
         element.write_a11y_info(&mut node);
         (role, node)
     }
+
+    /// Every `.rs` file under `dir`, for the scans over the source.
+    pub fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                rust_files(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -219,5 +237,104 @@ mod tests {
         );
         let shared: SharedString = AccessibilityId::new("main", "lock", 0).into();
         assert_eq!(shared.as_ref(), "fp.main.lock.0");
+    }
+
+    /// Calls that hand a text to VoiceOver or show it, beside the `.child(`
+    /// and `aria_label(` that `no_literals_in_render_code` looks at.
+    const TEXT_CALLS: &[&str] = &[
+        "accessibility_label(",
+        "aria_description(",
+        "aria_value(",
+        "aria_placeholder(",
+        "tooltip(",
+        "Label::new(",
+    ];
+
+    /// The string literals `source` hands straight to one of `TEXT_CALLS`,
+    /// with their line. Comments and the test module are left out.
+    fn literal_texts(source: &str) -> Vec<(usize, String)> {
+        let code = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default();
+        let code: Vec<&str> = code
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or_default())
+            .collect();
+        let code = code.join("\n");
+        let mut found = Vec::new();
+        for call in TEXT_CALLS {
+            for (at, _) in code.match_indices(call) {
+                let part_of_a_longer_name = code[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let argument = code[at + call.len()..].trim_start();
+                let literal = argument.starts_with('"')
+                    || argument.starts_with("r\"")
+                    || argument.starts_with("r#");
+                if literal && !part_of_a_longer_name {
+                    let line = code[..at].matches('\n').count() + 1;
+                    let first_line = argument.lines().next().unwrap_or_default();
+                    let text = first_line.trim_end_matches([')', ',', ';']);
+                    found.push((line, text.to_string()));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// A name, description, value or tooltip in `ui::ds` comes from a
+    /// parameter or a text key, never from a literal in the code.
+    #[test]
+    fn no_literal_names_descriptions_or_tooltips() {
+        let ds = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds");
+        let mut files = Vec::new();
+        probe::rust_files(&ds, &mut files);
+        assert!(
+            files.len() > 10,
+            "the scan found only {} files",
+            files.len()
+        );
+        let mut problems = Vec::new();
+        for file in &files {
+            let source = std::fs::read_to_string(file).expect("read source");
+            for (line, literal) in literal_texts(&source) {
+                problems.push(format!("{}:{line}: {literal}", file.display()));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "texts for VoiceOver come from a parameter or tr!:\n{}",
+            problems.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_text_scan_finds_literals_in_code_only() {
+        let source = r##"
+            div().aria_description("not available")
+                .accessibility_label(
+                    r#"Copy"#,
+                )
+                .aria_value(sentence)
+                // .tooltip("in a comment")
+                .my_aria_value("not this one")
+                .when_some(text, |this, text| this.aria_placeholder(text));
+            Label::new("Server");
+#[cfg(test)]
+mod tests {
+    fn sample() { div().aria_description("in a test"); }
+}
+        "##;
+        assert_eq!(
+            literal_texts(source),
+            [
+                (2, "\"not available\"".to_string()),
+                (3, "r#\"Copy\"#".to_string()),
+                (10, "\"Server\"".to_string()),
+            ]
+        );
     }
 }
