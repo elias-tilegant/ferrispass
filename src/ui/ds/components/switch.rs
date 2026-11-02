@@ -8,13 +8,19 @@
 //! stands beside the switch in `Body` and is the switch's name for
 //! VoiceOver. The track keeps the Kit's fixed size of 36 by 20 pixels at
 //! both text sizes.
+//!
+//! The Kit switch takes no description, so the sentence below is a node of
+//! its own, a label with the sentence as its value, which VoiceOver reaches
+//! right after the switch.
 
 use std::rc::Rc;
 
 use gpui::{
-    App, ElementId, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window,
-    div, prelude::FluentBuilder as _,
+    App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Role,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _,
 };
+use gpui_base::TestSupportExt as _;
 use gpui_component::Disableable as _;
 use gpui_component::switch::Switch as KitSwitch;
 
@@ -79,6 +85,9 @@ impl Switch {
 impl RenderOnce for Switch {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.ds().colors;
+        let note = self
+            .note
+            .map(|sentence| note_line(self.id.clone(), sentence, cx));
         let switch = KitSwitch::new(self.id)
             .checked(self.checked)
             .disabled(self.disabled)
@@ -111,15 +120,24 @@ impl RenderOnce for Switch {
                             .child(self.label),
                     ),
             )
-            .when_some(self.note, |this, note| {
-                this.child(
-                    div()
-                        .text_style(TextStyle::Callout)
-                        .text_color(colors.text_secondary.hsla)
-                        .child(note),
-                )
-            })
+            .children(note)
     }
+}
+
+/// The sentence under a switch. The Kit switch takes no description, so the
+/// sentence is a node of its own, which VoiceOver reaches right after the
+/// switch. A text without an id and a role writes no node at all.
+fn note_line(switch: ElementId, sentence: SharedString, cx: &App) -> impl IntoElement {
+    div()
+        .id((switch, "note"))
+        // The tests find the node through this; in the app it is the plain
+        // element.
+        .test_support()
+        .role(Role::Label)
+        .aria_value(sentence.clone())
+        .text_style(TextStyle::Callout)
+        .text_color(cx.ds().colors.text_secondary.hsla)
+        .child(sentence)
 }
 
 #[cfg(test)]
@@ -127,7 +145,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{Hsla, Modifiers, Role, TestAppContext};
+    use gpui::{Hsla, Modifiers, TestAppContext};
 
     use super::super::probe;
     use super::*;
@@ -231,5 +249,33 @@ mod tests {
 
         cx.simulate_click(switch.bounds().center(), Modifiers::default());
         assert_eq!(asked.get(), Some(false), "a click asks for off");
+    }
+
+    /// The sentence under a switch is a node of its own, a label with the
+    /// sentence as its value, drawn below the switch, because the Kit switch
+    /// takes no description that would carry it.
+    #[gpui::test]
+    fn a_switch_note_is_a_node_with_its_sentence(cx: &mut TestAppContext) {
+        const NOTE: &str = "After four minutes without input.";
+        let cx = probe::window(cx, |_, _| {
+            Switch::new("autolock", text("Lock when idle"))
+                .checked(true)
+                .note(text(NOTE))
+                .into_any_element()
+        });
+        let nodes = cx.update(|window, _| gpui_base::test_support::snapshots(window));
+        let switch = nodes
+            .iter()
+            .find(|node| node.role() == Some(Role::Switch))
+            .expect("a switch node");
+        let note = nodes
+            .iter()
+            .find(|node| node.role() == Some(Role::Label) && node.value() == Some(NOTE))
+            .unwrap_or_else(|| panic!("a label node with the sentence: {nodes:?}"));
+        assert!(note.visible(), "the sentence is drawn: {note:?}");
+        assert!(
+            note.bounds().top() >= switch.bounds().bottom(),
+            "the sentence is below the switch: {note:?}, switch {switch:?}"
+        );
     }
 }
