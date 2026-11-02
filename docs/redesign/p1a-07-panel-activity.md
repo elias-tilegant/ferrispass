@@ -9,7 +9,10 @@ Started from `p1a-08-secure-input` at `5031d12` on 2026-11-02.
 | `d85c0c7` | `src/app/services/activity.rs`, the auto-lock and the window reading it, the list of call sites and the tests |
 | `8a7b1cc` | SECURITY.md and this page |
 | `506310e` | Shortcuts, clicks, scrolling and the pointer over a dialog count as input in the window |
-| the last one | This list and the time in the progress log |
+| `4e21c3f` | This list and the time in the progress log |
+| `d92f331` | A test of the clock as the app builds it, with a touch and a reset from a second thread |
+| `a303725` | The unit test comments say what a new source needs |
+| the last one | This page and the progress log on the two before it |
 
 ## What counts as activity
 
@@ -38,7 +41,7 @@ Only the auto-lock task in `src/ui/legacy/shell/tasks.rs` reads it. When it star
 
 The clock is wall-clock time (`SystemTime`), as the field was. `Instant` stops while the Mac sleeps, and hours asleep would count as no idle time. A clock that jumps backwards makes `idle_for` return `Duration::MAX`, so the lock is due at once instead of later. Before the first `reset` the clock reads as the epoch, idle for decades, so a task that skipped it would lock rather than never.
 
-The clock is a `static` behind a `Mutex`, written from the main thread in practice. `touch` needs no GPUI context, so a callback from AppKit can call it too. In unit tests each test thread has its own clock: libtest runs tests side by side, and the GPUI test executor runs a test's tasks on its thread, so one test typing into its window can't reset the clock another test is watching.
+The clock is a `static` behind a `Mutex`, written from the main thread in practice. `touch` needs no GPUI context, so a callback from AppKit can call it too. In unit tests each test thread has its own clock: libtest runs tests side by side, and the GPUI test executor runs a test's tasks on its thread, so one test typing into its window can't reset the clock another test is watching. That leaves the `static` out of every unit test, so `tests/idle_clock.rs` builds against the library the way the app does and checks it: a touch and a reset on one thread are read on another, as they have to be once the global shortcuts move the clock from the thread that listens for them.
 
 ## How the list of call sites is kept
 
@@ -49,7 +52,9 @@ The clock is a `static` behind a `Mutex`, written from the main thread in practi
 - a call that doesn't name its source as `ActivitySource::<name>`, for example one that passes a variable along,
 - `touch` imported or used as a value, a glob import from the module, or the module renamed with `as`, since calls through another name would go unseen.
 
-A step that adds a source adds its call and one line to the list, and the line is what review looks at. `only_listed_sources_exist` in the module has a `match` over `ActivitySource` without a `_` arm, so a fifth source does not compile until that test lists it.
+Today the list has `src/ui/legacy/shell/render.rs` with `WindowInput`, and `tests/idle_clock.rs` with `Hotkey`: the scan reads tests as well, and that test touches the clock from a second thread. A step that adds a source adds its call and one line to the list, and the line is what review looks at.
+
+`only_listed_sources_exist` in the module has a `match` over `ActivitySource` without a `_` arm, so a fifth source does not compile until it has an arm there. The arm does not put it in `ALL_SOURCES`, the list `touch_resets_idle` goes through. That is a second edit, which the comments in the test module ask for and nothing checks: Rust can't go through an enum's variants without naming them.
 
 ## Tests
 
@@ -61,6 +66,7 @@ Each rule was checked by taking it out; the changed lines and the failing output
 | `lock_is_due_when_clock_goes_backwards` | a `now` before the last input reads as `Duration::MAX`, and the lock is due |
 | `touch_resets_idle`, `only_listed_sources_exist` | every source moves the clock, and there are exactly four |
 | `reading_the_clock_does_not_reset_it`, `reset_moves_the_baseline_both_ways`, `a_clock_never_set_reads_as_idle` | reads don't move it, `reset` sets it, an unset clock makes the lock due |
+| `the_app_has_one_idle_clock_for_every_thread` (`tests/idle_clock.rs`) | the clock as the app builds it: an unset clock makes the lock due, `idle_for` reads what `reset` set, and a touch or a reset on another thread is read on this one |
 | `key_press_in_the_window_resets_the_clock`, `shortcut_in_the_window_resets_the_clock` | a typed key and a key an action takes (Cmd+F) both move the clock (headless window) |
 | `click_in_the_window_resets_the_clock`, `scrolling_in_the_window_resets_the_clock` | a click without a move, and a scroll, move it |
 | `pointer_over_a_dialog_resets_the_clock` | the pointer over the About box, which blocks the pointer for the view below, moves it |
