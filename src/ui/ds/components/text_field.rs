@@ -150,9 +150,12 @@ fn error_line(field: ElementId, sentence: SharedString, cx: &App) -> Stateful<Di
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use gpui::{
-        AppContext as _, Bounds, Font, Hsla, Pixels, TestAppContext, TextRun, VisualTestContext,
-        font,
+        AppContext as _, Bounds, EntityInputHandler as _, Font, Hsla, Pixels, TestAppContext,
+        TextRun, VisualTestContext, font,
     };
 
     use super::super::probe;
@@ -208,6 +211,52 @@ mod tests {
         let large = input_height(cx, TEXT_SIZE_LARGE);
         let expected = 28.0 * TEXT_SIZE_LARGE / TEXT_SIZE_STANDARD;
         assert!((large - expected).abs() <= 0.5, "{large}, not {expected}");
+    }
+
+    /// How wide the field's input sets `value` in a window at `text_size`,
+    /// and how wide `value` is in `Body` there. The test platform paints no
+    /// glyphs, but the input lays its text out with the size it was given,
+    /// and the bounds it reports for a range of it come from that layout.
+    fn input_text_widths(
+        cx: &mut TestAppContext,
+        text_size: f32,
+        value: &'static str,
+    ) -> (Pixels, Pixels) {
+        apply_text_size(cx, text_size);
+        let state: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
+        let kept = state.clone();
+        let cx = probe::window(cx, move |window, cx| {
+            let state = kept
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    cx.new(|cx| InputState::new(window, cx).default_value(value))
+                })
+                .clone();
+            TextField::new("server", &state, text("Server")).into_any_element()
+        });
+        let state = state.borrow().clone().expect("the input state");
+        let laid_out = cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.bounds_for_range(0..value.len(), Bounds::default(), window, cx)
+            })
+        });
+        let laid_out = laid_out.expect("the input laid out its text").size.width;
+        (laid_out, text_width(cx, value, TextStyle::Body))
+    }
+
+    /// The Kit input writes 11.4 px at text size 13; the field writes
+    /// `Body`, 13 points, and grows with the larger text size.
+    #[gpui::test]
+    fn text_field_writes_body_at_13_and_15(cx: &mut TestAppContext) {
+        const VALUE: &str = "nhp.example.com:3200";
+        let _lock = ds::tests::lock_mode();
+        for text_size in [TEXT_SIZE_STANDARD, TEXT_SIZE_LARGE] {
+            let (laid_out, body) = input_text_widths(cx, text_size, VALUE);
+            assert!(
+                (laid_out - body).abs() <= px(0.5),
+                "at {text_size}: the input sets its text {laid_out:?} wide, in Body it is {body:?}"
+            );
+        }
     }
 
     #[gpui::test]
