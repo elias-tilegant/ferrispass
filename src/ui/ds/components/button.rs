@@ -528,7 +528,9 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{Bounds, Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point};
+    use gpui::{
+        Bounds, Edges, Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point,
+    };
     use gpui_component::IconName;
 
     #[cfg(debug_assertions)]
@@ -876,7 +878,8 @@ mod tests {
     }
 
     /// Tab shows the ring around the button, 1 px away and 2 px wide; a
-    /// click on a focused button does not.
+    /// click on a focused button does not. The ring's place comes from its
+    /// bounds, its width from the edge GPUI paints.
     #[gpui::test]
     fn the_focus_ring_shows_for_the_keyboard_only(cx: &mut TestAppContext) {
         let cx = probe::window(cx, |_, _| {
@@ -904,7 +907,35 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let button = cx.debug_bounds("fp-test-button").expect("the button");
         let ring = cx.debug_bounds("fp-focus-ring").expect("a ring after Tab");
-        assert_eq!(ring, button.dilate(px(3.)));
+        assert_eq!(ring, button.dilate(px(3.)), "the ring ends 3 px out");
+        // GPUI paints an edge without a surface as strips that share the
+        // bounds and the widths of the edge.
+        let widths: Vec<Edges<Pixels>> = cx.update(|window, cx| {
+            let color = cx.ds().colors.focus_ring.hsla;
+            let scale = window.scale_factor();
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.border_color == color)
+                .map(|quad| quad.border_widths.map(|width| px(width.0 / scale)))
+                .collect()
+        });
+        assert!(!widths.is_empty(), "the ring is painted in focus_ring");
+        assert!(
+            widths.iter().all(|width| *width == Edges::all(px(2.))),
+            "the ring is 2 px wide: {widths:?}"
+        );
+        let width = &widths[0];
+        let gaps = [
+            button.left() - (ring.left() + width.left),
+            button.top() - (ring.top() + width.top),
+            (ring.right() - width.right) - button.right(),
+            (ring.bottom() - width.bottom) - button.bottom(),
+        ];
+        assert!(
+            gaps.iter().all(|gap| (*gap - px(1.)).abs() < px(0.01)),
+            "1 px between the button and the ring: {gaps:?}"
+        );
 
         let middle = button.center();
         cx.simulate_click(middle, Modifiers::default());
