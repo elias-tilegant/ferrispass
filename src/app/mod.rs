@@ -3,6 +3,7 @@ pub mod assets;
 
 mod recents;
 mod search;
+pub mod services;
 pub mod settings;
 mod state;
 pub mod sync_history;
@@ -104,6 +105,13 @@ pub fn run() {
         });
 
         actions::init(cx);
+        // A secret an earlier run left on the clipboard (a crash, a forced
+        // quit) goes before the first window opens.
+        services::clipboard::clear_own_copy_on_start(cx);
+        services::clipboard::install_quit_hook(cx);
+        // Secure event input is released at quit and on a panic, whichever
+        // window held it.
+        crate::platform::secure_input::install_hooks(cx);
         // Held globally so a window closed with Cmd+W can be reopened from
         // the Dock against the same state, rather than restarting the app.
         cx.set_global(SharedAppState(app_state.clone()));

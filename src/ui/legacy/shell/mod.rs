@@ -2,8 +2,6 @@
 //! constructor are here; the methods are split by concern into the
 //! submodules.
 
-#[cfg(target_os = "macos")]
-use crate::clipboard::{ClipboardChangeCount, clear_if_unchanged, write_secret_text};
 use crate::{
     app::{
         AppSettings, AppState, CopyValueKind, Overlay,
@@ -15,10 +13,12 @@ use crate::{
             OpenVaultSwitcher, OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected,
             RenameGroupOp, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
         },
+        services::clipboard::ClipboardService,
     },
     autotype,
     keepass::{KeePassRepository, MutationError, limits::KdfCost},
     launch::{self, LaunchContext, LaunchError, LaunchHandle},
+    platform::secure_input::{self, HoldError, SecureInputGuard},
     ui::errors,
 };
 
@@ -31,8 +31,6 @@ pub enum SettingsTab {
     Sync,
     AutoType,
 }
-#[cfg(not(target_os = "macos"))]
-use gpui::ClipboardItem;
 use gpui::{
     AnyWindowHandle, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement as _, ParentElement as _, PathPromptOptions, Render,
@@ -89,19 +87,14 @@ pub struct CustomFieldDraftInputs {
     _subscriptions: [Subscription; 2],
 }
 
-/// Opaque identity of the clipboard write owned by the current clear timer.
-/// It deliberately contains neither the copied value nor a digest of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PendingClipboardWrite {
-    #[cfg(target_os = "macos")]
-    Native(ClipboardChangeCount),
-    #[cfg(not(target_os = "macos"))]
-    Portable(u64),
-}
-
 pub struct AppShell {
     state: Entity<AppState>,
     password_input: Entity<InputState>,
+    /// Keeps secure event input on while the master password field has
+    /// focus, so other programs on this Mac don't see what is typed there.
+    /// Dropped when the field loses focus, when the window stops being the
+    /// active one, and at lock.
+    secure_input: Option<SecureInputGuard>,
     keyfile_input: Entity<InputState>,
     search_input: Entity<InputState>,
     new_entry_title_input: Entity<InputState>,
@@ -172,27 +165,6 @@ pub struct AppShell {
     /// changes every 30 s so a coarser tick would also work, but 1 Hz keeps
     /// the "valid for Xs" text moving smoothly.
     totp_tick: Option<Task<()>>,
-    /// Background timer that wipes the clipboard `CLIPBOARD_CLEAR_SECS` after
-    /// a copy. Holding the `Task` here means a new copy replaces (= cancels)
-    /// the previous timer - only the latest copy's clear fires.
-    clipboard_clear_task: Option<Task<()>>,
-    /// Opaque identity of our latest clipboard write. On macOS this is the
-    /// NSPasteboard change count, which lets the timer compare-and-clear
-    /// without retaining the copied secret in application state.
-    pending_clipboard_write: Option<PendingClipboardWrite>,
-    /// Monotonic identity for portable clipboard writes. Only compiled on
-    /// platforms where GPUI cannot expose an OS clipboard generation.
-    #[cfg(not(target_os = "macos"))]
-    next_portable_clipboard_write: u64,
-    /// Wall-clock deadline at which the pending clipboard-clear fires.
-    /// Drives the countdown pill in the bottom-right corner. `None`
-    /// when no clear is scheduled (no active copy, or settings have
-    /// `clipboard_clear_secs = None`).
-    clipboard_clear_deadline: Option<Instant>,
-    /// 1 Hz tick that re-renders the countdown pill while a clear is
-    /// pending. Dropped when the deadline lapses or the user copies
-    /// something else.
-    clipboard_pill_tick: Option<Task<()>>,
     /// Id of the entry whose password is currently revealed in the
     /// detail panel. `None` = masked. Compared against the live selection
     /// in the state observer so switching entries (or locking) auto-masks.
@@ -218,18 +190,11 @@ pub struct AppShell {
     /// Validation or save failure for the entry editor, shown next to the
     /// form rather than as a toast that floats away from the field it means.
     entry_form_error: Option<String>,
-    /// Wall-clock timestamp of the last user input event (mouse-move,
-    /// click, key-down). Updated cheaply on every event without
-    /// triggering a re-render - only the auto-lock checker reads it.
-    /// `SystemTime`, not `Instant`: `Instant` does not advance while macOS
-    /// sleeps, so a machine asleep for hours accrued no idle time and the
-    /// auto-lock threshold was measured in awake-seconds only. `AppState`
-    /// documents the same hazard for `last_unlock_at`.
-    last_activity: SystemTime,
-    /// Periodic checker that locks the vault after the configured
-    /// auto-lock timeout. Only running while a vault is open AND a
-    /// non-`None` timeout is configured (managed alongside `totp_tick`
-    /// via the state observer). Drop = cancel.
+    /// Periodic checker that locks the vault once the app-wide idle clock
+    /// (`services::activity`) has passed the configured auto-lock timeout.
+    /// Only running while a vault is open AND a non-`None` timeout is
+    /// configured (managed alongside `totp_tick` via the state observer).
+    /// Drop = cancel.
     auto_lock_task: Option<Task<()>>,
     /// Retains the native macOS notification registrations for the lifetime
     /// of this window and the GPUI task that consumes their coalesced events.
@@ -332,7 +297,7 @@ pub struct AppShell {
     _subscriptions: Vec<Subscription>,
 }
 
-/// How often the auto-lock checker wakes to compare `last_activity`
+/// How often the auto-lock checker wakes to compare the idle clock
 /// against the configured timeout. Coarser than the typical timeout
 /// so the lock always fires within this window of crossing the
 /// threshold.
@@ -448,6 +413,11 @@ impl AppShell {
             })
             .detach();
 
+        // The clipboard countdown lives in the app-wide clipboard service,
+        // which notifies once a second while a clear is pending.
+        let clipboard = ClipboardService::handle(cx);
+        let password_focus = password_input.read(cx).focus_handle(cx);
+
         let _subscriptions = vec![
             cx.observe_in(&state, window, |shell: &mut AppShell, state, window, cx| {
                 // Re-render whenever AppState notifies AND keep the
@@ -506,6 +476,12 @@ impl AppShell {
                 cx.notify();
             }),
             cx.subscribe_in(&password_input, window, Self::on_password_input_event),
+            cx.on_focus_in(&password_focus, window, |shell, window, cx| {
+                shell.hold_secure_input(window, cx);
+            }),
+            cx.on_focus_out(&password_focus, window, |shell, _, _, _| {
+                shell.secure_input = None;
+            }),
             cx.subscribe_in(&keyfile_input, window, Self::on_keyfile_input_event),
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
             cx.subscribe_in(&picker_query_input, window, Self::on_picker_query_event),
@@ -552,9 +528,18 @@ impl AppShell {
             // The automatic Touch ID prompt only runs with the window in
             // front (see `schedule_automatic_biometric_unlock`), so coming
             // back to it is when a held-back or interrupted prompt runs.
-            cx.observe_window_activation(window, |shell: &mut AppShell, window, cx| {
+            //
+            // Secure event input is on for the whole login session while we
+            // hold it, so it goes as soon as another app is in front. GPUI
+            // reports the focus leaving the field too, but only with the next
+            // frame, and a window that is hidden may not draw one.
+            cx.observe_window_activation(window, move |shell: &mut AppShell, window, cx| {
                 if !window.is_window_active() {
+                    shell.secure_input = None;
                     return;
+                }
+                if password_focus.is_focused(window) {
+                    shell.hold_secure_input(window, cx);
                 }
                 shell.automatic_biometric_rearmed = false;
                 if std::mem::take(&mut shell.automatic_biometric_interrupted) {
@@ -562,6 +547,8 @@ impl AppShell {
                 }
                 shell.schedule_automatic_biometric_unlock(window, cx);
             }),
+            cx.observe(&clipboard, |_shell: &mut AppShell, _, cx| cx.notify()),
+            Self::count_key_presses(window, cx),
         ];
 
         // Sweep launch payloads orphaned by a previous crash. We only
@@ -593,6 +580,7 @@ impl AppShell {
         let mut shell = Self {
             state,
             password_input,
+            secure_input: None,
             keyfile_input,
             search_input,
             new_entry_title_input,
@@ -615,12 +603,6 @@ impl AppShell {
             pending_group_delete: None,
             disconnect_armed: false,
             totp_tick: None,
-            clipboard_clear_task: None,
-            pending_clipboard_write: None,
-            #[cfg(not(target_os = "macos"))]
-            next_portable_clipboard_write: 0,
-            clipboard_clear_deadline: None,
-            clipboard_pill_tick: None,
             revealed_entry_id: None,
             secret_context_path,
             secret_context_was_open,
@@ -628,7 +610,6 @@ impl AppShell {
             entry_form_baseline: None,
             entry_discard_armed: false,
             entry_form_error: None,
-            last_activity: SystemTime::now(),
             auto_lock_task: None,
             #[cfg(target_os = "macos")]
             _session_lock_monitor: crate::session_lock::SessionLockMonitor::new(),
@@ -795,4 +776,10 @@ fn copy_value_label(kind: CopyValueKind) -> &'static str {
 }
 
 #[cfg(test)]
+mod activity_tests;
+#[cfg(test)]
 mod characterization_tests;
+#[cfg(test)]
+mod clipboard_tests;
+#[cfg(test)]
+mod secure_input_tests;

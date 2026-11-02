@@ -2,6 +2,7 @@
 //! clipboard pill.
 
 use super::*;
+use crate::app::services::activity::{self, ActivitySource};
 
 impl AppShell {
     fn render_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -69,10 +70,10 @@ impl AppShell {
 
     /// Tiny pill in the bottom-right corner that counts down the
     /// remaining seconds until the clipboard auto-clear fires. `None`
-    /// when no clear is pending or the deadline has lapsed (the wipe
-    /// task drops the deadline as part of its cleanup).
-    fn render_clipboard_pill(&self) -> Option<impl gpui::IntoElement> {
-        let deadline = self.clipboard_clear_deadline?;
+    /// when no clear is pending or the deadline has lapsed (the clipboard
+    /// service drops the deadline when it clears).
+    fn render_clipboard_pill(deadline: Option<Instant>) -> Option<impl gpui::IntoElement> {
+        let deadline = deadline?;
         let remaining = deadline.checked_duration_since(Instant::now())?;
         let secs = remaining.as_secs();
         if secs == 0 {
@@ -101,22 +102,13 @@ impl AppShell {
 impl Render for AppShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let body = AppShell::render_body(self, cx);
-        let clipboard_pill = self.render_clipboard_pill();
+        let clipboard_deadline = ClipboardService::handle(cx).read(cx).deadline();
+        let clipboard_pill = Self::render_clipboard_pill(clipboard_deadline);
         let modal_overlay = self.render_modal_overlay(cx);
 
         div()
             .key_context(APP_CONTEXT)
             .track_focus(&self.focus_handle)
-            // Reset the idle clock on any user input. Setting an
-            // `Instant` is cheap and we deliberately don't `cx.notify`
-            // here - only the auto-lock checker reads the field, and
-            // it does so on its own schedule.
-            .on_mouse_move(cx.listener(|shell: &mut AppShell, _, _, _| {
-                shell.last_activity = SystemTime::now();
-            }))
-            .on_key_down(cx.listener(|shell: &mut AppShell, _, _, _| {
-                shell.last_activity = SystemTime::now();
-            }))
             .on_action(cx.listener(Self::on_action_open_vault))
             .on_action(cx.listener(Self::on_action_open_vault_switcher))
             .on_action(cx.listener(Self::on_action_open_add_vault))
@@ -157,8 +149,57 @@ impl Render for AppShell {
             .overflow_hidden()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .child(Self::pointer_activity())
             .child(body)
             .children(modal_overlay)
             .children(clipboard_pill)
+    }
+}
+
+/// Input in the window holds off the auto-lock. Nothing here calls
+/// `cx.notify`: only the auto-lock task reads the clock, on its own schedule.
+impl AppShell {
+    /// Every key press in `window`, typed text and shortcuts alike. The
+    /// interceptor sees a key before key bindings and text input do; a key
+    /// listener on an element only gets the keys no action took, so it missed
+    /// Cmd+C, the arrow keys and Return.
+    pub(super) fn count_key_presses(window: &Window, cx: &mut gpui::App) -> Subscription {
+        let this_window = window.window_handle();
+        cx.intercept_keystrokes(move |_, window, _| {
+            if window.window_handle() == this_window {
+                activity::touch(ActivitySource::WindowInput);
+            }
+        })
+    }
+
+    /// Pointer input anywhere in the window: a click or a scroll at any time,
+    /// a move only while the window is in front. With another app in front
+    /// macOS still reports the pointer passing over the window, but that is
+    /// not input to FerrisPass. The listeners go on the window, painted by an
+    /// empty canvas, rather than on an element: a dialog that blocks the
+    /// pointer for everything below it would hide an element's listeners.
+    fn pointer_activity() -> impl gpui::IntoElement {
+        gpui::canvas(
+            |_, _, _| {},
+            |_, _, window, _| {
+                window.on_mouse_event(|_: &gpui::MouseMoveEvent, phase, window, _| {
+                    if phase == gpui::DispatchPhase::Capture && window.is_window_active() {
+                        activity::touch(ActivitySource::WindowInput);
+                    }
+                });
+                window.on_mouse_event(|_: &gpui::MouseDownEvent, phase, _, _| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        activity::touch(ActivitySource::WindowInput);
+                    }
+                });
+                window.on_mouse_event(|_: &gpui::ScrollWheelEvent, phase, _, _| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        activity::touch(ActivitySource::WindowInput);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
     }
 }

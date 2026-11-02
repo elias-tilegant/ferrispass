@@ -52,7 +52,7 @@ const LEGACY_EXCEPTIONS: &[(&str, &str)] = &[
 /// Audited platform modules (V8). Each is a file under `src/platform/` that
 /// opts in once with `#![allow(unsafe_code)]` below a `//!` header that says
 /// why it needs `unsafe`.
-const PLATFORM_MODULES: &[&str] = &[];
+const PLATFORM_MODULES: &[&str] = &["src/platform/secure_input.rs"];
 
 /// Top-level directories that are never scanned: build output and Git's own
 /// data. Everything else under the manifest directory is.
@@ -1340,4 +1340,557 @@ fn lint_levels_are_read_from_the_lints_table() {
     assert!(level("[lints]\nrust.unsafe_code = \"allow\"\n").is_err());
     assert!(level("[lints.rust]\nunsafe_code = \"loud\"\n").is_err());
     assert!(level("[lints.rust]\n").is_err());
+}
+
+// ---------------------------------------------- clipboard content reads --
+
+/// `NSPasteboard` and `NSPasteboardItem` methods that return what is on the
+/// clipboard. Reading another app's contents is what shows the "paste from
+/// other apps" prompt. The clipboard code writes, clears and asks for types,
+/// and names these only in its tests. A name matches with any suffix, so
+/// `readObjectsForClasses_options` counts.
+const PASTEBOARD_CONTENT_READERS: &[&str] = &[
+    "stringForType",
+    "dataForType",
+    "propertyListForType",
+    "pasteboardItems",
+    "readObjectsForClasses",
+];
+
+/// The clipboard service, the pasteboard surface it works through, and both
+/// backends.
+const CLIPBOARD_SOURCES: &[&str] = &[
+    "src/app/services/clipboard.rs",
+    "src/clipboard.rs",
+    "src/clipboard_macos.rs",
+    "src/clipboard_portable.rs",
+];
+
+#[test]
+fn clipboard_code_never_reads_pasteboard_content() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found = Vec::new();
+    for rel in CLIPBOARD_SOURCES {
+        let source = fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|err| panic!("cannot read {rel}: {err}"));
+        let reads = content_reads_outside_tests(&source)
+            .unwrap_or_else(|err| panic!("cannot tokenize {rel}: {err}"));
+        for (line, name) in reads {
+            found.push(format!("{rel}:{line}: {name}"));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "the clipboard code reads pasteboard contents outside its tests:\n{}",
+        found.join("\n")
+    );
+}
+
+/// Every name from [`PASTEBOARD_CONTENT_READERS`] in code, with its line,
+/// except inside items switched off by `#[cfg(test)]`.
+fn content_reads_outside_tests(source: &str) -> Result<Vec<(usize, String)>, String> {
+    let p = parse(source)?;
+    let test_items = cfg_test_items(&p);
+    Ok(p.tokens
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !test_items.iter().any(|item| item.contains(i)))
+        .filter_map(|(_, token)| {
+            let name = token.name()?;
+            PASTEBOARD_CONTENT_READERS
+                .iter()
+                .any(|reader| name.starts_with(reader))
+                .then(|| (token.line, name.to_string()))
+        })
+        .collect())
+}
+
+/// Token ranges of what an outer `#[cfg(test)]` switches off. Only that exact
+/// attribute counts; `cfg(any(test, ..))` and the like are scanned, which errs
+/// on the side of a finding.
+fn cfg_test_items(p: &Parsed) -> Vec<std::ops::RangeInclusive<usize>> {
+    let t = &p.tokens;
+    attributes(p)
+        .into_iter()
+        .filter(|attr| {
+            let inside = &t[attr.open + 1..attr.close];
+            !attr.inner
+                && inside.len() == 4
+                && inside[0].is_keyword("cfg")
+                && inside[1].is_punct('(')
+                && inside[2].is_keyword("test")
+                && inside[3].is_punct(')')
+        })
+        .map(|attr| attr.hash..=item_end(p, attr.close + 1))
+        .collect()
+}
+
+/// The last token of the item, statement, field or arm that starts at
+/// `start`: the `}` closing its first brace block, or the `;` or `,` that ends
+/// it. Parentheses and brackets on the way are skipped whole, and a closing
+/// delimiter means the enclosing block ended first.
+fn item_end(p: &Parsed, start: usize) -> usize {
+    let t = &p.tokens;
+    let mut i = start;
+    while i < t.len() {
+        match t[i].tok {
+            Tok::Punct('{') => return p.partner[i].expect("balanced brace"),
+            Tok::Punct(';' | ',') => return i,
+            Tok::Punct('(' | '[') => i = p.partner[i].expect("balanced delimiter"),
+            Tok::Punct('}' | ')' | ']') => return i.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    t.len().saturating_sub(1)
+}
+
+#[test]
+fn content_reads_are_found_outside_tests_only() {
+    let source = r##"
+        // p.stringForType(&t) in a comment
+        fn real(p: &NSPasteboard) { let _ = p.stringForType(&t); }
+        const NOTE: &str = "dataForType( in a string";
+        #[cfg(test)]
+        mod tests { fn helper(p: &NSPasteboard) { p.dataForType(&t); } }
+        #[cfg(test)]
+        #[allow(dead_code)]
+        fn another(p: &NSPasteboard) -> Vec<[u8; 2]> { p.pasteboardItems(); vec![] }
+        struct S { #[cfg(test)] field: u8, other: Kind }
+        fn after(p: &NSPasteboard) { p.readObjectsForClasses_options(&a, None); }
+        #[cfg(not(test))]
+        fn live(p: &NSPasteboard) { p.propertyListForType(&t); }
+    "##;
+    assert_eq!(
+        content_reads_outside_tests(source).expect("scan"),
+        vec![
+            (3, "stringForType".to_string()),
+            (11, "readObjectsForClasses_options".to_string()),
+            (13, "propertyListForType".to_string()),
+        ]
+    );
+}
+
+// ------------------------------------------------------------- idle clock --
+
+/// Files that may call `activity::touch`, with the source each call names.
+/// The idle clock behind the auto-lock counts only input the user gives
+/// FerrisPass (see `src/app/services/activity.rs`), so every new caller is a
+/// line here and stands out in review.
+const ACTIVITY_CALL_SITES: &[(&str, &str)] = &[
+    ("src/ui/legacy/shell/render.rs", "WindowInput"),
+    // The test of the clock as the app builds it. Its second thread stands in
+    // for the one that will listen for the global shortcuts; it is not input.
+    ("tests/idle_clock.rs", "Hotkey"),
+];
+
+/// Every call of `activity::reset`, one line per call, with the function it
+/// is in. A reset sets the clock just as input does, so one in background
+/// work could keep the vault from ever locking. A second call in a listed
+/// function needs a second line.
+const RESET_CALL_SITES: &[(&str, &str)] = &[
+    // The auto-lock task counts from the moment it starts, so a vault opened
+    // after a long pause is not locked on its first check.
+    ("src/ui/legacy/shell/tasks.rs", "sync_auto_lock_task"),
+    // The test of the clock as the app builds it sets a time to read back...
+    (
+        "tests/idle_clock.rs",
+        "the_app_has_one_idle_clock_for_every_thread",
+    ),
+    // ...and sets it again from a second thread, which the first has to see.
+    (
+        "tests/idle_clock.rs",
+        "the_app_has_one_idle_clock_for_every_thread",
+    ),
+];
+
+#[test]
+fn activity_is_touched_only_where_listed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sources: Vec<(String, String)> = rust_sources(root)
+        .into_iter()
+        .map(|(rel, path)| {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+            (rel, source)
+        })
+        .collect();
+    let test_only = test_only_files(&sources).unwrap_or_else(|err| panic!("cannot tokenize {err}"));
+    let mut touches = Vec::new();
+    let mut resets = Vec::new();
+    let mut problems = Vec::new();
+    for (rel, source) in &sources {
+        if test_only.contains(rel) {
+            continue;
+        }
+        let calls =
+            activity_calls(source).unwrap_or_else(|err| panic!("cannot tokenize {rel}: {err}"));
+        for (line, call) in calls {
+            match call {
+                Ok(ClockCall::Touch(named)) => touches.push((rel.as_str(), named, line)),
+                Ok(ClockCall::Reset(function)) => resets.push((rel.as_str(), function, line)),
+                Err(problem) => problems.push(format!("{rel}:{line}: {problem}")),
+            }
+        }
+    }
+
+    for (file, source, line) in &touches {
+        if !ACTIVITY_CALL_SITES.contains(&(*file, source.as_str())) {
+            problems.push(format!(
+                "{file}:{line}: touches the idle clock as `{source}`, which is not on the \
+                 list. Only input the user gives FerrisPass holds off the auto-lock; if this \
+                 is such input, add the file and source to ACTIVITY_CALL_SITES."
+            ));
+        }
+    }
+    for (file, source) in ACTIVITY_CALL_SITES {
+        if !touches.iter().any(|(f, s, _)| f == file && s == source) {
+            problems.push(format!(
+                "{file}: listed as touching the idle clock as `{source}`, but no such call \
+                 is left. Remove the entry."
+            ));
+        }
+    }
+
+    // Each line on the list allows one call.
+    let mut unused: Vec<(&str, &str)> = RESET_CALL_SITES.to_vec();
+    for (file, function, line) in &resets {
+        match unused
+            .iter()
+            .position(|&(f, func)| f == *file && func == function.as_str())
+        {
+            Some(at) => {
+                unused.remove(at);
+            }
+            None => problems.push(format!(
+                "{file}:{line}: resets the idle clock in `fn {function}`, and \
+                 RESET_CALL_SITES has no line left for it. A reset holds off the auto-lock \
+                 just as input does; only the auto-lock task sets the baseline, when it starts."
+            )),
+        }
+    }
+    for (file, function) in unused {
+        problems.push(format!(
+            "{file}: listed as resetting the idle clock in `fn {function}`, but no such call \
+             is left. Remove the line."
+        ));
+    }
+    assert!(
+        problems.is_empty(),
+        "the idle clock is set outside the lists of call sites:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// Files the crate builds only for its own tests: the file of each
+/// `#[cfg(test)] mod name;` at the top level of a source file, and every
+/// module below it. They count as test code, as an inline `#[cfg(test)] mod`
+/// does. A declaration this does not place, one with `#[path]` or inside an
+/// inline module, leaves its file to the scan, which errs on the side of a
+/// finding.
+fn test_only_files(sources: &[(String, String)]) -> Result<Vec<String>, String> {
+    let mut modules = Vec::new();
+    for (rel, source) in sources {
+        let p = parse(source).map_err(|err| format!("{rel}: {err}"))?;
+        let t = &p.tokens;
+        let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let stem = file.strip_suffix(".rs").unwrap_or(file);
+        let base = if matches!(stem, "mod" | "lib" | "main") {
+            dir.to_string()
+        } else {
+            format!("{dir}/{stem}")
+        };
+        for item in cfg_test_items(&p) {
+            let (start, end) = (*item.start(), *item.end());
+            let declares_a_file = p.enclosing_brace[start].is_none()
+                && end >= 2
+                && t[end].is_punct(';')
+                && t[end - 2].is_keyword("mod")
+                && !t[start..end].iter().any(|tok| tok.is_keyword("path"));
+            if !declares_a_file {
+                continue;
+            }
+            if let Some(name) = t[end - 1].name() {
+                modules.push(format!("{base}/{name}"));
+            }
+        }
+    }
+    Ok(sources
+        .iter()
+        .map(|(rel, _)| rel)
+        .filter(|rel| {
+            modules.iter().any(|module| {
+                rel.strip_prefix(module.as_str())
+                    .is_some_and(|rest| rest == ".rs" || rest.starts_with('/'))
+            })
+        })
+        .cloned()
+        .collect())
+}
+
+/// What a call into the activity module does to the idle clock.
+#[derive(Debug, PartialEq)]
+enum ClockCall {
+    /// `activity::touch`, with the source it names.
+    Touch(String),
+    /// `activity::reset`, with the function it is in.
+    Reset(String),
+}
+
+/// A line, and the call found there or what is wrong with it.
+type FoundCall = (usize, Result<ClockCall, String>);
+
+/// Each `activity::touch` and `activity::reset` in code, with its line,
+/// outside items switched off by `#[cfg(test)]`: `Ok` with the source a touch
+/// names or the function a reset is in, or a problem. Ways a call could go
+/// by another name are problems too: `touch` or `reset` imported or used as a
+/// value, a glob import from the module, the module renamed with `as`.
+fn activity_calls(source: &str) -> Result<Vec<FoundCall>, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    let path_sep = |i: usize| {
+        t.get(i).is_some_and(|tok| tok.is_punct(':'))
+            && t.get(i + 1).is_some_and(|tok| tok.is_punct(':'))
+    };
+    let setter = |tok: &Token| matches!(tok.name(), Some("touch" | "reset"));
+    let mut found = Vec::new();
+    for i in 0..t.len() {
+        if t[i].name() != Some("activity") || test_items.iter().any(|item| item.contains(&i)) {
+            continue;
+        }
+        let line = t[i].line;
+        if t.get(i + 1).is_some_and(|tok| tok.is_keyword("as")) {
+            found.push((
+                line,
+                Err("renames the activity module, so its calls go unseen".to_string()),
+            ));
+            continue;
+        }
+        if !path_sep(i + 1) {
+            continue;
+        }
+        let Some(next) = t.get(i + 3) else {
+            continue;
+        };
+        if let Some(name) = next.name().filter(|_| setter(next)) {
+            if !t.get(i + 4).is_some_and(|tok| tok.is_punct('(')) {
+                let arguments = if name == "touch" {
+                    "ActivitySource::.."
+                } else {
+                    ".."
+                };
+                found.push((
+                    line,
+                    Err(format!(
+                        "`activity::{name}` is imported or passed around; call it as \
+                         `activity::{name}({arguments})`"
+                    )),
+                ));
+                continue;
+            }
+            let call = if name == "touch" {
+                let close = p.partner[i + 4].expect("balanced parenthesis");
+                named_source(&t[i + 5..close]).map(ClockCall::Touch)
+            } else {
+                enclosing_fn(&p, i)
+                    .map(ClockCall::Reset)
+                    .ok_or_else(|| "calls `activity::reset` outside a function".to_string())
+            };
+            found.push((line, call));
+        } else if next.is_punct('*') {
+            found.push((
+                line,
+                Err("glob import from the activity module".to_string()),
+            ));
+        } else if next.is_punct('{') {
+            let close = p.partner[i + 3].expect("balanced brace");
+            let group = &t[i + 4..close];
+            if group
+                .iter()
+                .any(|tok| setter(tok) || tok.is_punct('*') || tok.is_keyword("as"))
+            {
+                found.push((
+                    line,
+                    Err(
+                        "imports `touch` or `reset` from the activity module, or renames \
+                         something from it"
+                            .to_string(),
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The name of the innermost `fn` whose body holds token `i`. Closures and
+/// blocks in between don't count, so a call in a task a function spawns
+/// belongs to that function.
+fn enclosing_fn(p: &Parsed, i: usize) -> Option<String> {
+    let mut brace = p.enclosing_brace[i];
+    while let Some(open) = brace {
+        let header = anchor(&p.tokens[header_start(p, open)..open]);
+        if let Some(name) = header.strip_prefix("fn ") {
+            return Some(name.to_string());
+        }
+        brace = p.enclosing_brace[open];
+    }
+    None
+}
+
+/// The source a call of `activity::touch` names. The argument has to be
+/// `ActivitySource::<name>`, with or without a path in front, so the call
+/// site says which source it is.
+fn named_source(argument: &[Token]) -> Result<String, String> {
+    let unnamed = || {
+        Err("calls `activity::touch` without naming the source; pass \
+             `ActivitySource::<name>` directly"
+            .to_string())
+    };
+    let Some(split) = argument.len().checked_sub(4) else {
+        return unnamed();
+    };
+    let (path, tail) = argument.split_at(split);
+    let path_is_plain = path.len() % 3 == 0
+        && path.chunks(3).all(|segment| {
+            segment[0].name().is_some() && segment[1].is_punct(':') && segment[2].is_punct(':')
+        });
+    match tail {
+        [ty, colon, colon2, variant]
+            if path_is_plain
+                && ty.name() == Some("ActivitySource")
+                && colon.is_punct(':')
+                && colon2.is_punct(':') =>
+        {
+            match variant.name() {
+                Some(name) => Ok(name.to_string()),
+                None => unnamed(),
+            }
+        }
+        _ => unnamed(),
+    }
+}
+
+#[test]
+fn activity_touches_are_found_with_their_source() {
+    let source = r##"
+        use crate::app::services::activity::{self, ActivitySource};
+        // activity::touch(ActivitySource::Timer) in a comment
+        fn input() { activity::touch(ActivitySource::WindowInput); }
+        const NOTE: &str = "activity::touch(ActivitySource::Timer)";
+        fn full() { crate::app::services::activity::touch(crate::app::services::activity::ActivitySource::Panel); }
+        fn forwarded(source: ActivitySource) { activity::touch(source); }
+        #[cfg(test)]
+        mod tests { fn helper() { activity::touch(ActivitySource::Hotkey); } }
+        fn reads() { let _ = activity::idle_for(now); let _ = activity::lock_is_due(idle, None); }
+        use crate::app::services::activity::touch;
+        use crate::app::services::activity::{touch as poke};
+        use crate::app::services::activity::*;
+        use crate::app::services::activity as clock;
+        fn pointer() { let f = activity::touch; }
+    "##;
+    let found = activity_calls(source).expect("scan");
+    let named: Vec<(usize, String)> = found
+        .iter()
+        .filter_map(|(line, call)| match call {
+            Ok(ClockCall::Touch(source)) => Some((*line, source.clone())),
+            _ => None,
+        })
+        .collect();
+    let problems: Vec<usize> = found
+        .iter()
+        .filter(|(_, call)| call.is_err())
+        .map(|(line, _)| *line)
+        .collect();
+    assert_eq!(
+        named,
+        vec![(4, "WindowInput".to_string()), (6, "Panel".to_string())]
+    );
+    assert_eq!(problems, vec![7, 11, 12, 13, 14, 15]);
+    assert_eq!(found.len(), named.len() + problems.len(), "{found:?}");
+}
+
+#[test]
+fn activity_resets_are_found_with_their_function() {
+    let source = r##"
+        use crate::app::services::activity::{self, ActivitySource};
+        // activity::reset(now) in a comment
+        fn start() { activity::reset(SystemTime::now()); }
+        const NOTE: &str = "activity::reset(now)";
+        impl Shell { fn task(&mut self) { spawn(async move |_| { loop { activity::reset(now); } }); } }
+        fn outer() { let f = || { fn inner() { crate::app::services::activity::reset(now); } }; }
+        #[cfg(test)]
+        mod tests { fn helper() { activity::reset(now); } }
+        const _: () = { activity::reset(now); };
+        use crate::app::services::activity::reset;
+        use crate::app::services::activity::{self, reset};
+        fn pointer() { let f = activity::reset; }
+    "##;
+    assert_eq!(
+        activity_calls(source).expect("scan"),
+        vec![
+            (4, Ok(ClockCall::Reset("start".to_string()))),
+            (6, Ok(ClockCall::Reset("task".to_string()))),
+            (7, Ok(ClockCall::Reset("inner".to_string()))),
+            (
+                10,
+                Err("calls `activity::reset` outside a function".to_string())
+            ),
+            (
+                11,
+                Err(
+                    "`activity::reset` is imported or passed around; call it as \
+                     `activity::reset(..)`"
+                        .to_string()
+                )
+            ),
+            (
+                12,
+                Err(
+                    "imports `touch` or `reset` from the activity module, or renames \
+                     something from it"
+                        .to_string()
+                )
+            ),
+            (
+                13,
+                Err(
+                    "`activity::reset` is imported or passed around; call it as \
+                     `activity::reset(..)`"
+                        .to_string()
+                )
+            ),
+        ]
+    );
+}
+
+#[test]
+fn files_under_a_test_only_module_are_found() {
+    let file = |rel: &str, source: &str| (rel.to_string(), source.to_string());
+    let sources = [
+        file(
+            "src/shell/mod.rs",
+            "#[cfg(test)]\n#[allow(dead_code)]\nmod clock_tests;\nmod render;\n\
+             #[cfg(test)]\n#[path = \"moved_here.rs\"]\nmod moved;\n\
+             mod inline { #[cfg(test)] mod nested; }\n#[cfg(not(test))]\nmod live;",
+        ),
+        file("src/shell/clock_tests.rs", "mod helpers;"),
+        file("src/shell/clock_tests/helpers.rs", ""),
+        file("src/shell/clock_tests_more.rs", ""),
+        file("src/shell/render.rs", "#[cfg(test)] mod render_tests;"),
+        file("src/shell/render/render_tests/mod.rs", ""),
+        file("src/shell/moved.rs", ""),
+        file("src/shell/moved_here.rs", ""),
+        file("src/shell/nested.rs", ""),
+        file("src/shell/live.rs", ""),
+    ];
+    assert_eq!(
+        test_only_files(&sources).expect("scan"),
+        vec![
+            "src/shell/clock_tests.rs",
+            "src/shell/clock_tests/helpers.rs",
+            "src/shell/render/render_tests/mod.rs",
+        ]
+    );
 }
