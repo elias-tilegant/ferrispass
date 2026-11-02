@@ -1484,26 +1484,58 @@ const ACTIVITY_CALL_SITES: &[(&str, &str)] = &[
     ("tests/idle_clock.rs", "Hotkey"),
 ];
 
+/// Every call of `activity::reset`, one line per call, with the function it
+/// is in. A reset sets the clock just as input does, so one in background
+/// work could keep the vault from ever locking. A second call in a listed
+/// function needs a second line.
+const RESET_CALL_SITES: &[(&str, &str)] = &[
+    // The auto-lock task counts from the moment it starts, so a vault opened
+    // after a long pause is not locked on its first check.
+    ("src/ui/legacy/shell/tasks.rs", "sync_auto_lock_task"),
+    // The test of the clock as the app builds it sets a time to read back...
+    (
+        "tests/idle_clock.rs",
+        "the_app_has_one_idle_clock_for_every_thread",
+    ),
+    // ...and sets it again from a second thread, which the first has to see.
+    (
+        "tests/idle_clock.rs",
+        "the_app_has_one_idle_clock_for_every_thread",
+    ),
+];
+
 #[test]
 fn activity_is_touched_only_where_listed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut found = Vec::new();
+    let sources: Vec<(String, String)> = rust_sources(root)
+        .into_iter()
+        .map(|(rel, path)| {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+            (rel, source)
+        })
+        .collect();
+    let test_only = test_only_files(&sources).unwrap_or_else(|err| panic!("cannot tokenize {err}"));
+    let mut touches = Vec::new();
+    let mut resets = Vec::new();
     let mut problems = Vec::new();
-    for (rel, path) in rust_sources(root) {
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
-        let touches =
-            activity_touches(&source).unwrap_or_else(|err| panic!("cannot tokenize {rel}: {err}"));
-        for (line, touch) in touches {
-            match touch {
-                Ok(source) => found.push((rel.clone(), source, line)),
+    for (rel, source) in &sources {
+        if test_only.contains(rel) {
+            continue;
+        }
+        let calls =
+            activity_calls(source).unwrap_or_else(|err| panic!("cannot tokenize {rel}: {err}"));
+        for (line, call) in calls {
+            match call {
+                Ok(ClockCall::Touch(named)) => touches.push((rel.as_str(), named, line)),
+                Ok(ClockCall::Reset(function)) => resets.push((rel.as_str(), function, line)),
                 Err(problem) => problems.push(format!("{rel}:{line}: {problem}")),
             }
         }
     }
 
-    for (file, source, line) in &found {
-        if !ACTIVITY_CALL_SITES.contains(&(file.as_str(), source.as_str())) {
+    for (file, source, line) in &touches {
+        if !ACTIVITY_CALL_SITES.contains(&(*file, source.as_str())) {
             problems.push(format!(
                 "{file}:{line}: touches the idle clock as `{source}`, which is not on the \
                  list. Only input the user gives FerrisPass holds off the auto-lock; if this \
@@ -1512,28 +1544,108 @@ fn activity_is_touched_only_where_listed() {
         }
     }
     for (file, source) in ACTIVITY_CALL_SITES {
-        if !found.iter().any(|(f, s, _)| f == file && s == source) {
+        if !touches.iter().any(|(f, s, _)| f == file && s == source) {
             problems.push(format!(
                 "{file}: listed as touching the idle clock as `{source}`, but no such call \
                  is left. Remove the entry."
             ));
         }
     }
+
+    // Each line on the list allows one call.
+    let mut unused: Vec<(&str, &str)> = RESET_CALL_SITES.to_vec();
+    for (file, function, line) in &resets {
+        match unused
+            .iter()
+            .position(|&(f, func)| f == *file && func == function.as_str())
+        {
+            Some(at) => {
+                unused.remove(at);
+            }
+            None => problems.push(format!(
+                "{file}:{line}: resets the idle clock in `fn {function}`, and \
+                 RESET_CALL_SITES has no line left for it. A reset holds off the auto-lock \
+                 just as input does; only the auto-lock task sets the baseline, when it starts."
+            )),
+        }
+    }
+    for (file, function) in unused {
+        problems.push(format!(
+            "{file}: listed as resetting the idle clock in `fn {function}`, but no such call \
+             is left. Remove the line."
+        ));
+    }
     assert!(
         problems.is_empty(),
-        "the idle clock is touched outside the list of call sites:\n{}",
+        "the idle clock is set outside the lists of call sites:\n{}",
         problems.join("\n")
     );
 }
 
-/// A line, and the source the call there names or what is wrong with it.
-type FoundTouch = (usize, Result<String, String>);
+/// Files the crate builds only for its own tests: the file of each
+/// `#[cfg(test)] mod name;` at the top level of a source file, and every
+/// module below it. They count as test code, as an inline `#[cfg(test)] mod`
+/// does. A declaration this does not place, one with `#[path]` or inside an
+/// inline module, leaves its file to the scan, which errs on the side of a
+/// finding.
+fn test_only_files(sources: &[(String, String)]) -> Result<Vec<String>, String> {
+    let mut modules = Vec::new();
+    for (rel, source) in sources {
+        let p = parse(source).map_err(|err| format!("{rel}: {err}"))?;
+        let t = &p.tokens;
+        let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let stem = file.strip_suffix(".rs").unwrap_or(file);
+        let base = if matches!(stem, "mod" | "lib" | "main") {
+            dir.to_string()
+        } else {
+            format!("{dir}/{stem}")
+        };
+        for item in cfg_test_items(&p) {
+            let (start, end) = (*item.start(), *item.end());
+            let declares_a_file = p.enclosing_brace[start].is_none()
+                && end >= 2
+                && t[end].is_punct(';')
+                && t[end - 2].is_keyword("mod")
+                && !t[start..end].iter().any(|tok| tok.is_keyword("path"));
+            if !declares_a_file {
+                continue;
+            }
+            if let Some(name) = t[end - 1].name() {
+                modules.push(format!("{base}/{name}"));
+            }
+        }
+    }
+    Ok(sources
+        .iter()
+        .map(|(rel, _)| rel)
+        .filter(|rel| {
+            modules.iter().any(|module| {
+                rel.strip_prefix(module.as_str())
+                    .is_some_and(|rest| rest == ".rs" || rest.starts_with('/'))
+            })
+        })
+        .cloned()
+        .collect())
+}
 
-/// Each `activity::touch` in code, with its line, outside items switched off
-/// by `#[cfg(test)]`: `Ok` with the source a call names, or a problem. Ways a
-/// call could go by another name are problems too: `touch` imported or used
-/// as a value, a glob import from the module, the module renamed with `as`.
-fn activity_touches(source: &str) -> Result<Vec<FoundTouch>, String> {
+/// What a call into the activity module does to the idle clock.
+#[derive(Debug, PartialEq)]
+enum ClockCall {
+    /// `activity::touch`, with the source it names.
+    Touch(String),
+    /// `activity::reset`, with the function it is in.
+    Reset(String),
+}
+
+/// A line, and the call found there or what is wrong with it.
+type FoundCall = (usize, Result<ClockCall, String>);
+
+/// Each `activity::touch` and `activity::reset` in code, with its line,
+/// outside items switched off by `#[cfg(test)]`: `Ok` with the source a touch
+/// names or the function a reset is in, or a problem. Ways a call could go
+/// by another name are problems too: `touch` or `reset` imported or used as a
+/// value, a glob import from the module, the module renamed with `as`.
+fn activity_calls(source: &str) -> Result<Vec<FoundCall>, String> {
     let p = parse(source)?;
     let t = &p.tokens;
     let test_items = cfg_test_items(&p);
@@ -1541,6 +1653,7 @@ fn activity_touches(source: &str) -> Result<Vec<FoundTouch>, String> {
         t.get(i).is_some_and(|tok| tok.is_punct(':'))
             && t.get(i + 1).is_some_and(|tok| tok.is_punct(':'))
     };
+    let setter = |tok: &Token| matches!(tok.name(), Some("touch" | "reset"));
     let mut found = Vec::new();
     for i in 0..t.len() {
         if t[i].name() != Some("activity") || test_items.iter().any(|item| item.contains(&i)) {
@@ -1560,20 +1673,31 @@ fn activity_touches(source: &str) -> Result<Vec<FoundTouch>, String> {
         let Some(next) = t.get(i + 3) else {
             continue;
         };
-        if next.name() == Some("touch") {
+        if let Some(name) = next.name().filter(|_| setter(next)) {
             if !t.get(i + 4).is_some_and(|tok| tok.is_punct('(')) {
+                let arguments = if name == "touch" {
+                    "ActivitySource::.."
+                } else {
+                    ".."
+                };
                 found.push((
                     line,
-                    Err(
-                        "`activity::touch` is imported or passed around; call it as \
-                         `activity::touch(ActivitySource::..)`"
-                            .to_string(),
-                    ),
+                    Err(format!(
+                        "`activity::{name}` is imported or passed around; call it as \
+                         `activity::{name}({arguments})`"
+                    )),
                 ));
                 continue;
             }
-            let close = p.partner[i + 4].expect("balanced parenthesis");
-            found.push((line, named_source(&t[i + 5..close])));
+            let call = if name == "touch" {
+                let close = p.partner[i + 4].expect("balanced parenthesis");
+                named_source(&t[i + 5..close]).map(ClockCall::Touch)
+            } else {
+                enclosing_fn(&p, i)
+                    .map(ClockCall::Reset)
+                    .ok_or_else(|| "calls `activity::reset` outside a function".to_string())
+            };
+            found.push((line, call));
         } else if next.is_punct('*') {
             found.push((
                 line,
@@ -1584,16 +1708,35 @@ fn activity_touches(source: &str) -> Result<Vec<FoundTouch>, String> {
             let group = &t[i + 4..close];
             if group
                 .iter()
-                .any(|tok| tok.name() == Some("touch") || tok.is_punct('*') || tok.is_keyword("as"))
+                .any(|tok| setter(tok) || tok.is_punct('*') || tok.is_keyword("as"))
             {
                 found.push((
                     line,
-                    Err("imports `touch` from the activity module, or renames it".to_string()),
+                    Err(
+                        "imports `touch` or `reset` from the activity module, or renames \
+                         something from it"
+                            .to_string(),
+                    ),
                 ));
             }
         }
     }
     Ok(found)
+}
+
+/// The name of the innermost `fn` whose body holds token `i`. Closures and
+/// blocks in between don't count, so a call in a task a function spawns
+/// belongs to that function.
+fn enclosing_fn(p: &Parsed, i: usize) -> Option<String> {
+    let mut brace = p.enclosing_brace[i];
+    while let Some(open) = brace {
+        let header = anchor(&p.tokens[header_start(p, open)..open]);
+        if let Some(name) = header.strip_prefix("fn ") {
+            return Some(name.to_string());
+        }
+        brace = p.enclosing_brace[open];
+    }
+    None
 }
 
 /// The source a call of `activity::touch` names. The argument has to be
@@ -1640,21 +1783,24 @@ fn activity_touches_are_found_with_their_source() {
         fn forwarded(source: ActivitySource) { activity::touch(source); }
         #[cfg(test)]
         mod tests { fn helper() { activity::touch(ActivitySource::Hotkey); } }
-        fn reads() { let _ = activity::idle_for(now); activity::reset(now); }
+        fn reads() { let _ = activity::idle_for(now); let _ = activity::lock_is_due(idle, None); }
         use crate::app::services::activity::touch;
         use crate::app::services::activity::{touch as poke};
         use crate::app::services::activity::*;
         use crate::app::services::activity as clock;
         fn pointer() { let f = activity::touch; }
     "##;
-    let found = activity_touches(source).expect("scan");
+    let found = activity_calls(source).expect("scan");
     let named: Vec<(usize, String)> = found
         .iter()
-        .filter_map(|(line, touch)| touch.as_ref().ok().map(|s| (*line, s.clone())))
+        .filter_map(|(line, call)| match call {
+            Ok(ClockCall::Touch(source)) => Some((*line, source.clone())),
+            _ => None,
+        })
         .collect();
     let problems: Vec<usize> = found
         .iter()
-        .filter(|(_, touch)| touch.is_err())
+        .filter(|(_, call)| call.is_err())
         .map(|(line, _)| *line)
         .collect();
     assert_eq!(
@@ -1662,4 +1808,89 @@ fn activity_touches_are_found_with_their_source() {
         vec![(4, "WindowInput".to_string()), (6, "Panel".to_string())]
     );
     assert_eq!(problems, vec![7, 11, 12, 13, 14, 15]);
+    assert_eq!(found.len(), named.len() + problems.len(), "{found:?}");
+}
+
+#[test]
+fn activity_resets_are_found_with_their_function() {
+    let source = r##"
+        use crate::app::services::activity::{self, ActivitySource};
+        // activity::reset(now) in a comment
+        fn start() { activity::reset(SystemTime::now()); }
+        const NOTE: &str = "activity::reset(now)";
+        impl Shell { fn task(&mut self) { spawn(async move |_| { loop { activity::reset(now); } }); } }
+        fn outer() { let f = || { fn inner() { crate::app::services::activity::reset(now); } }; }
+        #[cfg(test)]
+        mod tests { fn helper() { activity::reset(now); } }
+        const _: () = { activity::reset(now); };
+        use crate::app::services::activity::reset;
+        use crate::app::services::activity::{self, reset};
+        fn pointer() { let f = activity::reset; }
+    "##;
+    assert_eq!(
+        activity_calls(source).expect("scan"),
+        vec![
+            (4, Ok(ClockCall::Reset("start".to_string()))),
+            (6, Ok(ClockCall::Reset("task".to_string()))),
+            (7, Ok(ClockCall::Reset("inner".to_string()))),
+            (
+                10,
+                Err("calls `activity::reset` outside a function".to_string())
+            ),
+            (
+                11,
+                Err(
+                    "`activity::reset` is imported or passed around; call it as \
+                     `activity::reset(..)`"
+                        .to_string()
+                )
+            ),
+            (
+                12,
+                Err(
+                    "imports `touch` or `reset` from the activity module, or renames \
+                     something from it"
+                        .to_string()
+                )
+            ),
+            (
+                13,
+                Err(
+                    "`activity::reset` is imported or passed around; call it as \
+                     `activity::reset(..)`"
+                        .to_string()
+                )
+            ),
+        ]
+    );
+}
+
+#[test]
+fn files_under_a_test_only_module_are_found() {
+    let file = |rel: &str, source: &str| (rel.to_string(), source.to_string());
+    let sources = [
+        file(
+            "src/shell/mod.rs",
+            "#[cfg(test)]\n#[allow(dead_code)]\nmod clock_tests;\nmod render;\n\
+             #[cfg(test)]\n#[path = \"moved_here.rs\"]\nmod moved;\n\
+             mod inline { #[cfg(test)] mod nested; }\n#[cfg(not(test))]\nmod live;",
+        ),
+        file("src/shell/clock_tests.rs", "mod helpers;"),
+        file("src/shell/clock_tests/helpers.rs", ""),
+        file("src/shell/clock_tests_more.rs", ""),
+        file("src/shell/render.rs", "#[cfg(test)] mod render_tests;"),
+        file("src/shell/render/render_tests/mod.rs", ""),
+        file("src/shell/moved.rs", ""),
+        file("src/shell/moved_here.rs", ""),
+        file("src/shell/nested.rs", ""),
+        file("src/shell/live.rs", ""),
+    ];
+    assert_eq!(
+        test_only_files(&sources).expect("scan"),
+        vec![
+            "src/shell/clock_tests.rs",
+            "src/shell/clock_tests/helpers.rs",
+            "src/shell/render/render_tests/mod.rs",
+        ]
+    );
 }

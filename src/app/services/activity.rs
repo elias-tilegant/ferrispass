@@ -6,10 +6,12 @@
 //! quick access panel, a global shortcut, a click on the menu bar item. The
 //! rules:
 //!
-//! - Only those sources move the clock. Every call of [`touch`] names its
-//!   source, and `activity_is_touched_only_where_listed` in
-//!   `tests/architecture.rs` holds the list of files allowed to call it, with
-//!   the source each one names. A new caller is a new line in that list.
+//! - Only those sources move the clock, and the auto-lock task when it
+//!   starts (the last rule). Every call of [`touch`] names its source, and
+//!   `activity_is_touched_only_where_listed` in `tests/architecture.rs`
+//!   holds the files allowed to call it, with the source each one names, and
+//!   each call of [`reset`], with the function it is in. A new caller is a
+//!   new line in one of those lists.
 //! - Background work never moves it: sync, the TOTP tick, favicon downloads,
 //!   the update check, launch cleanup, and the auto-lock check itself, which
 //!   only reads it.
@@ -53,7 +55,8 @@ pub fn touch(_source: ActivitySource) {
 }
 
 /// Start counting idle time from `now`, whatever came before. The auto-lock
-/// task calls this when it starts.
+/// task calls this when it starts. Nothing else in the app may: a reset holds
+/// off the lock just as input does.
 pub fn reset(now: SystemTime) {
     with_last_input(|last| last.set(now));
 }
