@@ -20,13 +20,14 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, accesskit, div, prelude::FluentBuilder as _, px,
+    Keystroke, ParentElement as _, RenderOnce, Role, SharedString, StatefulInteractiveElement as _,
+    Styled, Window, accesskit, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::Icon;
 use gpui_component::spinner::Spinner;
 
 use super::AccessibilityId;
+use super::keycap::{Keycap, keys_text, parse_keys};
 use crate::tr;
 use crate::ui::ds::ActiveTokens as _;
 use crate::ui::ds::tokens::{ColorSet, dimension};
@@ -41,6 +42,9 @@ pub const SPINNER_DELAY: Duration = Duration::from_millis(400);
 
 /// Size of the glyph in an icon button, in points.
 const ICON_SIZE: f32 = 16.0;
+
+/// The key string of the default button.
+const RETURN: &str = "enter";
 
 /// What a button looks like.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +185,7 @@ pub struct Button {
     kind: ButtonKind,
     size: ButtonSize,
     content: Content,
+    keys: Vec<Keystroke>,
     default: bool,
     disabled: bool,
     loading: bool,
@@ -219,11 +224,13 @@ impl Button {
     }
 
     fn with_content(id: ElementId, kind: ButtonKind, content: Content) -> Self {
+        debug_assert!(!content.name().is_empty(), "a button needs a name");
         Self {
             id,
             kind,
             size: kind.default_size(),
             content,
+            keys: Vec::new(),
             default: false,
             disabled: false,
             loading: false,
@@ -238,15 +245,30 @@ impl Button {
         self
     }
 
-    /// Marks the button Return presses. VoiceOver announces it as the
-    /// default button. A danger button can never be it: Return never
-    /// triggers something that cannot be undone.
+    /// Shows the keys that trigger the button as keycaps after its label,
+    /// and hands them to VoiceOver in `aria_keyshortcuts`. `keys` is a GPUI
+    /// key string such as `cmd-shift-c`. The binding itself lives elsewhere.
+    pub fn shortcut(mut self, keys: &str) -> Self {
+        self.keys = parse_keys(keys);
+        self
+    }
+
+    /// Marks the button Return presses: VoiceOver announces it as the
+    /// default button, and unless the button has a shortcut of its own it
+    /// shows ⏎. A danger button can never be it: Return never triggers
+    /// something that cannot be undone.
     pub fn default_button(mut self) -> Self {
         debug_assert!(
             self.kind != ButtonKind::Danger,
             "a danger button is never the default button"
         );
-        self.default = self.kind != ButtonKind::Danger;
+        if self.kind == ButtonKind::Danger {
+            return self;
+        }
+        self.default = true;
+        if self.keys.is_empty() {
+            self.keys = parse_keys(RETURN);
+        }
         self
     }
 
@@ -322,6 +344,13 @@ impl Button {
         let capsule = self.size == ButtonSize::Capsule44;
         let icon_only = matches!(self.content, Content::Icon { .. });
         let name = self.content.name().clone();
+        let keys = (!self.keys.is_empty()).then(|| keys_text(&self.keys));
+        let keycaps_on_copper = self.kind.is_copper() && !self.disabled;
+        let keycaps: Vec<Keycap> = self
+            .keys
+            .iter()
+            .map(|keystroke| Keycap::new(keystroke).on_accent(keycaps_on_copper))
+            .collect();
         let focus = window
             .use_keyed_state((self.id.clone(), "focus"), cx, |_, cx| cx.focus_handle())
             .read(cx)
@@ -347,6 +376,7 @@ impl Button {
             .track_focus(&focus)
             .when_some(self.accessibility_id, |this, id| this.accessibility_id(id))
             .when_some(description, |this, text| this.aria_description(text))
+            .when_some(keys, |this, keys| this.aria_keyshortcuts(keys))
             .when_some(handler, |this, handler| {
                 this.on_a11y_action(accesskit::Action::Click, voiceover_press(handler.clone()))
                     .on_click(move |event, window, cx| handler(event, window, cx))
@@ -378,6 +408,7 @@ impl Button {
             })
             .when(spinner, |this| this.child(Spinner::new().color(text)))
             .child(content)
+            .children(keycaps)
             .when(ring, |this| {
                 this.child(focus_ring(colors.focus_ring.hsla, capsule))
             })
@@ -546,6 +577,11 @@ mod tests {
         });
         assert_eq!(role, Some(Role::DefaultButton));
         assert_eq!(node.label(), Some("Sign in"));
+        assert_eq!(
+            node.keyboard_shortcut(),
+            Some("⏎"),
+            "it shows and announces ⏎"
+        );
         let (role, _) = node_of(cx, || Button::secondary("cancel", label("Cancel")));
         assert_eq!(role, Some(Role::Button), "only the button Return presses");
     }

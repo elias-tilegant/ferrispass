@@ -8,8 +8,11 @@
 //! behavior is worth keeping.
 
 pub mod button;
+pub(in crate::ui::ds) mod keycap;
+pub mod shortcut;
 
 pub use button::{Button, ButtonKind, ButtonSize, IconButton};
+pub use shortcut::Shortcut;
 
 use gpui::SharedString;
 
