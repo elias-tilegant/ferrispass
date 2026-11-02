@@ -11,7 +11,10 @@ Started from `p1a-04-entry-kinds` at `f26d44d` on 2026-11-01, because the rankin
 | `4809c01` | The copy an identifier is read from leaves out notes and protected fields from the start |
 | `02da559` | This page, and "favorite" spelled the same way everywhere in the new code |
 | `9bf129f` | The time recorded in the progress line |
-| `docs(search): explain how a title starting with a SID and client ranks` | The open question on such titles below, and this table |
+| `fe975e5` | The open question on titles that start with a SID and client, and this table |
+| `585e234` | Such a title names the system only when nothing but a role word follows the client; the tie count reads it the same way |
+| `a318acf` | A test that protected fields never make two results the same system |
+| `docs(search): describe which titles name a system and what marks an entry used` | The rule below, what counts as recently used, and this table |
 
 ## The four tiers
 
@@ -19,7 +22,7 @@ The text search decides whether an entry matches and how well. The ranking then 
 
 1. **Exact identifier.** The query names an SAP system by its SID and client, or any entry by its whole title. "nhp 100", "NHP 100" and "nhp   100" all name NHP 100. "nhp" alone does not: it names every NHP system, so it ranks like any other text.
 2. **Favorites** whose text matches.
-3. **Recently used** entries whose text matches, the most recent first. "Recently used" is the same session log the Recently used view shows: entries whose password or username was copied since the vault was unlocked.
+3. **Recently used** entries whose text matches, the most recent first. "Recently used" is the same session log the Recently used view shows: since the vault was unlocked, entries whose password, username or a custom field was copied, entries that were launched in their own app (SAP GUI today), and entries auto-type was started for. Auto-type marks the entry when the hotkey finds it, before the typing is done. Copying a URL does not count.
 4. **Everything else**, by how well the text matches, in exactly the order search gave before this step.
 
 Inside a tier, favorites come first, then recently used entries (most recent first), then entries by title, then by id. The text score only orders the last tier. The first three hold entries the user has singled out, by naming them, starring them or using them, and they keep an order the user can learn instead of reshuffling with every letter typed.
@@ -28,7 +31,12 @@ A favorite or a recently used entry has to match the text to rank at all. An emp
 
 ### Where the SID and client come from
 
-They come from the entry kinds (`kinds::classify`), so a title like "NHP 100 PRD" and the custom fields `SAP_SID` and `SAP_CLIENT` count the same, with the fields taking precedence as they do there. An entry titled "Nordhafen production" with those fields set to NHP and 100 is found by "nhp 100", although no word of its text matches.
+They come from the entry kinds (`kinds::classify`), and they name the system in one of two ways:
+
+- Both come from the custom fields `SAP_SID` and `SAP_CLIENT`, whatever the title says. An entry titled "Nordhafen production" with those fields set to NHP and 100 is found by "nhp 100", although no word of its text matches.
+- The title is the SID and client and nothing else, or followed by one role word the entry kinds know. These are the words `SapRole::parse` accepts: DEV, QAS, PRD and SBX, in any case. "NHP 100" and "NHP 100 PRD" name NHP 100.
+
+The entry kinds read every title that starts with a SID and a client as that system, whatever follows. The ranking does not: "NHP 100 Nordhafen alt", "NHP 100 PROD" and "NHP 100-PRD" are not exact identifiers for "nhp 100". Such a title is typically an old or a related entry, and as a favorite it would come before the system itself and be the row a new search selects. It ranks by its other tiers instead: as a favorite, as recently used, or by its text. Its fields still count, so with `SAP_SID` NHP and `SAP_CLIENT` 100 set, "NHP 100 Nordhafen alt" is NHP 100. A SID from a field and a client from such a title, or the other way round, are not enough, and neither are `SAP_HOST` and `SAP_INSTANCE`, which make an entry an SAP system without naming it. The entry kinds themselves are unchanged; only the ranking reads titles this way.
 
 Custom fields are still not search text. The SID and client count for the exact identifier and for nothing else.
 
@@ -38,9 +46,9 @@ Deleted entries never show up, not even by their identifier.
 
 ## Ties
 
-Two results can stand for the same thing, typically the same SID and client at two customers, or two logins with the same title. `tie_count` takes a ranked list and says how many results stand for the same thing as the first row, the first row included: the same SID and client (read without protected fields, as above), or the same title compared the way identifiers are. It is 1 when the first row is unique and 0 for no results.
+Two results can stand for the same thing, typically the same SID and client at two customers, or two logins with the same title. `tie_count` takes a ranked list and says how many results stand for the same thing as the first row, the first row included: the same SID and client, read the way the exact identifier tier reads them (never from a protected field, and not from a title that goes on after the client), or the same title compared the way identifiers are. It is 1 when the first row is unique and 0 for no results.
 
-Ties are ordered like everything else in a tier: favorite, then recently used, then title. Nothing shows the count yet. It is meant for a footer in the quick access panel, so the user knows the row Return would act on has a twin.
+Ties are ordered like everything else in a tier: favorite, then recently used, then title. A starred "NHP 100 Nordhafen alt" is listed after both NHP 100 systems for "nhp 100" and is not counted as their twin. Nothing shows the count yet. It is meant for a footer in the quick access panel, so the user knows the row Return would act on has a twin.
 
 ## The selection
 
@@ -67,8 +75,6 @@ The old main window looks no different for it. It has no arrow-key navigation in
 ## Open
 
 Whether the entry list and the detail panel should show a kind that only protected fields establish is not decided here. The ranking ignores protected fields; display still classifies the whole entry.
-
-The entry kinds read a title that starts with a SID and a client as that system, whatever follows, so "NHP 100 Nordhafen alt" is NHP 100 just as "NHP 100 PRD" is. For "nhp 100" both are exact identifiers, and inside that tier a favorite comes first: a starred "NHP 100 Nordhafen alt" is listed above an unstarred "NHP 100 PRD" and is the row a new search selects, and `tie_count` counts it with the other NHP 100 entries. Whether a title with more text after the client should name the system for the ranking, or the identifier tier should order its entries by something other than favorites first, is not decided here. The sample vaults in the tests title the old entry "Nordhafen alt (NHP 100)", which does not start with the SID and so is not read as a system.
 
 ## Checks
 
