@@ -528,7 +528,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point};
+    use gpui::{Bounds, Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point};
     use gpui_component::IconName;
 
     #[cfg(debug_assertions)]
@@ -914,6 +914,76 @@ mod tests {
             None,
             "a click shows no ring"
         );
+    }
+
+    /// What the window painted in the place of its keycap: the colors of
+    /// its fills and of its edges. GPUI paints a surface and its edge as
+    /// quads of their own.
+    fn keycap_paint(cx: &mut VisualTestContext) -> (Vec<Hsla>, Vec<Hsla>) {
+        let keycap = cx.debug_bounds("fp-keycap").expect("the keycap");
+        // Painting snaps to device pixels, so a quad is within one pixel of
+        // the bounds of its element.
+        let near = |a: Bounds<Pixels>, b: Bounds<Pixels>| {
+            [
+                (a.left(), b.left()),
+                (a.top(), b.top()),
+                (a.right(), b.right()),
+                (a.bottom(), b.bottom()),
+            ]
+            .into_iter()
+            .all(|(x, y)| (x - y).abs() <= px(1.))
+        };
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let quads: Vec<_> = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| near(quad.bounds.map(|value| px(value.0 / scale)), keycap))
+                .collect();
+            let fills = quads
+                .iter()
+                .filter(|quad| !quad.background.is_transparent())
+                .filter_map(|quad| quad.background.as_solid())
+                .collect();
+            let edges = quads
+                .iter()
+                .map(|quad| quad.border_color)
+                .filter(|color| !color.is_transparent())
+                .collect();
+            (fills, edges)
+        })
+    }
+
+    /// On a copper button a keycap has no surface of its own, only an edge
+    /// in `keycap_on_accent_border`, so the copper shows through. On every
+    /// other button it keeps its surface and its edge.
+    #[gpui::test]
+    fn a_keycap_on_copper_has_no_surface_of_its_own(cx: &mut TestAppContext) {
+        for kind in ButtonKind::ALL {
+            let cx = probe::window(cx, move |_, _| {
+                Button::new("copy", kind, label("Copy password"))
+                    .shortcut("cmd-shift-c")
+                    .into_any_element()
+            });
+            let colors = cx.update(|_, cx| cx.ds().colors);
+            let (fills, edges) = keycap_paint(cx);
+            let (fill, edge) = match kind {
+                ButtonKind::Primary | ButtonKind::Large => {
+                    (None, colors.keycap_on_accent_border.hsla)
+                }
+                _ => (Some(colors.keycap_bg.hsla), colors.keycap_border.hsla),
+            };
+            assert_eq!(
+                fills,
+                fill.into_iter().collect::<Vec<_>>(),
+                "{kind:?}: the keycap's fill"
+            );
+            assert!(!edges.is_empty(), "{kind:?}: the keycap has an edge");
+            assert!(
+                edges.iter().all(|color| *color == edge),
+                "{kind:?}: the keycap's edge is {edge:?}: {edges:?}"
+            );
+        }
     }
 
     #[gpui::test]
