@@ -1094,6 +1094,53 @@ mod tests {
         );
     }
 
+    /// A loading button asks for the next frame for as long as its spinner
+    /// is not due, so the spinner shows on time even when nothing else
+    /// draws the window again. In this test nothing does: the window is
+    /// drawn only for the frames the button asks for, which the test
+    /// delivers as the display would.
+    #[gpui::test]
+    fn a_loading_button_asks_for_frames_until_its_spinner_shows(cx: &mut TestAppContext) {
+        let next_frame = |cx: &mut VisualTestContext| {
+            let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            asked
+        };
+        let idle = probe::window(cx, |_, _| {
+            Button::primary("save", label("Save")).into_any_element()
+        });
+        assert_eq!(
+            next_frame(idle),
+            0,
+            "a button that is not loading asks for none"
+        );
+
+        let cx = probe::window(cx, |_, _| {
+            Button::primary("save", label("Save"))
+                .loading(true)
+                .into_any_element()
+        });
+        assert_eq!(cx.debug_bounds("fp-spinner"), None, "no spinner at first");
+        cx.executor()
+            .advance_clock(SPINNER_DELAY - Duration::from_millis(1));
+        assert_eq!(
+            next_frame(cx),
+            1,
+            "the button asks for a frame while its spinner is not due"
+        );
+        assert_eq!(
+            cx.debug_bounds("fp-spinner"),
+            None,
+            "no spinner before the delay is over"
+        );
+        cx.executor().advance_clock(Duration::from_millis(1));
+        assert_eq!(next_frame(cx), 1, "it asked again in that frame");
+        assert!(
+            cx.debug_bounds("fp-spinner").is_some(),
+            "the frame it asked for shows the spinner"
+        );
+    }
+
     /// What the window painted in the place of its keycap: the colors of
     /// its fills and of its edges. GPUI paints a surface and its edge as
     /// quads of their own.
