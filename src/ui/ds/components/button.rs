@@ -255,11 +255,17 @@ impl Button {
         self
     }
 
-    /// Marks the button Return presses: VoiceOver announces it as the
-    /// default button, and unless the button has a shortcut of its own it
-    /// shows ⏎. A danger button can never be it: Return never triggers
-    /// something that cannot be undone. Asking for it fails in a debug
-    /// build and leaves the button as it was in a release build.
+    /// Marks the button Return presses: its role is `DefaultButton`, and
+    /// unless the button has a shortcut of its own it shows ⏎ and hands it
+    /// to `aria_keyshortcuts`. It does not bind Return; like the keys of
+    /// [`Button::shortcut`], the binding lives with the screen. The macOS
+    /// adapter of AccessKit in `Cargo.lock` (0.26.3) hands the role to
+    /// VoiceOver as a plain button and does not pass `aria_keyshortcuts`
+    /// on, so VoiceOver reads the default button like any other today.
+    ///
+    /// A danger button can never be it: Return never triggers something
+    /// that cannot be undone. Asking for it fails in a debug build and
+    /// leaves the button as it was in a release build.
     pub fn default_button(self) -> Self {
         debug_check::danger_is_never_the_default(self.kind);
         self.make_default()
@@ -651,7 +657,7 @@ mod tests {
         assert_eq!(
             node.keyboard_shortcut(),
             Some("⏎"),
-            "it shows and announces ⏎"
+            "it shows ⏎ and hands it to aria_keyshortcuts"
         );
         let (role, _) = node_of(cx, || Button::secondary("cancel", label("Cancel")));
         assert_eq!(role, Some(Role::Button), "only the button Return presses");
