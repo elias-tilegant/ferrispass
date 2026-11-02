@@ -261,10 +261,7 @@ impl Button {
     /// something that cannot be undone. Asking for it fails in a debug
     /// build and leaves the button as it was in a release build.
     pub fn default_button(self) -> Self {
-        debug_assert!(
-            self.kind != ButtonKind::Danger,
-            "a danger button is never the default button"
-        );
+        debug_check::danger_is_never_the_default(self.kind);
         self.make_default()
     }
 
@@ -431,12 +428,17 @@ impl Button {
 /// The default role, behind the check that keeps it off a danger button.
 ///
 /// The flag of [`DefaultRole`] is private to this module, and
-/// [`Button::make_default`] below is the only code that sets it, together
+/// [`Button::make_default`] below is the only code that builds it, together
 /// with the ⏎ keys, whose key string only this module can name. Code
-/// elsewhere in `button.rs`, [`Button::default_button`] included, that
-/// tried to make a button the default without that check would not
-/// compile. `the_default_role_is_set_behind_its_guard_only` reads the
-/// source so that it stays so.
+/// elsewhere in `button.rs` cannot build the flag or name the key string,
+/// but it can copy both from a button that passed the check, or change the
+/// kind of a danger button around a call to `make_default`, and either
+/// compiles. `a_danger_button_never_becomes_the_default_button` builds
+/// `Button::danger(..).default_button()` in every build and reads the node
+/// it draws, so such code on that path fails it; in a builder method the
+/// test does not call, such as `shortcut` or `disabled`, it is past every
+/// test. `the_default_role_is_set_behind_its_guard_only` reads this
+/// module's source so that it stays as it is.
 mod default_role {
     use super::{Button, ButtonKind, parse_keys};
 
@@ -454,8 +456,7 @@ mod default_role {
     }
 
     impl Button {
-        /// What [`Button::default_button`] does after its debug check, so
-        /// the tests reach the release behavior in a debug build too.
+        /// What [`Button::default_button`] does after its debug check.
         pub(super) fn make_default(mut self) -> Self {
             if self.kind == ButtonKind::Danger {
                 return self;
@@ -466,6 +467,41 @@ mod default_role {
             }
             self
         }
+    }
+}
+
+/// The debug build's check in [`Button::default_button`].
+///
+/// A test can turn it off for its thread, so that it runs
+/// `default_button` on a danger button the way a release build does,
+/// where the check does not exist.
+mod debug_check {
+    use super::ButtonKind;
+
+    #[cfg(test)]
+    thread_local! {
+        static OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Panics in a debug build when `kind` is `Danger`.
+    pub(super) fn danger_is_never_the_default(kind: ButtonKind) {
+        #[cfg(test)]
+        if OFF.get() {
+            return;
+        }
+        debug_assert!(
+            kind != ButtonKind::Danger,
+            "a danger button is never the default button"
+        );
+    }
+
+    /// Runs `build` with the check off on this thread.
+    #[cfg(test)]
+    pub(super) fn as_in_a_release_build<R>(build: impl FnOnce() -> R) -> R {
+        OFF.set(true);
+        let result = build();
+        OFF.set(false);
+        result
     }
 }
 
@@ -629,12 +665,15 @@ mod tests {
     }
 
     /// In a release build `default_button` leaves a danger button as it
-    /// was. In a debug build its check panics first, so the test calls what
-    /// follows the check, which is the same in every build.
+    /// was. In a debug build its check panics first, so the test turns the
+    /// check off for its thread and runs `default_button` itself, as a
+    /// release build does, then reads the node the button draws.
     #[gpui::test]
     fn a_danger_button_never_becomes_the_default_button(cx: &mut TestAppContext) {
         let (role, node) = node_of(cx, || {
-            Button::danger("delete", label("Delete")).make_default()
+            debug_check::as_in_a_release_build(|| {
+                Button::danger("delete", label("Delete")).default_button()
+            })
         });
         assert_eq!(role, Some(Role::Button), "a danger button stays a button");
         assert_eq!(node.keyboard_shortcut(), None, "and shows no ⏎");
@@ -643,7 +682,7 @@ mod tests {
             .filter(|kind| *kind != ButtonKind::Danger)
         {
             let (role, _) = node_of(cx, move || {
-                Button::new("b", kind, label("B")).make_default()
+                Button::new("b", kind, label("B")).default_button()
             });
             assert_eq!(role, Some(Role::DefaultButton), "{kind:?}");
         }
@@ -1042,12 +1081,13 @@ mod tests {
         probe::assert_keyboard_focus_ring(cx, "fp-test-button");
     }
 
-    /// The default role is set in one place: `make_default` in the module
+    /// The default role is built in one place: `make_default` in the module
     /// `default_role`, after the check for a danger button. The compiler
-    /// keeps every other line of `button.rs` from setting it as long as the
-    /// role's flag and the ⏎ key string are private to that module; this
-    /// reads the source so that they stay so, and so that the module itself
-    /// builds and writes the flag nowhere else.
+    /// keeps every other line of `button.rs` from building it as long as
+    /// the role's flag and the ⏎ key string are private to that module, but
+    /// not from copying both from another button; this reads the source so
+    /// that they stay private, and so that the module itself builds and
+    /// writes the flag nowhere else.
     #[test]
     fn the_default_role_is_set_behind_its_guard_only() {
         let code: String = probe::code_only(include_str!("button.rs"))
