@@ -409,7 +409,13 @@ impl Button {
                     .hover(move |style| style.bg(hover))
                     .active(|style| style.opacity(PRESSED_OPACITY))
             })
-            .when(spinner, |this| this.child(Spinner::new().color(text)))
+            .when(spinner, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "fp-spinner".into())
+                        .child(Spinner::new().color(text)),
+                )
+            })
             .child(content)
             .children(keycaps)
             .when(ring, |this| {
@@ -461,9 +467,10 @@ fn shows_spinner(since: Instant, now: Instant) -> bool {
 
 /// Remembers when the button started loading, and asks for frames until
 /// the spinner is due. The memory goes away with the first frame the button
-/// is not loading.
+/// is not loading. The time comes from GPUI's clock, which is the system
+/// clock in the app and a clock the tests move.
 fn spinner_due(id: &ElementId, window: &mut Window, cx: &mut App) -> bool {
-    let now = Instant::now();
+    let now = cx.background_executor().now();
     let since = window.use_keyed_state((id.clone(), "loading-since"), cx, move |_, _| now);
     let due = shows_spinner(*since.read(cx), now);
     if !due {
@@ -704,6 +711,28 @@ mod tests {
             start + SPINNER_DELAY - Duration::from_millis(1)
         ));
         assert!(shows_spinner(start, start + SPINNER_DELAY));
+    }
+
+    /// A loading button shows its label alone at first, so a quick action
+    /// does not flash a spinner, and the spinner joins the label once the
+    /// delay is over. The button reads GPUI's clock, which the test moves.
+    #[gpui::test]
+    fn a_loading_button_shows_its_spinner_after_the_delay(cx: &mut TestAppContext) {
+        let cx = probe::window(cx, |_, _| {
+            Button::primary("save", label("Save"))
+                .loading(true)
+                .into_any_element()
+        });
+        let spinner = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.debug_bounds("fp-spinner")
+        };
+        assert_eq!(spinner(cx), None, "no spinner at first");
+        cx.executor()
+            .advance_clock(SPINNER_DELAY - Duration::from_millis(1));
+        assert_eq!(spinner(cx), None, "no spinner before the delay is over");
+        cx.executor().advance_clock(Duration::from_millis(1));
+        assert!(spinner(cx).is_some(), "the spinner once the delay is over");
     }
 
     #[gpui::test]
