@@ -486,25 +486,40 @@ mod tests {
         }
     }
 
-    /// Lines in the new modules that contain one of `needles`, as
-    /// `file:line: text`, leaving out the files in `skip`.
-    fn lines_with(needles: &[&str], skip: &[&str]) -> Vec<String> {
-        let skip: Vec<PathBuf> = skip.iter().map(|file| repo_file(file)).collect();
+    /// Every Rust file in the new modules, in order.
+    fn new_module_files() -> Vec<PathBuf> {
         let mut files = Vec::new();
         for dir in NEW_MODULES {
             rust_files(&repo_file(dir), &mut files);
         }
         assert!(files.len() > 2, "the scan found no files: {files:?}");
         files.sort();
+        files
+    }
+
+    fn relative(file: &Path) -> String {
+        let root = repo_file("");
+        file.strip_prefix(&root)
+            .unwrap_or(file)
+            .display()
+            .to_string()
+    }
+
+    /// Lines in the new modules that contain one of `needles`, as
+    /// `file:line: text`, leaving out the files in `skip`.
+    fn lines_with(needles: &[&str], skip: &[&str]) -> Vec<String> {
+        let skip: Vec<PathBuf> = skip.iter().map(|file| repo_file(file)).collect();
         let mut found = Vec::new();
-        for file in files.iter().filter(|file| !skip.contains(file)) {
+        for file in new_module_files()
+            .iter()
+            .filter(|file| !skip.contains(file))
+        {
             let text = std::fs::read_to_string(file).expect("read source");
             for (number, line) in text.lines().enumerate() {
                 if needles.iter().any(|needle| line.contains(needle)) {
-                    let relative = file.strip_prefix(repo_file("")).unwrap_or(file);
                     found.push(format!(
                         "{}:{}: {}",
-                        relative.display(),
+                        relative(file),
                         number + 1,
                         line.trim()
                     ));
@@ -513,6 +528,91 @@ mod tests {
         }
         found
     }
+
+    /// Whether `c` can be part of a Rust identifier.
+    fn is_identifier_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+
+    /// The argument list of a call, given the text right after its opening
+    /// parenthesis: everything up to the parenthesis that closes it, with
+    /// whitespace and a trailing comma taken out. Parentheses inside string
+    /// literals do not count. A call that never closes comes back with the
+    /// rest of the file, which no allowed argument matches.
+    fn call_arguments(rest: &str) -> String {
+        let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+        let mut end = rest.len();
+        for (index, c) in rest.char_indices() {
+            if in_string {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    end = index;
+                    break;
+                }
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        let arguments: String = rest[..end].chars().filter(|c| !c.is_whitespace()).collect();
+        match arguments.strip_suffix(',') {
+            Some(arguments) => arguments.to_string(),
+            None => arguments,
+        }
+    }
+
+    /// Every call of the GPUI method that sets a font family, in the new
+    /// modules: the file, the line the call starts on, and its arguments as
+    /// [`call_arguments`] reads them, however the call is spread over lines.
+    fn font_family_calls() -> Vec<(PathBuf, usize, String)> {
+        // Built from pieces so the scan does not find itself.
+        const METHOD: &str = concat!("font_", "family");
+        let mut calls = Vec::new();
+        for file in new_module_files() {
+            let text = std::fs::read_to_string(&file).expect("read source");
+            for (start, _) in text.match_indices(METHOD) {
+                // Part of a longer name, such as the Kit's mono font field.
+                if text[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_identifier_char)
+                {
+                    continue;
+                }
+                // A field, such as the one on a text style refinement.
+                let Some(rest) = text[start + METHOD.len()..].trim_start().strip_prefix('(') else {
+                    continue;
+                };
+                let line = text[..start].matches('\n').count() + 1;
+                calls.push((file.clone(), line, call_arguments(rest)));
+            }
+        }
+        calls
+    }
+
+    /// What the new modules may set as a font family, written as the scan
+    /// reads it: a family of this module, named through it. Mono text goes
+    /// through `Family::Mono` or `mono_family`, which follow the startup
+    /// check; `MONO_FAMILY` or `MONO_FALLBACK` passed on their own would not.
+    const FAMILY_ARGUMENTS: [&str; 4] = [
+        "typography::UI_FAMILY",
+        "typography::Family::Ui.name()",
+        "typography::Family::Mono.name()",
+        "typography::mono_family(cx)",
+    ];
+
+    /// The call in `.text_style`, the one place in this file that sets a
+    /// family: the family of the style it was given.
+    const TEXT_STYLE_ARGUMENT: &str = "style.family().name()";
 
     #[test]
     fn no_mono_literal_in_new_modules() {
@@ -527,12 +627,31 @@ mod tests {
         );
     }
 
+    /// Every font family the new modules set comes from this module, however
+    /// the argument is written. A literal, a `SharedString` made from one, a
+    /// constant of another module or a variable could each name a family the
+    /// text system does not have, and GPUI draws that in Helvetica.
     #[test]
-    fn no_family_literal_in_new_modules() {
-        let found = lines_with(&["font_family(\""], &[]);
+    fn font_families_in_new_modules_come_from_typography() {
+        let this_file = repo_file("src/ui/ds/typography.rs");
+        let calls = font_family_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|(file, _, arguments)| *file == this_file && arguments == TEXT_STYLE_ARGUMENT),
+            "the scan did not find the call in .text_style: {calls:?}"
+        );
+        let found: Vec<String> = calls
+            .iter()
+            .filter(|(file, _, arguments)| {
+                let in_text_style = *file == this_file && arguments == TEXT_STYLE_ARGUMENT;
+                !in_text_style && !FAMILY_ARGUMENTS.contains(&arguments.as_str())
+            })
+            .map(|(file, line, arguments)| format!("{}:{line}: {arguments}", relative(file)))
+            .collect();
         assert!(
             found.is_empty(),
-            "font families come from typography, set a TextStyle instead:\n{}",
+            "set a TextStyle, or pass one of {FAMILY_ARGUMENTS:?}:\n{}",
             found.join("\n")
         );
     }
