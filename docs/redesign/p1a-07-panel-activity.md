@@ -12,7 +12,9 @@ Started from `p1a-08-secure-input` at `5031d12` on 2026-11-02.
 | `4e21c3f` | This list and the time in the progress log |
 | `d92f331` | A test of the clock as the app builds it, with a touch and a reset from a second thread |
 | `a303725` | The unit test comments say what a new source needs |
-| the last one | This page and the progress log on the two before it |
+| `2647e9f` | This page and the progress log on the two before it |
+| `3436e34` | Every call of `activity::reset` is held to a list of its own |
+| the last one | This page on the resets |
 
 ## What counts as activity
 
@@ -25,7 +27,7 @@ Started from `p1a-08-secure-input` at `5031d12` on 2026-11-02.
 | `Hotkey` | a global shortcut, at the moment it is pressed | not yet; the Auto-Type shortcut leaves the clock alone, as it did before |
 | `StatusItem` | a click on the menu bar item | not yet; the menu bar item doesn't exist |
 
-Nothing else moves the clock. Background work doesn't: sync, the TOTP tick, favicon downloads, the update check, launch cleanup, and the auto-lock check itself, which only reads it. Nothing from outside the process reaches it either: there is no function that turns an event in another app into a `touch`, and a global shortcut counts when it is pressed, not while it is registered.
+Nothing else moves the clock, apart from the baseline the auto-lock task sets when it starts (see below). Background work doesn't: sync, the TOTP tick, favicon downloads, the update check, launch cleanup, and the auto-lock check itself, which only reads it. Nothing from outside the process reaches it either: there is no function that turns an event in another app into a `touch`, and a global shortcut counts when it is pressed, not while it is registered.
 
 The window's input used to be counted by two listeners on its root element, `on_key_down` and `on_mouse_move`, and three kinds of input got past them:
 
@@ -37,7 +39,7 @@ GPUI also tracks the pointer over a window while another app is in front (`NSTra
 
 ## Where the clock is read
 
-Only the auto-lock task in `src/ui/legacy/shell/tasks.rs` reads it. When it starts, which is when a vault is in memory and the auto-lock is on, it calls `activity::reset(now)`, so a vault opened after a long pause is not locked on the first check. Every five seconds it asks `activity::idle_for(now)` and `activity::lock_is_due(idle, threshold)`, with the threshold read from the settings on each tick.
+Only the auto-lock task in `src/ui/legacy/shell/tasks.rs` reads it. When it starts, which is when a vault is in memory and the auto-lock is on, it calls `activity::reset(now)`, so a vault opened after a long pause is not locked on the first check. That is the only reset in the app: a reset holds off the lock just as input does, so one in background work would keep the vault open for good. Every five seconds it asks `activity::idle_for(now)` and `activity::lock_is_due(idle, threshold)`, with the threshold read from the settings on each tick.
 
 The clock is wall-clock time (`SystemTime`), as the field was. `Instant` stops while the Mac sleeps, and hours asleep would count as no idle time. A clock that jumps backwards makes `idle_for` return `Duration::MAX`, so the lock is due at once instead of later. Before the first `reset` the clock reads as the epoch, idle for decades, so a task that skipped it would lock rather than never.
 
@@ -45,14 +47,20 @@ The clock is a `static` behind a `Mutex`, written from the main thread in practi
 
 ## How the list of call sites is kept
 
-`activity_is_touched_only_where_listed` in `tests/architecture.rs` reads every `.rs` file in the repository, with the tokenizer the `unsafe` check uses, so comments and strings don't count. For each `activity::touch(..)` outside items switched off by `#[cfg(test)]` it reads the source the call names and checks the pair of file and source against `ACTIVITY_CALL_SITES`. It fails on:
+`activity_is_touched_only_where_listed` in `tests/architecture.rs` reads every `.rs` file in the repository, with the tokenizer the `unsafe` check uses, so comments and strings don't count. Test code is left out: items under `#[cfg(test)]`, and the files a `#[cfg(test)] mod name;` pulls in with the modules below them. Everywhere else it finds each call of `activity::touch` and `activity::reset`, however the path to the module is written, and holds them against two lists:
 
-- a call from a file that is not on the list, or with a source the list doesn't give that file,
-- a line on the list that no call matches any more,
-- a call that doesn't name its source as `ActivitySource::<name>`, for example one that passes a variable along,
-- `touch` imported or used as a value, a glob import from the module, or the module renamed with `as`, since calls through another name would go unseen.
+- `ACTIVITY_CALL_SITES` has the files that may call `touch`, each with the source its calls name.
+- `RESET_CALL_SITES` has one line per call of `reset`, with the file and the function the call is in. A closure or a task the function spawns counts as part of it.
 
-Today the list has `src/ui/legacy/shell/render.rs` with `WindowInput`, and `tests/idle_clock.rs` with `Hotkey`: the scan reads tests as well, and that test touches the clock from a second thread. A step that adds a source adds its call and one line to the list, and the line is what review looks at.
+It fails, with the file and line where there is one, on:
+
+- a `touch` from a file that is not on its list, or with a source the list doesn't give that file,
+- a `reset` in a file and function that has no line left on its list, which includes a second reset in a listed function,
+- a line on either list that no call matches any more,
+- a `touch` that doesn't name its source as `ActivitySource::<name>`, for example one that passes a variable along,
+- `touch` or `reset` imported or used as a value, a glob import from the module, or the module renamed with `as`, since calls through another name would go unseen.
+
+Today `ACTIVITY_CALL_SITES` has `src/ui/legacy/shell/render.rs` with `WindowInput`, and `tests/idle_clock.rs` with `Hotkey`. `RESET_CALL_SITES` has `sync_auto_lock_task` in `src/ui/legacy/shell/tasks.rs`, and the two resets in `tests/idle_clock.rs`. The scan reads the files under `tests/` as well, and that test touches and resets the clock from a second thread. A step that adds a source adds its call and one line to the first list, and the line is what review looks at. A new reset would need a line of its own and a reason for it.
 
 `only_listed_sources_exist` in the module has a `match` over `ActivitySource` without a `_` arm, so a fifth source does not compile until it has an arm there. The arm does not put it in `ALL_SOURCES`, the list `touch_resets_idle` goes through. That is a second edit, which the comments in the test module ask for and nothing checks: Rust can't go through an enum's variants without naming them.
 
@@ -74,7 +82,8 @@ Each rule was checked by taking it out; the changed lines and the failing output
 | `pointer_counts_only_while_the_window_is_in_front` | the pointer over the window moves it only while the window is active |
 | `auto_lock_locks_once_the_clock_passes_the_threshold` | the task reads this clock: three idle minutes keep the vault open, four lock it |
 | `auto_lock_starts_counting_when_the_vault_opens` | the task sets the baseline when it starts |
-| `activity_is_touched_only_where_listed`, `activity_touches_are_found_with_their_source` | the list of call sites, and the scan itself on a sample with each finding |
+| `activity_is_touched_only_where_listed` | the lists of call sites for `touch` and `reset` |
+| `activity_touches_are_found_with_their_source`, `activity_resets_are_found_with_their_function`, `files_under_a_test_only_module_are_found` | the scan itself, on samples with each finding, and which files it takes for test code |
 
 `automatic_lock_discards_the_draft_and_says_so` and the other characterization tests are unchanged and pass.
 
@@ -90,5 +99,6 @@ On a preview build, with the auto-lock at its default of 4 minutes and a vault o
 ## Limits
 
 - The quick access panel, the menu bar item and the global shortcuts don't call `touch` yet, and SECURITY.md already names them: the row in the security contract applies from the redesign release, which ships with them. Until then the Auto-Type shortcut does not hold off the auto-lock, as before.
-- The scan sees the calls themselves, not who calls the function around them. A function in a listed file that wraps `touch` can be called from anywhere, and code that another crate's macro generates is out of its reach; review of the listed files covers both.
+- The scan sees the calls themselves, not who calls the function around them. A function in a listed file that wraps `touch`, or a listed function that wraps `reset`, can be called from anywhere, and code that another crate's macro generates is out of its reach; review of the listed files covers both. Code inside `src/app/services/activity.rs` sets the clock without the module's path and is not on either list; it is the clock.
+- `RESET_CALL_SITES` pins a reset to its function, not to its place in it. Moved from the start of `sync_auto_lock_task` into the task's loop, the reset still matches its line; `auto_lock_locks_once_the_clock_passes_the_threshold` and `background_tick_does_not_reset_the_clock` fail then.
 - The shell tests build the real `AppShell` and read the real `settings.json`. They set the auto-lock themselves and use a fake pasteboard.
