@@ -150,7 +150,10 @@ fn error_line(field: ElementId, sentence: SharedString, cx: &App) -> Stateful<Di
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, Hsla, TestAppContext};
+    use gpui::{
+        AppContext as _, Bounds, Font, Hsla, Pixels, TestAppContext, TextRun, VisualTestContext,
+        font,
+    };
 
     use super::super::probe;
     use super::*;
@@ -269,5 +272,107 @@ mod tests {
         });
         assert_eq!(role, Some(Role::Label));
         assert_eq!(node.value(), Some("The address needs a port."));
+    }
+
+    /// A field drawn in a window under an underline, which its texts
+    /// inherit. The test platform paints no glyphs, but it does paint the
+    /// underline of each line of text, as wide as the line.
+    fn underlined_field<'a>(
+        cx: &'a mut TestAppContext,
+        error: Option<&'static str>,
+    ) -> &'a mut VisualTestContext {
+        probe::window(cx, move |window, cx| {
+            let state = cx.new(|cx| InputState::new(window, cx));
+            let field = TextField::new("server", &state, text("Server"));
+            let field = match error {
+                Some(sentence) => field.error(text(sentence)),
+                None => field,
+            };
+            div().underline().child(field).into_any_element()
+        })
+    }
+
+    /// Each line of text the window painted, with its color.
+    fn painted_lines(cx: &mut VisualTestContext) -> Vec<(Bounds<Pixels>, Hsla)> {
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            window
+                .painted_underlines()
+                .into_iter()
+                .map(|line| (line.bounds.map(|value| px(value.0 / scale)), line.color))
+                .collect()
+        })
+    }
+
+    /// How wide `text` is when set in `style` in this window.
+    fn text_width(cx: &mut VisualTestContext, text: &'static str, style: TextStyle) -> Pixels {
+        cx.update(|window, _| {
+            let run = TextRun {
+                len: text.len(),
+                font: Font {
+                    weight: style.weight(),
+                    ..font(style.family().name())
+                },
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let size = u(style.size()).to_pixels(window.rem_size());
+            window
+                .text_system()
+                .shape_line(text.into(), size, &[run], None)
+                .width
+        })
+    }
+
+    /// The error sentence is part of the field: the field draws it below
+    /// the input, as text people see and not only as the value VoiceOver
+    /// reads.
+    #[gpui::test]
+    fn an_error_shows_its_sentence_below_the_input(cx: &mut TestAppContext) {
+        const SENTENCE: &str = "The address needs a port.";
+
+        let plain = underlined_field(cx, None);
+        let input = plain
+            .debug_bounds("fp-text-field-input")
+            .expect("the input");
+        let lines = painted_lines(plain);
+        assert!(
+            lines.iter().any(|(line, _)| line.bottom() <= input.top()),
+            "the label is painted above the input: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|(line, _)| line.top() < input.bottom()),
+            "without an error nothing is painted below the input: {lines:?}"
+        );
+
+        let wrong = underlined_field(cx, Some(SENTENCE));
+        let input = wrong
+            .debug_bounds("fp-text-field-input")
+            .expect("the input");
+        let lines = painted_lines(wrong);
+        let below: Vec<_> = lines
+            .iter()
+            .filter(|(line, _)| line.top() >= input.bottom())
+            .collect();
+        assert_eq!(
+            below.len(),
+            1,
+            "one line of text below the input, the sentence: {lines:?}"
+        );
+        let (line, color) = *below[0];
+        let danger = wrong.update(|_, cx| cx.ds().colors.status_danger_text.hsla);
+        assert_eq!(color, danger, "the sentence is in the danger color");
+        let width = text_width(wrong, SENTENCE, TextStyle::Callout);
+        assert!(
+            (line.size.width - width).abs() <= px(0.5),
+            "the line is the sentence in Callout: {:?} wide, not {width:?}",
+            line.size.width
+        );
+        assert!(
+            line.left() > input.left(),
+            "the sentence follows its glyph: {line:?}, input {input:?}"
+        );
     }
 }
