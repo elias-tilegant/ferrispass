@@ -373,6 +373,44 @@ fn tie_same_sid_two_customers() {
     );
 }
 
+#[test]
+fn protected_fields_do_not_make_a_tie() {
+    let nobody = HashMap::new();
+    // A third NHP 100 whose title does not say so; only its fields do.
+    let with_hidden_system = |protected: bool| {
+        sample_vault_with(vec![with_fields(
+            entry("hidden", "Nordhafen 100 NHP"),
+            &[
+                ("SAP_SID", "NHP", protected),
+                ("SAP_CLIENT", "100", protected),
+            ],
+        )])
+    };
+
+    let vault = with_hidden_system(true);
+    assert_eq!(
+        rows(&vault, "nhp 100", &nobody),
+        expect(&[
+            ("brenner-nhp", ExactIdentifier),
+            ("nhp-prd", ExactIdentifier),
+            ("nhp-old", Favorite),
+            ("hidden", Text),
+        ])
+    );
+    assert_eq!(
+        tie_count(&rank(RankInput::new(&vault, "nhp 100", &nobody))),
+        2,
+        "protected SAP_SID and SAP_CLIENT fields made the entry a twin"
+    );
+
+    // The same fields, not protected, make it the third NHP 100.
+    let vault = with_hidden_system(false);
+    assert_eq!(
+        tie_count(&rank(RankInput::new(&vault, "nhp 100", &nobody))),
+        3
+    );
+}
+
 fn vault_of_two_salesforce_logins() -> VaultSnapshot {
     snapshot(
         vec![
