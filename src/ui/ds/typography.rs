@@ -376,16 +376,21 @@ mod tests {
         assert_eq!(u(0.0), rems(0.0));
     }
 
-    #[test]
-    fn text_style_sets_family_size_line_weight_and_figures() {
+    /// Other tests decide the mono family too, on threads of their own, and
+    /// before it is decided mono styles name the bundled font. So this test
+    /// decides it first and reads it once: once decided, it never changes,
+    /// and the element gets the same answer, whichever test was first.
+    #[gpui::test]
+    fn text_style_sets_family_size_line_weight_and_figures(cx: &mut TestAppContext) {
+        let mono = cx.update(|cx| mono_family(cx));
         for style in TextStyle::ALL {
+            let family = match style.family() {
+                Family::Ui => UI_FAMILY,
+                Family::Mono => mono,
+            };
             let mut element = div().text_style(style);
             let text = Styled::text_style(&mut element).clone();
-            assert_eq!(
-                text.font_family.as_deref(),
-                Some(style.family().name()),
-                "{style:?}"
-            );
+            assert_eq!(text.font_family.as_deref(), Some(family), "{style:?}");
             assert_eq!(
                 text.font_size,
                 Some(AbsoluteLength::Rems(u(style.size()))),
