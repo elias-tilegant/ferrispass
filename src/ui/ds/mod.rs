@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod a11y_prefs;
+pub mod components;
 pub mod kit_theme;
 pub mod tokens;
 pub mod typography;

@@ -1,6 +1,6 @@
 _version: 2
 # Accessible names for controls that show no text of their own, such as icon
-# buttons. VoiceOver reads them; nobody sees them.
+# buttons, and the states VoiceOver reads after a name. Nobody sees them.
 a11y:
   copy_password:
     en: Copy password
@@ -8,3 +8,12 @@ a11y:
   reveal_password:
     en: Show password
     de: Passwort zeigen
+  # The description of a disabled control. GPUI has no disabled flag for
+  # assistive technology yet.
+  not_available:
+    en: not available
+    de: nicht verfügbar
+  # The description of a button whose action is running.
+  in_progress:
+    en: in progress
+    de: läuft
