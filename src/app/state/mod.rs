@@ -168,9 +168,11 @@ pub(crate) fn stalled_save_vault() -> Option<String> {
 pub struct AppState {
     vault: VaultStatus,
     /// The entry the user last picked by hand, with the list it was picked
-    /// in; see `selection_is_explicit`. Cleared when the app selects a first
-    /// row itself and when the active vault changes (`park_active`,
+    /// in; see `selection_is_explicit`. Cleared by a new or cleared search, a
+    /// new group or view, and a change of the active vault (`park_active`,
     /// `begin_open`), so nothing carries over to another vault or session.
+    /// Edits, deletes and sync merges leave it set, but they rebuild the list,
+    /// so the choice no longer matches and stops counting.
     explicit_selection: Option<select::ExplicitChoice>,
     /// Identity of the currently-active `VaultStatus::Open`. Kept outside the
     /// public enum so this internal race guard does not widen its public API.
