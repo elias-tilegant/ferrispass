@@ -1477,7 +1477,12 @@ fn content_reads_are_found_outside_tests_only() {
 /// The idle clock behind the auto-lock counts only input the user gives
 /// FerrisPass (see `src/app/services/activity.rs`), so every new caller is a
 /// line here and stands out in review.
-const ACTIVITY_CALL_SITES: &[(&str, &str)] = &[("src/ui/legacy/shell/render.rs", "WindowInput")];
+const ACTIVITY_CALL_SITES: &[(&str, &str)] = &[
+    ("src/ui/legacy/shell/render.rs", "WindowInput"),
+    // The test of the clock as the app builds it. Its second thread stands in
+    // for the one that will listen for the global shortcuts; it is not input.
+    ("tests/idle_clock.rs", "Hotkey"),
+];
 
 #[test]
 fn activity_is_touched_only_where_listed() {
