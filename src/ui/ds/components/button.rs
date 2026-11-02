@@ -956,19 +956,28 @@ mod tests {
 
     /// On a copper button a keycap has no surface of its own, only an edge
     /// in `keycap_on_accent_border`, so the copper shows through. On every
-    /// other button it keeps its surface and its edge.
+    /// other button it keeps its surface and its edge, and so it does on a
+    /// disabled copper button, which has no copper.
     #[gpui::test]
     fn a_keycap_on_copper_has_no_surface_of_its_own(cx: &mut TestAppContext) {
-        for kind in ButtonKind::ALL {
+        let enabled = ButtonKind::ALL.map(|kind| (kind, false));
+        let disabled_copper = [(ButtonKind::Primary, true), (ButtonKind::Large, true)];
+        for (kind, disabled) in enabled.into_iter().chain(disabled_copper) {
+            let case = if disabled {
+                format!("disabled {kind:?}")
+            } else {
+                format!("{kind:?}")
+            };
             let cx = probe::window(cx, move |_, _| {
                 Button::new("copy", kind, label("Copy password"))
                     .shortcut("cmd-shift-c")
+                    .disabled(disabled)
                     .into_any_element()
             });
             let colors = cx.update(|_, cx| cx.ds().colors);
             let (fills, edges) = keycap_paint(cx);
-            let (fill, edge) = match kind {
-                ButtonKind::Primary | ButtonKind::Large => {
+            let (fill, edge) = match (kind, disabled) {
+                (ButtonKind::Primary | ButtonKind::Large, false) => {
                     (None, colors.keycap_on_accent_border.hsla)
                 }
                 _ => (Some(colors.keycap_bg.hsla), colors.keycap_border.hsla),
@@ -976,12 +985,12 @@ mod tests {
             assert_eq!(
                 fills,
                 fill.into_iter().collect::<Vec<_>>(),
-                "{kind:?}: the keycap's fill"
+                "{case}: the keycap's fill"
             );
-            assert!(!edges.is_empty(), "{kind:?}: the keycap has an edge");
+            assert!(!edges.is_empty(), "{case}: the keycap has an edge");
             assert!(
                 edges.iter().all(|color| *color == edge),
-                "{kind:?}: the keycap's edge is {edge:?}: {edges:?}"
+                "{case}: the keycap's edge is {edge:?}: {edges:?}"
             );
         }
     }
