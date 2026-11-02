@@ -131,8 +131,8 @@ All five gates pass on every commit: `cargo fmt --all --check`, `cargo clippy --
 | `only_entry_primary_takes_return` | another command sits on Return |
 | `every_disabled_reason_exists` | a reason key is missing or has a placeholder |
 | `locked_hides_every_entry_command`, `no_selection_hides_every_entry_command` | a command on an entry is offered while the app is locked or nothing is selected |
-| `copy_code_needs_otp`, `copy_username_needs_a_user_name` | Copy code or Copy user name is offered for an entry without one |
-| `open_url_needs_http_or_https` | an address other than http or https counts as one, Open address is offered in any situation other than an unlocked app with an http or https address selected, or an empty address can be copied |
+| `copy_code_needs_otp`, `copy_username_needs_a_user_name` | Copy code or Copy user name is offered in any situation other than an unlocked app with an entry selected that has one |
+| `open_url_needs_http_or_https` | an address other than http or https counts as one, Open address is offered in any situation other than an unlocked app with an http or https address selected, or Copy address in any situation other than an unlocked app with an address selected |
 | `status_menu_has_exactly_the_five_items` | the menu bar item's menu gains, loses or reorders an item |
 | `panel_more_lists_every_panel_command` | the panel's list of all commands misses one, or one is disabled that should not be |
 
@@ -148,5 +148,6 @@ These rules were broken on purpose, one at a time, and each time the named test 
 - `primary_label_names_the_main_action`: Return's word read from its own row.
 - `every_command_has_its_keys`: Return without a key, and Copy user name on `cmd-shift-u`.
 - `every_key_has_both_languages`: Copy user name without German. `every_label_key_exists` passes with it.
+- Copy code, Copy user name and Copy address, `copy_code_needs_otp`, `copy_username_needs_a_user_name` and `open_url_needs_http_or_https`: each offered on a row the user picked even when the entry has no code, user name or address.
 
 The other tests were not probed. [PR #15](https://github.com/elias-tilegant/ferrispass/pull/15) lists the probes and their failing output.
