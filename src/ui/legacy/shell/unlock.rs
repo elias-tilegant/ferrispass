@@ -1,8 +1,31 @@
-//! Unlocking with a password or Touch ID, and confirming the KDF cost.
+//! Unlocking with a password or Touch ID, confirming the KDF cost, and
+//! secure event input for the master password field.
 
 use super::*;
 
+/// Shown when macOS refuses secure event input for the master password
+/// field. The field still works; the user has to know it is not shielded.
+pub(super) const SECURE_INPUT_REFUSED: &str =
+    "Secure typing is off for this password field. macOS refused secure event input.";
+
 impl AppShell {
+    /// Turns secure event input on for the master password field, which has
+    /// focus. A refusal is shown, not swallowed: a field that only looks
+    /// protected is worse than one that says it isn't.
+    pub(super) fn hold_secure_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match secure_input::hold(cx) {
+            Ok(guard) => self.secure_input = Some(guard),
+            // There is nothing to turn on on this platform. The log said so
+            // once at launch; a notice at every focus would only be noise.
+            Err(HoldError::Unsupported) => self.secure_input = None,
+            // `hold` has already logged the OSStatus.
+            Err(_) => {
+                self.secure_input = None;
+                Self::notify_error(window, SECURE_INPUT_REFUSED, cx);
+            }
+        }
+    }
+
     pub fn submit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.state.read(cx).pending_unlock_path() else {
             return;
