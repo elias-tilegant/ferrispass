@@ -16,7 +16,8 @@ Started from `p1a-04-entry-kinds` at `f26d44d` on 2026-11-01, because the rankin
 | `a318acf` | A test that protected fields never make two results the same system |
 | `612ac12` | The rule below, what counts as recently used, and this table |
 | `464f024` | Tests that an open SAP field contradicting a title with a role word leaves the entry naming no system |
-| `docs(search): say that a field contradicting the title names no system` | That rule here and in the ranking code, when auto-type marks an entry, and this table |
+| `b0748b6` | That rule here and in the ranking code, when auto-type marks an entry, and this table |
+| `docs(search): say which row stays selected when the list is rebuilt` | Which row an edit, a delete or a sync merge leaves selected, what an empty query lists, the Limits section, and this table |
 
 ## The four tiers
 
@@ -29,7 +30,7 @@ The text search decides whether an entry matches and how well. The ranking then 
 
 Inside a tier, favorites come first, then recently used entries (most recent first), then entries by title, then by id. The text score only orders the last tier. The first three hold entries the user has singled out, by naming them, starring them or using them, and they keep an order the user can learn instead of reshuffling with every letter typed.
 
-A favorite or a recently used entry has to match the text to rank at all. An empty search lists nothing, as before.
+A favorite or a recently used entry has to match the text to rank at all. An empty query, or one of only spaces, ranks nothing: the app then lists the selected group or library view instead, as before.
 
 ### Where the SID and client come from
 
@@ -62,7 +63,7 @@ The app now also knows whether the selected row was picked by hand. `select_entr
 
 - A vault is open and the list shows a selected row. With no row shown there is nothing to have picked, even when no choice is recorded either.
 - That row is the entry the user picked. What counts is the row the list shows (`shown_entry_id`), not the raw `selected_entry_id`, which can point at an entry that is no longer in the list while the first row is shown in its place. So a choice of an entry that is not in the list never makes a production system in the first row count as picked.
-- The list is the very one the choice was made in. Every place that rebuilds the list (a search, a group, a library view, an edit, a delete, a sync merge) puts a new list there, and from then on the first row is the app's pick again, even when it is the same entry. A test reads the source of `src/app/state/` and fails if a place that sets the selection does not build a new list in the same function.
+- The list is the very one the choice was made in. Every place that rebuilds the list puts a new list there. A search, a group or a library view then selects the first row. Editing, starring or deleting an entry and a sync merge keep the selected row when it is still listed and fall back to the first row only otherwise. Creating an entry selects the new one. In every case the selected row is the app's pick from then on, even when it is the row the user picked. A test reads the source of `src/app/state/` and fails if a function that sets the selection does not also build a new list; see Limits for what it does not see.
 
 The choice is also cleared when the active vault changes: when it is parked to switch to another vault, and when a vault is opened, also the same vault again after a lock. Switching back to a parked vault brings back the same list and the same selected row, so without the reset on parking a choice made before the switch would still count.
 
@@ -72,7 +73,12 @@ The old main window looks no different for it. It has no arrow-key navigation in
 
 - **Window context.** A tier between the exact identifier and the favorites, for entries that fit the window in front: its title (read through the accessibility API), the host of the page in a browser, and the kind of app (SAP GUI to SAP systems, a VPN client to remote access, a terminal to servers). It orders results and never types anything.
 - **Personal before team.** Once search covers every unlocked vault, a tie prefers the personal vault's entry, after favorites and recently used and before the title.
-- **The panel.** Results that arrive late in an asynchronous search must not move the selection; that belongs to the panel's search. The panel's arrow keys and Command-1 to 9 have to select through `select_entry`, like a click, or what they pick will not count as picked.
+- **The panel.** Results that arrive late in an asynchronous search must not move the selection; that belongs to the panel's search. The panel's arrow keys and Command-1 to 9 have to select through `select_entry`, like a click, or what they pick will not count as picked. The tests of this step call `select_entry` directly and cannot tell whether a handler does, so the panel needs tests that drive its own handlers (see Limits).
+
+## Limits
+
+- `every_implicit_selection_site_rebuilds_the_list` checks each function, not each path through it: a function that assigns `selected_entry_id` passes when it assigns `visible_entries = Rc::new(..)` anywhere in its body. A function with an early branch that sets the selection and returns without rebuilding the list passes as long as another branch of the same function rebuilds it. After such a branch the list is still the one the choice was made in, so if it lands on the entry the user had picked, the app's pick counts as theirs.
+- `arrow_or_click_makes_the_selection_explicit` calls `AppState::select_entry`, not a click or key handler. It shows what `select_entry` records, not that a click on a row or a key press reaches it. The main window's row click calls `select_entry` today; the panel's arrow keys and Command-1 to 9 must as well, and the panel has to test its own handlers for that (see What later steps add).
 
 ## Open
 

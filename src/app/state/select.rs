@@ -128,8 +128,8 @@ impl AppState {
     ///   not `selected_entry_id`, which can point at an entry that left the
     ///   list while the first row is shown in its place (`shown_entry_id`);
     /// - the list is the very one the choice was made in. Whatever rebuilds
-    ///   the list (a search, a group, an edit, a sync merge) makes the first
-    ///   row the app's pick again, even when it is the same entry.
+    ///   the list (a search, a group, an edit, a sync merge) makes the
+    ///   selected row the app's pick again, even when it is the same entry.
     pub fn selection_is_explicit(&self) -> bool {
         let VaultStatus::Open {
             visible_entries, ..
