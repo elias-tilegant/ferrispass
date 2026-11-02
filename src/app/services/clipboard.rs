@@ -1,12 +1,12 @@
-//! The one way a secret reaches the clipboard.
+//! The one way FerrisPass's own copy actions put a secret on the clipboard.
 //!
 //! Every password, username, URL, TOTP code or custom field FerrisPass copies
-//! for the user, from a button, a shortcut or a menu, goes through
-//! [`ClipboardService::write_secret`]. Text the user copies by hand out of an
-//! unprotected field in the entry editor is an ordinary copy and does not
-//! come through here; a protected field can't be copied by hand at all. The
-//! service lives in a GPUI global rather than in a window, so a caller
-//! without a window copies and clears the same way the main window does.
+//! with its own copy actions (the copy buttons and rows in the detail panel,
+//! the copy shortcuts, Copy Username/Password/URL in the Edit menu) goes
+//! through [`ClipboardService::write_secret`]. Copy and Cut on text selected
+//! in an editor field, by key, Edit menu or context menu, are the field's own
+//! plain copy and never come through here; a protected field blocks them. The
+//! service is a GPUI global, so a caller without a window gets the same path.
 //!
 //! The rules, each held by a test at the end of this file:
 //!
