@@ -153,13 +153,12 @@ impl AppShell {
         self.launch_cleanup_tasks.insert(launch_id, task);
     }
 
-    /// Single source of truth for "put this on the clipboard, tell the
-    /// user, schedule a clear". Used by the saved-fields copy path
-    /// (`copy_selected_value`) and the live-TOTP copy in the detail
-    /// panel. Replaces any in-flight clear so the latest copy always
-    /// wins - older timers would otherwise wipe the new value early.
-    /// When `clipboard_clear_secs` is `None` (user picked "Never"), no
-    /// timer is scheduled; the clipboard still gets wiped at lock time.
+    /// Put a secret on the clipboard through the clipboard service and tell
+    /// the user. Used by the saved-fields copy path (`copy_selected_value`),
+    /// custom fields and the live-TOTP copy in the detail panel. The service
+    /// replaces any earlier copy and its timer, so the latest copy always
+    /// wins. When `clipboard_clear_secs` is `None` (user picked "Never"), no
+    /// timer runs; the clipboard still gets wiped at lock and at quit.
     pub fn copy_with_auto_clear(
         &mut self,
         value: Zeroizing<String>,
@@ -167,87 +166,21 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(target_os = "macos")]
-        let write = match write_secret_text(&value) {
-            Ok(change_count) => PendingClipboardWrite::Native(change_count),
-            Err(_) => {
-                // Fail closed: a native write error must never downgrade to a
-                // normal pasteboard item that clipboard history or Universal
-                // Clipboard can retain. Clear any previous write we owned.
-                self.clear_owned_clipboard(cx);
-                self.clipboard_clear_task = None;
-                self.clipboard_clear_deadline = None;
-                self.clipboard_pill_tick = None;
-                window.push_notification(format!("Could not copy {label}."), cx);
-                return;
-            }
-        };
-        #[cfg(not(target_os = "macos"))]
-        let write = {
-            cx.write_to_clipboard(ClipboardItem::new_string(value));
-            self.next_portable_clipboard_write = self.next_portable_clipboard_write.wrapping_add(1);
-            PendingClipboardWrite::Portable(self.next_portable_clipboard_write)
-        };
-
-        let toast = match self.settings.clipboard_clear_secs {
+        let clear_secs = self.settings.clipboard_clear_secs;
+        let written = ClipboardService::handle(cx).update(cx, |service, cx| {
+            service.write_secret(value, clear_secs.map(Duration::from_secs), cx)
+        });
+        if written.is_err() {
+            // The service failed closed: nothing was written, and an earlier
+            // copy of ours is gone too.
+            window.push_notification(format!("Could not copy {label}."), cx);
+            return;
+        }
+        let toast = match clear_secs {
             Some(secs) => format!("{label} copied. Clipboard clears in {secs} s."),
             None => format!("{label} copied."),
         };
         window.push_notification(toast, cx);
-        self.schedule_clipboard_clear(write, cx);
-    }
-
-    fn schedule_clipboard_clear(&mut self, write: PendingClipboardWrite, cx: &mut Context<Self>) {
-        self.pending_clipboard_write = Some(write);
-        // Drop any prior timer by replacing the slot. GPUI tasks cancel
-        // on drop (same pattern as `totp_tick`).
-        let Some(secs) = self.settings.clipboard_clear_secs else {
-            // "Never": don't spawn a timer or pill. The opaque write token
-            // remains so lock-time cleanup can still clear our clipboard.
-            self.clipboard_clear_task = None;
-            self.clipboard_clear_deadline = None;
-            self.clipboard_pill_tick = None;
-            return;
-        };
-        // Track the deadline so the countdown pill can render
-        // `clears in N s…`. Re-rendering at 1 Hz comes from
-        // `clipboard_pill_tick` below.
-        self.clipboard_clear_deadline = Some(Instant::now() + Duration::from_secs(secs));
-        self.clipboard_pill_tick = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let keep_ticking = this
-                    .update(cx, |shell, cx| {
-                        if shell.clipboard_clear_deadline.is_none() {
-                            // Wipe fired (or settings flipped to Never).
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep_ticking {
-                    break;
-                }
-            }
-        }));
-        self.clipboard_clear_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_secs(secs))
-                .await;
-            let _ = this.update(cx, |shell, cx| {
-                // A cancelled timer can race a replacement copy. Its token
-                // must match before it may touch either clipboard or state.
-                if shell.pending_clipboard_write != Some(write) {
-                    return;
-                }
-                shell.clear_owned_clipboard(cx);
-                shell.clipboard_clear_task = None;
-                shell.clipboard_clear_deadline = None;
-                shell.clipboard_pill_tick = None;
-                cx.notify();
-            });
-        }));
     }
 
     /// True iff `entry_id`'s password is currently revealed in the

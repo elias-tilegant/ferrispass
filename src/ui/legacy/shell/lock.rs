@@ -23,6 +23,10 @@ impl AppShell {
     }
 
     pub fn lock_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Nothing typed after a lock is protected by an earlier hold, whoever
+        // took it: the field's guard goes, and so does every other one.
+        self.secure_input = None;
+        secure_input::release_all(cx);
         // AppState rotates the Auto-Type context before it revokes decrypted
         // ownership. Do this first so form and clipboard cleanup cannot leave
         // an old background typer authorized in parallel.
