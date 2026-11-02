@@ -602,6 +602,21 @@ fn open_url_needs_http_or_https() {
             "copy {url:?}"
         );
     }
+    // In every situation, Open address is there exactly when the app is
+    // unlocked and the selected entry has an http or https address. Picking
+    // the row, the search, the kind of entry and what else it has change
+    // nothing about that.
+    for ctx in every_ctx() {
+        let web_address = ctx
+            .selection
+            .is_some_and(|selection| selection.url == UrlKind::Web);
+        let offered = !ctx.locked && web_address;
+        assert_eq!(
+            enablement(CommandId::ENTRY_OPEN_URL, &ctx),
+            if offered { Enabled } else { Hidden },
+            "open, {ctx:?}"
+        );
+    }
 }
 
 #[test]
