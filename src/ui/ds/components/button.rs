@@ -26,6 +26,7 @@ use gpui::{
 use gpui_component::Icon;
 use gpui_component::spinner::Spinner;
 
+use self::default_role::DefaultRole;
 use super::AccessibilityId;
 use super::focus_ring::{Outline, keyboard_focus_ring};
 use super::keycap::{Keycap, keys_text, parse_keys};
@@ -43,9 +44,6 @@ pub const SPINNER_DELAY: Duration = Duration::from_millis(400);
 
 /// Size of the glyph in an icon button, in points.
 const ICON_SIZE: f32 = 16.0;
-
-/// The key string of the default button.
-const RETURN: &str = "enter";
 
 /// What a button looks like.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,7 +186,7 @@ pub struct Button {
     size: ButtonSize,
     content: Content,
     keys: Vec<Keystroke>,
-    default: bool,
+    default: DefaultRole,
     disabled: bool,
     loading: bool,
     description: Option<SharedString>,
@@ -235,7 +233,7 @@ impl Button {
             size: kind.default_size(),
             content,
             keys: Vec::new(),
-            default: false,
+            default: DefaultRole::default(),
             disabled: false,
             loading: false,
             description: None,
@@ -268,19 +266,6 @@ impl Button {
             "a danger button is never the default button"
         );
         self.make_default()
-    }
-
-    /// What [`Button::default_button`] does after its debug check, so the
-    /// tests reach the release behavior in a debug build too.
-    fn make_default(mut self) -> Self {
-        if self.kind == ButtonKind::Danger {
-            return self;
-        }
-        self.default = true;
-        if self.keys.is_empty() {
-            self.keys = parse_keys(RETURN);
-        }
-        self
     }
 
     /// A disabled button has no handler and no color, and its description
@@ -390,7 +375,7 @@ impl Button {
         };
 
         gpui_base::Button::new(self.id)
-            .role(if self.default {
+            .role(if self.default.is_set() {
                 Role::DefaultButton
             } else {
                 Role::Button
@@ -440,6 +425,47 @@ impl Button {
             .child(content)
             .children(keycaps)
             .children(ring)
+    }
+}
+
+/// The default role, behind the check that keeps it off a danger button.
+///
+/// The flag of [`DefaultRole`] is private to this module, and
+/// [`Button::make_default`] below is the only code that sets it, together
+/// with the ⏎ keys, whose key string only this module can name. Code
+/// elsewhere in `button.rs`, [`Button::default_button`] included, that
+/// tried to make a button the default without that check would not
+/// compile. `the_default_role_is_set_behind_its_guard_only` reads the
+/// source so that it stays so.
+mod default_role {
+    use super::{Button, ButtonKind, parse_keys};
+
+    /// The key string of the default button.
+    const RETURN: &str = "enter";
+
+    /// Whether a button is the one Return presses.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct DefaultRole(bool);
+
+    impl DefaultRole {
+        pub(super) fn is_set(self) -> bool {
+            self.0
+        }
+    }
+
+    impl Button {
+        /// What [`Button::default_button`] does after its debug check, so
+        /// the tests reach the release behavior in a debug build too.
+        pub(super) fn make_default(mut self) -> Self {
+            if self.kind == ButtonKind::Danger {
+                return self;
+            }
+            self.default = DefaultRole(true);
+            if self.keys.is_empty() {
+                self.keys = parse_keys(RETURN);
+            }
+            self
+        }
     }
 }
 
@@ -1012,6 +1038,60 @@ mod tests {
                 .into_any_element()
         });
         probe::assert_keyboard_focus_ring(cx, "fp-test-button");
+    }
+
+    /// The default role is set in one place: `make_default` in the module
+    /// `default_role`, after the check for a danger button. The compiler
+    /// keeps every other line of `button.rs` from setting it as long as the
+    /// role's flag and the ⏎ key string are private to that module; this
+    /// reads the source so that they stay so, and so that the module itself
+    /// builds and writes the flag nowhere else.
+    #[test]
+    fn the_default_role_is_set_behind_its_guard_only() {
+        let code: String = probe::code_only(include_str!("button.rs"))
+            .split_whitespace()
+            .collect();
+        let start = code
+            .find("moddefault_role{")
+            .expect("the module default_role");
+        let module = probe::braced(&code[start..]);
+        assert!(
+            module.contains("pub(super)structDefaultRole(bool);"),
+            "DefaultRole is declared in default_role, with a private flag: {module}"
+        );
+        assert!(
+            module.contains("constRETURN:&str="),
+            "the ⏎ key string is private to default_role: {module}"
+        );
+        assert!(
+            module.contains(
+                "ifself.kind==ButtonKind::Danger{returnself;}\
+                 self.default=DefaultRole(true);\
+                 ifself.keys.is_empty(){self.keys=parse_keys(RETURN);}"
+            ),
+            "make_default sets the role and the ⏎ keys after the check for a danger button: {module}"
+        );
+        // The declaration and the one construction in `make_default`.
+        assert_eq!(
+            code.matches("DefaultRole(").count(),
+            2,
+            "DefaultRole is built in make_default only"
+        );
+        assert_eq!(
+            module.matches("Self(").count() + module.matches("{0:").count(),
+            0,
+            "default_role builds DefaultRole nowhere else, as Self(..) or with braces: {module}"
+        );
+        assert_eq!(
+            module.matches(".0").count(),
+            1,
+            "default_role reads the flag in is_set and writes it nowhere: {module}"
+        );
+        assert_eq!(
+            code.matches("RETURN").count(),
+            2,
+            "the ⏎ key string is used in make_default only"
+        );
     }
 
     /// What the window painted in the place of its keycap: the colors of

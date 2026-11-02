@@ -271,6 +271,26 @@ pub(in crate::ui::ds) mod probe {
         bounds
     }
 
+    /// `code` from its first `{` to the brace that closes it. Meant for code
+    /// without comments; a brace inside a literal counts like any other.
+    pub fn braced(code: &str) -> &str {
+        let open = code.find('{').expect("an opening brace");
+        let mut depth = 0usize;
+        for (offset, c) in code[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &code[open..=open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &code[open..]
+    }
+
     /// Every `.rs` file under `dir`, for the scans over the source.
     pub fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
