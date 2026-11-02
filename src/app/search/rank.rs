@@ -31,6 +31,13 @@
 //!   one role word the entry kinds know ([`SapRole::parse`]): "NHP 100" and
 //!   "NHP 100 PRD" name NHP 100.
 //!
+//! A title only names the system the entry kinds read from the whole entry.
+//! An open `SAP_SID` or `SAP_CLIENT` that contradicts it wins there, so
+//! "NHP 100 PRD" with `SAP_SID` BRQ is BRQ 100 to the kinds. A SID and a
+//! client pieced together from a field and the title never name a system,
+//! and the title no longer says what the entry is, so neither "brq 100"
+//! nor "nhp 100" finds the entry as an exact identifier.
+//!
 //! The entry kinds read every title that starts with a SID and a client as
 //! that system, "NHP 100 Nordhafen alt" too. Such a title does not name the
 //! system here. It is typically an old or a related entry, and as a favorite

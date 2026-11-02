@@ -14,7 +14,9 @@ Started from `p1a-04-entry-kinds` at `f26d44d` on 2026-11-01, because the rankin
 | `fe975e5` | The open question on titles that start with a SID and client, and this table |
 | `585e234` | Such a title names the system only when nothing but a role word follows the client; the tie count reads it the same way |
 | `a318acf` | A test that protected fields never make two results the same system |
-| `docs(search): describe which titles name a system and what marks an entry used` | The rule below, what counts as recently used, and this table |
+| `612ac12` | The rule below, what counts as recently used, and this table |
+| `464f024` | Tests that an open SAP field contradicting a title with a role word leaves the entry naming no system |
+| `docs(search): say that a field contradicting the title names no system` | That rule here and in the ranking code, when auto-type marks an entry, and this table |
 
 ## The four tiers
 
@@ -22,7 +24,7 @@ The text search decides whether an entry matches and how well. The ranking then 
 
 1. **Exact identifier.** The query names an SAP system by its SID and client, or any entry by its whole title. "nhp 100", "NHP 100" and "nhp   100" all name NHP 100. "nhp" alone does not: it names every NHP system, so it ranks like any other text.
 2. **Favorites** whose text matches.
-3. **Recently used** entries whose text matches, the most recent first. "Recently used" is the same session log the Recently used view shows: since the vault was unlocked, entries whose password, username or a custom field was copied, entries that were launched in their own app (SAP GUI today), and entries auto-type was started for. Auto-type marks the entry when the hotkey finds it, before the typing is done. Copying a URL does not count.
+3. **Recently used** entries whose text matches, the most recent first. "Recently used" is the same session log the Recently used view shows: since the vault was unlocked, entries whose password, username or a custom field was copied, entries that were launched in their own app (SAP GUI today), and entries auto-type was started for. Auto-type marks the entry once it is about to type it, before the typing is done. Copying a URL does not count.
 4. **Everything else**, by how well the text matches, in exactly the order search gave before this step.
 
 Inside a tier, favorites come first, then recently used entries (most recent first), then entries by title, then by id. The text score only orders the last tier. The first three hold entries the user has singled out, by naming them, starring them or using them, and they keep an order the user can learn instead of reshuffling with every letter typed.
@@ -36,7 +38,7 @@ They come from the entry kinds (`kinds::classify`), and they name the system in 
 - Both come from the custom fields `SAP_SID` and `SAP_CLIENT`, whatever the title says. An entry titled "Nordhafen production" with those fields set to NHP and 100 is found by "nhp 100", although no word of its text matches.
 - The title is the SID and client and nothing else, or followed by one role word the entry kinds know. These are the words `SapRole::parse` accepts: DEV, QAS, PRD and SBX, in any case. "NHP 100" and "NHP 100 PRD" name NHP 100.
 
-The entry kinds read every title that starts with a SID and a client as that system, whatever follows. The ranking does not: "NHP 100 Nordhafen alt", "NHP 100 PROD" and "NHP 100-PRD" are not exact identifiers for "nhp 100". Such a title is typically an old or a related entry, and as a favorite it would come before the system itself and be the row a new search selects. It ranks by its other tiers instead: as a favorite, as recently used, or by its text. Its fields still count, so with `SAP_SID` NHP and `SAP_CLIENT` 100 set, "NHP 100 Nordhafen alt" is NHP 100. A SID from a field and a client from such a title, or the other way round, are not enough, and neither are `SAP_HOST` and `SAP_INSTANCE`, which make an entry an SAP system without naming it. The entry kinds themselves are unchanged; only the ranking reads titles this way.
+The entry kinds read every title that starts with a SID and a client as that system, whatever follows. The ranking does not: "NHP 100 Nordhafen alt", "NHP 100 PROD" and "NHP 100-PRD" are not exact identifiers for "nhp 100". Such a title is typically an old or a related entry, and as a favorite it would come before the system itself and be the row a new search selects. It ranks by its other tiers instead: as a favorite, as recently used, or by its text. Its fields still count, so with `SAP_SID` NHP and `SAP_CLIENT` 100 set, "NHP 100 Nordhafen alt" is NHP 100. A SID from a field and a client from such a title, or the other way round, are not enough, and neither are `SAP_HOST` and `SAP_INSTANCE`, which make an entry an SAP system without naming it. A title with a role word loses its system the same way when an open field contradicts it. "NHP 100 PRD" with `SAP_SID` BRQ is BRQ 100 to the entry kinds, which take the SID from the field and the client from the title. A SID and a client pieced together from a field and the title never name a system, and the title no longer says what the entry is, so neither "brq 100" nor "nhp 100" finds the entry as an exact identifier. A field that agrees with the title, `SAP_SID` NHP for example, changes nothing. The entry kinds themselves are unchanged; only the ranking reads titles this way.
 
 Custom fields are still not search text. The SID and client count for the exact identifier and for nothing else.
 
