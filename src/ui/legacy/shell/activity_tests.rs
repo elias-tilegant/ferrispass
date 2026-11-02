@@ -7,7 +7,10 @@ use crate::app::services::clipboard::ClipboardService;
 use crate::app::{LibrarySelection, VaultStatus};
 use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
 use crate::keepass::VaultDocument;
-use gpui::{Modifiers, TestAppContext, VisualTestContext, WindowHandle, point};
+use gpui::{
+    Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+    VisualTestContext, WindowHandle, point,
+};
 use gpui_component::Root;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -198,4 +201,80 @@ fn auto_lock_starts_counting_when_the_vault_opens(cx: &mut TestAppContext) {
     let harness = open_vault(cx, Some(240));
     advance(cx, 2 * AUTO_LOCK_TICK_SECS);
     assert!(is_open(cx, &harness), "locked on the first check");
+}
+
+fn assert_clock_moved(what: &str) {
+    let idle = activity::idle_for(SystemTime::now());
+    assert!(idle < Duration::from_secs(60), "{what} left {idle:?}");
+}
+
+#[gpui::test]
+fn shortcut_in_the_window_resets_the_clock(cx: &mut TestAppContext) {
+    let harness = open_vault(cx, Some(240));
+    activity::reset(SystemTime::now() - TEN_MINUTES);
+
+    // Cmd+F is bound to an action. The action takes the key before any
+    // element's key listener sees it.
+    cx.simulate_keystrokes(harness.window.into(), "cmd-f");
+    cx.run_until_parked();
+
+    assert_clock_moved("a shortcut");
+}
+
+#[gpui::test]
+fn click_in_the_window_resets_the_clock(cx: &mut TestAppContext) {
+    let harness = open_vault(cx, Some(240));
+    activity::reset(SystemTime::now() - TEN_MINUTES);
+
+    let mut window = VisualTestContext::from_window(harness.window.into(), cx);
+    window.simulate_mouse_down(
+        point(px(40.), px(40.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    window.simulate_mouse_up(
+        point(px(40.), px(40.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+
+    assert_clock_moved("a click without moving the pointer");
+}
+
+#[gpui::test]
+fn scrolling_in_the_window_resets_the_clock(cx: &mut TestAppContext) {
+    let harness = open_vault(cx, Some(240));
+    activity::reset(SystemTime::now() - TEN_MINUTES);
+
+    let mut window = VisualTestContext::from_window(harness.window.into(), cx);
+    window.simulate_event(ScrollWheelEvent {
+        position: point(px(300.), px(200.)),
+        delta: ScrollDelta::Lines(point(0., 3.)),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+
+    assert_clock_moved("scrolling");
+}
+
+#[gpui::test]
+fn pointer_over_a_dialog_resets_the_clock(cx: &mut TestAppContext) {
+    let harness = open_vault(cx, Some(240));
+    AnyWindowHandle::from(harness.window)
+        .update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    // The dialog blocks the pointer for everything below it, the window's
+    // root element included.
+    cx.dispatch_action(harness.window.into(), OpenAbout);
+    cx.run_until_parked();
+    assert!(
+        harness
+            .state
+            .read_with(cx, |state, _| matches!(state.overlay(), Overlay::About))
+    );
+    activity::reset(SystemTime::now() - TEN_MINUTES);
+
+    move_pointer(cx, &harness);
+
+    assert_clock_moved("the pointer over a dialog");
 }

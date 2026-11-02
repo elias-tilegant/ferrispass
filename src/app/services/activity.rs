@@ -32,8 +32,8 @@ use std::time::{Duration, SystemTime};
 /// Where input that counts as activity comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivitySource {
-    /// A key press in a FerrisPass window, or the pointer moving over one
-    /// while it is in front.
+    /// A key press, a click or a scroll in a FerrisPass window, or the
+    /// pointer moving over one while it is in front.
     WindowInput,
     /// A key press or a click in the quick access panel.
     Panel,

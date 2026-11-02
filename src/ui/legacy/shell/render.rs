@@ -109,19 +109,6 @@ impl Render for AppShell {
         div()
             .key_context(APP_CONTEXT)
             .track_focus(&self.focus_handle)
-            // A key press, or the pointer moving over the window while it
-            // is in front, holds off the auto-lock. With another app in
-            // front macOS still reports the pointer passing over, but that
-            // is not input to FerrisPass. No `cx.notify`: only the auto-lock
-            // task reads the clock, on its own schedule.
-            .on_mouse_move(|_, window, _| {
-                if window.is_window_active() {
-                    activity::touch(ActivitySource::WindowInput);
-                }
-            })
-            .on_key_down(|_, _, _| {
-                activity::touch(ActivitySource::WindowInput);
-            })
             .on_action(cx.listener(Self::on_action_open_vault))
             .on_action(cx.listener(Self::on_action_open_vault_switcher))
             .on_action(cx.listener(Self::on_action_open_add_vault))
@@ -162,8 +149,57 @@ impl Render for AppShell {
             .overflow_hidden()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .child(Self::pointer_activity())
             .child(body)
             .children(modal_overlay)
             .children(clipboard_pill)
+    }
+}
+
+/// Input in the window holds off the auto-lock. Nothing here calls
+/// `cx.notify`: only the auto-lock task reads the clock, on its own schedule.
+impl AppShell {
+    /// Every key press in `window`, typed text and shortcuts alike. The
+    /// interceptor sees a key before key bindings and text input do; a key
+    /// listener on an element only gets the keys no action took, so it missed
+    /// Cmd+C, the arrow keys and Return.
+    pub(super) fn count_key_presses(window: &Window, cx: &mut gpui::App) -> Subscription {
+        let this_window = window.window_handle();
+        cx.intercept_keystrokes(move |_, window, _| {
+            if window.window_handle() == this_window {
+                activity::touch(ActivitySource::WindowInput);
+            }
+        })
+    }
+
+    /// Pointer input anywhere in the window: a click or a scroll at any time,
+    /// a move only while the window is in front. With another app in front
+    /// macOS still reports the pointer passing over the window, but that is
+    /// not input to FerrisPass. The listeners go on the window, painted by an
+    /// empty canvas, rather than on an element: a dialog that blocks the
+    /// pointer for everything below it would hide an element's listeners.
+    fn pointer_activity() -> impl gpui::IntoElement {
+        gpui::canvas(
+            |_, _, _| {},
+            |_, _, window, _| {
+                window.on_mouse_event(|_: &gpui::MouseMoveEvent, phase, window, _| {
+                    if phase == gpui::DispatchPhase::Capture && window.is_window_active() {
+                        activity::touch(ActivitySource::WindowInput);
+                    }
+                });
+                window.on_mouse_event(|_: &gpui::MouseDownEvent, phase, _, _| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        activity::touch(ActivitySource::WindowInput);
+                    }
+                });
+                window.on_mouse_event(|_: &gpui::ScrollWheelEvent, phase, _, _| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        activity::touch(ActivitySource::WindowInput);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
     }
 }

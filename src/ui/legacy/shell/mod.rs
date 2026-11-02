@@ -548,6 +548,7 @@ impl AppShell {
                 shell.schedule_automatic_biometric_unlock(window, cx);
             }),
             cx.observe(&clipboard, |_shell: &mut AppShell, _, cx| cx.notify()),
+            Self::count_key_presses(window, cx),
         ];
 
         // Sweep launch payloads orphaned by a previous crash. We only
