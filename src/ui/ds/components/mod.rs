@@ -105,6 +105,7 @@ pub mod copper {
 #[cfg(test)]
 pub(in crate::ui::ds) mod probe {
     use std::cell::RefCell;
+    use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
@@ -195,18 +196,229 @@ pub(in crate::ui::ds) mod probe {
         }
     }
 
-    /// `source` without its comments and its test module, for the scans
-    /// over the code.
+    /// `source` without its comments and its inline test modules, for the
+    /// scans over the code. Line breaks stay, so a line in the result is the
+    /// same line in the file.
+    ///
+    /// String and character literals stay as they are written, and a `//`
+    /// or `/*` inside one starts no comment. An inline test module is
+    /// `#[cfg(test)]` followed by `mod tests {`, and it is left out up to
+    /// the brace that closes it, so code after it still counts. A test
+    /// module declared as `mod tests;` leaves the rest of its file alone.
     pub fn code_only(source: &str) -> String {
-        let code = source
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap_or_default();
-        let code: Vec<&str> = code
-            .lines()
-            .map(|line| line.split("//").next().unwrap_or_default())
+        let parts = parts(source);
+        // The source with comments and literals blanked out, byte for byte,
+        // so that braces and attributes inside them do not count.
+        let structure: Vec<u8> = source
+            .bytes()
+            .zip(&parts)
+            .map(|(byte, part)| {
+                if *part == Part::Code || byte == b'\n' {
+                    byte
+                } else {
+                    b' '
+                }
+            })
             .collect();
-        code.join("\n")
+        let structure = String::from_utf8(structure).expect("blanking keeps whole characters");
+        let mut keep: Vec<bool> = parts.iter().map(|part| *part != Part::Comment).collect();
+        for module in inline_test_modules(&structure) {
+            keep[module].fill(false);
+        }
+        let code: Vec<u8> = source
+            .bytes()
+            .zip(keep)
+            .filter(|(byte, keep)| *keep || *byte == b'\n')
+            .map(|(byte, _)| byte)
+            .collect();
+        String::from_utf8(code).expect("comments and test modules are whole characters")
+    }
+
+    /// What a byte of a source file belongs to.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Part {
+        Code,
+        Comment,
+        Literal,
+    }
+
+    /// Which bytes of `source` are code, which are comments, and which are
+    /// string or character literals.
+    fn parts(source: &str) -> Vec<Part> {
+        let bytes = source.as_bytes();
+        let at = |i: usize| bytes.get(i).copied();
+        let mut parts = vec![Part::Code; bytes.len()];
+        let mut i = 0;
+        while i < bytes.len() {
+            let start = i;
+            let part = match bytes[i] {
+                b'/' if at(i + 1) == Some(b'/') => {
+                    i = source[i..].find('\n').map_or(bytes.len(), |end| i + end);
+                    Part::Comment
+                }
+                b'/' if at(i + 1) == Some(b'*') => {
+                    // Block comments nest.
+                    let mut depth = 0;
+                    while i < bytes.len() {
+                        if bytes[i] == b'/' && at(i + 1) == Some(b'*') {
+                            depth += 1;
+                            i += 2;
+                        } else if bytes[i] == b'*' && at(i + 1) == Some(b'/') {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    Part::Comment
+                }
+                b'"' => {
+                    i = string_end(bytes, i + 1);
+                    Part::Literal
+                }
+                b'\'' => match char_literal_end(source, i) {
+                    Some(end) => {
+                        i = end;
+                        Part::Literal
+                    }
+                    // A lifetime or a label.
+                    None => {
+                        i += 1;
+                        Part::Code
+                    }
+                },
+                b'r' | b'b' | b'c' if !(i > 0 && is_identifier(bytes[i - 1])) => {
+                    match raw_string_end(source, i) {
+                        Some(end) => {
+                            i = end;
+                            Part::Literal
+                        }
+                        None => {
+                            i += 1;
+                            Part::Code
+                        }
+                    }
+                }
+                _ => {
+                    i += 1;
+                    Part::Code
+                }
+            };
+            let end = i.min(bytes.len());
+            parts[start..end].fill(part);
+            i = end;
+        }
+        parts
+    }
+
+    /// Whether `byte` can be part of an identifier. The bytes of characters
+    /// beyond ASCII count: outside literals and comments, only identifiers
+    /// hold them.
+    fn is_identifier(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_' || !byte.is_ascii()
+    }
+
+    /// Where the string whose text starts at `i` ends, after its closing
+    /// quote.
+    fn string_end(bytes: &[u8], mut i: usize) -> usize {
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2,
+                b'"' => return i + 1,
+                _ => i += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    /// Where the character literal that starts with the quote at `i` ends,
+    /// or `None` when that quote starts a lifetime or a label.
+    fn char_literal_end(source: &str, i: usize) -> Option<usize> {
+        let rest = &source[i + 1..];
+        let first = rest.chars().next()?;
+        if first == '\\' {
+            let escaped = rest[1..].chars().next()?;
+            let after = 1 + escaped.len_utf8();
+            return rest[after..].find('\'').map(|end| i + 1 + after + end + 1);
+        }
+        let after = first.len_utf8();
+        rest[after..].starts_with('\'').then_some(i + 1 + after + 1)
+    }
+
+    /// Where the raw string that starts at `i` (`r"`, `r#"`, `br"`, `cr"`
+    /// and so on) ends, or `None` when no raw string starts there.
+    fn raw_string_end(source: &str, i: usize) -> Option<usize> {
+        let bytes = source.as_bytes();
+        let mut at = i;
+        if matches!(bytes.get(at), Some(b'b' | b'c')) {
+            at += 1;
+        }
+        if bytes.get(at) != Some(&b'r') {
+            return None;
+        }
+        at += 1;
+        let hashes = bytes[at..].iter().take_while(|byte| **byte == b'#').count();
+        at += hashes;
+        if bytes.get(at) != Some(&b'"') {
+            return None;
+        }
+        let body = at + 1;
+        let closing = format!("\"{}", "#".repeat(hashes));
+        Some(
+            source[body..]
+                .find(&closing)
+                .map_or(source.len(), |end| body + end + closing.len()),
+        )
+    }
+
+    /// The byte ranges of the inline test modules in `structure`, the
+    /// source with its comments and literals blanked out: from
+    /// `#[cfg(test)]` to the brace that closes the `mod tests {` after it.
+    fn inline_test_modules(structure: &str) -> Vec<Range<usize>> {
+        const ATTRIBUTE: &str = "#[cfg(test)]";
+        let mut modules = Vec::new();
+        let mut from = 0;
+        while let Some(start) = structure[from..].find(ATTRIBUTE).map(|at| from + at) {
+            from = start + ATTRIBUTE.len();
+            let Some(open) = test_module_body(&structure[from..]).map(|at| from + at) else {
+                continue;
+            };
+            let mut depth = 0usize;
+            let end = structure[open..]
+                .char_indices()
+                .find_map(|(offset, c)| {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(open + offset + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                    None
+                })
+                .unwrap_or(structure.len());
+            modules.push(start..end);
+            from = end;
+        }
+        modules
+    }
+
+    /// Where the opening brace is when `text` starts with `mod tests {`,
+    /// with any whitespace around the words.
+    fn test_module_body(text: &str) -> Option<usize> {
+        let after_mod = text.trim_start().strip_prefix("mod")?;
+        let name = after_mod.trim_start();
+        if name.len() == after_mod.len() {
+            return None;
+        }
+        let body = name.strip_prefix("tests")?.trim_start();
+        body.starts_with('{').then_some(text.len() - body.len())
     }
 }
 
@@ -228,7 +440,7 @@ mod tests {
     ];
 
     /// The string literals `source` hands straight to one of `TEXT_CALLS`,
-    /// with their line. Comments and the test module are left out.
+    /// with their line. Comments and inline test modules are left out.
     fn literal_texts(source: &str) -> Vec<(usize, String)> {
         let code = probe::code_only(source);
         let mut found = Vec::new();
@@ -292,6 +504,7 @@ mod tests {
                 .my_aria_value("not this one")
                 .when_some(text, |this, text| this.aria_placeholder(text));
             Label::new("Server");
+            div().child(link("https://example.com")).tooltip("Open the link");
 #[cfg(test)]
 mod tests {
     fn sample() { div().aria_description("in a test"); }
@@ -303,6 +516,7 @@ mod tests {
                 (2, "\"not available\"".to_string()),
                 (3, "r#\"Copy\"#".to_string()),
                 (10, "\"Server\"".to_string()),
+                (11, "\"Open the link\"".to_string()),
             ]
         );
     }

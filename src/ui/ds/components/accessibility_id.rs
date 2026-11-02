@@ -91,7 +91,7 @@ mod tests {
 
     /// The calls to `AccessibilityId::new` in `source` that do not pass
     /// string literals for the window and the component, with their line.
-    /// Comments and the test module are left out.
+    /// Comments and inline test modules are left out.
     fn ids_from_other_than_literals(source: &str) -> Vec<(usize, String)> {
         let code = probe::code_only(source);
         let mut found = Vec::new();
@@ -168,10 +168,17 @@ mod tests {
             let d = AccessibilityId::new("main", Box::leak(title.into_boxed_str()), 0);
             let e = AccessibilityId::new;
             // AccessibilityId::new(title, "copy", 0)
+            /* AccessibilityId::new(title, "copy", 0) */
+            let f = ("https://", AccessibilityId::new(window, "copy", 0));
+            let g = ('"', "//", AccessibilityId::new(window, "copy", 0));
 #[cfg(test)]
 mod tests {
     fn sample() { AccessibilityId::new(title, "copy", 0); }
 }
+            let h = AccessibilityId::new(window, "copy", 0);
+#[cfg(test)]
+mod tests;
+            let i = AccessibilityId::new(window, "copy", 0);
         "#;
         assert_eq!(
             ids_from_other_than_literals(source),
@@ -186,6 +193,22 @@ mod tests {
                         .to_string()
                 ),
                 (10, "let e = AccessibilityId::new;".to_string()),
+                (
+                    13,
+                    r#"let f = ("https://", AccessibilityId::new(window, "copy", 0));"#.to_string()
+                ),
+                (
+                    14,
+                    r#"let g = ('"', "//", AccessibilityId::new(window, "copy", 0));"#.to_string()
+                ),
+                (
+                    19,
+                    r#"let h = AccessibilityId::new(window, "copy", 0);"#.to_string()
+                ),
+                (
+                    22,
+                    r#"let i = AccessibilityId::new(window, "copy", 0);"#.to_string()
+                ),
             ]
         );
     }
