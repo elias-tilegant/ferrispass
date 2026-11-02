@@ -462,7 +462,7 @@ fn appearance_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> imp
                 choice.label().to_string(),
                 choice == current,
                 cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                    crate::ui::theme::apply_choice(choice, Some(window), cx);
+                    crate::ui::ds::apply_choice(choice, Some(window), cx);
                     shell.update_settings(
                         AppSettings {
                             theme: choice,
