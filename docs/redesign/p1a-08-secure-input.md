@@ -2,7 +2,7 @@
 
 While the master password field on the unlock screen has focus, FerrisPass turns on macOS secure event input. Programs that watch the keyboard, through an event tap or the older Carbon hooks, stop seeing what is typed until the field loses focus. Nothing changes on screen. If macOS refuses, a notice says the field is not protected.
 
-Started from `p1a-06-clipboard-path` at `5da7f72` on 2026-11-01.
+Started from `p1a-06-clipboard-path` at `5da7f72` on 2026-11-01; `0fc6974` took in its later commit `3b140de`, which only touched its own page.
 
 | Commit | What |
 |---|---|
@@ -10,7 +10,8 @@ Started from `p1a-06-clipboard-path` at `5da7f72` on 2026-11-01.
 | `d58da6b` | The master password field, the window, lock, unlock and quit use the guard |
 | `e016fc5` | A Disable that fails is tried again later, and no second Enable is stacked on top of it |
 | `0a989da` | The test with the real Carbon calls runs on a real main thread, and the calls check for it |
-| the last one | SECURITY.md and this page |
+| `aab10f4` | SECURITY.md and this page |
+| the last one | The check by hand as steps that work with the guard in place, and the time in the progress log |
 
 ## How the guard works
 
@@ -46,9 +47,25 @@ The spike on 2026-10-17 ran the same guard shape in a GPUI window on a Mac: an e
 
 `carbon_calls_balance` makes the real Carbon calls in every test run: after `hold` the system reports secure input on, after the drop it is back where it was. libtest runs unit tests on worker threads, so this one is a doctest that rustdoc builds as a program of its own; it runs from `main`, on a real main thread.
 
-## Checked by hand
+## How to check by hand
 
-One case no test can show: the process killed while the field has focus. Apple's header says that if the app crashes, secure event input is turned off unless another app has it on, and Technical Note TN2150 says the same for a process that ends. On a preview build, with the field focused, `ioreg -l -w 0 | grep -o '"kCGSSessionSecureInputPID"=[0-9]*'` shows FerrisPass's PID; after `kill -9` it shows nothing. The same command shows nothing after a click into another app, after unlocking and after Cmd+Q, and the Auto-Type shortcut still reaches FerrisPass while the field has focus.
+One case no test can show: the process killed while the field has focus. Apple's header says that if the app crashes, secure event input is turned off unless another app has it on, and Technical Note TN2150 says the same for a process that ends. The rest of the list repeats on a real Mac what the tests show with the fake.
+
+On a preview build. `ioreg` reports the PID of the process that holds secure event input. Typing the command into Terminal brings Terminal to the front, and that alone makes FerrisPass let go, so leave a loop running in a Terminal window that stays visible behind FerrisPass:
+
+```sh
+while sleep 1; do ioreg -l -w 0 | grep -o '"kCGSSessionSecureInputPID"=[0-9]*' || echo none; done
+```
+
+- Click into the master password field: the loop prints FerrisPass's PID.
+- Click into another app: `none`. Click back into the field: the PID again.
+- Tab to the key file field: `none`.
+- Unlock: `none`.
+- Lock, click into the field, quit with Cmd+Q: `none`.
+- In a second Terminal window run `sleep 10; kill -9 $(pgrep -f FerrisPass.app/Contents/MacOS/ferrispass)`, switch to FerrisPass and click into the field before the ten seconds are up. The loop shows the PID, then `none` once the process is gone.
+- With the field focused, the Auto-Type shortcut still reaches FerrisPass.
+
+If another app holds secure event input at the same time (Terminal's "Secure Keyboard Entry", for example), the loop shows that app's PID instead of `none`.
 
 ## Limits
 
