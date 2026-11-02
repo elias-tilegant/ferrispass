@@ -221,7 +221,9 @@ mod tests {
 
     /// `Keycap` is visible inside `ui::ds` only, so code elsewhere cannot
     /// name it. This scan backs that up for every folder with Rust in it,
-    /// in case the visibility is ever widened.
+    /// in case the visibility is ever widened. Like the other scans over the
+    /// source it leaves out comments and inline test modules, and reads the
+    /// rest of a line after a `//` inside a string.
     #[test]
     fn keycap_cannot_be_built_outside_ds() {
         // Built from pieces so this file does not match its own pattern.
@@ -240,9 +242,9 @@ mod tests {
         let mut found = Vec::new();
         for file in files.iter().filter(|file| !file.starts_with(&ds)) {
             let text = std::fs::read_to_string(file).expect("read source");
-            for (number, line) in text.lines().enumerate() {
-                let code = line.split("//").next().unwrap_or_default();
-                if code.contains(constructor) {
+            let code = probe::code_only(&text);
+            for (number, line) in code.lines().enumerate() {
+                if line.contains(constructor) {
                     found.push(format!(
                         "{}:{}: {}",
                         file.display(),
