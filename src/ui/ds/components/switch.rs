@@ -12,6 +12,15 @@
 //! The Kit switch takes no description, so the sentence below is a node of
 //! its own, a label with the sentence as its value, which VoiceOver reaches
 //! right after the switch.
+//!
+//! The Kit's own focus ring, a tinted edge on the track with a 3 px band at
+//! half opacity and no gap, is off. The track shows the ring of every
+//! component instead, for focus from the keyboard. The Kit switch keeps its
+//! focus handle to itself, so the track sits in a wrapper that tracks a
+//! handle of its own, which is never a tab stop. Focus inside the wrapper
+//! is the switch's: nothing else in there can take focus, and a press on
+//! the switch focuses the switch, not the wrapper. A disabled switch takes
+//! no focus, and its wrapper tracks none.
 
 use std::rc::Rc;
 
@@ -21,9 +30,10 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_base::TestSupportExt as _;
-use gpui_component::Disableable as _;
 use gpui_component::switch::Switch as KitSwitch;
+use gpui_component::{Disableable as _, FocusableExt as _};
 
+use super::focus_ring::{Outline, keyboard_focus_ring};
 use crate::ui::ds::ActiveTokens as _;
 use crate::ui::ds::tokens::dimension;
 use crate::ui::ds::typography::{TextStyle, TextStyled as _, u};
@@ -83,8 +93,17 @@ impl Switch {
 }
 
 impl RenderOnce for Switch {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.ds().colors;
+        // Focus inside the wrapper around the track is the switch's.
+        let frame = window
+            .use_keyed_state((self.id.clone(), "focus-frame"), cx, |_, cx| {
+                cx.focus_handle()
+            })
+            .read(cx)
+            .clone();
+        let focused = !self.disabled && frame.contains_focused(window, cx);
+        let ring = keyboard_focus_ring(focused, Outline::Capsule, window, cx);
         let note = self
             .note
             .map(|sentence| note_line(self.id.clone(), sentence, cx));
@@ -93,6 +112,7 @@ impl RenderOnce for Switch {
             .disabled(self.disabled)
             .accessibility_label(self.label.clone())
             .color(colors.switch_on_bg.hsla)
+            .focus_ring(false)
             .when_some(
                 self.on_change.filter(|_| !self.disabled),
                 |switch, handler| {
@@ -108,7 +128,14 @@ impl RenderOnce for Switch {
                     .flex()
                     .items_center()
                     .gap(u(dimension::SPACE_8))
-                    .child(switch)
+                    .child(
+                        div()
+                            .debug_selector(|| "fp-switch-track".into())
+                            .relative()
+                            .when(!self.disabled, |this| this.track_focus(&frame))
+                            .child(switch)
+                            .children(ring),
+                    )
                     .child(
                         div()
                             .text_style(TextStyle::Body)
@@ -145,7 +172,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{Hsla, Modifiers, TestAppContext};
+    use gpui::{Hsla, Modifiers, TestAppContext, px, size};
 
     use super::super::probe;
     use super::*;
@@ -249,6 +276,25 @@ mod tests {
 
         cx.simulate_click(switch.bounds().center(), Modifiers::default());
         assert_eq!(asked.get(), Some(false), "a click asks for off");
+    }
+
+    /// Tab shows the ring around the track and a click does not. The Kit's
+    /// own ring, which tints the track's edge and lays a band at half
+    /// opacity around it, is off, so the ring is the only edge focus adds.
+    #[gpui::test]
+    fn the_switch_shows_the_focus_ring_for_the_keyboard_only(cx: &mut TestAppContext) {
+        let cx = probe::window(cx, |_, _| {
+            div()
+                .p(px(8.))
+                .child(Switch::new("autolock", text("Lock when idle")).checked(true))
+                .into_any_element()
+        });
+        let track = probe::assert_keyboard_focus_ring(cx, "fp-switch-track");
+        assert_eq!(
+            track.size,
+            size(px(36.), px(20.)),
+            "the ring goes around the track"
+        );
     }
 
     /// The sentence under a switch is a node of its own, a label with the

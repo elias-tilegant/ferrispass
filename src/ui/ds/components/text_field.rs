@@ -2,7 +2,7 @@
 //! label above it and, when something is wrong, a sentence below it.
 //!
 //! The Kit input keeps what is hard to get right (editing, selection, input
-//! methods, the context menu). This wrapper changes three things about it:
+//! methods, the context menu). This wrapper changes four things about it:
 //!
 //! - Its height and text size. Kit Medium is 26 high at text size 13 and
 //!   writes 11.4 px; the field is 28 high and writes `Body` at 13, and both
@@ -11,16 +11,20 @@
 //!   macOS then reads the placeholder as name and value at once. The field's
 //!   name is always its label.
 //! - Its edge, which turns carmine with an error.
+//! - Its focus ring. The Kit tints the edge and lays a 3 px band at half
+//!   opacity around it, without a gap; the field turns that off and shows
+//!   the ring of every component instead, for focus from the keyboard.
 
 use gpui::{
-    App, Div, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    App, Div, ElementId, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+    ParentElement as _, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::{Icon, IconName};
+use gpui_component::{FocusableExt as _, Icon, IconName};
 
 use super::AccessibilityId;
+use super::focus_ring::{Outline, keyboard_focus_ring};
 use crate::ui::ds::ActiveTokens as _;
 use crate::ui::ds::tokens::dimension;
 use crate::ui::ds::typography::{TextStyle, TextStyled as _, u};
@@ -88,6 +92,7 @@ impl TextField {
             .id((self.id.clone(), "input"))
             .aria_label(self.label.clone())
             .disabled(self.disabled)
+            .focus_ring(false)
             .when_some(self.accessibility_id.clone(), |input, id| {
                 input.accessibility_id(id)
             });
@@ -102,9 +107,11 @@ impl TextField {
 }
 
 impl RenderOnce for TextField {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.ds().colors;
         let input = self.input(cx);
+        let focused = !self.disabled && self.state.focus_handle(cx).is_focused(window);
+        let ring = keyboard_focus_ring(focused, Outline::Rounded, window, cx);
         div()
             .flex()
             .flex_col()
@@ -118,7 +125,9 @@ impl RenderOnce for TextField {
             .child(
                 div()
                     .debug_selector(|| "fp-text-field-input".into())
-                    .child(input),
+                    .relative()
+                    .child(input)
+                    .children(ring),
             )
             .when_some(self.error, |this, sentence| {
                 this.child(error_line(self.id, sentence, cx))
@@ -284,6 +293,25 @@ mod tests {
             Some("name@example.com"),
             "the Kit names a field after its placeholder"
         );
+    }
+
+    /// Tab shows the ring around the input and a click does not. The Kit's
+    /// own ring, which tints the edge and lays a band at half opacity around
+    /// it, is off, so the ring is the only edge focus adds.
+    #[gpui::test]
+    fn the_text_field_shows_the_focus_ring_for_the_keyboard_only(cx: &mut TestAppContext) {
+        let state: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
+        let cx = probe::window(cx, move |window, cx| {
+            let state = state
+                .borrow_mut()
+                .get_or_insert_with(|| cx.new(|cx| InputState::new(window, cx)))
+                .clone();
+            div()
+                .p(px(8.))
+                .child(TextField::new("server", &state, text("Server")))
+                .into_any_element()
+        });
+        probe::assert_keyboard_focus_ring(cx, "fp-text-field-input");
     }
 
     #[gpui::test]

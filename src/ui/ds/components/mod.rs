@@ -5,10 +5,13 @@
 //! comes from a text key, never from a literal in here, and a stable element
 //! id. The button is drawn on the unstyled `gpui_base::Button`; the text field
 //! and the switch wrap the GPUI Kit controls, whose editing and toggling
-//! behavior is worth keeping.
+//! behavior is worth keeping. All three show the same keyboard focus ring,
+//! from `focus_ring.rs`, and the text field and the switch turn the Kit's
+//! own ring off for it.
 
 mod accessibility_id;
 pub mod button;
+mod focus_ring;
 pub(in crate::ui::ds) mod keycap;
 pub mod shortcut;
 pub mod switch;
@@ -110,11 +113,13 @@ pub(in crate::ui::ds) mod probe {
     use std::rc::Rc;
 
     use gpui::{
-        AnyElement, App, AppContext as _, Context, Element as _, IntoElement, ParentElement as _,
-        Render, Role, Styled as _, TestAppContext, VisualTestContext, Window, accesskit, canvas,
-        div,
+        AnyElement, App, AppContext as _, Bounds, Context, Edges, Element as _, Hsla, IntoElement,
+        Modifiers, ParentElement as _, Pixels, Render, Role, Styled as _, TestAppContext,
+        VisualTestContext, Window, accesskit, canvas, div, px,
     };
     use gpui_component::{Root, Theme};
+
+    use crate::ui::ds::ActiveTokens as _;
 
     type Build = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
@@ -179,6 +184,91 @@ pub(in crate::ui::ds) mod probe {
         let mut node = accesskit::Node::new(role.unwrap_or(Role::Unknown));
         element.write_a11y_info(&mut node);
         (role, node)
+    }
+
+    /// The edges a window painted in its last frame: each quad with a
+    /// visible border, with its bounds, its color and its widths in pixels.
+    /// GPUI paints an edge without a surface as strips that share the
+    /// bounds and the widths of the edge.
+    fn edges(cx: &mut VisualTestContext) -> Vec<(Bounds<Pixels>, Hsla, Edges<Pixels>)> {
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| !quad.border_color.is_transparent())
+                .map(|quad| {
+                    (
+                        quad.bounds.map(|value| px(value.0 / scale)),
+                        quad.border_color,
+                        quad.border_widths.map(|width| px(width.0 / scale)),
+                    )
+                })
+                .filter(|(_, _, widths)| widths.any(|width| *width > Pixels::ZERO))
+                .collect()
+        })
+    }
+
+    /// Takes the first tab stop of the window, as Tab does, and checks the
+    /// ring around the element marked `control`: it ends 3 px out, it is the
+    /// only edge focus adds to the frame, 2 px wide in `focus_ring`, and
+    /// 1 px lies between it and the control. A ring the GPUI Kit draws, a
+    /// tinted edge or a wider band, is an edge focus adds too. Then clicks
+    /// the middle of the control and checks that focus from a click shows
+    /// no ring. Returns the bounds of the control.
+    pub fn assert_keyboard_focus_ring(
+        cx: &mut VisualTestContext,
+        control: &'static str,
+    ) -> Bounds<Pixels> {
+        assert_eq!(
+            cx.debug_bounds("fp-focus-ring"),
+            None,
+            "nothing has focus yet"
+        );
+        let unfocused = edges(cx);
+        // With nothing focused yet, a key press reaches no handler, so the
+        // first tab stop is taken directly after it, as Tab would.
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            assert!(window.last_input_was_keyboard());
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = cx.debug_bounds(control).expect("the control");
+        let ring = cx.debug_bounds("fp-focus-ring").expect("a ring after Tab");
+        assert_eq!(ring, bounds.dilate(px(3.)), "the ring ends 3 px out");
+        let color = cx.update(|_, cx| cx.ds().colors.focus_ring.hsla);
+        let added: Vec<_> = edges(cx)
+            .into_iter()
+            .filter(|edge| !unfocused.contains(edge))
+            .collect();
+        assert!(!added.is_empty(), "the ring is painted");
+        assert!(
+            added
+                .iter()
+                .all(|(_, painted, width)| *painted == color && *width == Edges::all(px(2.))),
+            "focus adds the ring alone, 2 px wide in focus_ring: {added:?}"
+        );
+        let (_, _, width) = &added[0];
+        let gaps = [
+            bounds.left() - (ring.left() + width.left),
+            bounds.top() - (ring.top() + width.top),
+            (ring.right() - width.right) - bounds.right(),
+            (ring.bottom() - width.bottom) - bounds.bottom(),
+        ];
+        assert!(
+            gaps.iter().all(|gap| (*gap - px(1.)).abs() < px(0.01)),
+            "1 px between the control and the ring: {gaps:?}"
+        );
+
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            cx.debug_bounds("fp-focus-ring"),
+            None,
+            "a click shows no ring"
+        );
+        bounds
     }
 
     /// Every `.rs` file under `dir`, for the scans over the source.

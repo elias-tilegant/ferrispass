@@ -11,22 +11,23 @@
 //!   assistive technology yet.
 //!
 //! A button that is held down fades to [`PRESSED_OPACITY`] instead of
-//! shrinking: GPUI cannot scale an element. Focus from the keyboard shows a
-//! ring outside the button, 2 px in `focus_ring` with 1 px of space; it takes
-//! no room, and a click does not show it.
+//! shrinking: GPUI cannot scale an element. Focus from the keyboard shows the
+//! ring of every component outside the button, 2 px in `focus_ring` with
+//! 1 px of space; it takes no room, and a click does not show it.
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    Keystroke, ParentElement as _, RenderOnce, Role, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, accesskit, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, ElementId, Hsla, InteractiveElement as _, IntoElement, Keystroke,
+    ParentElement as _, RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled,
+    Window, accesskit, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::Icon;
 use gpui_component::spinner::Spinner;
 
 use super::AccessibilityId;
+use super::focus_ring::{Outline, keyboard_focus_ring};
 use super::keycap::{Keycap, keys_text, parse_keys};
 use crate::tr;
 use crate::ui::ds::ActiveTokens as _;
@@ -369,7 +370,16 @@ impl Button {
             .use_keyed_state((self.id.clone(), "focus"), cx, |_, cx| cx.focus_handle())
             .read(cx)
             .clone();
-        let ring = !self.disabled && focus.is_focused(window) && window.last_input_was_keyboard();
+        let ring = keyboard_focus_ring(
+            !self.disabled && focus.is_focused(window),
+            if capsule {
+                Outline::Capsule
+            } else {
+                Outline::Rounded
+            },
+            window,
+            cx,
+        );
 
         let content: AnyElement = match self.content {
             Content::Label(label) => label.into_any_element(),
@@ -429,32 +439,8 @@ impl Button {
             })
             .child(content)
             .children(keycaps)
-            .when(ring, |this| {
-                this.child(focus_ring(colors.focus_ring.hsla, capsule))
-            })
+            .children(ring)
     }
-}
-
-/// The keyboard focus ring: outside the button, so it takes no room, and
-/// with a gap that shows whatever is behind the button.
-fn focus_ring(color: Hsla, capsule: bool) -> Div {
-    let outset = px(dimension::FOCUS_GAP + dimension::FOCUS_WIDTH);
-    div()
-        .debug_selector(|| "fp-focus-ring".into())
-        .absolute()
-        .top(-outset)
-        .left(-outset)
-        .right(-outset)
-        .bottom(-outset)
-        .border(px(dimension::FOCUS_WIDTH))
-        .border_color(color)
-        .map(|this| {
-            if capsule {
-                this.rounded_full()
-            } else {
-                this.rounded(px(dimension::RADIUS_MD) + outset)
-            }
-        })
 }
 
 impl RenderOnce for Button {
@@ -547,8 +533,8 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{
-        Bounds, CursorStyle, Edges, Modifiers, MouseButton, Pixels, TestAppContext,
-        VisualTestContext, point,
+        Bounds, CursorStyle, Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext,
+        point,
     };
     use gpui_component::IconName;
 
@@ -1012,8 +998,7 @@ mod tests {
     }
 
     /// Tab shows the ring around the button, 1 px away and 2 px wide; a
-    /// click on a focused button does not. The ring's place comes from its
-    /// bounds, its width from the edge GPUI paints.
+    /// click on a focused button does not.
     #[gpui::test]
     fn the_focus_ring_shows_for_the_keyboard_only(cx: &mut TestAppContext) {
         let cx = probe::window(cx, |_, _| {
@@ -1026,59 +1011,7 @@ mod tests {
                 )
                 .into_any_element()
         });
-        assert_eq!(
-            cx.debug_bounds("fp-focus-ring"),
-            None,
-            "nothing has focus yet"
-        );
-        // With nothing focused yet, a key press reaches no handler, so the
-        // first tab stop is taken directly after it, as Tab would.
-        cx.simulate_keystrokes("tab");
-        cx.update(|window, cx| {
-            window.focus_next(cx);
-            assert!(window.last_input_was_keyboard());
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let button = cx.debug_bounds("fp-test-button").expect("the button");
-        let ring = cx.debug_bounds("fp-focus-ring").expect("a ring after Tab");
-        assert_eq!(ring, button.dilate(px(3.)), "the ring ends 3 px out");
-        // GPUI paints an edge without a surface as strips that share the
-        // bounds and the widths of the edge.
-        let widths: Vec<Edges<Pixels>> = cx.update(|window, cx| {
-            let color = cx.ds().colors.focus_ring.hsla;
-            let scale = window.scale_factor();
-            window
-                .painted_quads()
-                .into_iter()
-                .filter(|quad| quad.border_color == color)
-                .map(|quad| quad.border_widths.map(|width| px(width.0 / scale)))
-                .collect()
-        });
-        assert!(!widths.is_empty(), "the ring is painted in focus_ring");
-        assert!(
-            widths.iter().all(|width| *width == Edges::all(px(2.))),
-            "the ring is 2 px wide: {widths:?}"
-        );
-        let width = &widths[0];
-        let gaps = [
-            button.left() - (ring.left() + width.left),
-            button.top() - (ring.top() + width.top),
-            (ring.right() - width.right) - button.right(),
-            (ring.bottom() - width.bottom) - button.bottom(),
-        ];
-        assert!(
-            gaps.iter().all(|gap| (*gap - px(1.)).abs() < px(0.01)),
-            "1 px between the button and the ring: {gaps:?}"
-        );
-
-        let middle = button.center();
-        cx.simulate_click(middle, Modifiers::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert_eq!(
-            cx.debug_bounds("fp-focus-ring"),
-            None,
-            "a click shows no ring"
-        );
+        probe::assert_keyboard_focus_ring(cx, "fp-test-button");
     }
 
     /// What the window painted in the place of its keycap: the colors of
