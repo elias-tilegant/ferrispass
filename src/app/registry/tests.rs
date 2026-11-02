@@ -66,17 +66,17 @@ fn ids_name_an_area_and_a_verb() {
 
 #[test]
 fn every_label_key_exists() {
+    // English only. A label without German reads the English text, as tr!
+    // does, so a German check here could never fail.
+    // every_key_has_both_languages in src/i18n/tests.rs fails for it.
     for spec in commands() {
-        for language in Language::ALL {
-            let text = catalogue_text(language, spec.label_key);
-            assert!(
-                text.is_some_and(|text| !text.trim().is_empty()),
-                "{}: `{}` has no {} text in locales/action.yml",
-                id(spec),
-                spec.label_key,
-                language.code()
-            );
-        }
+        let text = catalogue_text(Language::English, spec.label_key);
+        assert!(
+            text.is_some_and(|text| !text.trim().is_empty()),
+            "{}: `{}` has no text in locales/action.yml",
+            id(spec),
+            spec.label_key
+        );
     }
 }
 
