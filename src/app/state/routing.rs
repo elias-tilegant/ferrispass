@@ -149,6 +149,7 @@ impl AppState {
         if !matches!(self.vault, VaultStatus::Open { .. }) {
             return;
         }
+        self.explicit_selection = None;
         let session_id = self
             .active_vault_session_id
             .take()
