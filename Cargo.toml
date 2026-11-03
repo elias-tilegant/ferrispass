@@ -178,6 +178,13 @@ gpui-component = { version = "=0.7.1", features = ["test-support"] }
 regex = "1"
 toml = "0.8"
 
+# Checks on the real macOS text system. macOS lets the platform be created on
+# the main thread only, and libtest runs every test on a thread of its own, so
+# this test brings its own `main`.
+[[test]]
+name = "text_system"
+harness = false
+
 [lints.rust]
 # `deny` (rather than `forbid`) so a single targeted module - currently
 # only `src/biometric/macos.rs`, which wraps LocalAuthentication FFI

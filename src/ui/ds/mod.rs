@@ -1,6 +1,6 @@
 //! The FerrisPass design system.
 //!
-//! Colours, dimensions and the GPUI Kit theme all come from
+//! Colours, dimensions, text styles and the GPUI Kit theme all come from
 //! `design/tokens.json`. `design/README.md` explains how to change them.
 
 #![forbid(unsafe_code)]
@@ -8,6 +8,7 @@
 pub mod a11y_prefs;
 pub mod kit_theme;
 pub mod tokens;
+pub mod typography;
 
 use gpui::{App, Window};
 
@@ -42,6 +43,10 @@ impl Appearance {
 /// Startup: after the fonts are added and `gpui_component::init` ran, before
 /// the first window opens, so the first frame is already right.
 pub fn init(choice: ThemeChoice, cx: &mut App) {
+    // The bundled fonts are in by now, so this is where the mono family is
+    // decided: Atkinson Hyperlegible Mono if the text system has it, else
+    // the fallback.
+    typography::mono_family(cx);
     kit_theme::install(cx);
     apply(cx, Appearance::current(choice));
 }
