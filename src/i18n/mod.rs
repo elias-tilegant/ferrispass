@@ -131,6 +131,7 @@ pub fn init() {
 #[cfg_attr(not(test), allow(dead_code))]
 const CATALOGUES: &[(&str, &str)] = &[
     ("a11y.yml", include_str!("../../locales/a11y.yml")),
+    ("action.yml", include_str!("../../locales/action.yml")),
     ("bundle.yml", include_str!("../../locales/bundle.yml")),
     ("common.yml", include_str!("../../locales/common.yml")),
     ("glossary.yml", include_str!("../../locales/glossary.yml")),
@@ -183,6 +184,16 @@ fn lookup(language: Language, key: &str) -> String {
             key.to_string()
         }
     }
+}
+
+/// The text for `key` in `language` as the catalogues hold it, placeholders
+/// unfilled, or `None` when there is no such key. For tests that hold a key
+/// as text and need to know it exists or what `tr!` shows for it, such as
+/// the command table's label keys. A missing German falls back to English,
+/// as in `tr!`; `every_key_has_both_languages` makes sure none is missing.
+#[cfg(test)]
+pub fn catalogue_text(language: Language, key: &str) -> Option<String> {
+    crate::_rust_i18n_try_translate(language.code(), key).map(|text| text.into_owned())
 }
 
 fn fill(key: &str, template: &str, args: &[(&str, String)]) -> String {

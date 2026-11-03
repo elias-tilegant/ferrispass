@@ -1,0 +1,70 @@
+_version: 2
+# The words for the commands in src/app/registry/, one word or a short
+# phrase each. Quick Access, the menu bar item's menu, the main window's
+# menus and the command palette will all show these words once they are
+# built. A screen never names a command with words of its own. The command
+# <area>.<verb> reads action.<verb>.label.
+action:
+  # What Return does with the selected entry. Lists of shortcuts show this
+  # word. With an entry in view, Return shows the word of the entry's main
+  # action instead, one of the three below.
+  primary:
+    label:
+      en: Main action
+      de: Hauptaktion
+  sap_login:
+    label:
+      en: Sign in
+      de: Anmelden
+  open_website:
+    label:
+      en: Open website
+      de: Website öffnen
+  copy_password:
+    label:
+      en: Copy password
+      de: Passwort kopieren
+  copy_username:
+    label:
+      en: Copy user name
+      de: Benutzer kopieren
+  copy_code:
+    label:
+      en: Copy code
+      de: Code kopieren
+  copy_url:
+    label:
+      en: Copy address
+      de: Adresse kopieren
+  open_url:
+    label:
+      en: Open address
+      de: Adresse öffnen
+  show_in_app:
+    label:
+      en: Show in FerrisPass
+      de: In FerrisPass zeigen
+  quick_access:
+    label:
+      en: Quick Access
+      de: Schnellzugriff
+  open:
+    label:
+      en: Open FerrisPass
+      de: FerrisPass öffnen
+  lock_all:
+    label:
+      en: Lock everything
+      de: Alles sperren
+  settings:
+    label:
+      en: Settings
+      de: Einstellungen
+  quit:
+    label:
+      en: Quit
+      de: Beenden
+  close:
+    label:
+      en: Close
+      de: Schließen
