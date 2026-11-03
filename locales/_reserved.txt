@@ -85,11 +85,6 @@ quick.locked.file_missing            the quick access panel, locked
 quick.error.website_failed           the quick access panel
 quick.error.copy_failed              the quick access panel
 
-menubar.menu.quick_access            the menu bar item
-menubar.menu.open_app                the menu bar item
-menubar.menu.lock_all                the menu bar item
-menubar.menu.settings                the menu bar item
-menubar.menu.quit                    the menu bar item
 menubar.notch.hidden                 the menu bar item, when the notch hides it
 menubar.notch.practice               the menu bar item, when the notch hides it
 

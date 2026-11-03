@@ -3,6 +3,7 @@ pub mod assets;
 
 pub mod kinds;
 mod recents;
+pub mod registry;
 mod search;
 pub mod services;
 pub mod settings;
