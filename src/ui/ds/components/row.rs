@@ -12,7 +12,9 @@
 //! shows into words: [`RowParts::accessible_name`]. The tile, the chip, the
 //! badge and the texts write no node of their own: none of them gets an
 //! element id or a role, and the texts are plain strings, not GPUI text
-//! with an id. The ghost button is a button inside the option.
+//! with an id. The tests render the parts and read the source for the
+//! calls that would give one of them a node; only a device session shows
+//! the tree VoiceOver gets. The ghost button is a button inside the option.
 //!
 //! The row draws the selection it is given and never changes it. The
 //! pointer over a row changes its color and shows its verb, nothing else.
@@ -363,7 +365,7 @@ fn keys_hint(keys: SharedString, colors: &ColorSet) -> Div {
 /// gives a role only to an element with an id, a `Stateful<Div>`, so an id
 /// or a role on one of them does not compile here. A text with an id inside
 /// one of them would compile, and GPUI would write it as a label, so a test
-/// reads this file for such a text.
+/// reads this file for the calls that build one.
 struct Inside {
     tile: Tile,
     title: Div,
@@ -772,11 +774,15 @@ mod tests {
     /// gives an element an id and one that gives it a role, written as a
     /// method or through its trait, and both are on the row's own node, so
     /// neither the parts the test above reads nor the boxes that line them
-    /// up get one. It builds no text with an id, which GPUI writes as a
-    /// label, so the title, the second line and the keys stay plain text in
-    /// the row's node, and it shows no part of the row on its own, which
+    /// up get one. It calls none of `Text::new`, `text!`, `with_id` and
+    /// `InteractiveText`, which build a text with an id that GPUI writes as
+    /// a label, so the title, the second line and the keys stay plain text
+    /// in the row's node, and it shows no part of the row on its own, which
     /// would give it a node inside the option. The source is read through
-    /// `code_only`, so comments and these tests do not count.
+    /// `code_only`, so comments and these tests do not count. The test reads
+    /// text, not the tree: such a call made by a macro or a function from
+    /// another file or written through a renamed import, an element that
+    /// reports a role through `a11y_role`, and a Kit control are past it.
     #[test]
     fn a_row_gives_an_id_and_a_role_to_its_own_node_only() {
         let mut wrong = Vec::new();
