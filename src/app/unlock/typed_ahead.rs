@@ -18,13 +18,19 @@
 //!   allows `String::push` in `push` and can't see whether it grows the
 //!   text; the assertion can.
 //! - Secure event input is held for as long as the buffer is live, so other
-//!   programs on the Mac don't see the keystrokes. If macOS refuses it,
-//!   [`TypedAhead::begin`] fails and there is no buffer; the panel then sends
-//!   you to the main window. Where the platform has no secure event input at
-//!   all, the buffer works without it and claims nothing.
-//! - It is wiped 30 seconds after it was started ([`EXPIRY`]), when you
+//!   programs on the Mac don't see the keystrokes. [`TypedAhead::begin`]
+//!   takes it for an empty buffer, before any key arrives: the panel begins
+//!   the buffer as soon as it is key while locked, so secure input is on
+//!   before the first keystroke reaches FerrisPass, not from the first
+//!   keystroke on. If macOS refuses it, `begin` fails and there is no buffer;
+//!   the panel then sends you to the main window. Where the platform has no
+//!   secure event input at all, the buffer works without it and claims
+//!   nothing.
+//! - It is wiped 30 seconds after the first keystroke ([`EXPIRY`]), when you
 //!   cancel, and when it looks like a password: more than one word and not a
-//!   single match. The two checks that can wipe it,
+//!   single match. With nothing typed there is nothing to expire, and the
+//!   buffer keeps secure input for as long as the panel keeps it. The two
+//!   checks that can wipe it,
 //!   [`TypedAhead::expire_if_due`] and [`TypedAhead::wipe_if_password_like`],
 //!   do the wiping themselves. There is no variant that only reports and
 //!   leaves the wiping to the caller.
@@ -32,7 +38,8 @@
 //!   auto-lock: a Mac that slept through them finds the buffer expired. A
 //!   clock that went backwards counts as expired too.
 //! - A wiped buffer stays empty, has let go of secure event input and takes
-//!   no more input. The next keystroke needs a new buffer.
+//!   no more input. A panel that is still key and locked begins the next one
+//!   at once.
 //! - [`TypedAhead::take_query`] hands the text over once, as the search the
 //!   unlocked panel runs, and the buffer is gone with it. A search never
 //!   marks an entry as recently used; only copying a value or launching an
@@ -41,10 +48,14 @@
 //!   only the number of characters. `typed_ahead_never_logs_or_writes` in
 //!   `tests/architecture.rs` reads this file to keep it that way.
 //!
-//! Who owns the buffer and calls these methods is the panel: it starts one
-//! with the first keystroke, checks [`TypedAhead::expire_if_due`] on every
-//! tick and keystroke and [`TypedAhead::wipe_if_password_like`] after every
-//! search, and wipes it on Esc.
+//! Who owns the buffer and calls these methods is the panel. It begins one as
+//! soon as it is key while locked, before any key arrives, puts every typed
+//! key into it, checks [`TypedAhead::expire_if_due`] on every tick and
+//! keystroke and [`TypedAhead::wipe_if_password_like`] after every search,
+//! and wipes it on Esc. When the panel loses key status the buffer ends, so
+//! secure input does not outlast it: through [`TypedAhead::take_query`] when
+//! the Touch ID dialog took key status, so the text can become the search
+//! once the vault is open, and with a wipe otherwise.
 
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -64,13 +75,17 @@ const INITIAL_CAPACITY: usize = 64;
 /// guard, which stays on the main thread.
 pub struct TypedAhead {
     text: Zeroizing<String>,
-    started: SystemTime,
+    /// When the first key went in; `None` while nothing was typed.
+    started: Option<SystemTime>,
     guard: Option<SecureInputGuard>,
     wiped: bool,
 }
 
 impl TypedAhead {
-    /// An empty buffer that holds secure event input from now on.
+    /// An empty buffer that holds secure event input from now on. The panel
+    /// calls this as soon as it is key while locked, before any key arrives,
+    /// so the first keystroke is already shielded. The 30 seconds start with
+    /// the first key, not here.
     ///
     /// A refusal by macOS, or a call off the main thread, is an error and
     /// there is no buffer: the panel must not collect keystrokes it cannot
@@ -84,16 +99,20 @@ impl TypedAhead {
         };
         Ok(Self {
             text: Zeroizing::new(String::with_capacity(INITIAL_CAPACITY)),
-            started: SystemTime::now(),
+            started: None,
             guard,
             wiped: false,
         })
     }
 
-    /// Adds `c` at the end. Does nothing once the buffer is wiped.
+    /// Adds `c` at the end; the first key starts the 30 seconds. Does nothing
+    /// once the buffer is wiped.
     pub fn push(&mut self, c: char) {
         if self.wiped {
             return;
+        }
+        if self.started.is_none() {
+            self.started = Some(SystemTime::now());
         }
         let needed = self.text.len() + c.len_utf8();
         if needed > self.text.capacity() {
@@ -131,10 +150,14 @@ impl TypedAhead {
         self.text.is_empty()
     }
 
-    /// Whether [`EXPIRY`] has passed at `now`. A `now` before the start,
-    /// which only a clock that went backwards produces, counts as expired.
+    /// Whether [`EXPIRY`] has passed at `now`, counted from the first key. A
+    /// `now` before that, which only a clock that went backwards produces,
+    /// counts as expired. With nothing typed yet, nothing has expired.
     pub fn expired(&self, now: SystemTime) -> bool {
-        match now.duration_since(self.started) {
+        let Some(started) = self.started else {
+            return false;
+        };
+        match now.duration_since(started) {
             Ok(elapsed) => elapsed >= EXPIRY,
             Err(_) => true,
         }
@@ -247,11 +270,108 @@ mod tests {
         assert_eq!(fake.api.disables(), 2);
     }
 
+    /// The panel begins the buffer as soon as it is key while locked, so
+    /// secure input is on before the first key reaches FerrisPass. With
+    /// nothing typed there is nothing to expire, and the buffer keeps secure
+    /// input for as long as the panel keeps it. The keys that follow go in
+    /// under the same guard, which goes when the buffer is wiped, expires,
+    /// hands its text over or is dropped, and only once.
+    #[gpui::test]
+    fn secure_input_is_on_before_the_first_key(cx: &mut TestAppContext) {
+        let fake = install(cx, FakeApi::new());
+        for ending in ["wipe", "expiry", "hand-over", "drop"] {
+            let enables = fake.api.enables();
+            let disables = fake.api.disables();
+
+            let mut buffer = cx.update(|cx| TypedAhead::begin(cx)).expect("begin");
+            assert!(
+                fake.held(),
+                "{ending}: secure input is off before the first key"
+            );
+            assert_eq!(fake.api.enables(), enables + 1, "{ending}");
+            let an_hour_on = SystemTime::now() + Duration::from_secs(3600);
+            assert!(
+                !buffer.expire_if_due(an_hour_on),
+                "{ending}: a buffer with nothing typed in it expired"
+            );
+            assert!(
+                fake.held(),
+                "{ending}: secure input went off with nothing typed"
+            );
+
+            for c in "nhq".chars() {
+                buffer.push(c);
+            }
+            assert_eq!(buffer.len(), 3, "{ending}");
+            assert!(fake.held(), "{ending}");
+            assert_eq!(
+                fake.api.enables(),
+                enables + 1,
+                "{ending}: a key took secure input a second time"
+            );
+
+            let ended = match ending {
+                "wipe" => {
+                    buffer.wipe();
+                    Some(buffer)
+                }
+                "expiry" => {
+                    assert!(buffer.expire_if_due(SystemTime::now() + EXPIRY));
+                    Some(buffer)
+                }
+                "hand-over" => {
+                    assert_eq!(buffer.take_query().as_str(), "nhq");
+                    None
+                }
+                _ => {
+                    drop(buffer);
+                    None
+                }
+            };
+            assert!(!fake.held(), "{ending}: secure input stayed on");
+            assert_eq!(fake.api.disables(), disables + 1, "{ending}");
+            drop(ended);
+            assert_eq!(
+                fake.api.disables(),
+                disables + 1,
+                "{ending}: the ended buffer let go of secure input twice"
+            );
+        }
+    }
+
+    /// The panel begins the buffer when it becomes key, which can be long
+    /// before anything is typed, so the 30 seconds start with the first key.
+    /// Until then not even a clock that went backwards expires it.
+    #[gpui::test]
+    fn the_thirty_seconds_start_with_the_first_key(cx: &mut TestAppContext) {
+        install(cx, FakeApi::new());
+        let mut buffer = cx.update(|cx| TypedAhead::begin(cx)).expect("begin");
+        assert_eq!(buffer.started, None, "the clock started with no key typed");
+        assert!(!buffer.expired(SystemTime::now() + Duration::from_secs(3600)));
+        assert!(!buffer.expired(SystemTime::UNIX_EPOCH));
+
+        let before = SystemTime::now();
+        buffer.push('n');
+        let first = buffer.started.expect("the first key started the clock");
+        assert!(first >= before, "the clock started before the first key");
+        buffer.push('h');
+        buffer.backspace();
+        buffer.backspace();
+        buffer.push('q');
+        assert_eq!(
+            buffer.started,
+            Some(first),
+            "a later key started the clock again"
+        );
+        assert!(!buffer.expired(first + Duration::from_secs(29)));
+        assert!(buffer.expired(first + EXPIRY));
+    }
+
     #[gpui::test]
     fn typed_ahead_expires_after_thirty_seconds(cx: &mut TestAppContext) {
         install(cx, FakeApi::new());
         let buffer = typed(cx, "nhq");
-        let start = buffer.started;
+        let start = buffer.started.expect("the first key started the clock");
 
         assert!(!buffer.expired(start));
         assert!(!buffer.expired(start + Duration::from_secs(29)));
@@ -263,7 +383,7 @@ mod tests {
     fn expire_if_due_wipes_the_buffer_and_releases_the_guard(cx: &mut TestAppContext) {
         let fake = install(cx, FakeApi::new());
         let mut buffer = typed(cx, "nhq");
-        let start = buffer.started;
+        let start = buffer.started.expect("the first key started the clock");
 
         assert!(!buffer.expire_if_due(start + Duration::from_secs(29)));
         assert_eq!(buffer.len(), 3, "a buffer that has not expired lost text");
@@ -286,7 +406,8 @@ mod tests {
     fn a_clock_that_went_backwards_counts_as_expired(cx: &mut TestAppContext) {
         let fake = install(cx, FakeApi::new());
         let mut buffer = typed(cx, "nhq");
-        let earlier = buffer.started - Duration::from_secs(1);
+        let earlier =
+            buffer.started.expect("the first key started the clock") - Duration::from_secs(1);
 
         assert!(buffer.expired(earlier));
         assert!(buffer.expire_if_due(earlier));
