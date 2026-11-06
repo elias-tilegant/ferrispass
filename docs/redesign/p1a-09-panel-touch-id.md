@@ -26,6 +26,9 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 | `bc4460b` | The test of the automatic retry also has a click withdrawn with the window in the background, after the retry is spent |
 | `02f8ee9` | This page, on the same |
 | `c845fcb` | Line breaks in those tests as rustfmt sets them |
+| `b7c69a0` | This page, on the two commits before it |
+| `bab763f` | `on_answered` runs as soon as macOS answers, before the vault is opened, with a test that holds the order |
+| `bfb8b00` | Secure input from the moment the locked panel is key: `begin` holds it for the empty buffer, and the 30 seconds start with the first key; SECURITY.md on the same |
 | the last one | This page |
 
 ## The typed-ahead buffer
@@ -33,8 +36,8 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 `src/app/unlock/typed_ahead.rs`. The panel lets you start a search before Touch ID has unlocked the vault. What you type goes into a `TypedAhead`, and the panel only ever learns how many characters there are (`len`), to show as dots.
 
 - The text sits in a `Zeroizing<String>`. `wipe` and the drop overwrite it, spare capacity included, and `take_query` hands it over in that same zeroizing string. Growing it never leaves a copy: when a character doesn't fit in the room left, `push` copies the text into a bigger zeroizing string and the old one is overwritten as it drops, instead of letting `String::push` reallocate and free the old memory as it was. In debug builds `push` then asserts that `String::push` finds room, worked out apart from the condition that decides on the copy. `a_character_that_does_not_fit_grows_the_buffer_by_copying` types up to the last free byte with a character of each UTF-8 length (`n`, `ä`, `€`, `🦀`): with exactly its bytes left it goes in place, with one byte fewer the text is copied first. A condition that misjudges a multi-byte character, such as one that copies only once every byte is in use, fails there.
-- `begin` takes a secure input guard (`secure_input::hold`), so other programs don't see the keystrokes, and the buffer holds it until it is wiped, taken or dropped. If macOS refuses secure input, or the call is off the main thread, `begin` fails and there is no buffer: the panel then sends you to the main window. Where the platform has no secure event input at all, the buffer starts without a guard and claims nothing.
-- It is wiped 30 seconds after `begin` (`EXPIRY`), on cancel (`wipe`), and when it looks like a password rather than a search: more than one word and not a single match (`wipe_if_password_like`). `expire_if_due` and `wipe_if_password_like` wipe on their own and say whether they did; there is no check that only reports and leaves the wiping to the caller. The 30 seconds are wall-clock time, like the auto-lock's idle clock, so a Mac that slept through them finds the buffer expired, and a clock that went backwards counts as expired too.
+- Secure input covers the locked panel from the moment it is key. The panel calls `begin` as soon as it is key while locked, before any key arrives, and `begin` takes a secure input guard (`secure_input::hold`) for the empty buffer, so other programs don't see even the first keystroke. The keys typed after that go into the same buffer under the same guard, which goes when the buffer is wiped, expires, hands its text over or is dropped. If macOS refuses secure input, or the call is off the main thread, `begin` fails and there is no buffer: the panel then sends you to the main window. Where the platform has no secure event input at all, the buffer starts without a guard and claims nothing.
+- It is wiped 30 seconds after the first keystroke (`EXPIRY`), on cancel (`wipe`), and when it looks like a password rather than a search: more than one word and not a single match (`wipe_if_password_like`). The 30 seconds start with the first `push`, not with `begin`, so a panel that has been key for a while doesn't lose what you type a moment later. With nothing typed there is nothing to expire, and the buffer keeps secure input for as long as the panel keeps it. `expire_if_due` and `wipe_if_password_like` wipe on their own and say whether they did; there is no check that only reports and leaves the wiping to the caller. The 30 seconds are wall-clock time, like the auto-lock's idle clock, so a Mac that slept through them finds the buffer expired, and a clock that went backwards counts as expired too.
 - A wiped buffer stays empty, has let go of secure input and takes no more keystrokes. `take_query` hands the text over once, as the search to run after the unlock, and the buffer is gone with it.
 - `Debug` prints `TypedAhead(<n> chars)`. Nothing in the file logs, prints or writes, and `typed_ahead_never_logs_or_writes` in `tests/architecture.rs` reads the file to keep it that way: no file system, log or print names, no derives, the field only in the functions listed in `TYPED_TEXT_USERS`, and never inside a macro call.
 - `typed_ahead_wipes_by_overwriting` reads the same file for what is done to the text. `TYPED_TEXT_CALLS` lists every method called on it, with the function it is called in, and `wipe` has to be the one that calls `zeroize`. A method that only shortens the string (`clear`, `truncate`) leaves the typed bytes in its allocation until the buffer drops, and one that regrows or shrinks it (`reserve`, `push_str`, `shrink_to_fit`) frees the old allocation without overwriting it; either fails the test, and so does a mutable borrow of the text. No safe test can read those bytes back, so the list holds the code to its shape. The list allows `String::push` in `push`, which would regrow a string that is out of room too, so it can't tell whether `push` copies in time; the assertion in `push` does.
@@ -44,20 +47,20 @@ A search never marks an entry as recently used; only copying a value or launchin
 
 ## One Touch ID flow, two ways in
 
-`src/app/unlock/touch_id.rs` holds the Touch ID unlock that used to live in `start_biometric_unlock` in the shell. The steps are the same as before: `begin_biometric_unlock` stamps a new generation, the keychain read behind the prompt and the open run in the background, and on the foreground the answer goes through `begin_open` and `finish_open_attempt`, or `fail_biometric_unlock`. The prompt still reads "Unlock <file name>". The flow is the private `run`; nothing outside the module can call it, and no public function takes an origin or a trigger as a plain value. Inside the module, `the_raw_flow_has_no_public_entry` allows a call of `run` only in `unlock_from_lock_screen` and `unlock_from_panel`, and the `Panel` origin only in `unlock_from_panel` and in the comparison in `run`, so a new function in the module can't start the panel's flow without a token either.
+`src/app/unlock/touch_id.rs` holds the Touch ID unlock that used to live in `start_biometric_unlock` in the shell. `begin_biometric_unlock` stamps a new generation, and the keychain read behind the prompt runs in the background. As soon as macOS has answered, `on_answered` runs on the foreground. With the password, the vault is then opened in a background task of its own, and the answer goes through `begin_open` and `finish_open_attempt` on the foreground; a failed prompt goes to `fail_biometric_unlock` right after `on_answered`. The open waits for `on_answered` because it can take seconds with an expensive Argon2 key derivation or a slow disk, and the panel has to have key focus back first, or keys typed in that time could go to another app. The prompt still reads "Unlock <file name>". The flow is the private `run`; nothing outside the module can call it, and no public function takes an origin or a trigger as a plain value. Inside the module, `the_raw_flow_has_no_public_entry` allows a call of `run` only in `unlock_from_lock_screen` and `unlock_from_panel`, and the `Panel` origin only in `unlock_from_panel` and in the comparison in `run`, so a new function in the module can't start the panel's flow without a token either.
 
 | | Unlock screen | Quick access panel |
 |---|---|---|
 | Way in | `unlock_from_lock_screen`, from the Touch ID button, its shortcut, and on its own when the screen comes up with the window in front | `unlock_from_panel`, which takes a `Confirmed`. Only `confirm(PanelTrigger::ReturnKey)` and `confirm(PanelTrigger::UnlockButtonClick)` make one |
 | macOS withdrew the prompt | the automatic prompt asks once more, as before. A withdrawn click is left for the user to click again: it brings no other prompt, neither at once with the window in front nor when the window comes back from the background | `Answer::Interrupted`, nothing else. The next attempt needs a new confirmation |
-| As soon as macOS answers, whatever the answer, before it is applied | nothing | `on_answered` runs: the panel makes itself key and focuses the search field or the list |
+| As soon as macOS answers, whatever the answer, before the vault is opened and before the answer is applied | nothing | `on_answered` runs: the panel makes itself key and focuses the search field or the list |
 | A cost still to confirm, or the header not read yet | the click counts as allowing the cost; the automatic prompt waits | no attempt starts |
 
 The token has a private field, so no code outside the module can build one. It is neither `Clone` nor `Copy`, and `unlock_from_panel` takes it by value, so each attempt uses one up. Two doctests on `Confirmed` don't compile, on purpose: one builds a token by hand, one clones it.
 
 Rules both ways share:
 
-- An answer from an attempt that a newer one replaced opens nothing and ends the attempt in flight (`Answer::Stale`), as the unlock screen always did.
+- An answer from an attempt that a newer one replaced opens nothing and ends the attempt in flight (`Answer::Stale`), as the unlock screen always did. That is checked when the answer comes, so a stale password never goes on to the open, and again once the open is done, for an attempt replaced while the vault was being opened.
 - The task is detached inside the module. Nobody holds a handle, so dropping what the call returns cannot cancel an unlock, and neither the shell nor the panel needs a field for it. The functions return the generation of the attempt they started, or `None`.
 - `on_done` gets the answer once it is applied: `Opened(path)`, `NotOpened` (Touch ID answered, but the stored password no longer fits, the file is gone, or the cost has to be confirmed; the unlock screen says which), `Failed(error)`, `Interrupted` or `Stale`.
 
@@ -87,11 +90,12 @@ The vault is the one waiting on the unlock screen, or else the most recent one. 
 
 ## What the panel will do with it
 
-- Start a `TypedAhead` with the first keystroke while locked, show `len()` dots, call `expire_if_due` on every tick and keystroke and `wipe_if_password_like` after every search, and `wipe` on Esc.
+- Begin a `TypedAhead` as soon as the panel is key while locked, before any key arrives, so secure input covers the locked panel from the moment it is key. Put every typed key into it, show `len()` dots, call `expire_if_due` on every tick and keystroke and `wipe_if_password_like` after every search, and `wipe` on Esc. When one is wiped while the panel is still key and locked, begin the next one at once.
+- End the buffer when the panel loses key status, so secure input goes with it: with `take_query` when the Touch ID dialog took key status, keeping the text for the search once the vault is open and dropping it if the vault stays locked, and with `wipe` otherwise. When the panel is key again and still locked, begin a new one.
 - Ask `kind` what to show, and put the most recent vault on the unlock screen when none waits there.
 - On Return or a click on the unlock button, and only then, call `confirm` and hand the token to `unlock_from_panel`. In `on_answered`, make the panel window key (`Window::activate_window`) and focus the search field or the list. The report on Touch ID from the panel in `docs/gpui-matrix.md` found the panel no longer key after the prompt in every run that showed one, and Return in the list did nothing until the panel was clicked.
 - Check `return_accepted` for every Return in the results.
-- After the unlock, run `take_query` as the search.
+- After the unlock, run the typed text as the search: the text taken when the Touch ID dialog took key status, or `take_query` if the vault was unlocked some other way while the panel was key.
 
 ## What the tests show, and what needs a Mac
 
@@ -100,6 +104,8 @@ PR #28 has a table of changes that each break one of these rules, with the test 
 | Rule | Test |
 |---|---|
 | The buffer holds secure input while it lives, and lets go when wiped or dropped | `typed_ahead_holds_secure_input_while_it_lives` |
+| Secure input is on as soon as `begin` returns, before the first key, and stays on with nothing typed, an hour on too; the keys after it take no second guard, and the guard goes once, when the buffer is wiped, expires, hands its text over or is dropped | `secure_input_is_on_before_the_first_key` |
+| The 30 seconds start with the first key, not with `begin`, and a later key doesn't start them again; before the first key, not even a clock that went backwards expires the buffer | `the_thirty_seconds_start_with_the_first_key` |
 | 29 seconds no, 30 yes | `typed_ahead_expires_after_thirty_seconds` |
 | `expire_if_due` wipes and lets go of secure input | `expire_if_due_wipes_the_buffer_and_releases_the_guard` |
 | A clock that went backwards counts as expired | `a_clock_that_went_backwards_counts_as_expired` |
@@ -123,6 +129,7 @@ PR #28 has a table of changes that each break one of these rules, with the test 
 | The raw flow has no public way in, only the two ways in call it, only the panel's makes a panel origin, and the token can't be made or copied elsewhere | `the_raw_flow_has_no_public_entry`, and the two doctests on `Confirmed` |
 | A withdrawn prompt in the panel is not asked again | `an_interrupted_panel_prompt_is_not_retried` |
 | After the password, a cancel, a failed match, a prompt macOS withdrew, and an answer that comes after the user moved on, `on_answered` runs before the answer is applied and before `on_done`, and Return reaches the panel only after it | `the_panel_regains_key_before_it_takes_return` |
+| With the password, `on_answered` runs before the vault is opened, through the panel's way in and with the unlock screen's origin: it writes the vault file the open reads, so the vault opens only if it ran first | `on_answered_runs_before_the_vault_is_opened` |
 | The panel never answers a cost question | `the_panel_never_answers_a_cost_question` |
 | Every locked case | `locked_panel_kind_for_every_case` |
 | Return before drawing, within 300 ms, and before every vault is done is dropped; one exact match in an open vault goes at once unless it is production | `return_before_results_are_drawn_is_dropped`, `return_within_300ms_of_drawing_is_dropped`, `return_waits_for_every_vault_of_the_set`, `one_exact_hit_in_an_open_vault_takes_return_at_once_unless_production` |
@@ -132,11 +139,12 @@ The characterization tests and `src/app/state/biometric_tests.rs` are unchanged 
 
 On a Mac, with a preview build, the unlock screen gets the same checks as before, since it now runs on the shared flow: Touch ID with the button and with Return unlocks; with the window sent to the background and brought back, the automatic prompt comes again, once; cancelling the prompt brings no second one without a click; and with a loop running `ioreg -l -w 0 | grep -o '"kCGSSessionSecureInputPID"=[0-9]*'` in a Terminal window behind FerrisPass, the PID shows while the master password field has focus and is gone after the unlock.
 
-The panel's own checks need the panel: Return working after Touch ID without a click into the panel, focus going back to TextEdit, SAP GUI and Safari afterwards, and a panel tick that leaves out `expire_if_due` making a test fail. They come with the panel.
+The panel's own checks need the panel: Return working after Touch ID without a click into the panel, focus going back to TextEdit, SAP GUI and Safari afterwards, a panel tick that leaves out `expire_if_due` making a test fail, and a test that the locked panel holds secure input from the moment it is key, before a key is typed, and lets go when it loses key status. They come with the panel, which wires the buffer and the flow in and tests them there.
 
 ## Limits
 
 - The 30 seconds count from the first keystroke, not from the last.
+- With nothing typed, the buffer does not expire and keeps secure input on for as long as the panel keeps it. That it ends when the panel loses key status is the panel's to do, and so is its test.
 - After the unlock, the typed text becomes the panel's search, and from there it is held like any search typed into the open vault: as a plain string in the vault's state, not wiped on a timer.
 - `backspace` leaves the removed character's bytes in the spare capacity until the buffer is wiped or dropped, which overwrites the whole allocation.
 - That `wipe` overwrites the text is held by the list of methods called on it, not read back from memory.
@@ -146,6 +154,7 @@ The panel's own checks need the panel: Return working after Touch ID without a c
 - Opening a vault writes the list of recent vaults under `~/Library/Application Support/ferrispass`, and the shell reads its settings from there. Tests that open a vault or build the shell therefore run again in a child process of the test binary whose `HOME` and `TMPDIR` point at a temporary folder; the parent only checks that exactly that test passed there.
 - A token only shows that `confirm` was asked with Return or the unlock button. That the panel asks it only from its handlers for that key and that click is held by the call-site list and by review, not by the type.
 - The scans in `tests/architecture.rs` read names, not values. A helper in another file that is handed the text, a call through a trait object that renames `retrieve`, a method called on the typed text through a dereference in parentheses, or a panel origin reached without its name is out of their sight. The compiler carries the first line: the token's private field, no `Clone`, the buffer not `Send`, `run` private to its module. Inside the module, who calls `run` and where a panel origin is made rests on the scan.
-- That the Touch ID dialog leaves the panel without key focus was measured on one Mac with macOS 27.0.1. The test only shows the order, for every way the prompt can end: `on_answered` before the answer is applied and before Return counts.
+- That the Touch ID dialog leaves the panel without key focus was measured on one Mac with macOS 27.0.1. The tests only show the order, for every way the prompt can end: `on_answered` before the answer is applied and before Return counts, and with the password before the vault is opened.
+- The tests run on GPUI's test executor, where a background task starts only once the foreground step that spawned it is over. `on_answered_runs_before_the_vault_is_opened` therefore fails for an open in the background task of the keychain read and for `on_answered` moved behind the open, but not for an open spawned inside the foreground step just before `on_answered` is called. That the open is spawned only after the step has handed the password out is held by the shape of `run` and by review.
 
-The agents spent about 5 hours on this, including review and fixes.
+The agents spent about 7 hours on this, including review and fixes.
