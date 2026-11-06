@@ -10,6 +10,7 @@ pub mod settings;
 mod state;
 pub mod sync_history;
 pub(crate) mod time;
+pub mod unlock;
 
 pub use recents::{RecentEntry, RecentsError};
 pub use settings::AppSettings;

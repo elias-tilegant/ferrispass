@@ -1504,6 +1504,888 @@ const RESET_CALL_SITES: &[(&str, &str)] = &[
     ),
 ];
 
+// ------------------------------------------------- the locked quick access panel --
+
+/// Every call that can raise the Touch ID prompt or lead to it, one line per
+/// call, with the function it is in and the name it calls:
+/// `begin_biometric_unlock` starts an attempt in the app, `retrieve` shows the
+/// prompt and reads the stored password, `unlock_from_lock_screen` and
+/// `unlock_from_panel` are the two ways into the shared flow, and `confirm`
+/// turns something that happened in the quick access panel into the token the
+/// panel's way in takes. A token only says that `confirm` was asked with
+/// Return or the unlock button, so the function that asks has to be the one
+/// that handles that key or click; a timer or an activation handler on this
+/// list would stand out in review, as would any other new caller.
+const TOUCH_ID_CALL_SITES: &[(&str, &str, &str)] = &[
+    // The one flow for the lock screen and the quick access panel: the
+    // attempt, then the prompt in the background.
+    (
+        "src/app/unlock/touch_id.rs",
+        "run",
+        "begin_biometric_unlock",
+    ),
+    ("src/app/unlock/touch_id.rs", "run", "retrieve"),
+    // The unlock screen: the Touch ID button and its automatic prompt.
+    (
+        "src/ui/legacy/shell/unlock.rs",
+        "start_biometric_unlock",
+        "unlock_from_lock_screen",
+    ),
+    // The command line, with --touch-id, or at a terminal for an enrolled
+    // vault.
+    ("src/cli.rs", "unlock_password", "retrieve"),
+];
+
+/// The names whose calls [`TOUCH_ID_CALL_SITES`] lists.
+const TOUCH_ID_ENTRIES: &[&str] = &[
+    "begin_biometric_unlock",
+    "retrieve",
+    "unlock_from_lock_screen",
+    "unlock_from_panel",
+    "confirm",
+];
+
+#[test]
+fn touch_id_starts_only_where_listed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sources: Vec<(String, String)> = rust_sources(root)
+        .into_iter()
+        .map(|(rel, path)| {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+            (rel, source)
+        })
+        .collect();
+    let test_only = test_only_files(&sources).unwrap_or_else(|err| panic!("cannot tokenize {err}"));
+    let mut unused: Vec<(&str, &str, &str)> = TOUCH_ID_CALL_SITES.to_vec();
+    let mut problems = Vec::new();
+    for (rel, source) in &sources {
+        if test_only.contains(rel) {
+            continue;
+        }
+        let calls =
+            touch_id_calls(source).unwrap_or_else(|err| panic!("cannot tokenize {rel}: {err}"));
+        for (line, call) in calls {
+            match call {
+                Ok((function, name)) => match unused
+                    .iter()
+                    .position(|&(f, func, called)| f == rel && func == function && called == name)
+                {
+                    Some(at) => {
+                        unused.remove(at);
+                    }
+                    None => problems.push(format!(
+                        "{rel}:{line}: calls `{name}` in `fn {function}`, and \
+                         TOUCH_ID_CALL_SITES has no line left for it. Each call can raise the \
+                         Touch ID prompt; if this one should, add a line with its reason."
+                    )),
+                },
+                Err(problem) => problems.push(format!("{rel}:{line}: {problem}")),
+            }
+        }
+    }
+    for (file, function, name) in unused {
+        problems.push(format!(
+            "{file}: listed as calling `{name}` in `fn {function}`, but no such call is left. \
+             Remove the line."
+        ));
+    }
+    assert!(
+        problems.is_empty(),
+        "Touch ID can start outside the listed places:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// Each use of a name from [`TOUCH_ID_ENTRIES`] in code, outside items
+/// switched off by `#[cfg(test)]`: `Ok` with the function a call is in and
+/// the name it calls, or a problem. A definition (`fn retrieve`) is not a
+/// call. The name used any other way, imported or passed as a value, is a
+/// problem, because a call could hide behind it.
+fn touch_id_calls(source: &str) -> Result<Vec<FoundEntryCall>, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    let mut found = Vec::new();
+    for i in 0..t.len() {
+        let Some(name) = t[i].name().filter(|name| TOUCH_ID_ENTRIES.contains(name)) else {
+            continue;
+        };
+        if test_items.iter().any(|item| item.contains(&i)) {
+            continue;
+        }
+        if i > 0 && t[i - 1].is_keyword("fn") {
+            continue;
+        }
+        let line = t[i].line;
+        if !t.get(i + 1).is_some_and(|tok| tok.is_punct('(')) {
+            found.push((
+                line,
+                Err(format!(
+                    "`{name}` is named without being called, so a call could go unseen; \
+                     call it directly"
+                )),
+            ));
+            continue;
+        }
+        let call = enclosing_fn(&p, i)
+            .map(|function| (function, name.to_string()))
+            .ok_or_else(|| format!("calls `{name}` outside a function"));
+        found.push((line, call));
+    }
+    Ok(found)
+}
+
+/// A line, and the function and name of the call found there, or what is
+/// wrong with it.
+type FoundEntryCall = (usize, Result<(String, String), String>);
+
+#[test]
+fn touch_id_calls_are_found_with_their_function() {
+    let source = r##"
+        // store.retrieve(&id) in a comment
+        fn unlock(store: &dyn BiometricStore) { let _ = store.retrieve(&id, "p", options); }
+        trait BiometricStore { fn retrieve(&self, id: &EnrollmentId) -> String; }
+        fn start(state: &mut AppState) { spawn(async move { state.begin_biometric_unlock(cx); }); }
+        fn full(store: &Store) { BiometricStore::retrieve(store, &id, "p", options); }
+        const NOTE: &str = "retrieve(";
+        fn later(store: &Store) { let f = BiometricStore::retrieve; }
+        use crate::app::AppState::begin_biometric_unlock;
+        fn on_timer(cx: &mut App) { let token = touch_id::confirm(PanelTrigger::ReturnKey); }
+        fn on_open(state: Entity<AppState>, cx: &mut App) { touch_id::unlock_from_lock_screen(state, true, done, cx); }
+        pub fn confirm(trigger: PanelTrigger) -> Option<Confirmed> { None }
+        use crate::app::unlock::touch_id::unlock_from_panel;
+        #[cfg(test)]
+        mod tests { fn helper(store: &Store) { store.retrieve(&id, "p", o); } }
+    "##;
+    let found = touch_id_calls(source).expect("scan");
+    let calls: Vec<(usize, String, String)> = found
+        .iter()
+        .filter_map(|(line, call)| {
+            call.as_ref()
+                .ok()
+                .map(|(function, name)| (*line, function.clone(), name.clone()))
+        })
+        .collect();
+    let problems: Vec<usize> = found
+        .iter()
+        .filter(|(_, call)| call.is_err())
+        .map(|(line, _)| *line)
+        .collect();
+    let call =
+        |line: usize, function: &str, name: &str| (line, function.to_string(), name.to_string());
+    assert_eq!(
+        calls,
+        vec![
+            call(3, "unlock", "retrieve"),
+            call(5, "start", "begin_biometric_unlock"),
+            call(6, "full", "retrieve"),
+            call(10, "on_timer", "confirm"),
+            call(11, "on_open", "unlock_from_lock_screen"),
+        ]
+    );
+    assert_eq!(problems, vec![8, 9, 13]);
+}
+
+/// The file that holds what is typed into the quick access panel while it is
+/// locked.
+const TYPED_AHEAD_SOURCE: &str = "src/app/unlock/typed_ahead.rs";
+
+/// Names through which typed text could leave the buffer: the file system,
+/// the log, the print macros, formatting other than the hand-written `Debug`
+/// that shows only a count, and derives (a derived `Debug` prints every
+/// field).
+const TEXT_OUTLETS: &[&str] = &[
+    "fs",
+    "File",
+    "OpenOptions",
+    "log",
+    "tracing",
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "dbg",
+    "Display",
+    "Serialize",
+    "derive",
+    "write_str",
+    "write_fmt",
+    "debug_struct",
+    "debug_tuple",
+];
+
+/// The functions in the typed-ahead file that may touch the field `text`.
+/// Each keeps the text in the buffer, counts it, wipes it, or hands it to
+/// the caller as a `Zeroizing<String>`. Anything new that reads the text is
+/// a line here and stands out in review.
+const TYPED_TEXT_USERS: &[&str] = &[
+    "begin",
+    "push",
+    "backspace",
+    "len",
+    "is_empty",
+    "wipe_if_password_like",
+    "wipe",
+    "take_query",
+];
+
+/// Every method called on the field `text`, with the function it is called
+/// in. Only `zeroize` overwrites the typed bytes. A method that shortens the
+/// string (`clear`, `truncate`, `drain`) leaves them in its allocation until
+/// the buffer drops, and one that regrows or shrinks it (`reserve`,
+/// `push_str`, `shrink_to_fit`) frees the old allocation without
+/// overwriting it. No safe test can read those bytes, so this list holds the
+/// code to its shape instead: `wipe` overwrites, and no method beyond these
+/// is called on the text. `String::push` is one of them, and it too would
+/// regrow a string that is out of room. That `push` copies the text before
+/// it gets there is held by the assertion in front of that call and the
+/// tests in `typed_ahead.rs` that type up to the last free byte, not by
+/// this list.
+const TYPED_TEXT_CALLS: &[(&str, &str)] = &[
+    // Copies the text into a bigger buffer when `c` doesn't fit in the room
+    // left, and asserts in debug builds that `String::push` then has room.
+    ("push", "len"),
+    ("push", "capacity"),
+    ("push", "push"),
+    // The removed bytes stay in the spare capacity, which `wipe` and the drop
+    // overwrite with the rest.
+    ("backspace", "pop"),
+    ("len", "chars"),
+    ("is_empty", "is_empty"),
+    // Overwrites the whole allocation, spare capacity included.
+    ("wipe", "zeroize"),
+];
+
+#[test]
+fn typed_ahead_never_logs_or_writes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join(TYPED_AHEAD_SOURCE))
+        .unwrap_or_else(|err| panic!("cannot read {TYPED_AHEAD_SOURCE}: {err}"));
+    let scan = typed_text_scan(&source)
+        .unwrap_or_else(|err| panic!("cannot tokenize {TYPED_AHEAD_SOURCE}: {err}"));
+    let leaks: Vec<String> = scan
+        .leaks
+        .iter()
+        .map(|(line, what)| format!("{TYPED_AHEAD_SOURCE}:{line}: {what}"))
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "what is typed into the locked panel could get out of its buffer:\n{}",
+        leaks.join("\n")
+    );
+    // The scan has to see the field it guards, or it proves nothing.
+    for known in ["push", "wipe", "take_query"] {
+        assert!(
+            scan.users.iter().any(|name| name == known),
+            "the scan no longer sees `fn {known}` touch the text; found {:?}",
+            scan.users
+        );
+    }
+}
+
+#[test]
+fn typed_ahead_wipes_by_overwriting() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join(TYPED_AHEAD_SOURCE))
+        .unwrap_or_else(|err| panic!("cannot read {TYPED_AHEAD_SOURCE}: {err}"));
+    let scan = typed_text_scan(&source)
+        .unwrap_or_else(|err| panic!("cannot tokenize {TYPED_AHEAD_SOURCE}: {err}"));
+    let mut unused: Vec<(&str, &str)> = TYPED_TEXT_CALLS.to_vec();
+    let mut problems = Vec::new();
+    for (line, function, what) in &scan.calls {
+        if what == "&mut" {
+            problems.push(format!(
+                "{TYPED_AHEAD_SOURCE}:{line}: `fn {function}` borrows the text mutably, so \
+                 whatever it is handed to could shorten or regrow it out of sight"
+            ));
+        } else if TYPED_TEXT_CALLS.contains(&(function.as_str(), what.as_str())) {
+            unused.retain(|&(f, m)| (f, m) != (function.as_str(), what.as_str()));
+        } else {
+            problems.push(format!(
+                "{TYPED_AHEAD_SOURCE}:{line}: `fn {function}` calls `{what}` on the text, and \
+                 TYPED_TEXT_CALLS does not list it. Only `zeroize` overwrites what was typed."
+            ));
+        }
+    }
+    for (function, method) in unused {
+        problems.push(if (function, method) == ("wipe", "zeroize") {
+            format!(
+                "{TYPED_AHEAD_SOURCE}: `fn wipe` no longer calls `zeroize` on the text; it has \
+                 to overwrite what was typed, not only let go of it"
+            )
+        } else {
+            format!(
+                "{TYPED_AHEAD_SOURCE}: listed as calling `{method}` on the text in \
+                 `fn {function}`, but no such call is left. Remove the line."
+            )
+        });
+    }
+    assert!(
+        problems.is_empty(),
+        "what was typed into the locked panel could stay in memory after a wipe:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// What the scan of the typed-ahead file found.
+struct TextScan {
+    /// Each place, by line, where the text could get out.
+    leaks: Vec<(usize, String)>,
+    /// The functions that touch the field `text`.
+    users: Vec<String>,
+    /// Each method called on the field, by line, with the function it is
+    /// called in, and `&mut` for a mutable borrow of it.
+    calls: Vec<(usize, String, String)>,
+}
+
+/// Reads the typed-ahead file outside items switched off by `#[cfg(test)]`.
+/// A name from [`TEXT_OUTLETS`] anywhere is a leak, and so is the field
+/// `text` inside a macro call (`format!`, `panic!`, `write!` and the like),
+/// in a function not on [`TYPED_TEXT_USERS`], or outside a function other
+/// than in the declaration of `struct TypedAhead`. In the functions on that
+/// list it notes what is done to the field ([`text_call`]).
+fn typed_text_scan(source: &str) -> Result<TextScan, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    let mut scan = TextScan {
+        leaks: Vec::new(),
+        users: Vec::new(),
+        calls: Vec::new(),
+    };
+    for (i, token) in t.iter().enumerate() {
+        if test_items.iter().any(|item| item.contains(&i)) {
+            continue;
+        }
+        let Some(name) = token.name() else {
+            continue;
+        };
+        let line = token.line;
+        if TEXT_OUTLETS.contains(&name) {
+            scan.leaks.push((line, format!("`{name}`")));
+            continue;
+        }
+        if name != "text" {
+            continue;
+        }
+        if p.in_macro_call[i] {
+            scan.leaks
+                .push((line, "the text in a macro call".to_string()));
+            continue;
+        }
+        match enclosing_fn(&p, i) {
+            Some(function) if TYPED_TEXT_USERS.contains(&function.as_str()) => {
+                if let Some(what) = text_call(t, i) {
+                    scan.calls.push((line, function.clone(), what));
+                }
+                if !scan.users.contains(&function) {
+                    scan.users.push(function);
+                }
+            }
+            Some(function) => scan.leaks.push((
+                line,
+                format!("the text in `fn {function}`, which is not on TYPED_TEXT_USERS"),
+            )),
+            None if p.enclosing_brace[i].is_some_and(|open| {
+                anchor(&t[header_start(&p, open)..open]) == "struct TypedAhead"
+            }) => {}
+            None => scan
+                .leaks
+                .push((line, "the text outside a function".to_string())),
+        }
+    }
+    Ok(scan)
+}
+
+#[test]
+fn typed_text_leaks_are_found() {
+    let source = r##"
+        use std::fs;
+        struct TypedAhead { text: Zeroizing<String>, started: SystemTime }
+        impl TypedAhead {
+            fn push(&mut self, c: char) { self.text.push(c); }
+            fn note(&self) { log::info!("{}", self.len()); }
+            fn shout(&self) { eprintln!("{}", self.text.as_str()); }
+            fn leak(&self) -> String { self.text.to_string() }
+            // self.text in a comment, and "text" in a string
+            fn save(&self) { std::fs::write("/tmp/x", "y").ok(); }
+        }
+        impl fmt::Display for TypedAhead {}
+        #[derive(Debug)]
+        struct Other;
+        static COPY: &str = text;
+        #[cfg(test)]
+        mod tests { fn helper(b: &TypedAhead) { println!("{}", b.text.as_str()); } }
+    "##;
+    let scan = typed_text_scan(source).expect("scan");
+    let lines: Vec<usize> = scan.leaks.iter().map(|(line, _)| *line).collect();
+    assert_eq!(
+        lines,
+        vec![2, 6, 7, 7, 8, 10, 12, 13, 15],
+        "{:?}",
+        scan.leaks
+    );
+    assert_eq!(scan.users, vec!["push".to_string()]);
+}
+
+/// What the code does to the field `text` at token `i`, where the scan has
+/// to know it: the name of a method called on it directly
+/// (`self.text.zeroize()`), or `&mut` for a mutable borrow
+/// (`&mut self.text`), through which code elsewhere could change it.
+fn text_call(t: &[Token], i: usize) -> Option<String> {
+    if t.get(i + 1).is_some_and(|tok| tok.is_punct('.'))
+        && t.get(i + 3).is_some_and(|tok| tok.is_punct('('))
+        && let Some(method) = t.get(i + 2).and_then(Token::name)
+    {
+        return Some(method.to_string());
+    }
+    let mut j = i;
+    if j >= 2 && t[j - 1].is_punct('.') && t[j - 2].is_keyword("self") {
+        j -= 2;
+    }
+    (j >= 2 && t[j - 1].is_keyword("mut") && t[j - 2].is_punct('&')).then(|| "&mut".to_string())
+}
+
+#[test]
+fn typed_text_calls_are_found() {
+    let source = r##"
+        impl TypedAhead {
+            fn push(&mut self, c: char) { if self.text.len() < self.text.capacity() { self.text.push(c); } }
+            fn wipe(&mut self) { self.text.clear(); self.guard = None; }
+            fn backspace(&mut self) { String::truncate(&mut self.text, 0); }
+            fn take_query(self) -> Zeroizing<String> { let Self { text, .. } = self; text }
+            fn len(&self) -> usize { self.text.chars().count() }
+            fn is_empty(&self) -> bool { is_blank(&self.text) }
+        }
+        #[cfg(test)]
+        mod tests { fn wipe(buffer: &mut TypedAhead) { buffer.text.zeroize(); } }
+    "##;
+    let scan = typed_text_scan(source).expect("scan");
+    let calls: Vec<(usize, &str, &str)> = scan
+        .calls
+        .iter()
+        .map(|(line, function, what)| (*line, function.as_str(), what.as_str()))
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (3, "push", "len"),
+            (3, "push", "capacity"),
+            (3, "push", "push"),
+            (4, "wipe", "clear"),
+            (5, "backspace", "&mut"),
+            (7, "len", "chars"),
+        ]
+    );
+}
+
+/// The Touch ID flow the lock screen and the quick access panel share.
+const TOUCH_ID_FLOW: &str = "src/app/unlock/touch_id.rs";
+
+#[test]
+fn the_raw_flow_has_no_public_entry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join(TOUCH_ID_FLOW))
+        .unwrap_or_else(|err| panic!("cannot read {TOUCH_ID_FLOW}: {err}"));
+    let problems = raw_flow_entries(&source)
+        .unwrap_or_else(|err| panic!("cannot tokenize {TOUCH_ID_FLOW}: {err}"));
+    let problems: Vec<String> = problems
+        .iter()
+        .map(|(line, what)| format!("{TOUCH_ID_FLOW}:{line}: {what}"))
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "the quick access panel could start Touch ID without a confirmation:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// What in the Touch ID flow would let code start the prompt for the panel
+/// without a token, outside items switched off by `#[cfg(test)]`:
+///
+/// - `fn run` missing, or written with a visibility;
+/// - `struct Confirmed` missing, or with anything but one private `()`;
+/// - `Clone`, `Copy` or `Default` derived for it, a trait implemented for it
+///   by hand, or methods added to it;
+/// - a `Confirmed` built anywhere but in `fn confirm` (taking one apart with
+///   `let Confirmed(..) =` is fine);
+/// - a function with a visibility, other than `confirm`, that takes an
+///   `UnlockOrigin` or a `PanelTrigger`;
+/// - `run` called anywhere but in `unlock_from_lock_screen` and
+///   `unlock_from_panel`, or named without being called;
+/// - the name `Panel` anywhere but in `unlock_from_panel`, in the
+///   declaration of `UnlockOrigin`, and on the right of a comparison
+///   (`origin == UnlockOrigin::Panel`). A panel origin made anywhere else
+///   could reach `run` through a function that takes no token.
+fn raw_flow_entries(source: &str) -> Result<Vec<(usize, String)>, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    let mut problems = Vec::new();
+    let mut saw_run = false;
+    let mut saw_token = false;
+    for i in 0..t.len() {
+        if test_items.iter().any(|item| item.contains(&i)) {
+            continue;
+        }
+        let line = t[i].line;
+        if t[i].is_keyword("fn") {
+            let Some(name) = t.get(i + 1).and_then(Token::name) else {
+                continue;
+            };
+            let visibility = visibility_before(&p, i);
+            if name == "run" {
+                saw_run = true;
+                if !visibility.is_empty() {
+                    problems.push((
+                        line,
+                        format!("`fn run` is `{visibility}`; the raw flow has to stay private"),
+                    ));
+                }
+            }
+            if visibility.is_empty() || name == "confirm" {
+                continue;
+            }
+            let Some(open) = (i + 2..t.len()).find(|&j| t[j].is_punct('(')) else {
+                continue;
+            };
+            let close = p.partner[open].expect("balanced parenthesis");
+            for parameter in &t[open + 1..close] {
+                if let Some(kind @ ("UnlockOrigin" | "PanelTrigger")) = parameter.name() {
+                    problems.push((
+                        line,
+                        format!(
+                            "`{visibility} fn {name}` takes a `{kind}` as a plain value; only \
+                             `confirm` may, and only a `Confirmed` opens the panel's way in"
+                        ),
+                    ));
+                }
+            }
+        } else if t[i].name() == Some("Confirmed") {
+            let before = i.checked_sub(1).map(|j| &t[j]);
+            let after = t.get(i + 1);
+            if before.is_some_and(|tok| tok.is_keyword("struct")) {
+                saw_token = true;
+                let body: Vec<&Tok> = t[i + 1..].iter().take(5).map(|tok| &tok.tok).collect();
+                let private_unit = [
+                    Tok::Punct('('),
+                    Tok::Punct('('),
+                    Tok::Punct(')'),
+                    Tok::Punct(')'),
+                    Tok::Punct(';'),
+                ];
+                if body.len() != private_unit.len()
+                    || body.iter().zip(&private_unit).any(|(a, b)| *a != b)
+                {
+                    problems.push((
+                        line,
+                        "`struct Confirmed` has to be `Confirmed(())`, one private field"
+                            .to_string(),
+                    ));
+                }
+                for derived in derives_before(&p, i - 1) {
+                    if matches!(derived.as_str(), "Clone" | "Copy" | "Default") {
+                        problems.push((
+                            line,
+                            format!("`Confirmed` derives `{derived}`; a token is used up once"),
+                        ));
+                    }
+                }
+            } else if before.is_some_and(|tok| tok.is_keyword("for")) {
+                problems.push((
+                    line,
+                    "implements a trait for `Confirmed` by hand".to_string(),
+                ));
+            } else if before.is_some_and(|tok| tok.is_keyword("impl")) {
+                problems.push((
+                    line,
+                    "adds methods to `Confirmed`, which could hand out tokens".to_string(),
+                ));
+            } else if after.is_some_and(|tok| tok.is_punct('(') || tok.is_punct('{')) {
+                let taken_apart = before.is_some_and(|tok| tok.is_keyword("let"));
+                let function = enclosing_fn(&p, i);
+                if !taken_apart && function.as_deref() != Some("confirm") {
+                    problems.push((
+                        line,
+                        format!(
+                            "builds a `Confirmed` in {}; only `fn confirm` may",
+                            function.map_or("no function".to_string(), |f| format!("`fn {f}`"))
+                        ),
+                    ));
+                }
+            }
+        } else if t[i].name() == Some("run") {
+            // The definition is checked above; `.run(` is a method of
+            // something else.
+            if i > 0 && (t[i - 1].is_keyword("fn") || t[i - 1].is_punct('.')) {
+                continue;
+            }
+            let function = enclosing_fn(&p, i);
+            if !t.get(i + 1).is_some_and(|tok| tok.is_punct('(')) {
+                problems.push((
+                    line,
+                    "`run` is named without being called, so a call could go unseen".to_string(),
+                ));
+            } else if !matches!(
+                function.as_deref(),
+                Some("unlock_from_lock_screen" | "unlock_from_panel")
+            ) {
+                problems.push((
+                    line,
+                    format!(
+                        "calls `run` in {}; only `unlock_from_lock_screen` and \
+                         `unlock_from_panel` may, so the panel's way in keeps its token",
+                        function.map_or("no function".to_string(), |f| format!("`fn {f}`"))
+                    ),
+                ));
+            }
+        } else if t[i].name() == Some("Panel") {
+            let function = enclosing_fn(&p, i);
+            let declared = function.is_none()
+                && p.enclosing_brace[i].is_some_and(|open| {
+                    anchor(&t[header_start(&p, open)..open]) == "enum UnlockOrigin"
+                });
+            let compared = i >= 5
+                && t[i - 1].is_punct(':')
+                && t[i - 2].is_punct(':')
+                && t[i - 3].name() == Some("UnlockOrigin")
+                && t[i - 4].is_punct('=')
+                && (t[i - 5].is_punct('=') || t[i - 5].is_punct('!'));
+            if !declared && !compared && function.as_deref() != Some("unlock_from_panel") {
+                problems.push((
+                    line,
+                    format!(
+                        "names the `Panel` origin in {}; only `fn unlock_from_panel` may make \
+                         one, behind its token",
+                        function.map_or("no function".to_string(), |f| format!("`fn {f}`"))
+                    ),
+                ));
+            }
+        }
+    }
+    if !saw_run {
+        problems.push((0, "there is no `fn run` to check".to_string()));
+    }
+    if !saw_token {
+        problems.push((0, "there is no `struct Confirmed` to check".to_string()));
+    }
+    Ok(problems)
+}
+
+/// The visibility written before the item keyword at token `i` (`pub`,
+/// `pub(crate)`, `pub(super)` and so on), or an empty string for none.
+/// Qualifiers such as `const` or `async` in between are skipped.
+fn visibility_before(p: &Parsed, i: usize) -> String {
+    let t = &p.tokens;
+    let mut j = i;
+    while j > 0
+        && (matches!(
+            t[j - 1].name(),
+            Some("const" | "async" | "unsafe" | "safe" | "extern")
+        ) || matches!(t[j - 1].tok, Tok::Str(_)))
+    {
+        j -= 1;
+    }
+    if j > 0 && t[j - 1].is_punct(')') {
+        let open = p.partner[j - 1].expect("balanced parenthesis");
+        if open > 0 && t[open - 1].is_keyword("pub") {
+            let scope: Vec<&str> = t[open + 1..j - 1].iter().filter_map(Token::name).collect();
+            return format!("pub({})", scope.join(" "));
+        }
+    }
+    if j > 0 && t[j - 1].is_keyword("pub") {
+        return "pub".to_string();
+    }
+    String::new()
+}
+
+/// The names in the `derive` attributes above the item whose keyword is at
+/// token `i`.
+fn derives_before(p: &Parsed, i: usize) -> Vec<String> {
+    let t = &p.tokens;
+    let mut j = i;
+    if j > 0 && t[j - 1].is_punct(')') {
+        j = p.partner[j - 1].expect("balanced parenthesis");
+    }
+    if j > 0 && t[j - 1].is_keyword("pub") {
+        j -= 1;
+    }
+    let mut names = Vec::new();
+    while j > 0 && t[j - 1].is_punct(']') {
+        let open = p.partner[j - 1].expect("balanced bracket");
+        let inside = &t[open + 1..j - 1];
+        if inside.first().is_some_and(|tok| tok.is_keyword("derive")) {
+            names.extend(
+                inside
+                    .iter()
+                    .skip(1)
+                    .filter_map(Token::name)
+                    .map(str::to_string),
+            );
+        }
+        j = open.saturating_sub(1);
+    }
+    names
+}
+
+#[test]
+fn raw_flow_entries_are_found() {
+    let fine = r##"
+        #[derive(Clone, Copy)]
+        pub enum UnlockOrigin { LockScreen, Panel }
+        #[derive(Debug)]
+        #[must_use]
+        pub struct Confirmed(());
+        pub fn confirm(trigger: PanelTrigger) -> Option<Confirmed> { Some(Confirmed(())) }
+        pub fn unlock_from_lock_screen(cx: &mut App) -> Option<u64> {
+            run(UnlockOrigin::LockScreen, cx)
+        }
+        pub fn unlock_from_panel(token: Confirmed, cx: &mut App) -> Option<u64> {
+            let Confirmed(()) = token;
+            run(UnlockOrigin::Panel, cx)
+        }
+        fn run(origin: UnlockOrigin, cx: &mut App) -> Option<u64> {
+            if origin == UnlockOrigin::Panel { return None; }
+            cx.background_executor().run(async {});
+            None
+        }
+        #[cfg(test)]
+        mod tests {
+            pub fn sneak() -> Confirmed { Confirmed(()) }
+            fn stale(cx: &mut App) { run(UnlockOrigin::Panel, cx); }
+        }
+    "##;
+    assert_eq!(raw_flow_entries(fine).expect("scan"), Vec::new());
+
+    let broken = r##"
+        #[derive(Debug, Clone)]
+        pub struct Confirmed(pub ());
+        impl Default for Confirmed { fn default() -> Self { Self(()) } }
+        impl Confirmed { pub fn again(&self) -> Self { Confirmed(()) } }
+        pub fn unlock_from_panel(trigger: PanelTrigger) -> Option<u64> { None }
+        pub(crate) fn run(origin: UnlockOrigin) -> Option<u64> {
+            let token = Confirmed(());
+            None
+        }
+    "##;
+    let lines: Vec<usize> = raw_flow_entries(broken)
+        .expect("scan")
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect();
+    assert_eq!(lines, vec![3, 3, 4, 5, 5, 6, 7, 7, 8]);
+
+    // Ways past the token that take no origin as a parameter: a new entry
+    // that calls the flow, the flow passed as a value, a panel origin made
+    // in a helper, renamed by a `use`, or matched rather than compared.
+    let around = r##"
+        pub enum UnlockOrigin { LockScreen, Panel }
+        pub struct Confirmed(());
+        fn run(origin: UnlockOrigin, cx: &mut App) -> Option<u64> { None }
+        pub fn unlock_from_panel_at_once(cx: &mut App) -> Option<u64> {
+            run(UnlockOrigin::Panel, cx)
+        }
+        pub fn unlock_later(cx: &mut App) { let flow = run; }
+        fn origin_for_timer() -> UnlockOrigin { UnlockOrigin::Panel }
+        use self::UnlockOrigin::Panel as FromPanel;
+        fn on_timer(origin: UnlockOrigin) { if matches!(origin, UnlockOrigin::Panel) {} }
+    "##;
+    let lines: Vec<usize> = raw_flow_entries(around)
+        .expect("scan")
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect();
+    assert_eq!(lines, vec![6, 6, 8, 9, 10, 11]);
+
+    assert_eq!(
+        raw_flow_entries("fn other() {}").expect("scan"),
+        vec![
+            (0, "there is no `fn run` to check".to_string()),
+            (0, "there is no `struct Confirmed` to check".to_string()),
+        ]
+    );
+}
+
+/// The shell file with the lock screen's Touch ID.
+const LOCK_SCREEN_SOURCE: &str = "src/ui/legacy/shell/unlock.rs";
+
+/// The functions there that raise the automatic prompt or run an attempt on
+/// their own. None of them may be visible beyond the shell: the lock screen's
+/// automatic prompt has no way in from anywhere else.
+const LOCK_SCREEN_PROMPTS: &[&str] = &[
+    "schedule_automatic_biometric_unlock",
+    "start_automatic_biometric_unlock",
+    "start_biometric_unlock",
+    "note_automatic_biometric_interruption",
+];
+
+#[test]
+fn the_automatic_prompt_has_no_public_entry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join(LOCK_SCREEN_SOURCE))
+        .unwrap_or_else(|err| panic!("cannot read {LOCK_SCREEN_SOURCE}: {err}"));
+    let found = function_visibility(&source)
+        .unwrap_or_else(|err| panic!("cannot tokenize {LOCK_SCREEN_SOURCE}: {err}"));
+    let mut problems = Vec::new();
+    for name in LOCK_SCREEN_PROMPTS {
+        match found.iter().find(|(function, _)| function == name) {
+            None => problems.push(format!("there is no `fn {name}` to check")),
+            Some((_, visibility)) if !matches!(visibility.as_str(), "" | "pub(super)") => problems
+                .push(format!(
+                    "`fn {name}` is `{visibility}`; the automatic prompt stays inside the shell"
+                )),
+            Some(_) => {}
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{LOCK_SCREEN_SOURCE}:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// Every function in code outside `#[cfg(test)]` items, with the visibility
+/// written before it.
+fn function_visibility(source: &str) -> Result<Vec<(String, String)>, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    Ok((0..t.len())
+        .filter(|&i| t[i].is_keyword("fn") && !test_items.iter().any(|item| item.contains(&i)))
+        .filter_map(|i| {
+            let name = t.get(i + 1)?.name()?;
+            Some((name.to_string(), visibility_before(&p, i)))
+        })
+        .collect())
+}
+
+#[test]
+fn function_visibility_is_read_as_written() {
+    let source = r##"
+        impl Shell {
+            fn private(&self) {}
+            pub(super) fn shell_only(&mut self) {}
+            pub(crate) async fn crate_wide(&self) {}
+            pub fn everyone(&self) {}
+            pub const fn constant() -> u8 { 0 }
+        }
+        #[cfg(test)]
+        mod tests { pub fn helper() {} }
+    "##;
+    let pair = |name: &str, visibility: &str| (name.to_string(), visibility.to_string());
+    assert_eq!(
+        function_visibility(source).expect("scan"),
+        vec![
+            pair("private", ""),
+            pair("shell_only", "pub(super)"),
+            pair("crate_wide", "pub(crate)"),
+            pair("everyone", "pub"),
+            pair("constant", "pub"),
+        ]
+    );
+}
+
 #[test]
 fn activity_is_touched_only_where_listed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
