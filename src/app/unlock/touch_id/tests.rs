@@ -702,58 +702,116 @@ impl PanelWindow {
     }
 }
 
+/// Whatever the dialog answers, the panel takes key focus back before the
+/// answer is applied, and only then takes Return: after the password, a
+/// cancel, a failed match, a prompt macOS withdrew, and an answer that comes
+/// after the user moved on.
 #[gpui::test]
 fn the_panel_regains_key_before_it_takes_return(cx: &mut TestAppContext) {
-    let vault = locked_panel(cx);
-    let panel = Rc::new(RefCell::new(PanelWindow {
-        key: true,
-        ..PanelWindow::default()
-    }));
+    // (how the prompt ends, what the store answers instead of the password,
+    // whether the user moves on before the answer comes, the answer)
+    let cases = [
+        (
+            "the password, the vault stays shut",
+            None,
+            false,
+            Answer::NotOpened,
+        ),
+        (
+            "cancelled",
+            Some(BiometricError::UserCancelled),
+            false,
+            Answer::Failed(BiometricError::UserCancelled),
+        ),
+        (
+            "no match",
+            Some(BiometricError::AuthFailed),
+            false,
+            Answer::Failed(BiometricError::AuthFailed),
+        ),
+        (
+            "withdrawn by macOS",
+            Some(BiometricError::Interrupted),
+            false,
+            Answer::Interrupted,
+        ),
+        ("the password, too late", None, true, Answer::Stale),
+        (
+            "cancelled, too late",
+            Some(BiometricError::UserCancelled),
+            true,
+            Answer::Stale,
+        ),
+    ];
+    let mut seen = Vec::new();
+    let mut wanted = Vec::new();
+    for (case, error, moved_on, answer) in cases {
+        let vault = locked_panel(cx);
+        vault.store.answering(error);
+        let panel = Rc::new(RefCell::new(PanelWindow {
+            key: true,
+            ..PanelWindow::default()
+        }));
+        // The attempt as it stands just before the answer comes. If
+        // `on_answered` finds it changed, the answer was applied first.
+        let before = Rc::new(RefCell::new(BiometricAttempt::Idle));
+        let answered = Rc::new(RefCell::new(None));
 
-    let token = confirm(PanelTrigger::ReturnKey).expect("Return confirms");
-    // The dialog goes up and takes key focus.
-    panel.borrow_mut().key = false;
-    let on_answered: OnAnswered = {
-        let panel = panel.clone();
+        let token = confirm(PanelTrigger::ReturnKey).expect("Return confirms");
+        // The dialog goes up and takes key focus.
+        panel.borrow_mut().key = false;
+        let on_answered: OnAnswered = {
+            let panel = panel.clone();
+            let before = before.clone();
+            let state = vault.state.clone();
+            Box::new(move |cx: &mut App| {
+                let applied = *state.read(cx).biometric_attempt() != *before.borrow();
+                let mut panel = panel.borrow_mut();
+                panel.key = true;
+                panel.events.push(if applied {
+                    "answered after the answer was applied"
+                } else {
+                    "answered"
+                });
+            })
+        };
+        let on_done: OnDone = {
+            let panel = panel.clone();
+            let answered = answered.clone();
+            Box::new(move |answer, _| {
+                let mut panel = panel.borrow_mut();
+                let event = if panel.key {
+                    "done"
+                } else {
+                    "done while not key"
+                };
+                panel.events.push(event);
+                *answered.borrow_mut() = Some(answer);
+            })
+        };
         let state = vault.state.clone();
-        Box::new(move |cx: &mut App| {
-            let applied = !matches!(
-                state.read(cx).biometric_attempt(),
-                BiometricAttempt::InFlight { .. }
-            );
-            let mut panel = panel.borrow_mut();
-            panel.key = true;
-            panel.events.push(if applied {
-                "answered after the answer was applied"
-            } else {
-                "answered"
-            });
-        })
-    };
-    let on_done: OnDone = {
-        let panel = panel.clone();
-        Box::new(move |_, _| {
-            let mut panel = panel.borrow_mut();
-            let event = if panel.key {
-                "done"
-            } else {
-                "done while not key"
-            };
-            panel.events.push(event);
-        })
-    };
-    let state = vault.state.clone();
-    cx.update(|cx| unlock_from_panel(token, state, false, on_answered, on_done, cx))
-        .expect("the attempt starts");
+        cx.update(|cx| unlock_from_panel(token, state, false, on_answered, on_done, cx))
+            .expect("the attempt starts");
+        if moved_on {
+            vault
+                .state
+                .update(cx, |state, _| state.clear_biometric_attempt_public());
+        }
+        *before.borrow_mut() = vault
+            .state
+            .read_with(cx, |state, _| state.biometric_attempt().clone());
 
-    // Return while the dialog is up.
-    panel.borrow_mut().press_return();
-    assert_eq!(panel.borrow().returns_taken, 0);
+        // Return while the dialog is up, and again once it has answered.
+        panel.borrow_mut().press_return();
+        cx.run_until_parked();
+        panel.borrow_mut().press_return();
 
-    cx.run_until_parked();
-    assert_eq!(panel.borrow().events, ["answered", "done"]);
-    panel.borrow_mut().press_return();
-    assert_eq!(panel.borrow().returns_taken, 1);
+        let panel = panel.borrow();
+        let answered = answered.borrow_mut().take();
+        seen.push((case, panel.events.clone(), panel.returns_taken, answered));
+        wanted.push((case, vec!["answered", "done"], 1_usize, Some(answer)));
+    }
+    assert_eq!(seen, wanted);
 }
 
 #[gpui::test]
