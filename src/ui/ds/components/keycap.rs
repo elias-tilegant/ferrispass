@@ -228,6 +228,68 @@ mod tests {
     /// in case the visibility is ever widened. Like the other scans over the
     /// source it leaves out comments and inline test modules, and reads the
     /// rest of a line after a `//` inside a string.
+    /// The lines of `code` that name `Keycap::new`, called or passed on as
+    /// a function, and not as part of a longer name.
+    fn keycap_constructions(code: &str) -> Vec<(usize, String)> {
+        // Built from pieces so this file does not match its own pattern.
+        let constructor = concat!("Keycap", "::new");
+        let joins = |c: char| c.is_alphanumeric() || c == '_';
+        let mut found = Vec::new();
+        for (number, line) in code.lines().enumerate() {
+            for (at, _) in line.match_indices(constructor) {
+                let longer = line[..at].ends_with(joins)
+                    || line[at + constructor.len()..].starts_with(joins);
+                if !longer {
+                    found.push((number + 1, line.trim().to_string()));
+                }
+            }
+        }
+        found
+    }
+
+    /// A keycap never stands alone. Inside the design system two places
+    /// build one: the shortcut pair, next to the word for what its keys do,
+    /// and the button, whose name says it. The test reads every file under
+    /// `src/ui/ds` through `code_only` and finds `Keycap::new`, called or
+    /// passed on as a function, in `shortcut.rs` and `button.rs` only, and
+    /// in both; outside the design system `Keycap` cannot be named at all.
+    /// A keycap built through a renamed import or a macro is past it.
+    #[test]
+    fn keycap_never_alone() {
+        let ds = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds");
+        let allowed = [
+            ds.join("components/shortcut.rs"),
+            ds.join("components/button.rs"),
+        ];
+        let mut files = Vec::new();
+        probe::rust_files(&ds, &mut files);
+        assert!(
+            files.len() > 10,
+            "the scan found only {} files",
+            files.len()
+        );
+        let mut alone = Vec::new();
+        let mut paired = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("read source");
+            for (number, line) in keycap_constructions(&probe::code_only(&text)) {
+                if allowed.contains(file) {
+                    paired.push(file.clone());
+                } else {
+                    alone.push(format!("{}:{number}: {line}", file.display()));
+                }
+            }
+        }
+        assert!(
+            alone.is_empty(),
+            "a keycap stands in a Shortcut or a Button only:\n{}",
+            alone.join("\n")
+        );
+        for file in &allowed {
+            assert!(paired.contains(file), "{} builds no keycap", file.display());
+        }
+    }
+
     #[test]
     fn keycap_cannot_be_built_outside_ds() {
         // Built from pieces so this file does not match its own pattern.

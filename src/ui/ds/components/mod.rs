@@ -1350,4 +1350,81 @@ mod tests {
             }
         }
     }
+
+    /// Whether a type has `Debug` or `Display`, read without requiring
+    /// either: the constant of the inherent impl applies where its bound
+    /// holds, the trait's everywhere else.
+    struct Printable<T>(std::marker::PhantomData<T>);
+
+    trait NotPrintable {
+        const DEBUG: bool = false;
+        const DISPLAY: bool = false;
+    }
+
+    impl<T> NotPrintable for Printable<T> {}
+
+    impl<T: std::fmt::Debug> Printable<T> {
+        const DEBUG: bool = true;
+    }
+
+    impl<T: std::fmt::Display> Printable<T> {
+        const DISPLAY: bool = true;
+    }
+
+    /// Neither the secret field nor the ring can be printed with what it
+    /// holds: neither has `Debug` or `Display`, which for the secret's
+    /// `Zeroizing<String>` would write the secret, and neither file calls a
+    /// macro that prints, writes or logs. The files are read through
+    /// `code_only`, so comments and their tests do not count; a macro
+    /// called through a renamed import or from another file is past it.
+    #[test]
+    fn neither_secret_component_can_be_printed() {
+        assert_eq!(
+            [
+                <Printable<zeroize::Zeroizing<String>>>::DEBUG,
+                <Printable<String>>::DISPLAY,
+            ],
+            [true, true],
+            "the test sees both traits"
+        );
+        let printable: Vec<&str> = [
+            (
+                "SecretField",
+                <Printable<SecretField>>::DEBUG,
+                <Printable<SecretField>>::DISPLAY,
+            ),
+            (
+                "OtpRing",
+                <Printable<OtpRing>>::DEBUG,
+                <Printable<OtpRing>>::DISPLAY,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, debug, display)| *debug || *display)
+        .map(|(name, _, _)| name)
+        .collect();
+        assert!(printable.is_empty(), "printable: {printable:?}");
+
+        let mut found = Vec::new();
+        for file in ["secret_field.rs", "otp.rs"] {
+            for call in [
+                "print!(",
+                "println!(",
+                "eprint!(",
+                "eprintln!(",
+                "dbg!(",
+                "write!(",
+                "writeln!(",
+                "log::",
+                "tracing::",
+            ] {
+                found.extend(probe::calls_in(file, call));
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "a secret component prints, writes or logs:\n{}",
+            found.join("\n")
+        );
+    }
 }

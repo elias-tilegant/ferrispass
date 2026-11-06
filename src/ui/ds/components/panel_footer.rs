@@ -561,7 +561,7 @@ mod tests {
         };
         let parts = parts_of(cx, build);
         assert!(parts.iter().any(|part| part.name == "glyph"), "a glyph");
-        let parts = parts_of(cx, || sap_footer());
+        let parts = parts_of(cx, sap_footer);
         assert!(!parts.iter().any(|part| part.name == "glyph"), "no glyph");
     }
 

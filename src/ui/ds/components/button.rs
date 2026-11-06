@@ -1009,10 +1009,15 @@ mod tests {
     }
 
     /// A view has at most one copper surface. The counter sees every copper
-    /// button a window draws, so a view with a second one fails here.
+    /// button a window draws, so a view with a second one fails here. The
+    /// view holds one primary button, a button of every other kind, a
+    /// selected row with its ghost verb, the panel footer with its menu
+    /// button and a secret field with its icon buttons.
     #[gpui::test]
     #[cfg(debug_assertions)]
     fn one_copper_per_view(cx: &mut TestAppContext) {
+        use super::super::{PanelFooter, Row, RowParts, SecretField, Shortcut, Tile, VaultBadge};
+
         let drawn = copper_drawn(cx, || {
             vec![
                 Button::primary("sign-in", label("Sign in"))
@@ -1023,6 +1028,26 @@ mod tests {
                 Button::ghost("open", label("Open")).into_any_element(),
                 Button::danger("forget", label("Forget")).into_any_element(),
                 IconButton::new("copy", IconName::Copy, label("Copy password")).into_any_element(),
+                Row::new(
+                    "row",
+                    0,
+                    1,
+                    RowParts::new(label("Web login"), label("Salesforce")),
+                    Tile::new(IconName::Globe),
+                    VaultBadge::Personal,
+                )
+                .selected(true)
+                .verb(Button::ghost("open-row", label("Open website")))
+                .into_any_element(),
+                PanelFooter::new("footer", |_, _, _| {})
+                    .primary(Shortcut::from_keystroke("enter", label("Open website")))
+                    .more(Shortcut::from_keystroke("cmd-c", label("Password")))
+                    .into_any_element(),
+                SecretField::new("password", label("Password"))
+                    .value(zeroize::Zeroizing::new("sp-test".to_string()))
+                    .on_copy(|_, _, _| {})
+                    .on_toggle_reveal(|_, _, _| {})
+                    .into_any_element(),
             ]
         });
         assert_eq!(drawn, 1, "one copper surface per view");
