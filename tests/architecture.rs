@@ -1506,6 +1506,164 @@ const RESET_CALL_SITES: &[(&str, &str)] = &[
 
 // ------------------------------------------------- the locked quick access panel --
 
+/// Every call that can raise the Touch ID prompt, one line per call, with
+/// the function it is in and the name it calls: `begin_biometric_unlock`
+/// starts an attempt in the app, and `retrieve` shows the prompt and reads
+/// the stored password. A new caller is a new line here and stands out in
+/// review.
+const TOUCH_ID_CALL_SITES: &[(&str, &str, &str)] = &[
+    // The one flow for the lock screen and the quick access panel: the
+    // attempt, then the prompt in the background.
+    (
+        "src/app/unlock/touch_id.rs",
+        "run",
+        "begin_biometric_unlock",
+    ),
+    ("src/app/unlock/touch_id.rs", "run", "retrieve"),
+    // The command line, with --touch-id, or at a terminal for an enrolled
+    // vault.
+    ("src/cli.rs", "unlock_password", "retrieve"),
+];
+
+/// The names whose calls [`TOUCH_ID_CALL_SITES`] lists.
+const TOUCH_ID_ENTRIES: &[&str] = &["begin_biometric_unlock", "retrieve"];
+
+#[test]
+fn touch_id_starts_only_where_listed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sources: Vec<(String, String)> = rust_sources(root)
+        .into_iter()
+        .map(|(rel, path)| {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+            (rel, source)
+        })
+        .collect();
+    let test_only = test_only_files(&sources).unwrap_or_else(|err| panic!("cannot tokenize {err}"));
+    let mut unused: Vec<(&str, &str, &str)> = TOUCH_ID_CALL_SITES.to_vec();
+    let mut problems = Vec::new();
+    for (rel, source) in &sources {
+        if test_only.contains(rel) {
+            continue;
+        }
+        let calls =
+            touch_id_calls(source).unwrap_or_else(|err| panic!("cannot tokenize {rel}: {err}"));
+        for (line, call) in calls {
+            match call {
+                Ok((function, name)) => match unused
+                    .iter()
+                    .position(|&(f, func, called)| f == rel && func == function && called == name)
+                {
+                    Some(at) => {
+                        unused.remove(at);
+                    }
+                    None => problems.push(format!(
+                        "{rel}:{line}: calls `{name}` in `fn {function}`, and \
+                         TOUCH_ID_CALL_SITES has no line left for it. Each call can raise the \
+                         Touch ID prompt; if this one should, add a line with its reason."
+                    )),
+                },
+                Err(problem) => problems.push(format!("{rel}:{line}: {problem}")),
+            }
+        }
+    }
+    for (file, function, name) in unused {
+        problems.push(format!(
+            "{file}: listed as calling `{name}` in `fn {function}`, but no such call is left. \
+             Remove the line."
+        ));
+    }
+    assert!(
+        problems.is_empty(),
+        "Touch ID can start outside the listed places:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// Each use of a name from [`TOUCH_ID_ENTRIES`] in code, outside items
+/// switched off by `#[cfg(test)]`: `Ok` with the function a call is in and
+/// the name it calls, or a problem. A definition (`fn retrieve`) is not a
+/// call. The name used any other way, imported or passed as a value, is a
+/// problem, because a call could hide behind it.
+fn touch_id_calls(source: &str) -> Result<Vec<FoundEntryCall>, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    let mut found = Vec::new();
+    for i in 0..t.len() {
+        let Some(name) = t[i].name().filter(|name| TOUCH_ID_ENTRIES.contains(name)) else {
+            continue;
+        };
+        if test_items.iter().any(|item| item.contains(&i)) {
+            continue;
+        }
+        if i > 0 && t[i - 1].is_keyword("fn") {
+            continue;
+        }
+        let line = t[i].line;
+        if !t.get(i + 1).is_some_and(|tok| tok.is_punct('(')) {
+            found.push((
+                line,
+                Err(format!(
+                    "`{name}` is named without being called, so a call could go unseen; \
+                     call it directly"
+                )),
+            ));
+            continue;
+        }
+        let call = enclosing_fn(&p, i)
+            .map(|function| (function, name.to_string()))
+            .ok_or_else(|| format!("calls `{name}` outside a function"));
+        found.push((line, call));
+    }
+    Ok(found)
+}
+
+/// A line, and the function and name of the call found there, or what is
+/// wrong with it.
+type FoundEntryCall = (usize, Result<(String, String), String>);
+
+#[test]
+fn touch_id_calls_are_found_with_their_function() {
+    let source = r##"
+        // store.retrieve(&id) in a comment
+        fn unlock(store: &dyn BiometricStore) { let _ = store.retrieve(&id, "p", options); }
+        trait BiometricStore { fn retrieve(&self, id: &EnrollmentId) -> String; }
+        fn start(state: &mut AppState) { spawn(async move { state.begin_biometric_unlock(cx); }); }
+        fn full(store: &Store) { BiometricStore::retrieve(store, &id, "p", options); }
+        const NOTE: &str = "retrieve(";
+        fn later(store: &Store) { let f = BiometricStore::retrieve; }
+        use crate::app::AppState::begin_biometric_unlock;
+        #[cfg(test)]
+        mod tests { fn helper(store: &Store) { store.retrieve(&id, "p", o); } }
+    "##;
+    let found = touch_id_calls(source).expect("scan");
+    let calls: Vec<(usize, String, String)> = found
+        .iter()
+        .filter_map(|(line, call)| {
+            call.as_ref()
+                .ok()
+                .map(|(function, name)| (*line, function.clone(), name.clone()))
+        })
+        .collect();
+    let problems: Vec<usize> = found
+        .iter()
+        .filter(|(_, call)| call.is_err())
+        .map(|(line, _)| *line)
+        .collect();
+    let call =
+        |line: usize, function: &str, name: &str| (line, function.to_string(), name.to_string());
+    assert_eq!(
+        calls,
+        vec![
+            call(3, "unlock", "retrieve"),
+            call(5, "start", "begin_biometric_unlock"),
+            call(6, "full", "retrieve"),
+        ]
+    );
+    assert_eq!(problems, vec![8, 9]);
+}
+
 /// The file that holds what is typed into the quick access panel while it is
 /// locked.
 const TYPED_AHEAD_SOURCE: &str = "src/app/unlock/typed_ahead.rs";
@@ -1905,6 +2063,85 @@ fn raw_flow_entries_are_found() {
         vec![
             (0, "there is no `fn run` to check".to_string()),
             (0, "there is no `struct Confirmed` to check".to_string()),
+        ]
+    );
+}
+
+/// The shell file with the lock screen's Touch ID.
+const LOCK_SCREEN_SOURCE: &str = "src/ui/legacy/shell/unlock.rs";
+
+/// The functions there that raise the automatic prompt or run an attempt on
+/// their own. None of them may be visible beyond the shell: the lock screen's
+/// automatic prompt has no way in from anywhere else.
+const LOCK_SCREEN_PROMPTS: &[&str] = &[
+    "schedule_automatic_biometric_unlock",
+    "start_automatic_biometric_unlock",
+    "start_biometric_unlock",
+    "note_automatic_biometric_interruption",
+];
+
+#[test]
+fn the_automatic_prompt_has_no_public_entry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join(LOCK_SCREEN_SOURCE))
+        .unwrap_or_else(|err| panic!("cannot read {LOCK_SCREEN_SOURCE}: {err}"));
+    let found = function_visibility(&source)
+        .unwrap_or_else(|err| panic!("cannot tokenize {LOCK_SCREEN_SOURCE}: {err}"));
+    let mut problems = Vec::new();
+    for name in LOCK_SCREEN_PROMPTS {
+        match found.iter().find(|(function, _)| function == name) {
+            None => problems.push(format!("there is no `fn {name}` to check")),
+            Some((_, visibility)) if !matches!(visibility.as_str(), "" | "pub(super)") => problems
+                .push(format!(
+                    "`fn {name}` is `{visibility}`; the automatic prompt stays inside the shell"
+                )),
+            Some(_) => {}
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{LOCK_SCREEN_SOURCE}:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// Every function in code outside `#[cfg(test)]` items, with the visibility
+/// written before it.
+fn function_visibility(source: &str) -> Result<Vec<(String, String)>, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    Ok((0..t.len())
+        .filter(|&i| t[i].is_keyword("fn") && !test_items.iter().any(|item| item.contains(&i)))
+        .filter_map(|i| {
+            let name = t.get(i + 1)?.name()?;
+            Some((name.to_string(), visibility_before(&p, i)))
+        })
+        .collect())
+}
+
+#[test]
+fn function_visibility_is_read_as_written() {
+    let source = r##"
+        impl Shell {
+            fn private(&self) {}
+            pub(super) fn shell_only(&mut self) {}
+            pub(crate) async fn crate_wide(&self) {}
+            pub fn everyone(&self) {}
+            pub const fn constant() -> u8 { 0 }
+        }
+        #[cfg(test)]
+        mod tests { pub fn helper() {} }
+    "##;
+    let pair = |name: &str, visibility: &str| (name.to_string(), visibility.to_string());
+    assert_eq!(
+        function_visibility(source).expect("scan"),
+        vec![
+            pair("private", ""),
+            pair("shell_only", "pub(super)"),
+            pair("crate_wide", "pub(crate)"),
+            pair("everyone", "pub"),
+            pair("constant", "pub"),
         ]
     );
 }
