@@ -8,20 +8,74 @@
 //! behavior is worth keeping. All three show the same keyboard focus ring,
 //! from `focus_ring.rs`, and the text field and the switch turn the Kit's
 //! own ring off for it.
+//!
+//! The type tile, the chip and the vault badge are parts of a row and write
+//! no node there; the row's name says what they show. Shown on their own,
+//! each sits in a [`Standalone`], which gives it a node with a role and a
+//! name.
 
 mod accessibility_id;
 pub mod button;
+pub mod chip;
 mod focus_ring;
 pub(in crate::ui::ds) mod keycap;
 pub mod shortcut;
 pub mod switch;
 pub mod text_field;
+pub mod tile;
+pub mod vault_badge;
+
+use gpui::{
+    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
+    RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+};
 
 pub use accessibility_id::AccessibilityId;
 pub use button::{Button, ButtonKind, ButtonSize, IconButton};
+pub use chip::{Chip, ChipTone};
 pub use shortcut::Shortcut;
 pub use switch::Switch;
 pub use text_field::TextField;
+pub use tile::Tile;
+pub use vault_badge::{VaultBadge, initial_for};
+
+/// A component shown on its own rather than inside a row, such as the type
+/// tile in the head of an entry's details: a node of its own, with a role
+/// and a name, around what the component draws.
+#[derive(IntoElement)]
+pub struct Standalone {
+    id: ElementId,
+    role: Role,
+    name: SharedString,
+    body: AnyElement,
+}
+
+impl Standalone {
+    /// Panics on an empty name, in every build: VoiceOver reads the node by
+    /// its name, since a glyph, a dot or a mark such as "PRD" says nothing
+    /// on its own.
+    fn new(id: ElementId, role: Role, name: SharedString, body: AnyElement) -> Self {
+        assert!(!name.is_empty(), "a component on its own needs a name");
+        Self {
+            id,
+            role,
+            name,
+            body,
+        }
+    }
+}
+
+impl RenderOnce for Standalone {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .id(self.id)
+            .role(self.role)
+            .aria_label(self.name)
+            .flex()
+            .flex_none()
+            .child(self.body)
+    }
+}
 
 /// The count behind the rule of one copper surface per view.
 ///
@@ -113,9 +167,9 @@ pub(in crate::ui::ds) mod probe {
     use std::rc::Rc;
 
     use gpui::{
-        AnyElement, App, AppContext as _, Bounds, Context, Edges, Element as _, Hsla, IntoElement,
-        Modifiers, ParentElement as _, Pixels, Render, Role, Styled as _, TestAppContext,
-        VisualTestContext, Window, accesskit, canvas, div, px,
+        AnyElement, App, AppContext as _, Bounds, Context, Edges, Element as _, ElementId, Hsla,
+        IntoElement, Modifiers, ParentElement as _, Pixels, Render, Role, Styled as _,
+        TestAppContext, VisualTestContext, Window, accesskit, canvas, div, px,
     };
     use gpui_component::{Root, Theme};
 
@@ -184,6 +238,12 @@ pub(in crate::ui::ds) mod probe {
         let mut node = accesskit::Node::new(role.unwrap_or(Role::Unknown));
         element.write_a11y_info(&mut node);
         (role, node)
+    }
+
+    /// The element id `element` carries. Without one, GPUI writes no node
+    /// for it in the real tree, whatever its role.
+    pub fn element_id(element: impl IntoElement) -> Option<ElementId> {
+        element.into_element().id()
     }
 
     /// The edges a window painted in its last frame: each quad with a
@@ -650,6 +710,17 @@ mod tests {
         ("Shortcut::from_keystroke(", 1),
         ("TextField::new(", 2),
         ("Switch::new(", 1),
+        ("Chip::new(", 1),
+        ("VaultBadge::team(", 0),
+        ("VaultBadge::other(", 0),
+        // The name of a component on its own. `standalone(` covers the
+        // vault badge's `badge.standalone(id, name)`; in the tile's and the
+        // chip's the argument there is the glyph or the tone.
+        ("Standalone::new(", 2),
+        ("Tile::standalone(", 2),
+        ("Chip::standalone(", 2),
+        ("Chip::standalone(", 3),
+        ("standalone(", 1),
         // The sentences a component adds to its name.
         ("description(", 0),
         ("note(", 0),
@@ -759,6 +830,15 @@ mod tests {
             gpui_base::Button::new("save");
             Button::primary("row,", label).my_note("not this one");
             fn note(mut self, sentence: impl Into<SharedString>) -> Self { self }
+            Chip::new(ChipTone::Production, "PRD");
+            Chip::new(ChipTone::Production, prd);
+            Chip::standalone("role", ChipTone::Production, "PRD", "Production system");
+            Tile::standalone("kind", IconName::Globe, "Web login");
+            VaultBadge::team("B", color).standalone("vault", "Team Beratung");
+            VaultBadge::other("K");
+            Standalone::new(id, Role::Image, "Image", body);
+            Tile::standalone("kind", IconName::Globe, name);
+            fn standalone(self, id: impl Into<ElementId>, name: impl Into<SharedString>) {}
         "##;
         assert_eq!(
             literal_texts(source),
@@ -782,7 +862,66 @@ mod tests {
                 (28, "\"After four minutes without input.\"".to_string()),
                 (29, "\"The address needs a port.\"".to_string()),
                 (30, "\"Server address\"".to_string()),
+                (42, "\"PRD\"".to_string()),
+                (44, "\"PRD\"".to_string()),
+                (44, "\"Production system\"".to_string()),
+                (45, "\"Web login\"".to_string()),
+                (46, "\"B\"".to_string()),
+                (46, "\"Team Beratung\"".to_string()),
+                (47, "\"K\"".to_string()),
+                (48, "\"Image\"".to_string()),
             ]
         );
+    }
+
+    /// Text in the components comes in a text style, and no text style is
+    /// below 11 points (`nothing_below_11_points` in `typography.rs`). So a
+    /// component sets no text size of its own: neither GPUI's size setters
+    /// nor the GPUI Kit's sizes, which go down to 11.4 px at text size 13.
+    /// The scan reads the files through `code_only`, so comments and inline
+    /// test modules do not count.
+    #[test]
+    fn nothing_below_11_points_in_the_new_components() {
+        // Built from pieces so that the list does not find itself.
+        let setters = [
+            concat!(".text_", "size("),
+            concat!(".text_", "xs("),
+            concat!(".text_", "sm("),
+            concat!(".text_", "base("),
+            concat!(".text_", "lg("),
+            concat!(".text_", "xl("),
+            concat!(".text_", "2xl("),
+            concat!(".text_", "3xl("),
+            concat!(".x", "small("),
+            concat!(".", "small("),
+            concat!(".with_", "size("),
+            concat!(".font_", "size("),
+        ];
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds/components");
+        let mut files = Vec::new();
+        probe::rust_files(&dir, &mut files);
+        assert!(files.len() > 8, "the scan found only {} files", files.len());
+        let mut found = Vec::new();
+        for file in &files {
+            let source = std::fs::read_to_string(file).expect("read source");
+            for (number, line) in probe::code_only(&source).lines().enumerate() {
+                if setters.iter().any(|setter| line.contains(setter)) {
+                    found.push(format!(
+                        "{}:{}: {}",
+                        file.display(),
+                        number + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "set text with .text_style(TextStyle::..), never below 11 points:\n{}",
+            found.join("\n")
+        );
+        for style in crate::ui::ds::typography::TextStyle::ALL {
+            assert!(style.size() >= 11.0, "{style:?} is {} pt", style.size());
+        }
     }
 }
