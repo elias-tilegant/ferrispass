@@ -505,7 +505,6 @@ impl RenderOnce for Row {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::path::Path;
     use std::rc::Rc;
 
     use gpui::{
@@ -746,30 +745,6 @@ mod tests {
         }
     }
 
-    /// Each line of `file` in `src/ui/ds/components` that has `call` on
-    /// it, once for every time it does, read through `code_only`, so
-    /// comments and the file's tests do not count. A call that starts with
-    /// a letter counts only where no letter, digit or underscore comes
-    /// right before it: `id(` is found in `.id(` and in
-    /// `InteractiveElement::id(`, not in `accessibility_id(`.
-    fn calls_in(file: &str, call: &str) -> Vec<String> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/ui/ds/components")
-            .join(file);
-        let source = std::fs::read_to_string(path).expect(file);
-        let code = probe::code_only(&source);
-        let in_word = |c: char| c.is_alphanumeric() || c == '_';
-        let word = call.starts_with(in_word);
-        code.lines()
-            .enumerate()
-            .flat_map(|(at, line)| {
-                line.match_indices(call)
-                    .filter(move |(start, _)| !word || !line[..*start].ends_with(in_word))
-                    .map(move |_| format!("{file}:{}: {}", at + 1, line.trim()))
-            })
-            .collect()
-    }
-
     /// A node needs an element id and a role. `row.rs` has one call that
     /// gives an element an id and one that gives it a role, written as a
     /// method or through its trait, and both are on the row's own node, so
@@ -798,7 +773,7 @@ mod tests {
             ("standalone(", 0),
             ("Standalone", 0),
         ] {
-            let found = calls_in("row.rs", call);
+            let found = probe::calls_in("row.rs", call);
             if found.len() != allowed {
                 wrong.push(format!("{call} in row.rs, {allowed} allowed: {found:#?}"));
             }
@@ -832,7 +807,7 @@ mod tests {
                 ("Standalone::new(", 1),
                 ("standalone(", 1),
             ] {
-                let found = calls_in(file, call);
+                let found = probe::calls_in(file, call);
                 if found.len() != allowed {
                     wrong.push(format!("{call} in {file}, {allowed} allowed: {found:#?}"));
                 }

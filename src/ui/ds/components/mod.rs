@@ -14,6 +14,12 @@
 //! each sits in a [`Standalone`], which gives it a node with a role and a
 //! name. The row itself is one node, an option in a list box, named after
 //! its parts through [`RowParts::accessible_name`].
+//!
+//! The secret field is built from several elements, and the secret may
+//! reach none of them while it is hidden or while no assistive technology
+//! runs. Under `cfg(test)` it lists every element it builds, and its
+//! containers note how many children they hold, so the tests read each
+//! element and find one that is not on the list.
 
 mod accessibility_id;
 pub mod button;
@@ -21,6 +27,7 @@ pub mod chip;
 mod focus_ring;
 pub(in crate::ui::ds) mod keycap;
 pub mod row;
+pub mod secret_field;
 pub mod shortcut;
 pub mod switch;
 pub mod text_field;
@@ -28,7 +35,7 @@ pub mod tile;
 pub mod vault_badge;
 
 use gpui::{
-    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
     RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
@@ -36,6 +43,7 @@ pub use accessibility_id::AccessibilityId;
 pub use button::{Button, ButtonKind, ButtonSize, IconButton};
 pub use chip::{Chip, ChipTone};
 pub use row::{Row, RowDensity, RowParts};
+pub use secret_field::{CopyState, SecretField};
 pub use shortcut::Shortcut;
 pub use switch::Switch;
 pub use text_field::TextField;
@@ -78,6 +86,19 @@ impl RenderOnce for Standalone {
             .flex_none()
             .child(self.body)
     }
+}
+
+/// A container of a composed component, such as the secret field. In the
+/// tests it notes how many children it holds once it is laid out, so that a
+/// test can hold the component to the parts it lists for the tests; outside
+/// the tests it is the container as it was.
+fn counted(container: Div, name: &'static str) -> Div {
+    #[cfg(test)]
+    let container = container
+        .on_children_prepainted(move |children, _, _| probe::note_children(name, children.len()));
+    #[cfg(not(test))]
+    let _ = name;
+    container
 }
 
 /// The count behind the rule of one copper surface per view.
@@ -165,6 +186,7 @@ pub mod copper {
 #[cfg(test)]
 pub(in crate::ui::ds) mod probe {
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
@@ -252,6 +274,67 @@ pub(in crate::ui::ds) mod probe {
     /// for it in the real tree, whatever its role.
     pub fn element_id(element: impl IntoElement) -> Option<ElementId> {
         element.into_element().id()
+    }
+
+    /// One element a composed component builds, and what it tells assistive
+    /// technology: its role, its element id and its node. Read before the
+    /// element goes into its container, since an element whose type GPUI
+    /// has erased reports no role and writes nothing.
+    pub struct ComponentPart {
+        pub name: &'static str,
+        pub role: Option<Role>,
+        pub id: Option<ElementId>,
+        pub node: accesskit::Node,
+    }
+
+    /// Reads `element` as the part called `name`.
+    pub fn part(name: &'static str, element: impl IntoElement) -> ComponentPart {
+        let element = element.into_element();
+        let (role, node) = node_of(&element);
+        ComponentPart {
+            name,
+            role,
+            id: element.id(),
+            node,
+        }
+    }
+
+    thread_local! {
+        /// How many children each counted container held when it was last
+        /// laid out on this thread.
+        static CHILDREN: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
+    }
+
+    /// Called by a counted container once its children are laid out.
+    pub fn note_children(container: &'static str, count: usize) {
+        CHILDREN.with_borrow_mut(|children| {
+            children.insert(container, count);
+        });
+    }
+
+    /// Each line of `file` in `src/ui/ds/components` that has `call` on
+    /// it, once for every time it does, read through `code_only`, so
+    /// comments and the file's tests do not count. A call that starts with
+    /// a letter counts only where no letter, digit or underscore comes
+    /// right before it: `id(` is found in `.id(` and in
+    /// `InteractiveElement::id(`, not in `accessibility_id(`, and
+    /// `Text::new(` not in `StyledText::new(`.
+    pub fn calls_in(file: &str, call: &str) -> Vec<String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/ui/ds/components")
+            .join(file);
+        let source = std::fs::read_to_string(path).expect(file);
+        let code = code_only(&source);
+        let in_word = |c: char| c.is_alphanumeric() || c == '_';
+        let word = call.starts_with(in_word);
+        code.lines()
+            .enumerate()
+            .flat_map(|(at, line)| {
+                line.match_indices(call)
+                    .filter(move |(start, _)| !word || !line[..*start].ends_with(in_word))
+                    .map(move |_| format!("{file}:{}: {}", at + 1, line.trim()))
+            })
+            .collect()
     }
 
     /// The edges a window painted in its last frame: each quad with a
@@ -719,6 +802,7 @@ mod tests {
         ("TextField::new(", 2),
         ("Switch::new(", 1),
         ("Chip::new(", 1),
+        ("SecretField::new(", 1),
         ("VaultBadge::team(", 0),
         ("VaultBadge::other(", 0),
         // The name of a component on its own. `standalone(` covers the
@@ -865,6 +949,7 @@ mod tests {
             RowParts::new(kind, title).role_word(role).user(user).vault(vault);
             fn user(mut self, user: impl Into<SharedString>) -> Self { self }
             Row::new("row", 0, 1, parts, tile, badge).description("Return: sign in");
+            SecretField::new("password", "Password").value(secret);
         "##;
         assert_eq!(
             literal_texts(source),
@@ -904,6 +989,7 @@ mod tests {
                 (55, "\"N.WEISS\"".to_string()),
                 (56, "\"Team Beratung\"".to_string()),
                 (59, "\"Return: sign in\"".to_string()),
+                (60, "\"Password\"".to_string()),
             ]
         );
     }

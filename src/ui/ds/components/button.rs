@@ -156,7 +156,7 @@ impl ButtonSize {
     }
 }
 
-type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+pub(super) type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// What a button shows, and the name VoiceOver reads for it.
 enum Content {
@@ -190,6 +190,8 @@ pub struct Button {
     disabled: bool,
     loading: bool,
     description: Option<SharedString>,
+    toggled: Option<bool>,
+    expanded: Option<bool>,
     accessibility_id: Option<AccessibilityId>,
     on_click: Option<ClickHandler>,
 }
@@ -237,6 +239,8 @@ impl Button {
             disabled: false,
             loading: false,
             description: None,
+            toggled: None,
+            expanded: None,
             accessibility_id: None,
             on_click: None,
         }
@@ -388,6 +392,14 @@ impl Button {
             .track_focus(&focus)
             .when_some(self.accessibility_id, |this, id| id.apply(this))
             .when_some(description, |this, text| this.aria_description(text))
+            .when_some(self.toggled, |this, on| {
+                this.aria_toggled(if on {
+                    accesskit::Toggled::True
+                } else {
+                    accesskit::Toggled::False
+                })
+            })
+            .when_some(self.expanded, |this, open| this.aria_expanded(open))
             .when_some(keys, |this, keys| this.aria_keyshortcuts(keys))
             .when_some(handler, |this, handler| {
                 this.on_a11y_action(accesskit::Action::Click, voiceover_press(handler.clone()))
@@ -518,7 +530,7 @@ impl RenderOnce for Button {
 }
 
 /// What VoiceOver's press does: the same as a click from the keyboard.
-fn voiceover_press(
+pub(super) fn voiceover_press(
     handler: ClickHandler,
 ) -> impl FnMut(Option<&accesskit::ActionData>, &mut Window, &mut App) + 'static {
     move |_, window, cx| handler(&ClickEvent::default(), window, cx)
@@ -569,6 +581,19 @@ impl IconButton {
 
     pub fn description(self, description: impl Into<SharedString>) -> Self {
         Self(self.0.description(description))
+    }
+
+    /// For a button that switches something on and off, such as showing a
+    /// password: whether it is on, which VoiceOver reads with the name.
+    pub fn toggled(mut self, on: bool) -> Self {
+        self.0.toggled = Some(on);
+        self
+    }
+
+    /// For a button that opens a menu: whether the menu is open.
+    pub fn expanded(mut self, open: bool) -> Self {
+        self.0.expanded = Some(open);
+        self
     }
 
     pub fn accessibility_id(mut self, id: AccessibilityId) -> Self {

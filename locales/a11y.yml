@@ -8,6 +8,10 @@ a11y:
   reveal_password:
     en: Show password
     de: Passwort zeigen
+  # The description of a secret while it is hidden.
+  hidden:
+    en: hidden
+    de: verborgen
   # The description of a disabled control. GPUI has no disabled flag for
   # assistive technology yet.
   not_available:
