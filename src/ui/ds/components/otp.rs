@@ -314,23 +314,37 @@ impl OtpRing {
 
     /// Every element `render` builds, each read as the tests read it: the
     /// timer, the boxes of the code, the next code and the seconds with the
-    /// text each holds, and the ring.
+    /// text each holds, and the ring. The timer is read off the element
+    /// `render` returns, so whatever is set on it on the way counts too.
     #[cfg(test)]
-    pub(super) fn parts(&self, _: &mut Window, cx: &mut App) -> Vec<super::probe::ComponentPart> {
+    pub(super) fn parts(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<super::probe::ComponentPart> {
         use super::probe::part;
-        let built = self.clone().build(cx);
-        let mut parts = vec![part("timer", built.timer)];
+        let timer = part("timer", RenderOnce::render(self.clone(), window, cx));
+        // Every field by name, so an element added to `Built` does not
+        // compile until it is listed here. The timer is read above.
+        let Built {
+            timer: _,
+            code,
+            next_code,
+            seconds,
+            ring,
+        } = self.clone().build(cx);
+        let mut parts = vec![timer];
         for (name, text_name, shown) in [
-            ("code", "code_text", built.code),
-            ("next_code", "next_code_text", built.next_code),
-            ("seconds", "seconds_text", Some(built.seconds)),
+            ("code", "code_text", code),
+            ("next_code", "next_code_text", next_code),
+            ("seconds", "seconds_text", Some(seconds)),
         ] {
             if let Some((shown, text)) = shown {
                 parts.push(part(name, shown));
                 parts.push(part(text_name, text));
             }
         }
-        parts.push(part("ring", built.ring));
+        parts.push(part("ring", ring));
         parts
     }
 }

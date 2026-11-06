@@ -348,45 +348,54 @@ impl PanelFooter {
         }
     }
 
-    /// Every element `render` builds, each read as the tests read it.
+    /// Every element `render` builds from the footer `make` returns, each
+    /// read as the tests read it. The footer itself is read off the element
+    /// `render` returns, so whatever is set on it on the way counts too;
+    /// `make` builds it once for that and once for the elements inside.
     #[cfg(test)]
     pub(super) fn parts(
-        self,
+        make: impl Fn() -> Self,
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<super::probe::ComponentPart> {
         use super::probe::part;
-        let built = self.build(cx);
+        let footer = part("footer", RenderOnce::render(make(), window, cx));
+        // Every field by name, so an element added to `Built` does not
+        // compile until it is listed here. The footer is read above.
+        let Built {
+            footer: _,
+            lines,
+            main,
+            glyph,
+            primary,
+            second,
+            more,
+            note,
+            via,
+            menu,
+        } = make().build(cx);
         let mut parts = vec![
-            part("footer", built.footer),
-            part("lines", built.lines),
-            part("main", built.main),
-            part("second", built.second),
+            footer,
+            part("lines", lines),
+            part("main", main),
+            part("second", second),
         ];
-        parts.extend(
-            built
-                .glyph
-                .map(|glyph| part("glyph", RenderOnce::render(glyph, window, cx))),
-        );
-        parts.extend(
-            built
-                .primary
-                .map(|pair| part("primary", RenderOnce::render(pair, window, cx))),
-        );
-        for (place, pair) in built.more {
+        parts.extend(glyph.map(|glyph| part("glyph", RenderOnce::render(glyph, window, cx))));
+        parts.extend(primary.map(|pair| part("primary", RenderOnce::render(pair, window, cx))));
+        for (place, pair) in more {
             parts.push(part("more place", place));
             parts.push(part("more", RenderOnce::render(pair, window, cx)));
         }
-        if let Some((place, note)) = built.note {
+        if let Some((place, note)) = note {
             parts.push(part("note place", place));
             parts.push(part("note", note));
         }
-        if let Some((place, glyph, text)) = built.via {
+        if let Some((place, glyph, text)) = via {
             parts.push(part("via", place));
             parts.push(part("via glyph", RenderOnce::render(glyph, window, cx)));
             parts.push(part("via text", text));
         }
-        let menu = built.menu.into_base(window, cx);
+        let menu = menu.into_base(window, cx);
         parts.push(part("menu", RenderOnce::render(menu, window, cx)));
         parts
     }
@@ -451,7 +460,7 @@ mod tests {
         cx: &mut TestAppContext,
         build: impl Fn() -> PanelFooter + 'static,
     ) -> Vec<probe::ComponentPart> {
-        probe::in_frame(cx, move |window, cx| build().parts(window, cx))
+        probe::in_frame(cx, move |window, cx| PanelFooter::parts(&build, window, cx))
     }
 
     /// The color of the first line, as the footer styles its pair.
@@ -467,10 +476,11 @@ mod tests {
         })
     }
 
-    /// The footer takes no focus and writes no node of its own: only the
-    /// menu button has an element id and a role, it is a button, and no
-    /// element is a live region or a role that announces itself. In a
-    /// window that holds the footer alone, Tab finds one stop, the button.
+    /// The footer takes no focus and writes no node of its own: of every
+    /// element it builds, the footer itself read as `render` returns it,
+    /// only the menu button has an element id and a role, it is a button,
+    /// and no element is a live region or a role that announces itself. In
+    /// a window that holds the footer alone, Tab finds one stop, the button.
     #[gpui::test]
     fn the_footer_is_not_focusable_and_writes_no_live_node(cx: &mut TestAppContext) {
         let tones = [

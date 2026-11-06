@@ -17,10 +17,13 @@
 //!
 //! The secret field and the one-time code ring are built from several
 //! elements, and the secret or the code may reach none of them while it is
-//! hidden or while no assistive technology runs. Under `cfg(test)` each
-//! lists every element it builds, and its containers note how many
-//! children they hold, so the tests read each element and find one that is
-//! not on the list.
+//! hidden or while no assistive technology runs. Each makes its elements in
+//! `build` and only puts them into one another in `assemble`. Under
+//! `cfg(test)` each lists every element it builds, the outer one as
+//! `render` returns it, and its containers note how many children they
+//! hold, so the tests read each element, hidden and shown, with and
+//! without assistive technology, and find a child that is not on the list.
+//! The panel footer is built and listed the same way.
 //!
 //! The panel footer is no node and takes no focus; the one node in it is
 //! the button that opens its menu. The panel hands what it says to
@@ -1125,9 +1128,14 @@ mod tests {
         found
     }
 
-    fn field(revealed: bool, assistive: bool, copied: CopyState, handlers: bool) -> SecretField {
+    /// A secret field in the given state, without a secret.
+    fn empty_field(
+        revealed: bool,
+        assistive: bool,
+        copied: CopyState,
+        handlers: bool,
+    ) -> SecretField {
         let field = SecretField::new("password", SharedString::new_static("Password"))
-            .value(zeroize::Zeroizing::new(SECRET.to_string()))
             .revealed(revealed)
             .assistive(assistive)
             .copied(copied)
@@ -1139,16 +1147,26 @@ mod tests {
         }
     }
 
-    fn ring(remaining: u64, masked: bool, assistive: bool) -> OtpRing {
+    fn field(revealed: bool, assistive: bool, copied: CopyState, handlers: bool) -> SecretField {
+        empty_field(revealed, assistive, copied, handlers)
+            .value(zeroize::Zeroizing::new(SECRET.to_string()))
+    }
+
+    /// A ring in the given state, without a code.
+    fn empty_ring(remaining: u64, masked: bool, assistive: bool) -> OtpRing {
         OtpRing::new(
             "otp",
             std::time::Duration::from_secs(remaining),
             std::time::Duration::from_secs(30),
         )
-        .code(zeroize::Zeroizing::new(CODE.to_string()))
-        .next_code(zeroize::Zeroizing::new(NEXT_CODE.to_string()))
         .masked(masked)
         .assistive(assistive)
+    }
+
+    fn ring(remaining: u64, masked: bool, assistive: bool) -> OtpRing {
+        empty_ring(remaining, masked, assistive)
+            .code(zeroize::Zeroizing::new(CODE.to_string()))
+            .next_code(zeroize::Zeroizing::new(NEXT_CODE.to_string()))
     }
 
     /// Where `parts` hand any piece of `secrets` to assistive technology,
@@ -1186,9 +1204,10 @@ mod tests {
 
     /// No secret and no one-time code reaches assistive technology while it
     /// is hidden or while none runs. Every part the secret field and the
-    /// ring build, read one by one, holds neither the secret nor the code,
-    /// nor a group of three or four of either, in its label, value,
-    /// description, tooltip, author id or placeholder: the field hidden
+    /// ring build, read one by one, the group and the timer as `render`
+    /// returns them, holds neither the secret nor the code, nor a group of
+    /// three or four of either, in its label, value, description, tooltip,
+    /// author id or placeholder: the field hidden
     /// without and with assistive technology and revealed without it, in
     /// every copy state, with and without its handlers, and the ring masked
     /// without and with assistive technology and unmasked without it, with
@@ -1319,58 +1338,176 @@ mod tests {
     /// Every element the secret field and the ring put into their containers
     /// is one of their parts, which `no_secret_in_ax_tree` reads: the parts
     /// each lists are as many as the elements it draws, the one it returns
-    /// and the children its containers hold, in each state. The count
-    /// covers the containers the two files build; what a button of their
-    /// own draws inside it is the button's.
+    /// and the children its containers hold. The field is drawn hidden and
+    /// revealed, without and with assistive technology, in every copy
+    /// state, without and with its handlers and without and with a secret;
+    /// the ring masked and unmasked, without and with assistive technology,
+    /// with 18 and with 3 seconds left and without and with a code. So a
+    /// child that only one state adds shows up too. The count covers the
+    /// containers the two files build; what a button of their own draws
+    /// inside it is the button's. That `assemble` puts no element around a
+    /// part is `assemble_only_places_parts`.
     #[gpui::test]
     fn every_rendered_child_is_a_part(cx: &mut gpui::TestAppContext) {
-        for revealed in [false, true] {
-            for handlers in [false, true] {
-                for with_value in [false, true] {
-                    let build = move || {
-                        let field = field(revealed, false, CopyState::Idle, handlers);
-                        if with_value {
-                            field
-                        } else {
-                            SecretField::new("password", SharedString::new_static("Password"))
-                                .revealed(revealed)
+        let both = [false, true];
+        for revealed in both {
+            for assistive in both {
+                for copied in CopyState::ALL {
+                    for handlers in both {
+                        for with_value in both {
+                            let build = move || {
+                                if with_value {
+                                    field(revealed, assistive, copied, handlers)
+                                } else {
+                                    empty_field(revealed, assistive, copied, handlers)
+                                }
+                            };
+                            let parts = probe::in_frame(cx, move |window, cx| {
+                                build().parts(window, cx).len()
+                            });
+                            let drawn = drawn_elements(cx, move || build().into_any_element());
+                            assert_eq!(
+                                drawn, parts,
+                                "field, revealed: {revealed}, assistive: {assistive}, \
+                                 {copied:?}, handlers: {handlers}, value: {with_value}"
+                            );
                         }
-                    };
-                    let parts =
-                        probe::in_frame(cx, move |window, cx| build().parts(window, cx).len());
-                    let drawn = drawn_elements(cx, move || build().into_any_element());
-                    assert_eq!(
-                        drawn, parts,
-                        "field, revealed: {revealed}, handlers: {handlers}, value: {with_value}"
-                    );
+                    }
                 }
             }
         }
-        for masked in [true, false] {
-            for remaining in [18, 3] {
-                for with_code in [false, true] {
-                    let build = move || {
-                        if with_code {
-                            ring(remaining, masked, false)
-                        } else {
-                            OtpRing::new(
-                                "otp",
-                                std::time::Duration::from_secs(remaining),
-                                std::time::Duration::from_secs(30),
-                            )
-                            .masked(masked)
-                        }
-                    };
-                    let parts =
-                        probe::in_frame(cx, move |window, cx| build().parts(window, cx).len());
-                    let drawn = drawn_elements(cx, move || build().into_any_element());
-                    assert_eq!(
-                        drawn, parts,
-                        "ring, masked: {masked}, {remaining} s left, code: {with_code}"
-                    );
+        for masked in both {
+            for assistive in both {
+                for remaining in [18, 3] {
+                    for with_code in both {
+                        let build = move || {
+                            if with_code {
+                                ring(remaining, masked, assistive)
+                            } else {
+                                empty_ring(remaining, masked, assistive)
+                            }
+                        };
+                        let parts =
+                            probe::in_frame(cx, move |window, cx| build().parts(window, cx).len());
+                        let drawn = drawn_elements(cx, move || build().into_any_element());
+                        assert_eq!(
+                            drawn, parts,
+                            "ring, masked: {masked}, assistive: {assistive}, \
+                             {remaining} s left, code: {with_code}"
+                        );
+                    }
                 }
             }
         }
+    }
+
+    /// The words of `code`, runs of letters, digits and underscores, each
+    /// with the character right before it and the one right after it,
+    /// spaces left out.
+    fn words_in(code: &str) -> Vec<(&str, Option<char>, Option<char>)> {
+        let in_word = |c: char| c.is_alphanumeric() || c == '_';
+        let mut words = Vec::new();
+        let mut start = None;
+        for (at, c) in code.char_indices().chain([(code.len(), ' ')]) {
+            match (start, in_word(c)) {
+                (None, true) => start = Some(at),
+                (Some(from), false) => {
+                    let before = code[..from].trim_end().chars().next_back();
+                    let after = code[at..].trim_start().chars().next();
+                    words.push((&code[from..at], before, after));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        words
+    }
+
+    /// `assemble` in the secret field, the ring and the footer puts the
+    /// elements `build` made into one another and does nothing else, so
+    /// every element `render` draws is one that `parts()` reads, and no
+    /// element gets a node, a role or a name on the way. Read through
+    /// `code_only`, its body may call `child`, `children`, `map`,
+    /// `into_iter` and `into_any_element` on an element, read a field of
+    /// `Built`, call the variants it matches and a closure of its own, and
+    /// name what it binds. Any other word fails, and so does a macro, a
+    /// literal or an attribute: a `div()` around a part, an `id`, a `role`
+    /// or an `aria_label` set on one, a keycap, a function from elsewhere.
+    /// A function of the same file called under one of the names the body
+    /// may use is past it.
+    #[test]
+    fn assemble_only_places_parts() {
+        const METHODS: [&str; 5] = ["child", "children", "map", "into_iter", "into_any_element"];
+        const WORDS: [&str; 3] = ["let", "match", "built"];
+        // Each file, the names `assemble` binds there and the types it
+        // names, and what it calls that is no method: the variants it
+        // matches and its own closure.
+        let files: [(&str, &[&str], &[&str]); 3] = [
+            (
+                "secret_field.rs",
+                &["Shown", "Value", "shown", "text", "value"],
+                &["Mask", "Revealed", "Button", "Plain"],
+            ),
+            (
+                "otp.rs",
+                &["Div", "SharedString", "shown", "text"],
+                &["shown"],
+            ),
+            (
+                "panel_footer.rs",
+                &[
+                    "main", "second", "via", "place", "pair", "note", "glyph", "text",
+                ],
+                &[],
+            ),
+        ];
+        let mut found = Vec::new();
+        for (file, names, calls) in files {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/ui/ds/components")
+                .join(file);
+            let code = probe::code_only(&std::fs::read_to_string(path).expect(file));
+            let built = code.find("struct Built").expect("struct Built");
+            let fields: Vec<&str> = probe::braced(&code[built..])
+                .lines()
+                .filter_map(|line| line.trim().split_once(':'))
+                .filter(|(name, rest)| {
+                    !rest.starts_with(':')
+                        && !name.is_empty()
+                        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                })
+                .map(|(name, _)| name)
+                .collect();
+            assert!(fields.len() > 2, "{file}: the fields of Built: {fields:?}");
+            let assemble = code.find("fn assemble(").expect("fn assemble");
+            let body = probe::braced(&code[assemble..]);
+            for mark in ['!', '"', '\'', '#'] {
+                if body.contains(mark) {
+                    found.push(format!("{file}: {mark:?}"));
+                }
+            }
+            let words = words_in(body);
+            assert!(
+                words.iter().any(|(word, ..)| *word == "child"),
+                "{file}: the body of assemble: {body}"
+            );
+            for (word, before, after) in words {
+                let (kind, allowed) = match (before == Some('.'), after == Some('(')) {
+                    (true, true) => ("method", METHODS.contains(&word)),
+                    (true, false) => ("field", fields.contains(&word)),
+                    (false, true) => ("call", calls.contains(&word)),
+                    (false, false) => ("name", WORDS.contains(&word) || names.contains(&word)),
+                };
+                if !allowed {
+                    found.push(format!("{file}: {kind} {word}"));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "assemble puts the parts in place and does nothing else:\n{}",
+            found.join("\n")
+        );
     }
 
     /// Whether a type has `Debug` or `Display`, read without requiring

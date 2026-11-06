@@ -345,7 +345,9 @@ impl SecretField {
 
     /// Every element `render` builds, each read as the tests read it: the
     /// group, the value, the focus ring while it shows, the dots or the
-    /// revealed text, and the buttons that reveal and copy.
+    /// revealed text, and the buttons that reveal and copy. The group is
+    /// read off the element `render` returns, so whatever is set on it on
+    /// the way counts too.
     #[cfg(test)]
     pub(super) fn parts(
         &self,
@@ -353,20 +355,30 @@ impl SecretField {
         cx: &mut App,
     ) -> Vec<super::probe::ComponentPart> {
         use super::probe::part;
-        let built = self.clone().build(window, cx);
+        let group = part("group", RenderOnce::render(self.clone(), window, cx));
+        // Every field by name, so an element added to `Built` does not
+        // compile until it is listed here. The group is read above.
+        let Built {
+            group: _,
+            value,
+            shown,
+            ring,
+            reveal,
+            copy,
+        } = self.clone().build(window, cx);
         let mut parts = vec![
-            part("group", built.group),
-            match built.value {
+            group,
+            match value {
                 Value::Button(value) => part("value", value),
                 Value::Plain(value) => part("value", value),
             },
-            match built.shown {
+            match shown {
                 Shown::Mask(text) => part("mask", text),
                 Shown::Revealed(text) => part("revealed_text", text),
             },
         ];
-        parts.extend(built.ring.map(|ring| part("ring", ring)));
-        for (name, button) in [("reveal", built.reveal), ("copy", built.copy)] {
+        parts.extend(ring.map(|ring| part("ring", ring)));
+        for (name, button) in [("reveal", reveal), ("copy", copy)] {
             if let Some(button) = button {
                 let base = button.into_base(window, cx);
                 parts.push(part(name, RenderOnce::render(base, window, cx)));
