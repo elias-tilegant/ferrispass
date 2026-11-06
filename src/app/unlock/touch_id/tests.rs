@@ -27,7 +27,7 @@ use crate::keepass::limits::{Argon2Variant, KdfCost};
 use crate::keepass::repository::snapshot_from_database;
 use crate::platform::secure_input::{self, fake::FakeApi};
 use crate::ui::AppShell;
-use gpui::{AnyWindowHandle, TestAppContext, Window, WindowHandle};
+use gpui::{AnyWindowHandle, TestAppContext, VisualTestContext, Window, WindowHandle};
 use gpui_component::Root;
 use keepass::config::{DatabaseConfig, KdfConfig};
 use keepass::db::fields;
@@ -296,6 +296,16 @@ impl LockScreen {
             .expect("the window is open");
         cx.run_until_parked();
     }
+
+    /// Another app comes to the front.
+    fn deactivate(&self, cx: &mut TestAppContext) {
+        VisualTestContext::from_window(self.window.into(), cx).deactivate_window();
+        cx.run_until_parked();
+        let in_front = AnyWindowHandle::from(self.window)
+            .update(cx, |_, window, _| window.is_window_active())
+            .expect("the window is open");
+        assert!(!in_front, "the window is still in front");
+    }
 }
 
 #[gpui::test]
@@ -395,13 +405,69 @@ fn an_interrupted_automatic_prompt_is_retried_once_on_the_lock_screen(cx: &mut T
         assert!(state.unlock_prompt().expect("still locked").error.is_none());
     });
 
-    // A withdrawn click is left for the user to click again.
+    // With that one retry spent, a withdrawn click brings no prompt either.
+    // A click withdrawn while the retry is still unspent is the next test.
     screen.vault.store.answering([BiometricError::Interrupted]);
     screen.in_window(cx, |shell, window, cx| {
         shell.submit_biometric_unlock(window, cx)
     });
     cx.run_until_parked();
     assert_eq!(screen.vault.store.retrieves(), 3);
+}
+
+/// A click that macOS withdraws is left for the user to click again, also
+/// while the automatic prompt's one retry is unspent: no prompt comes up on
+/// its own, neither at once with the window in front nor when the window
+/// comes back to the front.
+#[gpui::test]
+fn a_withdrawn_click_is_not_asked_again_on_the_lock_screen(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("a_withdrawn_click_is_not_asked_again_on_the_lock_screen") {
+        return;
+    }
+    let screen = LockScreen::new(cx, Path::new(NOWHERE));
+    let click = |cx: &mut TestAppContext| {
+        screen.in_window(cx, |shell, window, cx| {
+            shell.submit_biometric_unlock(window, cx)
+        });
+        cx.run_until_parked();
+    };
+
+    // The window comes to the front and the user cancels the automatic
+    // prompt. macOS did not withdraw it, so its retry is unspent.
+    screen.vault.store.answering([BiometricError::UserCancelled]);
+    screen.activate(cx);
+    assert_eq!(screen.vault.store.retrieves(), 1);
+
+    // How many prompts each withdrawn click brought, its own included.
+    let mut prompts = Vec::new();
+
+    // With the window in front, macOS withdraws a click.
+    let before = screen.vault.store.retrieves();
+    screen.vault.store.answering([BiometricError::Interrupted]);
+    click(cx);
+    prompts.push(("in front", screen.vault.store.retrieves() - before));
+
+    // With the window in the background, macOS withdraws a click, and then
+    // the window comes back to the front.
+    screen.deactivate(cx);
+    let before = screen.vault.store.retrieves();
+    screen.vault.store.answering([BiometricError::Interrupted]);
+    click(cx);
+    screen.activate(cx);
+    prompts.push((
+        "in the background, then back in front",
+        screen.vault.store.retrieves() - before,
+    ));
+
+    assert_eq!(
+        prompts,
+        [("in front", 1), ("in the background, then back in front", 1)],
+        "a withdrawn click brought a prompt nobody clicked for"
+    );
+    screen.vault.state.read_with(cx, |state, _| {
+        assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
+        assert!(state.unlock_prompt().expect("still locked").error.is_none());
+    });
 }
 
 #[gpui::test]
