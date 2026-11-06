@@ -352,6 +352,41 @@ mod tests {
             ),
             "not the launch directory of this test process"
         );
+        #[cfg(unix)]
+        assert_eq!(
+            mode_after_loosening_the_launch_dir(),
+            0o700,
+            "launch_dir() did not tighten a loosened test launch directory"
+        );
+    }
+
+    /// Loosens this process's launch directory to 0755, calls `launch_dir()`
+    /// again and returns the mode it left. Shell tests in the same process
+    /// lock and quit, which removes the directory at any moment, so a pass in
+    /// which the directory was replaced starts over.
+    #[cfg(unix)]
+    fn mode_after_loosening_the_launch_dir() -> u32 {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let current = || match launch_dir() {
+            Ok(dir) => std::fs::symlink_metadata(&dir).ok().map(|meta| (dir, meta)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => panic!("the test launch directory fails the checks: {error}"),
+        };
+        for _ in 0..100 {
+            let Some((dir, before)) = current() else {
+                continue;
+            };
+            if std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).is_err() {
+                continue;
+            }
+            let Some((_, after)) = current() else {
+                continue;
+            };
+            if after.ino() == before.ino() {
+                return after.permissions().mode() & 0o777;
+            }
+        }
+        panic!("the test launch directory was replaced on every pass");
     }
 
     #[cfg(unix)]
