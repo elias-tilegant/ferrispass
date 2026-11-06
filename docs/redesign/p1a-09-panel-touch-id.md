@@ -20,6 +20,10 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 | `99e744b` | `push` asserts that `String::push` finds room, with a test that types up to the edge of the allocation |
 | `0bbbad1` | This page, on how the buffer grows |
 | `3ae5e2f` | Tests that the Touch ID prompt takes the Mac password only when it is allowed, from the unlock screen and from the panel |
+| `867a5f2` | This page, on the same |
+| `578ee07` | A test that a click macOS withdrew while the automatic prompt's retry is still to come brings no other prompt, with the window in front and when it comes back from the background |
+| `0f56c9b` | The test of the Mac password setting also covers the prompt the unlock screen raises on its own, with the setting off |
+| `bc4460b` | The test of the automatic retry also has a click withdrawn with the window in the background, after the retry is spent |
 | the last one | This page |
 
 ## The typed-ahead buffer
@@ -43,7 +47,7 @@ A search never marks an entry as recently used; only copying a value or launchin
 | | Unlock screen | Quick access panel |
 |---|---|---|
 | Way in | `unlock_from_lock_screen`, from the Touch ID button, its shortcut, and on its own when the screen comes up with the window in front | `unlock_from_panel`, which takes a `Confirmed`. Only `confirm(PanelTrigger::ReturnKey)` and `confirm(PanelTrigger::UnlockButtonClick)` make one |
-| macOS withdrew the prompt | the automatic prompt asks once more, as before; a click is left for the user to click again | `Answer::Interrupted`, nothing else. The next attempt needs a new confirmation |
+| macOS withdrew the prompt | the automatic prompt asks once more, as before. A withdrawn click is left for the user to click again: it brings no other prompt, neither at once with the window in front nor when the window comes back from the background | `Answer::Interrupted`, nothing else. The next attempt needs a new confirmation |
 | As soon as macOS answers, whatever the answer, before it is applied | nothing | `on_answered` runs: the panel makes itself key and focuses the search field or the list |
 | A cost still to confirm, or the header not read yet | the click counts as allowing the cost; the automatic prompt waits | no attempt starts |
 
@@ -106,8 +110,8 @@ PR #28 has a table of changes that each break one of these rules, with the test 
 | The buffer can't leave the main thread | `typed_ahead_is_not_send` (doctest) |
 | No log, print, file or derive in the buffer's file | `typed_ahead_never_logs_or_writes` |
 | The unlock screen unlocks through the shared flow with one prompt, named after the vault; with the settings at their defaults, the prompt takes the Mac password as the default allows | `the_lock_screen_unlocks_through_the_shared_flow` |
-| The prompt takes the Mac password only when it is allowed: from the unlock screen as its setting says, turned off and then on again while the app runs, and from the panel as `unlock_from_panel` is told, first not and then yes | `the_lock_screen_prompt_follows_the_mac_password_setting`, `the_panel_prompt_takes_the_mac_password_only_when_allowed` |
-| A withdrawn automatic prompt is asked again once, a withdrawn click is not | `an_interrupted_automatic_prompt_is_retried_once_on_the_lock_screen` |
+| The prompt takes the Mac password only when it is allowed: from the unlock screen as its setting says, for the prompt the screen raises on its own with the setting off and for a click with the setting turned off and then on again while the app runs, and from the panel as `unlock_from_panel` is told, first not and then yes | `the_lock_screen_prompt_follows_the_mac_password_setting`, `the_panel_prompt_takes_the_mac_password_only_when_allowed` |
+| A withdrawn automatic prompt is asked again once. A withdrawn click brings no other prompt, neither at once with the window in front nor when the window comes back from the background, whether that one retry is spent or still to come | `an_interrupted_automatic_prompt_is_retried_once_on_the_lock_screen`, `a_withdrawn_click_is_not_asked_again_on_the_lock_screen` |
 | Dropping what the call returns doesn't cancel the unlock | `an_unlock_completes_without_anyone_holding_a_task` |
 | A stale answer opens nothing | `a_stale_answer_opens_nothing` |
 | A failed prompt is reported | `a_failed_retrieve_reports_the_error` |
@@ -142,4 +146,4 @@ The panel's own checks need the panel: Return working after Touch ID without a c
 - The scans in `tests/architecture.rs` read names, not values. A helper in another file that is handed the text, a call through a trait object that renames `retrieve`, a method called on the typed text through a dereference in parentheses, or a panel origin reached without its name is out of their sight. The compiler carries the first line: the token's private field, no `Clone`, the buffer not `Send`, `run` private to its module. Inside the module, who calls `run` and where a panel origin is made rests on the scan.
 - That the Touch ID dialog leaves the panel without key focus was measured on one Mac with macOS 27.0.1. The test only shows the order, for every way the prompt can end: `on_answered` before the answer is applied and before Return counts.
 
-The agents spent about 4 hours on this, including review and fixes.
+The agents spent about 5 hours on this, including review and fixes.
