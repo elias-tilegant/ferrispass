@@ -21,8 +21,8 @@
 
 use gpui::{
     App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 
 use super::focus_ring::{Outline, keyboard_focus_ring};
@@ -343,6 +343,105 @@ fn surface(selected: bool, focused: bool, colors: &ColorSet) -> Option<Hsla> {
     Some(surface.hsla)
 }
 
+/// The keys that select a row, as a hint in `Caption` and `text_tertiary`.
+fn keys_hint(keys: SharedString, colors: &ColorSet) -> Div {
+    div()
+        .debug_selector(|| "fp-row-keys".into())
+        .flex_none()
+        .text_style(TextStyle::Caption)
+        .text_color(colors.text_tertiary.hsla)
+        .child(keys)
+}
+
+/// What a row draws inside its node, each part as the row builds it: the
+/// tile, the title, the chip, the second line, the vault badge, the keys
+/// that select the row, and the verb while it shows. None of them but the
+/// verb has an element id or a role, so GPUI writes no node for them and
+/// the row's name says what they show; the verb is a button inside the
+/// option. The title, the second line and the keys are plain `Div`s: GPUI
+/// gives a role only to an element with an id, a `Stateful<Div>`, so a
+/// node on one of them does not compile here.
+struct Inside {
+    tile: Tile,
+    title: Div,
+    chip: Option<Chip>,
+    second_line: Option<Div>,
+    badge: VaultBadge,
+    keys: Option<Div>,
+    verb: Option<Button>,
+}
+
+impl Row {
+    /// The keys that select the row, ⌘1 to ⌘9, as a Mac prints them.
+    fn keys(&self) -> Option<SharedString> {
+        self.shortcut_index
+            .filter(|number| (1..=9).contains(number))
+            .map(|number| keys_text(&parse_keys(&format!("cmd-{number}"))))
+    }
+
+    /// What the row draws inside its node. The verb shows while the row is
+    /// selected or `pointer_over` it.
+    fn inside(self, pointer_over: bool, colors: &ColorSet) -> Inside {
+        let selected = self.selected;
+        let keys = self.keys().map(|keys| keys_hint(keys, colors));
+        let second = (!self.discreet)
+            .then(|| self.parts.second_line(self.density))
+            .flatten()
+            .map(|text| second_line(text, selected, colors));
+        Inside {
+            tile: self.tile.selected(selected),
+            title: title(self.parts.title, selected, colors),
+            chip: self.chip,
+            second_line: second,
+            badge: self.badge,
+            keys,
+            verb: self.verb.filter(|_| selected || pointer_over),
+        }
+    }
+}
+
+/// Puts what a row draws inside its node in its place: the tile, then the
+/// title with the chip and the second line, on two lines or on one, then
+/// the badge, the keys and the verb.
+fn lay_out(row: Stateful<Div>, inside: Inside, density: RowDensity) -> Stateful<Div> {
+    let title_line = div()
+        .flex()
+        .items_center()
+        .gap(u(dimension::SPACE_6))
+        .min_w(px(0.))
+        .child(inside.title);
+    let text = if density.two_lines() {
+        div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .flex_1()
+            .min_w(px(0.))
+            .child(title_line.children(inside.chip))
+            .children(inside.second_line)
+    } else {
+        div()
+            .flex()
+            .items_center()
+            .gap(u(dimension::SPACE_8))
+            .flex_1()
+            .min_w(px(0.))
+            .child(title_line)
+            .children(inside.second_line)
+            .children(inside.chip)
+    };
+    row.child(inside.tile)
+        .child(text)
+        .child(inside.badge)
+        .children(inside.keys)
+        .children(inside.verb.map(|verb| {
+            div()
+                .debug_selector(|| "fp-row-verb".into())
+                .flex_none()
+                .child(verb)
+        }))
+}
+
 impl RenderOnce for Row {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.ds().colors;
@@ -351,52 +450,19 @@ impl RenderOnce for Row {
         let hovered = window.use_keyed_state((self.id.clone(), "hovered"), cx, |_, _| false);
         let pointer_over = *hovered.read(cx);
         let selected = self.selected;
-        let keys = self
-            .shortcut_index
-            .filter(|number| (1..=9).contains(number))
-            .map(|number| keys_text(&parse_keys(&format!("cmd-{number}"))));
         let ring = keyboard_focus_ring(selected && self.focused, Outline::Inset, window, cx);
-        let second = (!self.discreet)
-            .then(|| self.parts.second_line(self.density))
-            .flatten()
-            .map(|text| second_line(text, selected, colors));
-        let title_line = div()
-            .flex()
-            .items_center()
-            .gap(u(dimension::SPACE_6))
-            .min_w(px(0.))
-            .child(title(self.parts.title.clone(), selected, colors));
-        let text = if self.density.two_lines() {
-            div()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .flex_1()
-                .min_w(px(0.))
-                .child(title_line.children(self.chip))
-                .children(second)
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .gap(u(dimension::SPACE_8))
-                .flex_1()
-                .min_w(px(0.))
-                .child(title_line)
-                .children(second)
-                .children(self.chip)
-        };
-        let shows_verb = selected || pointer_over;
 
         let row = div()
-            .id(self.id)
+            .id(self.id.clone())
             .role(Role::ListBoxOption)
             .aria_label(self.parts.accessible_name())
             .aria_selected(selected)
             .aria_position_in_set(self.index + 1)
             .aria_size_of_set(self.count)
-            .when_some(self.description, |this, text| this.aria_description(text))
-            .when_some(keys.clone(), |this, keys| this.aria_keyshortcuts(keys))
+            .when_some(self.description.clone(), |this, text| {
+                this.aria_description(text)
+            })
+            .when_some(self.keys(), |this, keys| this.aria_keyshortcuts(keys))
             .on_hover(move |over, _, cx| {
                 hovered.update(cx, |state, cx| {
                     if *state != *over {
@@ -421,33 +487,13 @@ impl RenderOnce for Row {
                     let hover = colors.bg_hover.hsla;
                     this.hover(move |style| style.bg(hover))
                 }
-            })
-            .child(self.tile.selected(selected))
-            .child(text)
-            .child(self.badge)
-            .when_some(keys, |this, keys| {
-                this.child(
-                    div()
-                        .debug_selector(|| "fp-row-keys".into())
-                        .flex_none()
-                        .text_style(TextStyle::Caption)
-                        .text_color(colors.text_tertiary.hsla)
-                        .child(keys),
-                )
-            })
-            .when(shows_verb, |this| {
-                this.children(self.verb.map(|verb| {
-                    div()
-                        .debug_selector(|| "fp-row-verb".into())
-                        .flex_none()
-                        .child(verb)
-                }))
-            })
-            .children(ring);
-        match &self.accessibility_id {
+            });
+        let row = match &self.accessibility_id {
             Some(id) => id.apply(row),
             None => row,
-        }
+        };
+        let density = self.density;
+        lay_out(row, self.inside(pointer_over, colors), density).children(ring)
     }
 }
 
