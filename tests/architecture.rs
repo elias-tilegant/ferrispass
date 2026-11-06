@@ -2007,7 +2007,13 @@ fn the_raw_flow_has_no_public_entry() {
 /// - a `Confirmed` built anywhere but in `fn confirm` (taking one apart with
 ///   `let Confirmed(..) =` is fine);
 /// - a function with a visibility, other than `confirm`, that takes an
-///   `UnlockOrigin` or a `PanelTrigger`.
+///   `UnlockOrigin` or a `PanelTrigger`;
+/// - `run` called anywhere but in `unlock_from_lock_screen` and
+///   `unlock_from_panel`, or named without being called;
+/// - the name `Panel` anywhere but in `unlock_from_panel`, in the
+///   declaration of `UnlockOrigin`, and on the right of a comparison
+///   (`origin == UnlockOrigin::Panel`). A panel origin made anywhere else
+///   could reach `run` through a function that takes no token.
 fn raw_flow_entries(source: &str) -> Result<Vec<(usize, String)>, String> {
     let p = parse(source)?;
     let t = &p.tokens;
@@ -2105,6 +2111,53 @@ fn raw_flow_entries(source: &str) -> Result<Vec<(usize, String)>, String> {
                     ));
                 }
             }
+        } else if t[i].name() == Some("run") {
+            // The definition is checked above; `.run(` is a method of
+            // something else.
+            if i > 0 && (t[i - 1].is_keyword("fn") || t[i - 1].is_punct('.')) {
+                continue;
+            }
+            let function = enclosing_fn(&p, i);
+            if !t.get(i + 1).is_some_and(|tok| tok.is_punct('(')) {
+                problems.push((
+                    line,
+                    "`run` is named without being called, so a call could go unseen".to_string(),
+                ));
+            } else if !matches!(
+                function.as_deref(),
+                Some("unlock_from_lock_screen" | "unlock_from_panel")
+            ) {
+                problems.push((
+                    line,
+                    format!(
+                        "calls `run` in {}; only `unlock_from_lock_screen` and \
+                         `unlock_from_panel` may, so the panel's way in keeps its token",
+                        function.map_or("no function".to_string(), |f| format!("`fn {f}`"))
+                    ),
+                ));
+            }
+        } else if t[i].name() == Some("Panel") {
+            let function = enclosing_fn(&p, i);
+            let declared = function.is_none()
+                && p.enclosing_brace[i].is_some_and(|open| {
+                    anchor(&t[header_start(&p, open)..open]) == "enum UnlockOrigin"
+                });
+            let compared = i >= 5
+                && t[i - 1].is_punct(':')
+                && t[i - 2].is_punct(':')
+                && t[i - 3].name() == Some("UnlockOrigin")
+                && t[i - 4].is_punct('=')
+                && (t[i - 5].is_punct('=') || t[i - 5].is_punct('!'));
+            if !declared && !compared && function.as_deref() != Some("unlock_from_panel") {
+                problems.push((
+                    line,
+                    format!(
+                        "names the `Panel` origin in {}; only `fn unlock_from_panel` may make \
+                         one, behind its token",
+                        function.map_or("no function".to_string(), |f| format!("`fn {f}`"))
+                    ),
+                ));
+            }
         }
     }
     if !saw_run {
@@ -2175,17 +2228,29 @@ fn derives_before(p: &Parsed, i: usize) -> Vec<String> {
 #[test]
 fn raw_flow_entries_are_found() {
     let fine = r##"
+        #[derive(Clone, Copy)]
+        pub enum UnlockOrigin { LockScreen, Panel }
         #[derive(Debug)]
         #[must_use]
         pub struct Confirmed(());
         pub fn confirm(trigger: PanelTrigger) -> Option<Confirmed> { Some(Confirmed(())) }
+        pub fn unlock_from_lock_screen(cx: &mut App) -> Option<u64> {
+            run(UnlockOrigin::LockScreen, cx)
+        }
         pub fn unlock_from_panel(token: Confirmed, cx: &mut App) -> Option<u64> {
             let Confirmed(()) = token;
             run(UnlockOrigin::Panel, cx)
         }
-        fn run(origin: UnlockOrigin, cx: &mut App) -> Option<u64> { None }
+        fn run(origin: UnlockOrigin, cx: &mut App) -> Option<u64> {
+            if origin == UnlockOrigin::Panel { return None; }
+            cx.background_executor().run(async {});
+            None
+        }
         #[cfg(test)]
-        mod tests { pub fn sneak() -> Confirmed { Confirmed(()) } }
+        mod tests {
+            pub fn sneak() -> Confirmed { Confirmed(()) }
+            fn stale(cx: &mut App) { run(UnlockOrigin::Panel, cx); }
+        }
     "##;
     assert_eq!(raw_flow_entries(fine).expect("scan"), Vec::new());
 
@@ -2206,6 +2271,28 @@ fn raw_flow_entries_are_found() {
         .map(|(line, _)| line)
         .collect();
     assert_eq!(lines, vec![3, 3, 4, 5, 5, 6, 7, 7, 8]);
+
+    // Ways past the token that take no origin as a parameter: a new entry
+    // that calls the flow, the flow passed as a value, a panel origin made
+    // in a helper, renamed by a `use`, or matched rather than compared.
+    let around = r##"
+        pub enum UnlockOrigin { LockScreen, Panel }
+        pub struct Confirmed(());
+        fn run(origin: UnlockOrigin, cx: &mut App) -> Option<u64> { None }
+        pub fn unlock_from_panel_at_once(cx: &mut App) -> Option<u64> {
+            run(UnlockOrigin::Panel, cx)
+        }
+        pub fn unlock_later(cx: &mut App) { let flow = run; }
+        fn origin_for_timer() -> UnlockOrigin { UnlockOrigin::Panel }
+        use self::UnlockOrigin::Panel as FromPanel;
+        fn on_timer(origin: UnlockOrigin) { if matches!(origin, UnlockOrigin::Panel) {} }
+    "##;
+    let lines: Vec<usize> = raw_flow_entries(around)
+        .expect("scan")
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect();
+    assert_eq!(lines, vec![6, 6, 8, 9, 10, 11]);
 
     assert_eq!(
         raw_flow_entries("fn other() {}").expect("scan"),
