@@ -27,12 +27,23 @@ const GLYPH_SIZE: f32 = 16.0;
 #[derive(IntoElement)]
 pub struct Tile {
     icon: Icon,
+    selected: bool,
 }
 
 impl Tile {
     /// A tile for a row, which writes no node.
     pub fn new(icon: impl Into<Icon>) -> Self {
-        Self { icon: icon.into() }
+        Self {
+            icon: icon.into(),
+            selected: false,
+        }
+    }
+
+    /// The tile of a selected row, in `tile_selected_bg` and
+    /// `tile_selected_glyph`. The row sets it.
+    pub(in crate::ui::ds) fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
     }
 
     /// A tile on its own, such as in the head of an entry's details: an
@@ -55,6 +66,11 @@ impl Tile {
 impl RenderOnce for Tile {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.ds().colors;
+        let (surface, glyph) = if self.selected {
+            (colors.tile_selected_bg, colors.tile_selected_glyph)
+        } else {
+            (colors.tile_bg, colors.tile_glyph)
+        };
         div()
             .debug_selector(|| "fp-tile".into())
             .flex()
@@ -63,12 +79,8 @@ impl RenderOnce for Tile {
             .justify_center()
             .size(u(dimension::HEIGHT_TILE))
             .rounded(px(dimension::RADIUS_SM))
-            .bg(colors.tile_bg.hsla)
-            .child(
-                self.icon
-                    .size(u(GLYPH_SIZE))
-                    .text_color(colors.tile_glyph.hsla),
-            )
+            .bg(surface.hsla)
+            .child(self.icon.size(u(GLYPH_SIZE)).text_color(glyph.hsla))
     }
 }
 

@@ -1,7 +1,8 @@
 //! The keyboard focus ring of every component: 2 px in `focus_ring`, with
 //! 1 px of space between it and the control, which shows whatever is behind
 //! the control. It lies outside the control, so it takes no room, and focus
-//! from a click shows none.
+//! from a click shows none. A row draws it inside its edge instead, because
+//! a list that scrolls cuts off whatever lies outside it.
 
 use gpui::{
     App, Div, Hsla, InteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _,
@@ -18,6 +19,8 @@ pub(super) enum Outline {
     Rounded,
     /// Fully rounded, as on the capsule button and the track of a switch.
     Capsule,
+    /// Inside the edge of a row, with corners of `dimension::RADIUS_MD`.
+    Inset,
 }
 
 /// The ring for a control, when it has focus and the focus came from the
@@ -33,7 +36,10 @@ pub(super) fn keyboard_focus_ring(
 }
 
 fn ring(color: Hsla, outline: Outline) -> Div {
-    let outset = px(dimension::FOCUS_GAP + dimension::FOCUS_WIDTH);
+    let outset = match outline {
+        Outline::Inset => px(0.),
+        Outline::Rounded | Outline::Capsule => px(dimension::FOCUS_GAP + dimension::FOCUS_WIDTH),
+    };
     div()
         .debug_selector(|| "fp-focus-ring".into())
         .absolute()
@@ -45,6 +51,6 @@ fn ring(color: Hsla, outline: Outline) -> Div {
         .border_color(color)
         .map(|this| match outline {
             Outline::Capsule => this.rounded_full(),
-            Outline::Rounded => this.rounded(px(dimension::RADIUS_MD) + outset),
+            Outline::Rounded | Outline::Inset => this.rounded(px(dimension::RADIUS_MD) + outset),
         })
 }

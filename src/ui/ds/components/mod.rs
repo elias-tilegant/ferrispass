@@ -12,13 +12,15 @@
 //! The type tile, the chip and the vault badge are parts of a row and write
 //! no node there; the row's name says what they show. Shown on their own,
 //! each sits in a [`Standalone`], which gives it a node with a role and a
-//! name.
+//! name. The row itself is one node, an option in a list box, named after
+//! its parts through [`RowParts::accessible_name`].
 
 mod accessibility_id;
 pub mod button;
 pub mod chip;
 mod focus_ring;
 pub(in crate::ui::ds) mod keycap;
+pub mod row;
 pub mod shortcut;
 pub mod switch;
 pub mod text_field;
@@ -33,6 +35,7 @@ use gpui::{
 pub use accessibility_id::AccessibilityId;
 pub use button::{Button, ButtonKind, ButtonSize, IconButton};
 pub use chip::{Chip, ChipTone};
+pub use row::{Row, RowDensity, RowParts};
 pub use shortcut::Shortcut;
 pub use switch::Switch;
 pub use text_field::TextField;
@@ -167,7 +170,7 @@ pub(in crate::ui::ds) mod probe {
     use std::rc::Rc;
 
     use gpui::{
-        AnyElement, App, AppContext as _, Bounds, Context, Edges, Element as _, ElementId, Hsla,
+        AnyElement, App, AppContext as _, Bounds, Context, Edges, Element, ElementId, Hsla,
         IntoElement, Modifiers, ParentElement as _, Pixels, Render, Role, Styled as _,
         TestAppContext, VisualTestContext, Window, accesskit, canvas, div, px,
     };
@@ -233,7 +236,12 @@ pub(in crate::ui::ds) mod probe {
     /// The accessibility node `element` writes: its role and the properties
     /// AccessKit hands to VoiceOver.
     pub fn node(element: impl IntoElement) -> (Option<Role>, accesskit::Node) {
-        let element = element.into_element();
+        node_of(&element.into_element())
+    }
+
+    /// The same, read without taking `element`, so that a test can still
+    /// draw the element it read.
+    pub fn node_of(element: &impl Element) -> (Option<Role>, accesskit::Node) {
         let role = element.a11y_role();
         let mut node = accesskit::Node::new(role.unwrap_or(Role::Unknown));
         element.write_a11y_info(&mut node);
@@ -721,6 +729,15 @@ mod tests {
         ("Chip::standalone(", 2),
         ("Chip::standalone(", 3),
         ("standalone(", 1),
+        // The parts of a row's name, which the row also shows. `Row::new`
+        // takes no text of its own.
+        ("RowParts::new(", 0),
+        ("RowParts::new(", 1),
+        ("role_word(", 0),
+        ("customer(", 0),
+        ("client(", 0),
+        ("user(", 0),
+        ("vault(", 0),
         // The sentences a component adds to its name.
         ("description(", 0),
         ("note(", 0),
@@ -839,6 +856,15 @@ mod tests {
             Standalone::new(id, Role::Image, "Image", body);
             Tile::standalone("kind", IconName::Globe, name);
             fn standalone(self, id: impl Into<ElementId>, name: impl Into<SharedString>) {}
+            RowParts::new("SAP system", "NHP 100")
+                .role_word("Production system")
+                .customer("Nordhafen AG")
+                .client("Client 100")
+                .user("N.WEISS")
+                .vault("Team Beratung");
+            RowParts::new(kind, title).role_word(role).user(user).vault(vault);
+            fn user(mut self, user: impl Into<SharedString>) -> Self { self }
+            Row::new("row", 0, 1, parts, tile, badge).description("Return: sign in");
         "##;
         assert_eq!(
             literal_texts(source),
@@ -870,6 +896,14 @@ mod tests {
                 (46, "\"Team Beratung\"".to_string()),
                 (47, "\"K\"".to_string()),
                 (48, "\"Image\"".to_string()),
+                (51, "\"NHP 100\"".to_string()),
+                (51, "\"SAP system\"".to_string()),
+                (52, "\"Production system\"".to_string()),
+                (53, "\"Nordhafen AG\"".to_string()),
+                (54, "\"Client 100\"".to_string()),
+                (55, "\"N.WEISS\"".to_string()),
+                (56, "\"Team Beratung\"".to_string()),
+                (59, "\"Return: sign in\"".to_string()),
             ]
         );
     }
