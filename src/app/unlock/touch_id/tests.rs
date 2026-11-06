@@ -319,17 +319,55 @@ fn the_lock_screen_unlocks_through_the_shared_flow(cx: &mut TestAppContext) {
 
     assert_eq!(screen.vault.store.retrieves(), 1);
     assert_eq!(screen.vault.store.prompts(), ["Unlock nordhafen"]);
+    // The settings are the defaults here. Whether the prompt follows the
+    // setting when it is changed is the next test.
     assert_eq!(
         screen.vault.store.inner.retrieve_calls()[0]
             .1
             .allow_device_passcode,
         AppSettings::default().biometric_allow_passcode_fallback,
-        "the Mac password setting did not reach the prompt"
+        "the prompt did not follow the default setting for the Mac password"
     );
     assert_eq!(open_path(cx, &screen.vault.state), Some(path));
     screen.vault.state.read_with(cx, |state, _| {
         assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
     });
+}
+
+/// The unlock screen's prompt takes the Mac password only while the setting
+/// allows it. The setting is turned off and then on again while the shell
+/// runs, and the unlock is clicked after each change.
+#[gpui::test]
+fn the_lock_screen_prompt_follows_the_mac_password_setting(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("the_lock_screen_prompt_follows_the_mac_password_setting") {
+        return;
+    }
+    let screen = LockScreen::new(cx, Path::new(NOWHERE));
+    for allowed in [false, true] {
+        screen.in_window(cx, |shell, window, cx| {
+            let settings = AppSettings {
+                biometric_allow_passcode_fallback: allowed,
+                ..shell.settings().clone()
+            };
+            shell.update_settings(settings, cx);
+            shell.submit_biometric_unlock(window, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    let asked: Vec<bool> = screen
+        .vault
+        .store
+        .inner
+        .retrieve_calls()
+        .iter()
+        .map(|(_, options)| options.allow_device_passcode)
+        .collect();
+    assert_eq!(
+        asked,
+        [false, true],
+        "the prompt did not follow the setting for the Mac password, off and then on"
+    );
 }
 
 #[gpui::test]
@@ -854,4 +892,40 @@ fn the_panel_never_answers_a_cost_question(cx: &mut TestAppContext) {
     header_read(cx, &costly, None);
     assert!(start(cx, &costly));
     assert_eq!(costly.store.retrieves(), 1);
+}
+
+/// The panel's prompt takes the Mac password only when `unlock_from_panel`
+/// is told to allow it: first not, then yes.
+#[gpui::test]
+fn the_panel_prompt_takes_the_mac_password_only_when_allowed(cx: &mut TestAppContext) {
+    let vault = locked_panel(cx);
+    for allowed in [false, true] {
+        let token = confirm(PanelTrigger::ReturnKey).expect("Return confirms");
+        let state = vault.state.clone();
+        cx.update(|cx| {
+            unlock_from_panel(
+                token,
+                state,
+                allowed,
+                Box::new(|_| {}),
+                Box::new(|_, _| {}),
+                cx,
+            )
+        })
+        .expect("the attempt starts");
+        cx.run_until_parked();
+    }
+
+    let asked: Vec<bool> = vault
+        .store
+        .inner
+        .retrieve_calls()
+        .iter()
+        .map(|(_, options)| options.allow_device_passcode)
+        .collect();
+    assert_eq!(
+        asked,
+        [false, true],
+        "the panel's prompt did not take the Mac password as it was told, not and then yes"
+    );
 }
