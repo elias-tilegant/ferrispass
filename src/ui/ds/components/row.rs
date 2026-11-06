@@ -10,8 +10,9 @@
 //! For VoiceOver a row is one node, an option in a list box, with its place
 //! in the list, whether it is selected, and a name that puts what the row
 //! shows into words: [`RowParts::accessible_name`]. The tile, the chip, the
-//! badge and the texts write no node of their own; the ghost button is a
-//! button inside the option.
+//! badge and the texts write no node of their own: none of them gets an
+//! element id or a role, and the texts are plain strings, not GPUI text
+//! with an id. The ghost button is a button inside the option.
 //!
 //! The row draws the selection it is given and never changes it. The
 //! pointer over a row changes its color and shows its verb, nothing else.
@@ -359,8 +360,10 @@ fn keys_hint(keys: SharedString, colors: &ColorSet) -> Div {
 /// verb has an element id or a role, so GPUI writes no node for them and
 /// the row's name says what they show; the verb is a button inside the
 /// option. The title, the second line and the keys are plain `Div`s: GPUI
-/// gives a role only to an element with an id, a `Stateful<Div>`, so a
-/// node on one of them does not compile here.
+/// gives a role only to an element with an id, a `Stateful<Div>`, so an id
+/// or a role on one of them does not compile here. A text with an id inside
+/// one of them would compile, and GPUI would write it as a label, so a test
+/// reads this file for such a text.
 struct Inside {
     tile: Tile,
     title: Div,
@@ -765,27 +768,38 @@ mod tests {
             .collect()
     }
 
-    /// A node needs an element id and a role. In `row.rs` only the row's
-    /// own node gets either, so neither the parts the test above reads nor
-    /// the boxes that line them up get one, and no part of the row is shown
-    /// on its own, which would give it a node inside the option. The source
-    /// is read through `code_only`, so comments and these tests do not
-    /// count.
+    /// A node needs an element id and a role. `row.rs` has one call that
+    /// gives an element an id and one that gives it a role, written as a
+    /// method or through its trait, and both are on the row's own node, so
+    /// neither the parts the test above reads nor the boxes that line them
+    /// up get one. It builds no text with an id, which GPUI writes as a
+    /// label, so the title, the second line and the keys stay plain text in
+    /// the row's node, and it shows no part of the row on its own, which
+    /// would give it a node inside the option. The source is read through
+    /// `code_only`, so comments and these tests do not count.
     #[test]
     fn a_row_gives_an_id_and_a_role_to_its_own_node_only() {
+        let mut wrong = Vec::new();
         for (call, allowed) in [
-            (".id(", 1),
-            (".role(", 1),
+            ("id(", 1),
+            ("role(", 1),
+            ("Text::new(", 0),
+            ("text!(", 0),
+            ("with_id(", 0),
+            ("InteractiveText", 0),
             ("standalone(", 0),
             ("Standalone", 0),
         ] {
             let found = calls_in("row.rs", call);
-            assert_eq!(
-                found.len(),
-                allowed,
-                "a row writes one node, its own; {call} in row.rs: {found:#?}"
-            );
+            if found.len() != allowed {
+                wrong.push(format!("{call} in row.rs, {allowed} allowed: {found:#?}"));
+            }
         }
+        assert!(
+            wrong.is_empty(),
+            "a row writes one node, its own:\n{}",
+            wrong.join("\n")
+        );
     }
 
     /// What the tile, the chip and the badge draw inside the element the
