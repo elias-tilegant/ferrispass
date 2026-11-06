@@ -530,11 +530,16 @@ mod tests {
         "SAP system NHP 100, Production system, Nordhafen AG, Client 100, N.WEISS, Team Beratung";
 
     fn row(index: usize, count: usize) -> Row {
+        row_of(nhp(), index, count)
+    }
+
+    /// The row of `parts`, with a production chip that says "PRD".
+    fn row_of(parts: RowParts, index: usize, count: usize) -> Row {
         Row::new(
             ("row", index),
             index,
             count,
-            nhp(),
+            parts,
             Tile::new(IconName::Globe),
             VaultBadge::team(text("B"), crate::ui::ds::tokens::LIGHT.team_teal.hsla),
         )
@@ -879,7 +884,9 @@ mod tests {
 
     /// The row puts the role word into the name as the caller gives it and
     /// adds nothing of its own: not the letters on its chip, whatever the
-    /// chip says.
+    /// chip says. A row with a "PRD" chip reads the name its parts give,
+    /// with a role word, without one and with a blank one, and nothing its
+    /// node says spells "PRD".
     #[gpui::test]
     fn accessible_name_takes_the_role_word_as_given(cx: &mut TestAppContext) {
         for word in ["Production system", "Produktivsystem", "Production"] {
@@ -889,17 +896,35 @@ mod tests {
                 format!("SAP system NHP 100, {word}")
             );
         }
-        let (_, node, _) = row_node(cx, || row(0, 3).selected(true));
-        assert_eq!(node.label(), Some(NHP_NAME), "the name is the parts' name");
-        for (part, said) in [
-            ("label", node.label()),
-            ("value", node.value()),
-            ("description", node.description()),
+        let without_role = || {
+            RowParts::new(text("SAP system"), text("NHP 100"))
+                .customer(text("Nordhafen AG"))
+                .client(text("Client 100"))
+                .user(text("N.WEISS"))
+                .vault(text("Team Beratung"))
+        };
+        for (case, parts) in [
+            ("a role word", nhp()),
+            ("no role word", without_role()),
+            ("a blank role word", without_role().role_word(text("  "))),
         ] {
-            assert!(
-                !said.is_some_and(|said| said.contains("PRD")),
-                "the {part} spells the chip's letters: {said:?}"
+            let name = parts.accessible_name();
+            let (_, node, _) = row_node(cx, move || row_of(parts.clone(), 0, 3).selected(true));
+            assert_eq!(
+                node.label(),
+                Some(&*name),
+                "{case}: the name is the parts' name"
             );
+            for (part, said) in [
+                ("label", node.label()),
+                ("value", node.value()),
+                ("description", node.description()),
+            ] {
+                assert!(
+                    !said.is_some_and(|said| said.contains("PRD")),
+                    "{case}: the {part} spells the chip's letters: {said:?}"
+                );
+            }
         }
     }
 
