@@ -357,15 +357,15 @@ fn keys_hint(keys: SharedString, colors: &ColorSet) -> Div {
 }
 
 /// What a row draws inside its node, each part as the row builds it: the
-/// tile, the title, the chip, the second line, the vault badge, the keys
-/// that select the row, and the verb while it shows. None of them but the
-/// verb has an element id or a role, so GPUI writes no node for them and
-/// the row's name says what they show; the verb is a button inside the
-/// option. The title, the second line and the keys are plain `Div`s: GPUI
-/// gives a role only to an element with an id, a `Stateful<Div>`, so an id
-/// or a role on one of them does not compile here. A text with an id inside
-/// one of them would compile, and GPUI would write it as a label, so a test
-/// reads this file for the calls that build one.
+/// tile, the title, the chip, the second line, the vault badge, the keys that
+/// select the row, and the verb while it shows. None of them but the verb has
+/// an element id or a role, so GPUI writes no node for them and the row's
+/// name says what they show; the verb is a button inside the option. The
+/// title, the second line and the keys are plain `Div`s: GPUI gives a role
+/// only to a `Stateful<Div>`, so a role on one of them, and with it a node,
+/// does not compile. An id set through `interactivity()` does, and the render
+/// test finds it. A text with an id inside one, which GPUI writes as a label,
+/// compiles too, so a test reads this file for the calls that build one.
 struct Inside {
     tile: Tile,
     title: Div,
@@ -774,7 +774,9 @@ mod tests {
     /// gives an element an id and one that gives it a role, written as a
     /// method or through its trait, and both are on the row's own node, so
     /// neither the parts the test above reads nor the boxes that line them
-    /// up get one. It calls none of `Text::new`, `text!`, `with_id` and
+    /// up get a role, and with it a node. An id set through `interactivity()`
+    /// is no call this test looks for; on a part the test above finds it.
+    /// `row.rs` calls none of `Text::new`, `text!`, `with_id` and
     /// `InteractiveText`, which build a text with an id that GPUI writes as
     /// a label, so the title, the second line and the keys stay plain text
     /// in the row's node, and it shows no part of the row on its own, which
