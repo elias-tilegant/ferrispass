@@ -8,7 +8,9 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 |---|---|
 | `fb95ded` | `src/platform/system_idle.rs`, `activity::lock_is_due_with`, and the module on the list of audited platform modules |
 | `a6036c3` | The setting, the auto-lock task reading both clocks, and the second row in Settings |
-| the last one | SECURITY.md and this page |
+| `6b61d2e` | SECURITY.md and this page |
+| `c658d24` | What a trip back to 0.9.2 does to the setting, and which calls of the idle clock are new |
+| the last one | This table and the time below |
 
 ## When the vault locks
 
@@ -98,4 +100,4 @@ To try a shorter time, quit FerrisPass and set `mac_idle_lock_secs` to 60 in `~/
 - CI only builds for macOS, so the no-op for other platforms is compiled there only for the test build.
 - The shell tests build the real `AppShell` and read the real `settings.json`. They set both auto-lock settings themselves.
 
-The agents spent about 3 hours on this, including review and fixes.
+The agents spent about 1.5 hours on this, including review and fixes.
