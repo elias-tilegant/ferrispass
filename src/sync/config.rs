@@ -411,10 +411,11 @@ pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
 }
 
 /// Unit tests never use the user's folder. The shell they build loads the
-/// settings, the recent vaults and the Touch ID registry from it, so the
-/// outcome of a test depended on the Mac it ran on, and a test that saved
-/// wrote there. Each test process gets a folder of its own in the temp
-/// directory instead, made on first use and open to the user only.
+/// settings, the recent vaults and the Touch ID registry from it, so a test
+/// reading the real folder would depend on the Mac it runs on, and one that
+/// saves would change the user's app. Each test process gets a folder of its
+/// own in the temp directory instead, made on first use and open to the user
+/// only.
 #[cfg(test)]
 pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
