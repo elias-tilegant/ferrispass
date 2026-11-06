@@ -260,7 +260,7 @@ fn run(
 
 /// Whether the vault waiting on the unlock screen has had its header read
 /// and has no cost left to confirm.
-fn cost_question_settled(state: &AppState) -> bool {
+pub(super) fn cost_question_settled(state: &AppState) -> bool {
     state.kdf_check_settled_for_pending() && state.kdf_confirmation_for_pending().is_none()
 }
 
