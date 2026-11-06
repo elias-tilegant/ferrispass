@@ -613,6 +613,8 @@ mod tests {
     /// A row is an option in a list box: its node has the role, the name
     /// from its parts, its place in the list counted from 1, the size of
     /// the list, whether it is selected, and the ⌘ number that selects it.
+    /// The selected row says it is selected while its list has no focus
+    /// too.
     #[gpui::test]
     fn a_row_is_a_list_box_option_with_its_place_in_the_set(cx: &mut TestAppContext) {
         let (role, node, id) = row_node(cx, || row(2, 7).selected(true).shortcut_index(3));
@@ -628,11 +630,21 @@ mod tests {
         assert_eq!(node.is_selected(), Some(true));
         assert_eq!(node.keyboard_shortcut(), Some("⌘3"));
 
+        let (_, node, _) = row_node(cx, || row(2, 7).selected(true).focused(false));
+        assert_eq!(
+            node.is_selected(),
+            Some(true),
+            "selected while the list has no focus"
+        );
+
         let (_, node, _) = row_node(cx, || row(0, 1));
         assert_eq!(node.position_in_set(), Some(1));
         assert_eq!(node.size_of_set(), Some(1));
         assert_eq!(node.is_selected(), Some(false), "not selected says so");
         assert_eq!(node.keyboard_shortcut(), None, "no keys without a number");
+
+        let (_, node, _) = row_node(cx, || row(0, 1).focused(false));
+        assert_eq!(node.is_selected(), Some(false));
     }
 
     /// The naming rule: the kind and the title, then the role, the
