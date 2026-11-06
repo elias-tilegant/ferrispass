@@ -10,7 +10,9 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 | `a6036c3` | The setting, the auto-lock task reading both clocks, and the second row in Settings |
 | `6b61d2e` | SECURITY.md and this page |
 | `c658d24` | What a trip back to 0.9.2 does to the setting, and which calls of the idle clock are new |
-| the last one | This table and the time below |
+| `4838fd2` | This table and the time below |
+| `3e780db` | A shell test that a Mac in use does not hold off the lock while the Mac idle row is off |
+| the last one | When 0.9.2 writes its settings file, this table and the time below |
 
 ## When the vault locks
 
@@ -65,6 +67,7 @@ Each rule was checked by taking it out; the changed lines and the failing output
 | `the_fake_is_read_through_the_app` | two test contexts, each with its own fake, each read their own value |
 | `system_idle_declares_one_foreign_function_and_one_unsafe_call`, `the_scan_skips_comments_and_strings` | the shape of the `unsafe` code, and the tokenizer that reads it |
 | `unsafe_code_stays_on_the_exception_list` | the module is on the list, with its header and its attribute |
+| `auto_lock_without_mac_idle_ignores_the_mac` | with the Mac idle row off and the Mac in use, three idle minutes in FerrisPass keep the vault open, just over four lock it |
 | `auto_lock_with_mac_idle_ignores_the_app_clock` | with the Mac in use, five and twenty idle minutes in FerrisPass keep the vault open |
 | `auto_lock_with_mac_idle_locks_when_the_mac_is_idle` | the Mac idle for one second short of fifteen minutes keeps it open, fifteen lock it |
 | `auto_lock_with_mac_idle_falls_back_when_macos_cannot_say` | with a NaN reading, five idle minutes in FerrisPass keep it open, fifteen lock it |
@@ -95,9 +98,9 @@ To try a shorter time, quit FerrisPass and set `mac_idle_lock_secs` to 60 in `~/
 - The settings rows are covered by unit tests over the choices, the auto-lock text and the two functions that build the new settings, not by clicking the rows in a window: in a test build a click would write the real `settings.json`.
 - `a_session_lock_event_still_locks_with_the_alternative` sends its event through a fake that a test can put on the `App` in place of the session lock monitor's events. `start_session_lock_task` takes its events from there when a test installed it. The macOS notifications themselves are covered by the tests in `src/session_lock.rs`.
 - Test builds never read the real idle time through the `App`. `the_real_call_answers_on_macos` calls CoreGraphics directly, and the doctest `idle_for_reads_core_graphics` reads it through the library as the app builds it. Both expect someone to have used the Mac within the last day.
-- A trip back to 0.9.2 can lose the setting. 0.9.2 reads a file with the new field, but writes its own fields only when it saves its settings (a theme toggle, any change in its Settings), so the field is gone when you come back, and the Mac idle row reads Off. With the auto-lock on 4 minutes that only means the default clock again. With the auto-lock on Never, there is no auto-lock until you choose one again; 0.9.2 itself already read that file as Never and did not auto-lock in between. Nothing here can tell a field 0.9.2 dropped from Off chosen by hand.
+- A trip back to 0.9.2 can lose the setting. 0.9.2 reads a file with the new field, but whenever it writes `settings.json` it writes only the fields it knows. It writes the file when it saves a setting (any change in its Settings, the theme toggle, allowing a vault's key derivation cost; `v0.9.2:src/ui/app_shell.rs:3761-3783`), and also when its window is closed or the app quits with the window at a position or size other than the one on file, which any move or resize brings about (`v0.9.2:src/app/actions.rs:218` and `:240`, through `persist_window_bounds` in `v0.9.2:src/app/settings.rs:223-237`). Moving the window once and closing it is enough. The field is gone when you come back, and the Mac idle row reads Off. With the auto-lock on 4 minutes that only means the default clock again. With the auto-lock on Never, there is no auto-lock until you choose one again; 0.9.2 itself already read that file as Never and did not auto-lock in between. Nothing here can tell a field 0.9.2 dropped from Off chosen by hand.
 - `#[serde(default)]` on the new field changes nothing that a test can see: serde reads a missing `Option` field as `None` without it too. It stays because it says what is meant, like on the other fields.
 - CI only builds for macOS, so the no-op for other platforms is compiled there only for the test build.
 - The shell tests build the real `AppShell` and read the real `settings.json`. They set both auto-lock settings themselves.
 
-The agents spent about 1.5 hours on this, including review and fixes.
+The agents spent about 2 hours on this, including review and fixes.
