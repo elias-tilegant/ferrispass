@@ -7,7 +7,10 @@
 //! - The text sits in a `Zeroizing<String>`, which is overwritten when it is
 //!   wiped or dropped, spare capacity included. Growing it never leaves a
 //!   copy behind: a full buffer is copied into a bigger one and the old one
-//!   is overwritten as it drops.
+//!   is overwritten as it drops. `typed_ahead_wipes_by_overwriting` in
+//!   `tests/architecture.rs` lists every method called on the text, so a
+//!   `wipe` that only clears it, or a call that regrows or shrinks it, fails
+//!   there.
 //! - Secure event input is held for as long as the buffer is live, so other
 //!   programs on the Mac don't see the keystrokes. If macOS refuses it,
 //!   [`TypedAhead::begin`] fails and there is no buffer; the panel then sends
@@ -277,6 +280,10 @@ mod tests {
         assert!(!fake.held());
     }
 
+    /// What a wipe leaves that a test can see. Whether `wipe` overwrote the
+    /// bytes, rather than only shortening the string, can't be read back
+    /// without `unsafe`; `typed_ahead_wipes_by_overwriting` in
+    /// `tests/architecture.rs` holds `wipe` to `zeroize` instead.
     #[gpui::test]
     fn wipe_leaves_nothing_behind(cx: &mut TestAppContext) {
         let fake = install(cx, FakeApi::new());

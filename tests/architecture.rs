@@ -1730,6 +1730,29 @@ const TYPED_TEXT_USERS: &[&str] = &[
     "take_query",
 ];
 
+/// Every method called on the field `text`, with the function it is called
+/// in. Only `zeroize` overwrites the typed bytes. A method that shortens the
+/// string (`clear`, `truncate`, `drain`) leaves them in its allocation until
+/// the buffer drops, and one that regrows or shrinks it (`reserve`,
+/// `push_str`, `shrink_to_fit`) frees the old allocation without
+/// overwriting it. No safe test can read those bytes, so this list holds the
+/// code to its shape instead: `wipe` overwrites, and nothing else changes
+/// the text in a way that could leave a copy.
+const TYPED_TEXT_CALLS: &[(&str, &str)] = &[
+    // Grows the buffer by copying it into a bigger one when it is full, and
+    // otherwise adds within the capacity it has.
+    ("push", "len"),
+    ("push", "capacity"),
+    ("push", "push"),
+    // The removed bytes stay in the spare capacity, which `wipe` and the drop
+    // overwrite with the rest.
+    ("backspace", "pop"),
+    ("len", "chars"),
+    ("is_empty", "is_empty"),
+    // Overwrites the whole allocation, spare capacity included.
+    ("wipe", "zeroize"),
+];
+
 #[test]
 fn typed_ahead_never_logs_or_writes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1757,19 +1780,67 @@ fn typed_ahead_never_logs_or_writes() {
     }
 }
 
+#[test]
+fn typed_ahead_wipes_by_overwriting() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join(TYPED_AHEAD_SOURCE))
+        .unwrap_or_else(|err| panic!("cannot read {TYPED_AHEAD_SOURCE}: {err}"));
+    let scan = typed_text_scan(&source)
+        .unwrap_or_else(|err| panic!("cannot tokenize {TYPED_AHEAD_SOURCE}: {err}"));
+    let mut unused: Vec<(&str, &str)> = TYPED_TEXT_CALLS.to_vec();
+    let mut problems = Vec::new();
+    for (line, function, what) in &scan.calls {
+        if what == "&mut" {
+            problems.push(format!(
+                "{TYPED_AHEAD_SOURCE}:{line}: `fn {function}` borrows the text mutably, so \
+                 whatever it is handed to could shorten or regrow it out of sight"
+            ));
+        } else if TYPED_TEXT_CALLS.contains(&(function.as_str(), what.as_str())) {
+            unused.retain(|&(f, m)| (f, m) != (function.as_str(), what.as_str()));
+        } else {
+            problems.push(format!(
+                "{TYPED_AHEAD_SOURCE}:{line}: `fn {function}` calls `{what}` on the text, and \
+                 TYPED_TEXT_CALLS does not list it. Only `zeroize` overwrites what was typed."
+            ));
+        }
+    }
+    for (function, method) in unused {
+        problems.push(if (function, method) == ("wipe", "zeroize") {
+            format!(
+                "{TYPED_AHEAD_SOURCE}: `fn wipe` no longer calls `zeroize` on the text; it has \
+                 to overwrite what was typed, not only let go of it"
+            )
+        } else {
+            format!(
+                "{TYPED_AHEAD_SOURCE}: listed as calling `{method}` on the text in \
+                 `fn {function}`, but no such call is left. Remove the line."
+            )
+        });
+    }
+    assert!(
+        problems.is_empty(),
+        "what was typed into the locked panel could stay in memory after a wipe:\n{}",
+        problems.join("\n")
+    );
+}
+
 /// What the scan of the typed-ahead file found.
 struct TextScan {
     /// Each place, by line, where the text could get out.
     leaks: Vec<(usize, String)>,
     /// The functions that touch the field `text`.
     users: Vec<String>,
+    /// Each method called on the field, by line, with the function it is
+    /// called in, and `&mut` for a mutable borrow of it.
+    calls: Vec<(usize, String, String)>,
 }
 
 /// Reads the typed-ahead file outside items switched off by `#[cfg(test)]`.
 /// A name from [`TEXT_OUTLETS`] anywhere is a leak, and so is the field
 /// `text` inside a macro call (`format!`, `panic!`, `write!` and the like),
 /// in a function not on [`TYPED_TEXT_USERS`], or outside a function other
-/// than in the declaration of `struct TypedAhead`.
+/// than in the declaration of `struct TypedAhead`. In the functions on that
+/// list it notes what is done to the field ([`text_call`]).
 fn typed_text_scan(source: &str) -> Result<TextScan, String> {
     let p = parse(source)?;
     let t = &p.tokens;
@@ -1777,6 +1848,7 @@ fn typed_text_scan(source: &str) -> Result<TextScan, String> {
     let mut scan = TextScan {
         leaks: Vec::new(),
         users: Vec::new(),
+        calls: Vec::new(),
     };
     for (i, token) in t.iter().enumerate() {
         if test_items.iter().any(|item| item.contains(&i)) {
@@ -1800,6 +1872,9 @@ fn typed_text_scan(source: &str) -> Result<TextScan, String> {
         }
         match enclosing_fn(&p, i) {
             Some(function) if TYPED_TEXT_USERS.contains(&function.as_str()) => {
+                if let Some(what) = text_call(t, i) {
+                    scan.calls.push((line, function.clone(), what));
+                }
                 if !scan.users.contains(&function) {
                     scan.users.push(function);
                 }
@@ -1848,6 +1923,57 @@ fn typed_text_leaks_are_found() {
         scan.leaks
     );
     assert_eq!(scan.users, vec!["push".to_string()]);
+}
+
+/// What the code does to the field `text` at token `i`, where the scan has
+/// to know it: the name of a method called on it directly
+/// (`self.text.zeroize()`), or `&mut` for a mutable borrow
+/// (`&mut self.text`), through which code elsewhere could change it.
+fn text_call(t: &[Token], i: usize) -> Option<String> {
+    if t.get(i + 1).is_some_and(|tok| tok.is_punct('.'))
+        && t.get(i + 3).is_some_and(|tok| tok.is_punct('('))
+        && let Some(method) = t.get(i + 2).and_then(Token::name)
+    {
+        return Some(method.to_string());
+    }
+    let mut j = i;
+    if j >= 2 && t[j - 1].is_punct('.') && t[j - 2].is_keyword("self") {
+        j -= 2;
+    }
+    (j >= 2 && t[j - 1].is_keyword("mut") && t[j - 2].is_punct('&')).then(|| "&mut".to_string())
+}
+
+#[test]
+fn typed_text_calls_are_found() {
+    let source = r##"
+        impl TypedAhead {
+            fn push(&mut self, c: char) { if self.text.len() < self.text.capacity() { self.text.push(c); } }
+            fn wipe(&mut self) { self.text.clear(); self.guard = None; }
+            fn backspace(&mut self) { String::truncate(&mut self.text, 0); }
+            fn take_query(self) -> Zeroizing<String> { let Self { text, .. } = self; text }
+            fn len(&self) -> usize { self.text.chars().count() }
+            fn is_empty(&self) -> bool { is_blank(&self.text) }
+        }
+        #[cfg(test)]
+        mod tests { fn wipe(buffer: &mut TypedAhead) { buffer.text.zeroize(); } }
+    "##;
+    let scan = typed_text_scan(source).expect("scan");
+    let calls: Vec<(usize, &str, &str)> = scan
+        .calls
+        .iter()
+        .map(|(line, function, what)| (*line, function.as_str(), what.as_str()))
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (3, "push", "len"),
+            (3, "push", "capacity"),
+            (3, "push", "push"),
+            (4, "wipe", "clear"),
+            (5, "backspace", "&mut"),
+            (7, "len", "chars"),
+        ]
+    );
 }
 
 /// The Touch ID flow the lock screen and the quick access panel share.
