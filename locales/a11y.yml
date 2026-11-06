@@ -17,6 +17,10 @@ a11y:
   one_time_code_expires:
     en: One-time code, expires in %{seconds} seconds
     de: Einmalcode, läuft in %{seconds} Sekunden ab
+  # The button at the end of the panel footer that opens its menu.
+  more_actions:
+    en: More actions
+    de: Weitere Aktionen
   # The description of a disabled control. GPUI has no disabled flag for
   # assistive technology yet.
   not_available:

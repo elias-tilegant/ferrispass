@@ -21,6 +21,10 @@
 //! lists every element it builds, and its containers note how many
 //! children they hold, so the tests read each element and find one that is
 //! not on the list.
+//!
+//! The panel footer is no node and takes no focus; the one node in it is
+//! the button that opens its menu. The panel hands what it says to
+//! VoiceOver as the description of the element that has focus.
 
 mod accessibility_id;
 pub mod button;
@@ -28,6 +32,7 @@ pub mod chip;
 mod focus_ring;
 pub(in crate::ui::ds) mod keycap;
 pub mod otp;
+pub mod panel_footer;
 pub mod row;
 pub mod secret_field;
 pub mod shortcut;
@@ -45,6 +50,7 @@ pub use accessibility_id::AccessibilityId;
 pub use button::{Button, ButtonKind, ButtonSize, IconButton};
 pub use chip::{Chip, ChipTone};
 pub use otp::{OtpRing, OtpSize};
+pub use panel_footer::{FooterTone, PanelFooter};
 pub use row::{Row, RowDensity, RowParts};
 pub use secret_field::{CopyState, SecretField};
 pub use shortcut::Shortcut;
@@ -837,6 +843,12 @@ mod tests {
         ("Switch::new(", 1),
         ("Chip::new(", 1),
         ("SecretField::new(", 1),
+        // The footer's line about what to connect to first, and the notes
+        // of its tones.
+        ("connect_first(", 0),
+        ("FooterTone::Offline(", 0),
+        ("FooterTone::Tie(", 0),
+        ("FooterTone::UpdateReady(", 0),
         ("VaultBadge::team(", 0),
         ("VaultBadge::other(", 0),
         // The name of a component on its own. `standalone(` covers the
@@ -984,6 +996,11 @@ mod tests {
             fn user(mut self, user: impl Into<SharedString>) -> Self { self }
             Row::new("row", 0, 1, parts, tile, badge).description("Return: sign in");
             SecretField::new("password", "Password").value(secret);
+            PanelFooter::new("footer", open).connect_first("Connect first: Nordhafen GP");
+            footer.tone(FooterTone::Offline("As of 13:40"));
+            footer.tone(FooterTone::Tie("2 identical matches"));
+            footer.tone(FooterTone::UpdateReady("Update ready"));
+            footer.tone(FooterTone::Offline(note)).connect_first(via);
         "##;
         assert_eq!(
             literal_texts(source),
@@ -1024,6 +1041,10 @@ mod tests {
                 (56, "\"Team Beratung\"".to_string()),
                 (59, "\"Return: sign in\"".to_string()),
                 (60, "\"Password\"".to_string()),
+                (61, "\"Connect first: Nordhafen GP\"".to_string()),
+                (62, "\"As of 13:40\"".to_string()),
+                (63, "\"2 identical matches\"".to_string()),
+                (64, "\"Update ready\"".to_string()),
             ]
         );
     }
