@@ -15,17 +15,19 @@
 //! name. The row itself is one node, an option in a list box, named after
 //! its parts through [`RowParts::accessible_name`].
 //!
-//! The secret field is built from several elements, and the secret may
-//! reach none of them while it is hidden or while no assistive technology
-//! runs. Under `cfg(test)` it lists every element it builds, and its
-//! containers note how many children they hold, so the tests read each
-//! element and find one that is not on the list.
+//! The secret field and the one-time code ring are built from several
+//! elements, and the secret or the code may reach none of them while it is
+//! hidden or while no assistive technology runs. Under `cfg(test)` each
+//! lists every element it builds, and its containers note how many
+//! children they hold, so the tests read each element and find one that is
+//! not on the list.
 
 mod accessibility_id;
 pub mod button;
 pub mod chip;
 mod focus_ring;
 pub(in crate::ui::ds) mod keycap;
+pub mod otp;
 pub mod row;
 pub mod secret_field;
 pub mod shortcut;
@@ -42,6 +44,7 @@ use gpui::{
 pub use accessibility_id::AccessibilityId;
 pub use button::{Button, ButtonKind, ButtonSize, IconButton};
 pub use chip::{Chip, ChipTone};
+pub use otp::{OtpRing, OtpSize};
 pub use row::{Row, RowDensity, RowParts};
 pub use secret_field::{CopyState, SecretField};
 pub use shortcut::Shortcut;
@@ -88,14 +91,16 @@ impl RenderOnce for Standalone {
     }
 }
 
-/// A container of a composed component, such as the secret field. In the
+/// A container of a composed component, such as the secret field or the
+/// one-time code ring. In the
 /// tests it notes how many children it holds once it is laid out, so that a
 /// test can hold the component to the parts it lists for the tests; outside
 /// the tests it is the container as it was.
 fn counted(container: Div, name: &'static str) -> Div {
     #[cfg(test)]
-    let container = container
-        .on_children_prepainted(move |children, _, _| probe::note_children(name, children.len()));
+    let container = container.on_children_prepainted(move |children, window, _| {
+        probe::note_children(window, name, children.len())
+    });
     #[cfg(not(test))]
     let _ = name;
     container
@@ -194,7 +199,7 @@ pub(in crate::ui::ds) mod probe {
     use gpui::{
         AnyElement, App, AppContext as _, Bounds, Context, Edges, Element, ElementId, Hsla,
         IntoElement, Modifiers, ParentElement as _, Pixels, Render, Role, Styled as _,
-        TestAppContext, VisualTestContext, Window, accesskit, canvas, div, px,
+        TestAppContext, VisualTestContext, Window, WindowId, accesskit, canvas, div, px,
     };
     use gpui_component::{Root, Theme};
 
@@ -287,6 +292,20 @@ pub(in crate::ui::ds) mod probe {
         pub node: accesskit::Node,
     }
 
+    impl ComponentPart {
+        /// The texts the node hands to assistive technology, by name.
+        pub fn texts(&self) -> [(&'static str, Option<&str>); 6] {
+            [
+                ("label", self.node.label()),
+                ("value", self.node.value()),
+                ("description", self.node.description()),
+                ("tooltip", self.node.tooltip()),
+                ("author id", self.node.author_id()),
+                ("placeholder", self.node.placeholder()),
+            ]
+        }
+    }
+
     /// Reads `element` as the part called `name`.
     pub fn part(name: &'static str, element: impl IntoElement) -> ComponentPart {
         let element = element.into_element();
@@ -300,16 +319,31 @@ pub(in crate::ui::ds) mod probe {
     }
 
     thread_local! {
-        /// How many children each counted container held when it was last
-        /// laid out on this thread.
-        static CHILDREN: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
+        /// How many children each counted container held when its window
+        /// last laid it out, on this thread.
+        static CHILDREN: RefCell<HashMap<(WindowId, &'static str), usize>> =
+            RefCell::new(HashMap::new());
     }
 
     /// Called by a counted container once its children are laid out.
-    pub fn note_children(container: &'static str, count: usize) {
+    pub fn note_children(window: &Window, container: &'static str, count: usize) {
+        let window = window.window_handle().window_id();
         CHILDREN.with_borrow_mut(|children| {
-            children.insert(container, count);
+            children.insert((window, container), count);
         });
+    }
+
+    /// How many children the counted containers of `window` held in its last
+    /// frame, together.
+    pub fn counted_children(window: &Window) -> usize {
+        let window = window.window_handle().window_id();
+        CHILDREN.with_borrow(|children| {
+            children
+                .iter()
+                .filter(|((drawn_in, _), _)| *drawn_in == window)
+                .map(|(_, count)| count)
+                .sum()
+        })
     }
 
     /// Each line of `file` in `src/ui/ds/components` that has `call` on
@@ -1042,6 +1076,257 @@ mod tests {
         );
         for style in crate::ui::ds::typography::TextStyle::ALL {
             assert!(style.size() >= 11.0, "{style:?} is {} pt", style.size());
+        }
+    }
+
+    /// The secret and the one-time codes of the tests below.
+    const SECRET: &str = "sp-test-7Qx!2026";
+    const CODE: &str = "739114";
+    const NEXT_CODE: &str = "205881";
+
+    /// `secret` and the pieces of it that would give it away: all of it, and
+    /// its groups of three and of four, alone and in a row with spaces.
+    fn giveaways(secret: &str) -> Vec<String> {
+        let chars: Vec<char> = secret.chars().collect();
+        let mut found = vec![secret.to_string()];
+        for size in [3, 4] {
+            let groups: Vec<String> = chars
+                .chunks(size)
+                .map(|group| group.iter().collect())
+                .collect();
+            found.push(groups.join(" "));
+            found.extend(
+                groups
+                    .into_iter()
+                    .filter(|group| group.chars().count() == size),
+            );
+        }
+        found
+    }
+
+    fn field(revealed: bool, assistive: bool, copied: CopyState, handlers: bool) -> SecretField {
+        let field = SecretField::new("password", SharedString::new_static("Password"))
+            .value(zeroize::Zeroizing::new(SECRET.to_string()))
+            .revealed(revealed)
+            .assistive(assistive)
+            .copied(copied)
+            .accessibility_id(AccessibilityId::new("quick", "password", 0));
+        if handlers {
+            field.on_copy(|_, _, _| {}).on_toggle_reveal(|_, _, _| {})
+        } else {
+            field
+        }
+    }
+
+    fn ring(remaining: u64, masked: bool, assistive: bool) -> OtpRing {
+        OtpRing::new(
+            "otp",
+            std::time::Duration::from_secs(remaining),
+            std::time::Duration::from_secs(30),
+        )
+        .code(zeroize::Zeroizing::new(CODE.to_string()))
+        .next_code(zeroize::Zeroizing::new(NEXT_CODE.to_string()))
+        .masked(masked)
+        .assistive(assistive)
+    }
+
+    /// Where `parts` hand any piece of `secrets` to assistive technology,
+    /// other than `allowed`: the part, the property and the exact text that
+    /// may hold it.
+    fn leaks(
+        case: &str,
+        parts: &[probe::ComponentPart],
+        secrets: &[&str],
+        allowed: Option<(&str, &str, &str)>,
+    ) -> Vec<String> {
+        let mut found = Vec::new();
+        for part in parts {
+            for (property, said) in part.texts() {
+                let Some(said) = said else {
+                    continue;
+                };
+                if allowed == Some((part.name, property, said)) {
+                    continue;
+                }
+                for secret in secrets {
+                    for piece in giveaways(secret) {
+                        if said.contains(&piece) {
+                            found.push(format!(
+                                "{case}: the {property} of the {} holds {piece:?}: {said:?}",
+                                part.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// No secret and no one-time code reaches assistive technology while it
+    /// is hidden or while none runs. Every part the secret field and the
+    /// ring build, read one by one, holds neither the secret nor the code,
+    /// nor a group of three or four of either, in its label, value,
+    /// description, tooltip, author id or placeholder: the field hidden
+    /// without and with assistive technology and revealed without it, in
+    /// every copy state, with and without its handlers, and the ring masked
+    /// without and with assistive technology and unmasked without it, with
+    /// and without the next code. Revealed with assistive technology, the
+    /// secret is the value of the value button and nothing else, and the
+    /// code the value of the timer; the next code never reaches the tree.
+    #[gpui::test]
+    fn no_secret_in_ax_tree(cx: &mut gpui::TestAppContext) {
+        let mut found = Vec::new();
+        let mut shown = 0;
+        for (revealed, assistive) in [(false, false), (false, true), (true, false), (true, true)] {
+            for copied in CopyState::ALL {
+                for handlers in [true, false] {
+                    let parts = probe::in_frame(cx, move |window, cx| {
+                        field(revealed, assistive, copied, handlers).parts(window, cx)
+                    });
+                    let case = format!(
+                        "field, revealed: {revealed}, assistive: {assistive}, {copied:?}, handlers: {handlers}"
+                    );
+                    let allowed =
+                        (revealed && assistive && handlers).then_some(("value", "value", SECRET));
+                    if let Some((part, property, value)) = allowed {
+                        let holds = parts.iter().any(|read| {
+                            read.name == part && read.texts().contains(&(property, Some(value)))
+                        });
+                        assert!(holds, "{case}: the value button holds the secret");
+                        shown += 1;
+                    }
+                    found.extend(leaks(&case, &parts, &[SECRET], allowed));
+                }
+            }
+        }
+        for (masked, assistive) in [(true, false), (true, true), (false, false), (false, true)] {
+            for remaining in [18, 3] {
+                let parts = probe::in_frame(cx, move |window, cx| {
+                    ring(remaining, masked, assistive).parts(window, cx)
+                });
+                let case =
+                    format!("ring, masked: {masked}, assistive: {assistive}, {remaining} s left");
+                let allowed = (!masked && assistive).then_some(("timer", "value", "739 114"));
+                if allowed.is_some() {
+                    let timer = parts
+                        .iter()
+                        .find(|part| part.name == "timer")
+                        .expect("the timer");
+                    assert_eq!(timer.node.value(), Some("739 114"), "{case}");
+                    shown += 1;
+                }
+                if !masked && remaining == 3 {
+                    assert!(
+                        parts.iter().any(|part| part.name == "next_code"),
+                        "{case}: the next code shows"
+                    );
+                }
+                found.extend(leaks(&case, &parts, &[CODE, NEXT_CODE], allowed));
+            }
+        }
+        assert_eq!(shown, 3 + 2, "the cases that may show a secret");
+        assert!(
+            found.is_empty(),
+            "a secret reaches assistive technology:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// The revealed secret and the code are drawn as text without an id:
+    /// neither `secret_field.rs` nor `otp.rs` calls `text!`, `Text::new`,
+    /// `with_id`, `InteractiveText` or the GPUI Kit's `Label::new`, which
+    /// each give a text an id or a node of its own, so GPUI writes the text
+    /// as a label with the secret as its value. `Text::new_inaccessible` is
+    /// allowed. The files are read through `code_only`, so comments and their
+    /// tests do not count; such a call made through a macro or a function in
+    /// another file, or written through a renamed import, is past it.
+    #[test]
+    fn secret_text_has_no_role() {
+        let mut found = Vec::new();
+        for file in ["secret_field.rs", "otp.rs"] {
+            for call in [
+                "text!(",
+                "Text::new(",
+                "with_id(",
+                "InteractiveText",
+                "Label::new(",
+            ] {
+                found.extend(probe::calls_in(file, call));
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "draw a secret as plain or styled text without an id:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// How many children the counted containers of `build` held, with the
+    /// element `build` returns itself, in a window of its own.
+    fn drawn_elements(
+        cx: &mut gpui::TestAppContext,
+        build: impl Fn() -> AnyElement + 'static,
+    ) -> usize {
+        let cx = probe::window(cx, move |_, _| build());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        1 + cx.update(|window, _| probe::counted_children(window))
+    }
+
+    /// Every element the secret field and the ring put into their containers
+    /// is one of their parts, which `no_secret_in_ax_tree` reads: the parts
+    /// each lists are as many as the elements it draws, the one it returns
+    /// and the children its containers hold, in each state. The count
+    /// covers the containers the two files build; what a button of their
+    /// own draws inside it is the button's.
+    #[gpui::test]
+    fn every_rendered_child_is_a_part(cx: &mut gpui::TestAppContext) {
+        for revealed in [false, true] {
+            for handlers in [false, true] {
+                for with_value in [false, true] {
+                    let build = move || {
+                        let field = field(revealed, false, CopyState::Idle, handlers);
+                        if with_value {
+                            field
+                        } else {
+                            SecretField::new("password", SharedString::new_static("Password"))
+                                .revealed(revealed)
+                        }
+                    };
+                    let parts =
+                        probe::in_frame(cx, move |window, cx| build().parts(window, cx).len());
+                    let drawn = drawn_elements(cx, move || build().into_any_element());
+                    assert_eq!(
+                        drawn, parts,
+                        "field, revealed: {revealed}, handlers: {handlers}, value: {with_value}"
+                    );
+                }
+            }
+        }
+        for masked in [true, false] {
+            for remaining in [18, 3] {
+                for with_code in [false, true] {
+                    let build = move || {
+                        if with_code {
+                            ring(remaining, masked, false)
+                        } else {
+                            OtpRing::new(
+                                "otp",
+                                std::time::Duration::from_secs(remaining),
+                                std::time::Duration::from_secs(30),
+                            )
+                            .masked(masked)
+                        }
+                    };
+                    let parts =
+                        probe::in_frame(cx, move |window, cx| build().parts(window, cx).len());
+                    let drawn = drawn_elements(cx, move || build().into_any_element());
+                    assert_eq!(
+                        drawn, parts,
+                        "ring, masked: {masked}, {remaining} s left, code: {with_code}"
+                    );
+                }
+            }
         }
     }
 }

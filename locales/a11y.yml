@@ -12,6 +12,11 @@ a11y:
   hidden:
     en: hidden
     de: verborgen
+  # The name of the ring next to a one-time code. The seconds are rounded
+  # up to a multiple of five, so the name changes at most every five seconds.
+  one_time_code_expires:
+    en: One-time code, expires in %{seconds} seconds
+    de: Einmalcode, läuft in %{seconds} Sekunden ab
   # The description of a disabled control. GPUI has no disabled flag for
   # assistive technology yet.
   not_available:
