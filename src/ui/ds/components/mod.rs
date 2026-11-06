@@ -1283,6 +1283,28 @@ mod tests {
         );
     }
 
+    /// Neither the secret field nor the ring shows a tooltip. GPUI's tooltip
+    /// is a view of its own that opens under the pointer, not a property of
+    /// the node `no_secret_in_ax_tree` reads, so a tooltip could show the
+    /// secret past the dots and past that test. The files are read through
+    /// `code_only`, so comments and their tests do not count; a tooltip set
+    /// through a renamed import, a macro or a function in another file is
+    /// past it.
+    #[test]
+    fn the_secret_components_show_no_tooltip() {
+        let mut found = Vec::new();
+        for file in ["secret_field.rs", "otp.rs"] {
+            for call in ["tooltip(", "hoverable_tooltip(", "Tooltip"] {
+                found.extend(probe::calls_in(file, call));
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "a secret component shows a tooltip:\n{}",
+            found.join("\n")
+        );
+    }
+
     /// How many children the counted containers of `build` held, with the
     /// element `build` returns itself, in a window of its own.
     fn drawn_elements(
