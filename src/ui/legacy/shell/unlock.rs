@@ -2,6 +2,8 @@
 //! secure event input for the master password field.
 
 use super::*;
+use crate::app::unlock::touch_id::{self, Answer};
+use gpui::App;
 
 /// Shown when macOS refuses secure event input for the master password
 /// field. The field still works; the user has to know it is not shielded.
@@ -159,107 +161,24 @@ impl AppShell {
     /// `automatic`: raised by the unlock screen itself rather than by a
     /// click. Only such an attempt is re-run when macOS withdraws it; a
     /// withdrawn click is left for the user to click again.
+    ///
+    /// The prompt, the keychain read and the open are the shared flow in
+    /// `app::unlock::touch_id`, the same one the quick access panel uses.
     fn start_biometric_unlock(&mut self, automatic: bool, cx: &mut Context<Self>) {
-        let Some(launch) = self
-            .state
-            .update(cx, |state, cx| state.begin_biometric_unlock(cx))
-        else {
-            return;
-        };
-
-        // begin_open clears VaultStatus to Opening{} only on the
-        // *successful* path; for a Touch ID retrieve we don't want
-        // to flip away from AwaitingPassword until the OS prompt
-        // actually resolves. So we postpone begin_open until after
-        // the retrieve returns.
-        let state = self.state.downgrade();
-        let id = launch.id.clone();
-        let path = launch.path.clone();
-        let keyfile = launch.keyfile.clone();
-        let store = launch.store;
-        let generation = launch.generation;
-        let prompt = format!("Unlock {}", file_name_for_prompt(&path));
-        // Read the per-app preference once, here on the foreground.
-        // The background task gets a plain bool - no AppSettings
-        // reference travels into the spawn closure.
-        let options = crate::biometric::RetrieveOptions {
-            allow_device_passcode: self.settings.biometric_allow_passcode_fallback,
-        };
-
-        let retrieve_task = cx.background_spawn(async move {
-            let outcome = store.retrieve(&id, &prompt, options);
-            match outcome {
-                Ok(password) => {
-                    let result = KeePassRepository::open(&path, &password, keyfile.as_deref());
-                    // `password` (Zeroizing) drops here, wiping the
-                    // transient buffer.
-                    BiometricUnlockOutcome::Open {
-                        path,
-                        result,
-                        generation,
-                    }
-                }
-                Err(err) => BiometricUnlockOutcome::Failed {
-                    path,
-                    err,
-                    generation,
-                },
-            }
-        });
-
-        cx.spawn(async move |this, cx| {
-            let outcome = retrieve_task.await;
-            // Decided before the state update below, which clears the
-            // attempt and with it the generation this compares against.
-            let interrupted = automatic
-                && match &outcome {
-                    BiometricUnlockOutcome::Failed {
-                        err: crate::biometric::BiometricError::Interrupted,
-                        generation,
-                        ..
-                    } => state
-                        .read_with(cx, |state, _| {
-                            state.biometric_unlock_is_current(*generation)
-                        })
-                        .unwrap_or(false),
-                    _ => false,
-                };
-            let _ = state.update(cx, |state, cx| match outcome {
-                BiometricUnlockOutcome::Open {
-                    path,
-                    result,
-                    generation,
-                } => {
-                    // A Touch ID prompt the user satisfied *after*
-                    // cancelling / re-arming (even for the same vault
-                    // path) carries a stale generation; ignore it so
-                    // it can't drive the current screen.
-                    if !state.biometric_unlock_is_current(generation) {
-                        state.clear_biometric_attempt_public();
-                        return;
-                    }
-                    let result = result.map_err(|error| {
-                        Self::note_kdf_confirmation(state, &path, &error, cx);
-                        errors::open_message(&error)
-                    });
-                    state.begin_open(path.clone(), cx);
-                    let _ = state.finish_open_attempt(path, result, cx);
-                }
-                BiometricUnlockOutcome::Failed {
-                    path,
-                    err,
-                    generation,
-                } => {
-                    state.fail_biometric_unlock(path, generation, err, cx);
-                }
-            });
-            if interrupted {
-                let _ = this.update_in(cx, |shell, window, cx| {
+        let shell = cx.entity().downgrade();
+        let on_done = Box::new(move |answer: Answer, cx: &mut App| {
+            if automatic && answer == Answer::Interrupted {
+                let _ = shell.update_in(cx, |shell, window, cx| {
                     shell.note_automatic_biometric_interruption(window, cx);
                 });
             }
-        })
-        .detach();
+        });
+        touch_id::unlock_from_lock_screen(
+            self.state.clone(),
+            self.settings.biometric_allow_passcode_fallback,
+            on_done,
+            cx,
+        );
     }
 
     /// macOS withdrew the automatic prompt. With the window in the
@@ -420,19 +339,5 @@ impl AppShell {
         self.state.update(cx, |state, cx| {
             state.take_remote_kdf_confirmation(cx);
         });
-    }
-
-    /// A failed open that turns out to be a cost question (the file changed
-    /// after the pre-check, or the pre-check had not landed yet) puts the
-    /// notice on the unlock screen instead of an error the user cannot act on.
-    fn note_kdf_confirmation(
-        state: &mut AppState,
-        path: &Path,
-        error: &keepass::db::DatabaseOpenError,
-        cx: &mut Context<AppState>,
-    ) {
-        if let Some(cost) = crate::keepass::limits::confirmation_required(error) {
-            state.note_kdf_check(path.to_path_buf(), Some(cost), cx);
-        }
     }
 }
