@@ -345,38 +345,56 @@ fn the_lock_screen_unlocks_through_the_shared_flow(cx: &mut TestAppContext) {
 }
 
 /// The unlock screen's prompt takes the Mac password only while the setting
-/// allows it. The setting is turned off and then on again while the shell
-/// runs, and the unlock is clicked after each change.
+/// allows it. The setting is turned off while the shell runs, and the window
+/// comes to the front, which raises the screen's own prompt. Then the unlock
+/// is clicked, the setting is turned on again, and the unlock is clicked once
+/// more.
 #[gpui::test]
 fn the_lock_screen_prompt_follows_the_mac_password_setting(cx: &mut TestAppContext) {
     if !in_a_home_of_its_own("the_lock_screen_prompt_follows_the_mac_password_setting") {
         return;
     }
     let screen = LockScreen::new(cx, Path::new(NOWHERE));
-    for allowed in [false, true] {
-        screen.in_window(cx, |shell, window, cx| {
+    let allow = |cx: &mut TestAppContext, allowed: bool| {
+        screen.in_window(cx, |shell, _, cx| {
             let settings = AppSettings {
                 biometric_allow_passcode_fallback: allowed,
                 ..shell.settings().clone()
             };
             shell.update_settings(settings, cx);
-            shell.submit_biometric_unlock(window, cx);
+        });
+    };
+    let asked = || -> Vec<bool> {
+        screen
+            .vault
+            .store
+            .inner
+            .retrieve_calls()
+            .iter()
+            .map(|(_, options)| options.allow_device_passcode)
+            .collect()
+    };
+
+    allow(cx, false);
+    screen.vault.store.answering([BiometricError::UserCancelled]);
+    screen.activate(cx);
+    assert_eq!(
+        asked(),
+        [false],
+        "the prompt the unlock screen raised on its own took the Mac password with the setting off"
+    );
+
+    for allowed in [false, true] {
+        allow(cx, allowed);
+        screen.in_window(cx, |shell, window, cx| {
+            shell.submit_biometric_unlock(window, cx)
         });
         cx.run_until_parked();
     }
-
-    let asked: Vec<bool> = screen
-        .vault
-        .store
-        .inner
-        .retrieve_calls()
-        .iter()
-        .map(|(_, options)| options.allow_device_passcode)
-        .collect();
     assert_eq!(
-        asked,
-        [false, true],
-        "the prompt did not follow the setting for the Mac password, off and then on"
+        asked(),
+        [false, false, true],
+        "a clicked prompt did not follow the setting for the Mac password, off and then on"
     );
 }
 
