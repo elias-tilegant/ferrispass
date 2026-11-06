@@ -2,7 +2,8 @@
 //! it, the TOTP tick and the auto-lock check don't, and the pointer counts
 //! only while the window is in front. With the Mac idle setting on, the
 //! Mac's idle time decides instead, and the app's clock with the Mac
-//! threshold when macOS cannot report it.
+//! threshold when macOS cannot report it. With it off, the Mac's idle time
+//! plays no part.
 use super::*;
 use crate::app::services::activity;
 use crate::app::services::clipboard::ClipboardService;
@@ -310,6 +311,27 @@ fn mac_idle_for(cx: &mut TestAppContext, idle: Duration) {
 /// From here on the app's own clock reads as idle for `idle`.
 fn app_idle_for(idle: Duration) {
     activity::reset(SystemTime::now() - idle);
+}
+
+#[gpui::test]
+fn auto_lock_without_mac_idle_ignores_the_mac(cx: &mut TestAppContext) {
+    // Someone at work in another app, with the Mac idle setting off: the
+    // Mac's idle time plays no part, FerrisPass's own clock decides alone.
+    // Without the fake the tick could not tell the two clocks apart, since a
+    // test build answers `Unsupported` and the fallback reads the app clock.
+    mac_idle_for(cx, Duration::ZERO);
+    let harness = open_vault_with(cx, AUTO_LOCK, None);
+
+    app_idle_for(Duration::from_secs(180));
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(is_open(cx, &harness), "locked after three idle minutes");
+
+    app_idle_for(Duration::from_secs(241));
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        !is_open(cx, &harness),
+        "input in another app held off the lock while the Mac idle setting was off"
+    );
 }
 
 #[gpui::test]
