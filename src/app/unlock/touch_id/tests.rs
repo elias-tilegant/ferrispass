@@ -23,6 +23,7 @@ use crate::biometric::registry::{BiometricEnrollment, BiometricRegistry};
 use crate::biometric::{BiometricResult, BiometricStore, EnrollmentId};
 use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
 use crate::keepass::VaultDocument;
+use crate::keepass::limits::{Argon2Variant, KdfCost};
 use crate::keepass::repository::snapshot_from_database;
 use crate::platform::secure_input::{self, fake::FakeApi};
 use crate::ui::AppShell;
@@ -535,4 +536,264 @@ fn the_prompt_names_the_vault_without_its_extension() {
         "Nordhafen"
     );
     assert_eq!(file_name_for_prompt(Path::new("/")), "vault");
+}
+
+/// Every trigger there is.
+const EVERY_TRIGGER: [PanelTrigger; 8] = [
+    PanelTrigger::ReturnKey,
+    PanelTrigger::UnlockButtonClick,
+    PanelTrigger::Opened,
+    PanelTrigger::Typed,
+    PanelTrigger::Activated,
+    PanelTrigger::Timer,
+    PanelTrigger::AfterInterrupted,
+    PanelTrigger::AfterExpiry,
+];
+
+/// Whether `trigger` is the user asking to unlock. A new trigger does not
+/// compile here until it is sorted in, and then belongs in
+/// [`EVERY_TRIGGER`].
+fn is_a_confirmation(trigger: PanelTrigger) -> bool {
+    match trigger {
+        PanelTrigger::ReturnKey | PanelTrigger::UnlockButtonClick => true,
+        PanelTrigger::Opened
+        | PanelTrigger::Typed
+        | PanelTrigger::Activated
+        | PanelTrigger::Timer
+        | PanelTrigger::AfterInterrupted
+        | PanelTrigger::AfterExpiry => false,
+    }
+}
+
+/// The vault on the unlock screen has had its header read, and `cost` is
+/// what it found.
+fn header_read(cx: &mut TestAppContext, vault: &Vault, cost: Option<KdfCost>) {
+    let path = vault.path.clone();
+    vault.state.update(cx, |state, cx| {
+        let check = state.begin_kdf_check(cx);
+        state.finish_kdf_check(check, path, cost, cx);
+    });
+}
+
+/// A vault the panel could unlock: on the unlock screen, enrolled, the
+/// sensor in reach and the header read. Its file does not exist, so Touch ID
+/// answers and nothing opens.
+fn locked_panel(cx: &mut TestAppContext) -> Vault {
+    let vault = waiting(cx, Path::new(NOWHERE), InMemoryBiometricStore::available());
+    header_read(cx, &vault, None);
+    vault
+}
+
+/// Stands in for the panel: whatever happens goes through `confirm`, and only
+/// a token reaches `unlock_from_panel`. Says whether an attempt started.
+fn panel_sees(cx: &mut TestAppContext, vault: &Vault, trigger: PanelTrigger) -> bool {
+    let Some(token) = confirm(trigger) else {
+        return false;
+    };
+    let state = vault.state.clone();
+    let started = cx.update(|cx| {
+        unlock_from_panel(
+            token,
+            state,
+            false,
+            Box::new(|_| {}),
+            Box::new(|_, _| {}),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    started.is_some()
+}
+
+#[test]
+fn confirm_is_a_closed_table() {
+    for trigger in EVERY_TRIGGER {
+        assert_eq!(
+            confirm(trigger).is_some(),
+            is_a_confirmation(trigger),
+            "{trigger:?}"
+        );
+    }
+    assert!(confirm(PanelTrigger::ReturnKey).is_some());
+    assert!(confirm(PanelTrigger::UnlockButtonClick).is_some());
+}
+
+#[gpui::test]
+fn the_panel_starts_touch_id_only_with_a_token(cx: &mut TestAppContext) {
+    cx.update(|cx| secure_input::fake::install(cx, FakeApi::new()));
+    let vault = locked_panel(cx);
+
+    // The panel opens, the user types, the panel comes back to the front.
+    assert!(!panel_sees(cx, &vault, PanelTrigger::Opened));
+    let mut typed = cx.update(|cx| TypedAhead::begin(cx)).expect("begin");
+    for c in "nhq".chars() {
+        typed.push(c);
+        assert!(!panel_sees(cx, &vault, PanelTrigger::Typed));
+    }
+    assert!(!panel_sees(cx, &vault, PanelTrigger::Activated));
+
+    // 31 seconds go by: the buffer expires, timers fire, and a prompt that
+    // macOS withdrew would be reported.
+    cx.executor().advance_clock(Duration::from_secs(31));
+    cx.run_until_parked();
+    assert!(typed.expire_if_due(std::time::SystemTime::now() + Duration::from_secs(31)));
+    for trigger in [
+        PanelTrigger::AfterExpiry,
+        PanelTrigger::Timer,
+        PanelTrigger::AfterInterrupted,
+    ] {
+        assert!(!panel_sees(cx, &vault, trigger), "{trigger:?}");
+    }
+    assert_eq!(
+        vault.store.retrieves(),
+        0,
+        "Touch ID came up without a confirmation"
+    );
+
+    assert!(panel_sees(cx, &vault, PanelTrigger::ReturnKey));
+    assert_eq!(vault.store.retrieves(), 1);
+    assert!(panel_sees(cx, &vault, PanelTrigger::UnlockButtonClick));
+    assert_eq!(vault.store.retrieves(), 2);
+}
+
+#[gpui::test]
+fn an_interrupted_panel_prompt_is_not_retried(cx: &mut TestAppContext) {
+    let vault = locked_panel(cx);
+    vault.store.answering([BiometricError::Interrupted]);
+    let answers = Answers::default();
+
+    let token = confirm(PanelTrigger::ReturnKey).expect("Return confirms");
+    let done = noting(&answers, "panel");
+    let state = vault.state.clone();
+    cx.update(|cx| unlock_from_panel(token, state, false, Box::new(|_| {}), done, cx))
+        .expect("the attempt starts");
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(5));
+    cx.run_until_parked();
+
+    assert_eq!(*answers.borrow(), [("panel", Answer::Interrupted)]);
+    assert_eq!(
+        vault.store.retrieves(),
+        1,
+        "a withdrawn prompt in the panel was asked again"
+    );
+    vault.state.read_with(cx, |state, _| {
+        assert_eq!(*state.biometric_attempt(), BiometricAttempt::Idle);
+        assert_eq!(state.pending_unlock_path(), Some(vault.path.clone()));
+        assert!(state.unlock_prompt().expect("still locked").error.is_none());
+    });
+}
+
+/// The panel's side of the Touch ID dialog. The dialog takes key focus, and
+/// macOS does not hand it back, so a Return typed before the panel takes it
+/// back goes nowhere.
+#[derive(Default)]
+struct PanelWindow {
+    key: bool,
+    returns_taken: usize,
+    events: Vec<&'static str>,
+}
+
+impl PanelWindow {
+    fn press_return(&mut self) {
+        if self.key {
+            self.returns_taken += 1;
+        }
+    }
+}
+
+#[gpui::test]
+fn the_panel_regains_key_before_it_takes_return(cx: &mut TestAppContext) {
+    let vault = locked_panel(cx);
+    let panel = Rc::new(RefCell::new(PanelWindow {
+        key: true,
+        ..PanelWindow::default()
+    }));
+
+    let token = confirm(PanelTrigger::ReturnKey).expect("Return confirms");
+    // The dialog goes up and takes key focus.
+    panel.borrow_mut().key = false;
+    let on_answered: OnAnswered = {
+        let panel = panel.clone();
+        let state = vault.state.clone();
+        Box::new(move |cx: &mut App| {
+            let applied = !matches!(
+                state.read(cx).biometric_attempt(),
+                BiometricAttempt::InFlight { .. }
+            );
+            let mut panel = panel.borrow_mut();
+            panel.key = true;
+            panel.events.push(if applied {
+                "answered after the answer was applied"
+            } else {
+                "answered"
+            });
+        })
+    };
+    let on_done: OnDone = {
+        let panel = panel.clone();
+        Box::new(move |_, _| {
+            let mut panel = panel.borrow_mut();
+            let event = if panel.key {
+                "done"
+            } else {
+                "done while not key"
+            };
+            panel.events.push(event);
+        })
+    };
+    let state = vault.state.clone();
+    cx.update(|cx| unlock_from_panel(token, state, false, on_answered, on_done, cx))
+        .expect("the attempt starts");
+
+    // Return while the dialog is up.
+    panel.borrow_mut().press_return();
+    assert_eq!(panel.borrow().returns_taken, 0);
+
+    cx.run_until_parked();
+    assert_eq!(panel.borrow().events, ["answered", "done"]);
+    panel.borrow_mut().press_return();
+    assert_eq!(panel.borrow().returns_taken, 1);
+}
+
+#[gpui::test]
+fn the_panel_never_answers_a_cost_question(cx: &mut TestAppContext) {
+    let start = |cx: &mut TestAppContext, vault: &Vault| {
+        let token = confirm(PanelTrigger::ReturnKey).expect("Return confirms");
+        let state = vault.state.clone();
+        let started = cx.update(|cx| {
+            unlock_from_panel(
+                token,
+                state,
+                false,
+                Box::new(|_| {}),
+                Box::new(|_, _| {}),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        started.is_some()
+    };
+
+    let not_read = waiting(cx, Path::new(NOWHERE), InMemoryBiometricStore::available());
+    assert!(!start(cx, &not_read), "started before the header was read");
+    assert_eq!(not_read.store.retrieves(), 0);
+
+    let costly = waiting(cx, Path::new(NOWHERE), InMemoryBiometricStore::available());
+    header_read(
+        cx,
+        &costly,
+        Some(KdfCost {
+            variant: Argon2Variant::Argon2id,
+            memory: 2 * 1024 * 1024 * 1024,
+            iterations: 3,
+            parallelism: 4,
+        }),
+    );
+    assert!(!start(cx, &costly), "started with a cost question open");
+    assert_eq!(costly.store.retrieves(), 0);
+
+    header_read(cx, &costly, None);
+    assert!(start(cx, &costly));
+    assert_eq!(costly.store.retrieves(), 1);
 }

@@ -12,8 +12,21 @@
 //!   comes up. If macOS withdraws that automatic prompt, the lock screen
 //!   asks once more; that rule stays with the shell, in the `on_done` it
 //!   passes.
+//! - The quick access panel calls [`unlock_from_panel`], which takes a
+//!   [`Confirmed`] token, and only [`confirm`] makes one: for Return and for
+//!   a click on the unlock button. The panel opening, typing, the panel
+//!   coming back to the front, a timer, the typed-ahead buffer expiring and
+//!   macOS withdrawing a prompt make none, so none of them can raise the
+//!   Touch ID prompt. The call uses the token up, so the next attempt needs
+//!   a new confirmation. There is no second attempt either: a withdrawn
+//!   prompt comes back as [`Answer::Interrupted`] and nothing else happens.
+//!   And the panel never answers a cost question: while one is open, or the
+//!   vault's header has not been read yet, no attempt starts.
 //! - Before the answer is applied, `on_answered` runs on the foreground. The
-//!   lock screen has nothing to do there.
+//!   Touch ID dialog takes key focus from the panel and macOS does not give
+//!   it back, so the panel makes itself key there and focuses the search
+//!   field or the list; the next Return reaches it only after that. The lock
+//!   screen has nothing to do there.
 //!
 //! The rules both share:
 //!
@@ -44,12 +57,70 @@ use crate::ui::errors;
 pub const TARGET_RETURN_WAIT: Duration = Duration::from_secs(2);
 
 /// Where an unlock was asked for. Public so a reader of an [`Answer`] can
-/// name it, but no public function takes it: each origin has a function of
-/// its own, such as [`unlock_from_lock_screen`].
+/// name it, but no public function takes it: the panel's way in is
+/// [`unlock_from_panel`] with a token, the lock screen's
+/// [`unlock_from_lock_screen`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnlockOrigin {
     LockScreen,
     Panel,
+}
+
+/// What happened in the quick access panel. Only the two that are the user
+/// asking to unlock count as a confirmation ([`confirm`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelTrigger {
+    /// Return, in the locked panel.
+    ReturnKey,
+    /// A click on the panel's unlock button.
+    UnlockButtonClick,
+    /// The panel opened.
+    Opened,
+    /// A key that goes into the typed-ahead buffer.
+    Typed,
+    /// The panel came back to the front.
+    Activated,
+    /// A timer fired.
+    Timer,
+    /// macOS withdrew the previous prompt.
+    AfterInterrupted,
+    /// The typed-ahead buffer expired.
+    AfterExpiry,
+}
+
+/// Proof that the user asked to unlock from the panel. Only [`confirm`]
+/// makes one. The field is private, so no code outside this module can
+/// build one, and it is neither `Clone` nor `Copy`: [`unlock_from_panel`]
+/// takes it by value, so each attempt uses one up.
+///
+/// Neither of these compiles:
+///
+/// ```compile_fail,E0603
+/// let made_up = ferrispass::app::unlock::touch_id::Confirmed(());
+/// ```
+///
+/// ```compile_fail,E0599
+/// use ferrispass::app::unlock::touch_id::{PanelTrigger, confirm};
+/// let token = confirm(PanelTrigger::ReturnKey).unwrap();
+/// let twice = token.clone();
+/// ```
+#[derive(Debug)]
+#[must_use = "a confirmation starts nothing until it goes to unlock_from_panel"]
+pub struct Confirmed(());
+
+/// The one table that turns something that happened in the panel into a
+/// confirmation: Return and a click on the unlock button do, nothing else
+/// does.
+pub fn confirm(trigger: PanelTrigger) -> Option<Confirmed> {
+    match trigger {
+        PanelTrigger::ReturnKey | PanelTrigger::UnlockButtonClick => Some(Confirmed(())),
+        PanelTrigger::Opened
+        | PanelTrigger::Typed
+        | PanelTrigger::Activated
+        | PanelTrigger::Timer
+        | PanelTrigger::AfterInterrupted
+        | PanelTrigger::AfterExpiry => None,
+    }
 }
 
 /// What runs on the foreground as soon as macOS has answered, before the
@@ -91,6 +162,31 @@ pub fn unlock_from_lock_screen(
         state,
         allow_device_passcode,
         Box::new(|_| {}),
+        on_done,
+        cx,
+    )
+}
+
+/// The quick access panel's Touch ID unlock, for the token a confirmation
+/// gave. `on_answered` runs as soon as macOS has answered and before the
+/// answer is applied: the panel makes itself key there. `on_done` gets the
+/// answer once it is applied. Returns the generation of the attempt, or
+/// `None` when none started (no vault with an enrolment on the unlock screen,
+/// a cost question open, or the vault's header not read yet).
+pub fn unlock_from_panel(
+    token: Confirmed,
+    state: Entity<AppState>,
+    allow_device_passcode: bool,
+    on_answered: OnAnswered,
+    on_done: OnDone,
+    cx: &mut App,
+) -> Option<u64> {
+    let Confirmed(()) = token;
+    run(
+        UnlockOrigin::Panel,
+        state,
+        allow_device_passcode,
+        on_answered,
         on_done,
         cx,
     )

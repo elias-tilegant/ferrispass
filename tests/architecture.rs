@@ -1669,6 +1669,246 @@ fn typed_text_leaks_are_found() {
     assert_eq!(scan.users, vec!["push".to_string()]);
 }
 
+/// The Touch ID flow the lock screen and the quick access panel share.
+const TOUCH_ID_FLOW: &str = "src/app/unlock/touch_id.rs";
+
+#[test]
+fn the_raw_flow_has_no_public_entry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join(TOUCH_ID_FLOW))
+        .unwrap_or_else(|err| panic!("cannot read {TOUCH_ID_FLOW}: {err}"));
+    let problems = raw_flow_entries(&source)
+        .unwrap_or_else(|err| panic!("cannot tokenize {TOUCH_ID_FLOW}: {err}"));
+    let problems: Vec<String> = problems
+        .iter()
+        .map(|(line, what)| format!("{TOUCH_ID_FLOW}:{line}: {what}"))
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "the quick access panel could start Touch ID without a confirmation:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// What in the Touch ID flow would let code start the prompt for the panel
+/// without a token, outside items switched off by `#[cfg(test)]`:
+///
+/// - `fn run` missing, or written with a visibility;
+/// - `struct Confirmed` missing, or with anything but one private `()`;
+/// - `Clone`, `Copy` or `Default` derived for it, a trait implemented for it
+///   by hand, or methods added to it;
+/// - a `Confirmed` built anywhere but in `fn confirm` (taking one apart with
+///   `let Confirmed(..) =` is fine);
+/// - a function with a visibility, other than `confirm`, that takes an
+///   `UnlockOrigin` or a `PanelTrigger`.
+fn raw_flow_entries(source: &str) -> Result<Vec<(usize, String)>, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    let mut problems = Vec::new();
+    let mut saw_run = false;
+    let mut saw_token = false;
+    for i in 0..t.len() {
+        if test_items.iter().any(|item| item.contains(&i)) {
+            continue;
+        }
+        let line = t[i].line;
+        if t[i].is_keyword("fn") {
+            let Some(name) = t.get(i + 1).and_then(Token::name) else {
+                continue;
+            };
+            let visibility = visibility_before(&p, i);
+            if name == "run" {
+                saw_run = true;
+                if !visibility.is_empty() {
+                    problems.push((
+                        line,
+                        format!("`fn run` is `{visibility}`; the raw flow has to stay private"),
+                    ));
+                }
+            }
+            if visibility.is_empty() || name == "confirm" {
+                continue;
+            }
+            let Some(open) = (i + 2..t.len()).find(|&j| t[j].is_punct('(')) else {
+                continue;
+            };
+            let close = p.partner[open].expect("balanced parenthesis");
+            for parameter in &t[open + 1..close] {
+                if let Some(kind @ ("UnlockOrigin" | "PanelTrigger")) = parameter.name() {
+                    problems.push((
+                        line,
+                        format!(
+                            "`{visibility} fn {name}` takes a `{kind}` as a plain value; only \
+                             `confirm` may, and only a `Confirmed` opens the panel's way in"
+                        ),
+                    ));
+                }
+            }
+        } else if t[i].name() == Some("Confirmed") {
+            let before = i.checked_sub(1).map(|j| &t[j]);
+            let after = t.get(i + 1);
+            if before.is_some_and(|tok| tok.is_keyword("struct")) {
+                saw_token = true;
+                let body: Vec<&Tok> = t[i + 1..].iter().take(5).map(|tok| &tok.tok).collect();
+                let private_unit = [
+                    Tok::Punct('('),
+                    Tok::Punct('('),
+                    Tok::Punct(')'),
+                    Tok::Punct(')'),
+                    Tok::Punct(';'),
+                ];
+                if body.len() != private_unit.len()
+                    || body.iter().zip(&private_unit).any(|(a, b)| *a != b)
+                {
+                    problems.push((
+                        line,
+                        "`struct Confirmed` has to be `Confirmed(())`, one private field"
+                            .to_string(),
+                    ));
+                }
+                for derived in derives_before(&p, i - 1) {
+                    if matches!(derived.as_str(), "Clone" | "Copy" | "Default") {
+                        problems.push((
+                            line,
+                            format!("`Confirmed` derives `{derived}`; a token is used up once"),
+                        ));
+                    }
+                }
+            } else if before.is_some_and(|tok| tok.is_keyword("for")) {
+                problems.push((
+                    line,
+                    "implements a trait for `Confirmed` by hand".to_string(),
+                ));
+            } else if before.is_some_and(|tok| tok.is_keyword("impl")) {
+                problems.push((
+                    line,
+                    "adds methods to `Confirmed`, which could hand out tokens".to_string(),
+                ));
+            } else if after.is_some_and(|tok| tok.is_punct('(') || tok.is_punct('{')) {
+                let taken_apart = before.is_some_and(|tok| tok.is_keyword("let"));
+                let function = enclosing_fn(&p, i);
+                if !taken_apart && function.as_deref() != Some("confirm") {
+                    problems.push((
+                        line,
+                        format!(
+                            "builds a `Confirmed` in {}; only `fn confirm` may",
+                            function.map_or("no function".to_string(), |f| format!("`fn {f}`"))
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    if !saw_run {
+        problems.push((0, "there is no `fn run` to check".to_string()));
+    }
+    if !saw_token {
+        problems.push((0, "there is no `struct Confirmed` to check".to_string()));
+    }
+    Ok(problems)
+}
+
+/// The visibility written before the item keyword at token `i` (`pub`,
+/// `pub(crate)`, `pub(super)` and so on), or an empty string for none.
+/// Qualifiers such as `const` or `async` in between are skipped.
+fn visibility_before(p: &Parsed, i: usize) -> String {
+    let t = &p.tokens;
+    let mut j = i;
+    while j > 0
+        && (matches!(
+            t[j - 1].name(),
+            Some("const" | "async" | "unsafe" | "safe" | "extern")
+        ) || matches!(t[j - 1].tok, Tok::Str(_)))
+    {
+        j -= 1;
+    }
+    if j > 0 && t[j - 1].is_punct(')') {
+        let open = p.partner[j - 1].expect("balanced parenthesis");
+        if open > 0 && t[open - 1].is_keyword("pub") {
+            let scope: Vec<&str> = t[open + 1..j - 1].iter().filter_map(Token::name).collect();
+            return format!("pub({})", scope.join(" "));
+        }
+    }
+    if j > 0 && t[j - 1].is_keyword("pub") {
+        return "pub".to_string();
+    }
+    String::new()
+}
+
+/// The names in the `derive` attributes above the item whose keyword is at
+/// token `i`.
+fn derives_before(p: &Parsed, i: usize) -> Vec<String> {
+    let t = &p.tokens;
+    let mut j = i;
+    if j > 0 && t[j - 1].is_punct(')') {
+        j = p.partner[j - 1].expect("balanced parenthesis");
+    }
+    if j > 0 && t[j - 1].is_keyword("pub") {
+        j -= 1;
+    }
+    let mut names = Vec::new();
+    while j > 0 && t[j - 1].is_punct(']') {
+        let open = p.partner[j - 1].expect("balanced bracket");
+        let inside = &t[open + 1..j - 1];
+        if inside.first().is_some_and(|tok| tok.is_keyword("derive")) {
+            names.extend(
+                inside
+                    .iter()
+                    .skip(1)
+                    .filter_map(Token::name)
+                    .map(str::to_string),
+            );
+        }
+        j = open.saturating_sub(1);
+    }
+    names
+}
+
+#[test]
+fn raw_flow_entries_are_found() {
+    let fine = r##"
+        #[derive(Debug)]
+        #[must_use]
+        pub struct Confirmed(());
+        pub fn confirm(trigger: PanelTrigger) -> Option<Confirmed> { Some(Confirmed(())) }
+        pub fn unlock_from_panel(token: Confirmed, cx: &mut App) -> Option<u64> {
+            let Confirmed(()) = token;
+            run(UnlockOrigin::Panel, cx)
+        }
+        fn run(origin: UnlockOrigin, cx: &mut App) -> Option<u64> { None }
+        #[cfg(test)]
+        mod tests { pub fn sneak() -> Confirmed { Confirmed(()) } }
+    "##;
+    assert_eq!(raw_flow_entries(fine).expect("scan"), Vec::new());
+
+    let broken = r##"
+        #[derive(Debug, Clone)]
+        pub struct Confirmed(pub ());
+        impl Default for Confirmed { fn default() -> Self { Self(()) } }
+        impl Confirmed { pub fn again(&self) -> Self { Confirmed(()) } }
+        pub fn unlock_from_panel(trigger: PanelTrigger) -> Option<u64> { None }
+        pub(crate) fn run(origin: UnlockOrigin) -> Option<u64> {
+            let token = Confirmed(());
+            None
+        }
+    "##;
+    let lines: Vec<usize> = raw_flow_entries(broken)
+        .expect("scan")
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect();
+    assert_eq!(lines, vec![3, 3, 4, 5, 5, 6, 7, 7, 8]);
+
+    assert_eq!(
+        raw_flow_entries("fn other() {}").expect("scan"),
+        vec![
+            (0, "there is no `fn run` to check".to_string()),
+            (0, "there is no `struct Confirmed` to check".to_string()),
+        ]
+    );
+}
+
 #[test]
 fn activity_is_touched_only_where_listed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
