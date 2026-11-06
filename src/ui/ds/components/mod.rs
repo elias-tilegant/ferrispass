@@ -28,6 +28,12 @@
 //! The panel footer is no node and takes no focus; the one node in it is
 //! the button that opens its menu. The panel hands what it says to
 //! VoiceOver as the description of the element that has focus.
+//!
+//! The result list holds the rows in GPUI's `uniform_list` inside a list box
+//! of its own, since `uniform_list` writes no node. The search group puts
+//! the search field and the list under one node that tracks the field's
+//! focus handle, so that the selected row, which says it is the active
+//! descendant, has a focused ancestor while the keyboard stays in the field.
 
 mod accessibility_id;
 pub mod button;
@@ -36,7 +42,9 @@ mod focus_ring;
 pub(in crate::ui::ds) mod keycap;
 pub mod otp;
 pub mod panel_footer;
+pub mod result_list;
 pub mod row;
+pub mod search_group;
 pub mod secret_field;
 pub mod shortcut;
 pub mod switch;
@@ -54,7 +62,9 @@ pub use button::{Button, ButtonKind, ButtonSize, IconButton};
 pub use chip::{Chip, ChipTone};
 pub use otp::{OtpRing, OtpSize};
 pub use panel_footer::{FooterTone, PanelFooter};
+pub use result_list::{ListSelection, ResultList, ResultsDrawn, move_selection, select_by_number};
 pub use row::{Row, RowDensity, RowParts};
+pub use search_group::SearchGroup;
 pub use secret_field::{CopyState, SecretField};
 pub use shortcut::Shortcut;
 pub use switch::Switch;
@@ -846,6 +856,8 @@ mod tests {
         ("Switch::new(", 1),
         ("Chip::new(", 1),
         ("SecretField::new(", 1),
+        ("ResultList::new(", 1),
+        ("SearchGroup::new(", 1),
         // The footer's line about what to connect to first, and the notes
         // of its tones.
         ("connect_first(", 0),
@@ -1004,6 +1016,9 @@ mod tests {
             footer.tone(FooterTone::Tie("2 identical matches"));
             footer.tone(FooterTone::UpdateReady("Update ready"));
             footer.tone(FooterTone::Offline(note)).connect_first(via);
+            ResultList::new("results", "Results", 3, row);
+            SearchGroup::new("search", "Search", field, list).description("No matches.");
+            SearchGroup::new("search", name, field, ResultList::new("results", name, 3, row));
         "##;
         assert_eq!(
             literal_texts(source),
@@ -1048,6 +1063,9 @@ mod tests {
                 (62, "\"As of 13:40\"".to_string()),
                 (63, "\"2 identical matches\"".to_string()),
                 (64, "\"Update ready\"".to_string()),
+                (66, "\"Results\"".to_string()),
+                (67, "\"No matches.\"".to_string()),
+                (67, "\"Search\"".to_string()),
             ]
         );
     }
@@ -1269,6 +1287,77 @@ mod tests {
         assert!(
             found.is_empty(),
             "a secret reaches assistive technology:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// The search group and the result list repeat nothing that is typed
+    /// into the search field, which in the locked panel can be a password
+    /// typed ahead. With the secret in the field, masked by the GPUI Kit
+    /// input or not, the node of the group, the list box and every row the
+    /// list draws hold no piece of it in their label, value, description,
+    /// tooltip, author id or placeholder. The field's own node is the Kit
+    /// input's, which holds the text as its value unless the input masks it.
+    #[gpui::test]
+    fn no_secret_in_the_search_group_or_the_result_list(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use gpui_component::input::InputState;
+
+        fn results() -> ResultList {
+            ResultList::new(
+                "results",
+                SharedString::new_static("Results"),
+                2,
+                |index, _, _| {
+                    Row::new(
+                        ("result", index),
+                        index,
+                        2,
+                        RowParts::new(
+                            SharedString::new_static("Web login"),
+                            SharedString::new_static("Salesforce"),
+                        ),
+                        Tile::new(gpui_component::IconName::Globe),
+                        VaultBadge::Personal,
+                    )
+                },
+            )
+            .selected(Some(0))
+        }
+
+        let mut found = Vec::new();
+        for masked in [true, false] {
+            let parts = probe::in_frame(cx, move |window, cx| {
+                let state = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .masked(masked)
+                        .default_value(SECRET)
+                });
+                let mut parts = Vec::new();
+                let list = results();
+                for index in 0..2 {
+                    let row = RenderOnce::render(list.row_at(index, window, cx), window, cx);
+                    parts.push(probe::part("row", row));
+                }
+                parts.push(probe::part("list", RenderOnce::render(list, window, cx)));
+                let field = TextField::new("query", &state, SharedString::new_static("Search"));
+                let group = SearchGroup::new(
+                    "search",
+                    SharedString::new_static("Search"),
+                    field,
+                    results(),
+                )
+                .description(SharedString::new_static("No matches."));
+                parts.push(probe::part("group", RenderOnce::render(group, window, cx)));
+                parts
+            });
+            let names: Vec<_> = parts.iter().map(|part| part.name).collect();
+            assert_eq!(names, ["row", "row", "list", "group"], "every node is read");
+            found.extend(leaks(&format!("masked: {masked}"), &parts, &[SECRET], None));
+        }
+        assert!(
+            found.is_empty(),
+            "the search group or the list repeats the field:\n{}",
             found.join("\n")
         );
     }

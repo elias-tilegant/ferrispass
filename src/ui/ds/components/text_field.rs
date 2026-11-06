@@ -16,7 +16,7 @@
 //!   the ring of every component instead, for focus from the keyboard.
 
 use gpui::{
-    App, Div, ElementId, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+    App, Div, ElementId, Entity, FocusHandle, Focusable as _, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement as _,
     Styled, Window, div, prelude::FluentBuilder as _, px,
 };
@@ -78,6 +78,12 @@ impl TextField {
     pub fn accessibility_id(mut self, id: AccessibilityId) -> Self {
         self.accessibility_id = Some(id);
         self
+    }
+
+    /// The focus handle of the Kit input, which holds keyboard focus while
+    /// someone types in the field.
+    pub(in crate::ui::ds) fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.state.focus_handle(cx)
     }
 
     /// The Kit input, sized, named and colored for this field.

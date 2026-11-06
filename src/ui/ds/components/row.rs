@@ -18,9 +18,12 @@
 //!
 //! The row draws the selection it is given and never changes it. The
 //! pointer over a row changes its color and shows its verb, nothing else.
-//! The row does not report itself as the focused element of the tree: how
-//! the list lets VoiceOver hear the selected row while the search field
-//! keeps focus is decided with the list.
+//!
+//! The selected row tells GPUI that it is the active descendant, the
+//! element VoiceOver treats as focused while keyboard focus stays where it
+//! is. GPUI honours that only while an ancestor of the row holds focus,
+//! which is what the search group around the search field and the result
+//! list is for (`search_group.rs`); without one the claim has no effect.
 
 use gpui::{
     App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -295,6 +298,25 @@ impl Row {
         self.accessibility_id = Some(id);
         self
     }
+
+    /// Puts the row at `index` in a list of `count` rows and says whether
+    /// it is the selected one. The result list calls it for every row it
+    /// draws, so the place, the size of the list and the selection are the
+    /// list's, whatever the row was built with.
+    pub(super) fn in_list(mut self, index: usize, count: usize, selected: bool) -> Self {
+        debug_assert!(index < count, "row {index} in a list of {count}");
+        self.index = index;
+        self.count = count;
+        self.selected = selected;
+        self
+    }
+
+    /// Whether the row tells GPUI that it is the active descendant: the
+    /// selected row always does, with or without focus on its list, since
+    /// GPUI ignores the claim while no ancestor of the row has focus.
+    pub(super) fn claims_active_descendant(&self) -> bool {
+        self.selected
+    }
 }
 
 /// The title, in `Headline` on the selected row and in `RowTitle` on the
@@ -468,6 +490,9 @@ impl RenderOnce for Row {
                 this.aria_description(text)
             })
             .when_some(self.keys(), |this, keys| this.aria_keyshortcuts(keys))
+            .when(self.claims_active_descendant(), |this| {
+                this.aria_active_descendant()
+            })
             .on_hover(move |over, _, cx| {
                 hovered.update(cx, |state, cx| {
                     if *state != *over {
@@ -923,6 +948,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The selected row tells GPUI that it is the active descendant, with
+    /// or without focus on its list, and a row that is not selected does
+    /// not. GPUI keeps the claim inside the element and acts on it only
+    /// while accessibility is on, which the test platform never turns on,
+    /// so the test reads the decision, `claims_active_descendant`, and the
+    /// source: `row.rs` makes the claim once, on the row's own node, under
+    /// that decision. The source is read through `code_only`; what that
+    /// cannot see is the same as for the other scans of this file.
+    #[test]
+    fn the_selected_row_claims_to_be_the_active_descendant() {
+        for selected in [false, true] {
+            for focused in [false, true] {
+                let row = row(0, 2).selected(selected).focused(focused);
+                assert_eq!(
+                    row.claims_active_descendant(),
+                    selected,
+                    "selected: {selected}, focused: {focused}"
+                );
+            }
+        }
+        let claims = probe::calls_in("row.rs", "aria_active_descendant(");
+        assert_eq!(claims.len(), 1, "one claim: {claims:#?}");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds/components/row.rs");
+        let code = probe::code_only(&std::fs::read_to_string(path).expect("row.rs"));
+        let call = ".when(self.claims_active_descendant(),";
+        let at = code
+            .find(call)
+            .expect("the claim is made under the decision");
+        let arguments = probe::call_arguments(&code, at + ".when".len());
+        assert_eq!(arguments.len(), 2, "{arguments:?}");
+        assert!(
+            arguments[1].contains("aria_active_descendant()"),
+            "the claim is what the decision does: {arguments:?}"
+        );
     }
 
     /// The footer's sentence reaches VoiceOver as the row's description;
