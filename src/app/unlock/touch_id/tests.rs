@@ -340,8 +340,10 @@ impl LockScreen {
 
 /// What [`LockScreen::withdraw_two_clicks`] has to find: each click brought
 /// its own prompt and no other.
-const ONE_PROMPT_EACH: [(&str, usize); 2] =
-    [("in front", 1), ("in the background, then back in front", 1)];
+const ONE_PROMPT_EACH: [(&str, usize); 2] = [
+    ("in front", 1),
+    ("in the background, then back in front", 1),
+];
 
 #[gpui::test]
 fn the_lock_screen_unlocks_through_the_shared_flow(cx: &mut TestAppContext) {
@@ -411,7 +413,10 @@ fn the_lock_screen_prompt_follows_the_mac_password_setting(cx: &mut TestAppConte
     };
 
     allow(cx, false);
-    screen.vault.store.answering([BiometricError::UserCancelled]);
+    screen
+        .vault
+        .store
+        .answering([BiometricError::UserCancelled]);
     screen.activate(cx);
     assert_eq!(
         asked(),
@@ -482,7 +487,10 @@ fn a_withdrawn_click_is_not_asked_again_on_the_lock_screen(cx: &mut TestAppConte
 
     // The window comes to the front and the user cancels the automatic
     // prompt. macOS did not withdraw it, so its retry is still to come.
-    screen.vault.store.answering([BiometricError::UserCancelled]);
+    screen
+        .vault
+        .store
+        .answering([BiometricError::UserCancelled]);
     screen.activate(cx);
     assert_eq!(screen.vault.store.retrieves(), 1);
 
