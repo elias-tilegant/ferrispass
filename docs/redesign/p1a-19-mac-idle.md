@@ -14,7 +14,8 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 | `3e780db` | A shell test that a Mac in use does not hold off the lock while the Mac idle row is off |
 | `ee8f3ed` | When 0.9.2 writes its settings file, this table and the time below |
 | `d23d3a8` | The trip back to 0.9.2 as an accepted limit, here and in SECURITY.md, this table and the time below |
-| the last one | The scan of the `unsafe` code fails on a name with retain or release in it in any letter case, a test of that name scan, the section on it here, the list of tests, this table and the time below |
+| `395eb3d` | The scan of the `unsafe` code fails on a name with retain or release in it in any letter case, a test of that name scan, the section on it here, the list of tests, this table and the time below |
+| the last one | What the two settings screen tests hold and what is left to the check by hand: the tests section, the list of tests, the check by hand, the limits, this table and the time below |
 
 ## When the vault locks
 
@@ -54,7 +55,9 @@ Tests reach the idle time through the `App`: `idle_for(cx)` reads a fake that th
 
 ## Tests
 
-Each rule was checked by taking it out; the changed lines and the failing output are in [PR #27](https://github.com/elias-tilegant/ferrispass/pull/27).
+The rules of the lock decision, the idle reading, the `unsafe` code, the settings file and the auto-lock and session lock tasks were each checked by taking one out; the changed lines and the failing output are in [PR #27](https://github.com/elias-tilegant/ferrispass/pull/27).
+
+The two settings screen tests are not among them. They test what the screen is built from, not the screen: the presets and labels of the Mac idle row, `auto_lock_description` for either state, and `with_auto_lock` and `with_mac_idle_lock`. Neither renders the screen, so both stay green if it stops showing the Mac idle row, hands the auto-lock row the wrong state, or a click in one row writes the other row's field. That wiring is left to the check by hand on a preview build before the merge, see below.
 
 | Test | What it holds |
 |---|---|
@@ -78,16 +81,17 @@ Each rule was checked by taking it out; the changed lines and the failing output
 | `a_session_lock_event_still_locks_with_the_alternative` | a lock event from the session lock locks at once while the Mac idle row is on |
 | `mac_idle_lock_secs_is_off_by_default_and_round_trips`, `an_older_settings_file_reads_the_field_as_off` | the field is off by default, survives a save and load, and an older file parses with it off |
 | `a_settings_file_with_the_mac_idle_field_loads_into_092` | a file with the field, set or off, loads into 0.9.2 with every other choice as written |
-| `the_mac_idle_row_offers_off_5_15_and_30_minutes` | the row's choices and their labels |
-| `the_auto_lock_row_says_it_is_the_fallback_while_mac_idle_is_set` | the auto-lock row's text with and without the Mac idle row, and that setting either row keeps the other's value |
+| `the_mac_idle_row_offers_off_5_15_and_30_minutes` | the presets the Mac idle row is built from, and their labels |
+| `the_auto_lock_row_says_it_is_the_fallback_while_mac_idle_is_set` | `auto_lock_description` with and without the Mac idle setting, and that `with_auto_lock` and `with_mac_idle_lock` each keep the other field's value |
 
 The shell tests above build the real `AppShell` and set both settings themselves. `activity_is_touched_only_where_listed`, `tests/idle_clock.rs` and the characterization tests are unchanged and pass. Outside tests, this step adds no call of `activity::touch` or `activity::reset`; the new shell tests set the app's clock with `activity::reset`, as the tests before them do.
 
 ## How to check by hand
 
-Not run yet. On a preview build, with a vault open:
+Not run yet. It comes before the merge, on a preview build with a vault open. The first two steps and the last one are also the only check of the settings screen's wiring: that it shows the Mac idle row, hands the auto-lock row the Mac idle setting, and that a click in each row writes that row's own field.
 
-- In Settings, set "Or lock after the Mac is idle for" to 5 min and leave the auto-lock at 4 min. The auto-lock row now has the sentence about macOS not reporting idle time.
+- In Settings, the row "Or lock after the Mac is idle for" is under the auto-lock row, with Off selected. Set it to 5 min and leave the auto-lock at 4 min. The Mac idle row shows 5 min, the auto-lock row still shows 4 min and now has the sentence about macOS not reporting idle time.
+- Set the auto-lock to 1 min and back to 4 min. The Mac idle row still shows 5 min.
 - Work in other apps for six minutes, typing and moving the mouse, without touching FerrisPass. The vault stays open.
 - Take your hands off the Mac. About five minutes later the vault is locked.
 - Unlock, close the lid, open it again. The vault is locked; that is the session lock, not the idle clock, and it has to stay that way.
@@ -98,7 +102,7 @@ To try a shorter time, quit FerrisPass and set `mac_idle_lock_secs` to 60 in `~/
 ## Limits
 
 - Input that programs post counts as input on the Mac, see above. With an Auto-Type, a presentation remote or a mouse jiggler running, the Mac idle time stays near zero, and only the session lock, the lock button or the menu locks the vault.
-- The settings rows are covered by unit tests over the choices, the auto-lock text and the two functions that build the new settings, not by clicking the rows in a window: in a test build a click would write the real `settings.json`.
+- The settings screen is covered by unit tests over what it is built from (the presets, the labels, the auto-lock text and the two functions that build the new settings), not by rendering it or clicking its rows: in a test build a click would write the real `settings.json`. No test fails if the screen leaves out the Mac idle row, hands the auto-lock row the wrong state, or a row writes the other row's field. The check by hand covers that.
 - `a_session_lock_event_still_locks_with_the_alternative` sends its event through a fake that a test can put on the `App` in place of the session lock monitor's events. `start_session_lock_task` takes its events from there when a test installed it. The macOS notifications themselves are covered by the tests in `src/session_lock.rs`.
 - Test builds never read the real idle time through the `App`. `the_real_call_answers_on_macos` calls CoreGraphics directly, and the doctest `idle_for_reads_core_graphics` reads it through the library as the app builds it. Both expect someone to have used the Mac within the last day.
 - A trip back to 0.9.2 can lose the setting. 0.9.2 reads a file with the new field, but whenever it writes `settings.json` it writes only the fields it knows. It writes the file when it saves a setting (any change in its Settings, the theme toggle, allowing a vault's key derivation cost; `v0.9.2:src/ui/app_shell.rs:3761-3783`), and also when its window is closed or the app quits with the window at a position or size other than the one on file, which any move or resize brings about (`v0.9.2:src/app/actions.rs:218` and `:240`, through `persist_window_bounds` in `v0.9.2:src/app/settings.rs:223-237`). Moving the window once and closing it is enough. The field is gone when you come back, and the Mac idle row reads Off. With the auto-lock on 4 minutes that only means the default clock again. With the auto-lock on Never, there is no idle lock at all until you choose the Mac idle time again; 0.9.2 itself already read that file as Never and did not auto-lock in between. Nothing here can tell a field 0.9.2 dropped from Off chosen by hand. This is an accepted limit and stays as it is: every new settings field goes the same way on the way back to 0.9.x, and sleep, the lock screen and the screen saver still lock the vault at once. SECURITY.md says it in its paragraph on the Mac idle rule.
@@ -106,4 +110,4 @@ To try a shorter time, quit FerrisPass and set `mac_idle_lock_secs` to 60 in `~/
 - CI only builds for macOS, so the no-op for other platforms is compiled there only for the test build.
 - The shell tests build the real `AppShell` and read the real `settings.json`. They set both auto-lock settings themselves.
 
-The agents spent about 3.5 hours on this, including review and fixes.
+The agents spent about 4 hours on this, including review and fixes.
