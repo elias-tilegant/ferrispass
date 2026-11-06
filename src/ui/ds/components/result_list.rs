@@ -167,14 +167,11 @@ impl ResultList {
     }
 
     /// The selected row, as [`move_selection`] and [`select_by_number`]
-    /// leave it, or none.
+    /// leave it, or none. An index past the end of the list, such as one
+    /// kept from longer results, selects no row, so the list neither marks
+    /// one nor scrolls past its end.
     pub fn selected(mut self, index: Option<usize>) -> Self {
-        debug_assert!(
-            index.is_none_or(|index| index < self.count),
-            "row {index:?} selected in a list of {}",
-            self.count
-        );
-        self.selected = index;
+        self.selected = index.filter(|index| *index < self.count);
         self
     }
 
@@ -363,6 +360,33 @@ mod tests {
                 (Some(3), Some(3), Some(true)),
             ]
         );
+    }
+
+    /// A selection past the end of the list, such as one kept from longer
+    /// results, selects no row and the list draws as it would without one,
+    /// in every build.
+    #[gpui::test]
+    fn a_selection_past_the_end_selects_no_row(cx: &mut TestAppContext) {
+        let selected = probe::in_frame(cx, |window, cx| {
+            let list = list(3).selected(Some(5));
+            (0..3)
+                .map(|index| {
+                    let row = list.row_at(index, window, cx);
+                    probe::node(RenderOnce::render(row, window, cx))
+                        .1
+                        .is_selected()
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(selected, [Some(false); 3]);
+        let cx = probe::window(cx, |_, _| {
+            div()
+                .h(u(200.))
+                .child(list(3).selected(Some(5)))
+                .into_any_element()
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("fp-row").is_some(), "the rows are drawn");
     }
 
     #[gpui::test]
