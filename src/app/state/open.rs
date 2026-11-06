@@ -45,6 +45,7 @@ impl AppState {
             return;
         }
         self.rotate_auto_type_context();
+        self.explicit_selection = None;
         // If we're transitioning from a currently-open vault directly into
         // unlocking another one (Welcome-recent → submit_password while a
         // different vault is already Open), park the active one first so it
