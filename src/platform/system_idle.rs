@@ -9,7 +9,7 @@
 //! on offers it as a safe function, so the `core_graphics` module below
 //! declares it itself, and calling a foreign function is `unsafe`. That one
 //! declaration and its one call are the whole reason this file allows
-//! `unsafe_code`: two integer constants go in, a `f64` comes out. There is no
+//! `unsafe_code`: two integer constants go in, an `f64` comes out. There is no
 //! pointer, nothing is retained or released, there is no callback and no
 //! state. The header puts no thread rule on the function; it reads a value
 //! the window server keeps for the session, and any thread may ask.
