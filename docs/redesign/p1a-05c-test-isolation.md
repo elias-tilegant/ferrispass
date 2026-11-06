@@ -10,7 +10,7 @@ Unit tests no longer read or write FerrisPass's folder in Application Support on
 
 **The launch directory.** Launch payloads go into `$TMPDIR/ferrispass-launch-<uid>`. Locking and quitting remove that directory, and the main window sweeps old payloads out of it when it opens. In a test build the directory is `ferrispass-launch-<uid>-test-<pid>`, so a test that locks or quits clears its own directory and not the one a running FerrisPass is using. It goes through the same checks as the app's: created with mode 0700, a real directory, owned by the user.
 
-`tests_use_a_launch_dir_of_their_own` holds this: the directory `launch_dir()` returns is named after this test process and is not the app's.
+`tests_use_a_launch_dir_of_their_own` holds this: the directory `launch_dir()` returns is named after this test process and is not the app's, and after the test loosens it to mode 0755, the next `launch_dir()` sets it back to 0700.
 
 Both switches are `#[cfg(test)]` items. A release build has the same paths as before.
 
@@ -43,4 +43,4 @@ A FerrisPass that is running, and tests from a checkout without this change, use
 - The release branches of `app_support_dir` and `instance_tag` are not compiled into the unit tests. `the_instance_tag_is_the_uid` tests `user_tag`, the part the app uses as the whole tag.
 - Of the other ways an entry gets marked, launching has no test: it starts SAP GUI through `/usr/bin/open`. These tests do not cover custom fields or Auto-Type either.
 
-The agents spent about 2 hours on this, including review and fixes.
+The agents spent about 3 hours on this, including review and fixes.
