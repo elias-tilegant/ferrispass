@@ -24,6 +24,8 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 | `578ee07` | A test that a click macOS withdrew while the automatic prompt's retry is still to come brings no other prompt, with the window in front and when it comes back from the background |
 | `0f56c9b` | The test of the Mac password setting also covers the prompt the unlock screen raises on its own, with the setting off |
 | `bc4460b` | The test of the automatic retry also has a click withdrawn with the window in the background, after the retry is spent |
+| `02f8ee9` | This page, on the same |
+| `c845fcb` | Line breaks in those tests as rustfmt sets them |
 | the last one | This page |
 
 ## The typed-ahead buffer
