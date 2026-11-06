@@ -291,7 +291,7 @@ impl SecretField {
                     .aria_label(tr!("a11y.copy_password"))
                     .when(hidden, |this| this.aria_description(tr!("a11y.hidden")))
                     .when_some(in_tree, |this, value| this.aria_value(value))
-                    .track_focus(&focus)
+                    .track_focus(&focus.clone().tab_stop(true))
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover))
                     .on_a11y_action(accesskit::Action::Click, voiceover_press(handler.clone()))
@@ -636,6 +636,40 @@ mod tests {
         let at = gpui::point(value.right() + px(14.), value.center().y);
         cx.simulate_click(at, Modifiers::default());
         assert_eq!(copies.get(), 2, "the copy button");
+    }
+
+    /// The value is the first tab stop of the field, before the buttons
+    /// next to it, and shows the ring of every component for focus from the
+    /// keyboard and none for a click. Return and Space copy, as a click
+    /// does.
+    #[gpui::test]
+    fn the_value_copies_from_the_keyboard_and_shows_the_focus_ring(cx: &mut TestAppContext) {
+        let window = probe::window(cx, |_, _| field(SECRET, false, false).into_any_element());
+        probe::assert_keyboard_focus_ring(window, "fp-secret-value");
+
+        let copies = Rc::new(Cell::new(0));
+        let counted = copies.clone();
+        let cx = probe::window(cx, move |_, _| {
+            let counted = counted.clone();
+            SecretField::new("password", text("Password"))
+                .value(secret(SECRET))
+                .on_copy(move |_, _, _| counted.set(counted.get() + 1))
+                .into_any_element()
+        });
+        cx.update(|window, cx| window.focus_next(cx));
+        // The focused element takes its keys from the next frame on.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // A key press is a key down and a key up, which makes the click.
+        for (key, copied) in [("enter", 1), ("space", 2)] {
+            let keystroke = gpui::Keystroke::parse(key).expect("a key");
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(gpui::KeyUpEvent { keystroke });
+            assert_eq!(copies.get(), copied, "{key} copies");
+        }
     }
 
     /// The surface painted in the place of the value. Painting snaps to
