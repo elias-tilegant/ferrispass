@@ -386,6 +386,7 @@ fn sync_dir() -> Result<PathBuf, ConfigError> {
     Ok(app_support_dir()?.join("sync"))
 }
 
+#[cfg(not(test))]
 pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
     let home =
         env::var_os("HOME").ok_or_else(|| ConfigError::NoSupportDir("$HOME not set".into()))?;
@@ -409,9 +410,76 @@ pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
     Ok(p)
 }
 
+/// Unit tests never use the user's folder. The shell they build loads the
+/// settings, the recent vaults and the Touch ID registry from it, so the
+/// outcome of a test depended on the Mac it ran on, and a test that saved
+/// wrote there. Each test process gets a folder of its own in the temp
+/// directory instead, made on first use and open to the user only.
+#[cfg(test)]
+pub(crate) fn app_support_dir() -> Result<PathBuf, ConfigError> {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    Ok(DIR.get_or_init(make_test_support_dir).clone())
+}
+
+#[cfg(test)]
+fn make_test_support_dir() -> PathBuf {
+    let root = env::temp_dir().join(format!("ferrispass-test-{}", std::process::id()));
+    // Process ids come round again. What an earlier test process with this
+    // id left behind is removed before this one reads anything, and the
+    // folder is made new so it gets the mode below.
+    match fs::remove_dir_all(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => panic!("cannot clear {}: {error}", root.display()),
+    }
+    let dir = root.join("ferrispass");
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    if let Err(error) = builder.create(&dir) {
+        panic!("cannot create {}: {error}", dir.display());
+    }
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real folder holds the user's settings, recent vaults, Touch ID
+    /// registry, update notes and sync bindings. A unit test reading it
+    /// depends on that Mac; one writing it changes the user's app.
+    #[test]
+    fn tests_never_read_the_real_application_support_dir() {
+        let dir = app_support_dir().expect("a support folder for the tests");
+        let shown = dir.to_string_lossy();
+        assert!(
+            !shown.contains("Library/Application Support"),
+            "a unit test reached the user's folder: {shown}"
+        );
+        assert!(
+            shown.contains(&format!("ferrispass-test-{}/", std::process::id())),
+            "not the folder of this test process: {shown}"
+        );
+        assert!(dir.starts_with(env::temp_dir()), "{shown}");
+        assert_eq!(
+            app_support_dir().unwrap(),
+            dir,
+            "one folder for the whole test process"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for folder in [dir.as_path(), dir.parent().unwrap()] {
+                let mode = fs::metadata(folder).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o700, "{}", folder.display());
+            }
+        }
+    }
 
     /// Background callers wait out `Busy` and report everything else. A lock
     /// file that cannot be reached answers the same way every time, so

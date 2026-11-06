@@ -231,6 +231,21 @@ fn is_cloud_storage_path(path: &Path) -> bool {
         })
 }
 
+/// The tag in the launch directory's name. In the app it is the user's tag.
+/// A unit test process adds its own id, so the tests that lock or quit clear
+/// a directory of their own and never the one a running FerrisPass stages
+/// its payloads in.
+fn instance_tag() -> String {
+    #[cfg(not(test))]
+    {
+        user_tag()
+    }
+    #[cfg(test)]
+    {
+        format!("{}-test-{}", user_tag(), std::process::id())
+    }
+}
+
 /// Stable per-user tag mixed into the tempdir name, so two accounts on a
 /// shared machine get their own subdir instead of racing for one path that
 /// `0700` then locks the loser out of.
@@ -240,7 +255,7 @@ fn is_cloud_storage_path(path: &Path) -> bool {
 /// also environment-driven and passes through `sanitize`, so `user.name` and
 /// `username` collapsed to the same tag and one of those accounts lost the
 /// launch feature entirely.
-fn instance_tag() -> String {
+fn user_tag() -> String {
     #[cfg(unix)]
     {
         process_uid().to_string()
@@ -313,7 +328,30 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_instance_tag_is_the_uid() {
-        assert_eq!(instance_tag(), process_uid().to_string());
+        assert_eq!(user_tag(), process_uid().to_string());
+    }
+
+    /// Locking and quitting remove the whole launch directory. A test doing
+    /// that in the directory the app uses deletes the payloads a running
+    /// FerrisPass staged there.
+    #[test]
+    fn tests_use_a_launch_dir_of_their_own() {
+        let dir = launch_dir().expect("the test launch directory passes the same checks");
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_ne!(
+            name,
+            format!("ferrispass-launch-{}", user_tag()),
+            "the tests share the launch directory of the app"
+        );
+        assert_eq!(
+            name,
+            format!(
+                "ferrispass-launch-{}-test-{}",
+                user_tag(),
+                std::process::id()
+            ),
+            "not the launch directory of this test process"
+        );
     }
 
     #[cfg(unix)]
