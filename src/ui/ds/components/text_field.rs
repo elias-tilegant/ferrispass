@@ -93,8 +93,8 @@ impl TextField {
             .aria_label(self.label.clone())
             .disabled(self.disabled)
             .focus_ring(false)
-            .when_some(self.accessibility_id.clone(), |input, id| {
-                input.accessibility_id(id)
+            .when_some(self.accessibility_id.as_ref(), |input, id| {
+                id.apply_to_input(input)
             });
         // `Input::h` sets the height of a multi-line field only; the style
         // sets it for this one.

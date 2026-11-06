@@ -386,7 +386,7 @@ impl Button {
             .accessibility_label(name)
             .disabled(self.disabled)
             .track_focus(&focus)
-            .when_some(self.accessibility_id, |this, id| this.accessibility_id(id))
+            .when_some(self.accessibility_id, |this, id| id.apply(this))
             .when_some(description, |this, text| this.aria_description(text))
             .when_some(keys, |this, keys| this.aria_keyshortcuts(keys))
             .when_some(handler, |this, handler| {
@@ -571,8 +571,9 @@ impl IconButton {
         Self(self.0.description(description))
     }
 
-    pub fn accessibility_id(self, id: AccessibilityId) -> Self {
-        Self(self.0.accessibility_id(id))
+    pub fn accessibility_id(mut self, id: AccessibilityId) -> Self {
+        self.0.accessibility_id = Some(id);
+        self
     }
 
     pub fn on_click(self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
