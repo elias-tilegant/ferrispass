@@ -500,6 +500,7 @@ impl RenderOnce for Row {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::Path;
     use std::rc::Rc;
 
     use gpui::{
@@ -645,6 +646,124 @@ mod tests {
 
         let (_, node, _) = row_node(cx, || row(0, 1).focused(false));
         assert_eq!(node.is_selected(), Some(false));
+    }
+
+    /// Each part of `inside`, with the role and the element id of the
+    /// element it renders to. GPUI writes a node only for an element with
+    /// both.
+    fn nodes_inside(
+        inside: Inside,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<(&'static str, Option<Role>, Option<ElementId>)> {
+        fn read(
+            part: &'static str,
+            element: impl IntoElement,
+        ) -> (&'static str, Option<Role>, Option<ElementId>) {
+            let element = element.into_element();
+            (
+                part,
+                probe::node_of(&element).0,
+                gpui::Element::id(&element),
+            )
+        }
+        let mut nodes = vec![
+            read("tile", RenderOnce::render(inside.tile, window, cx)),
+            read("title", inside.title),
+        ];
+        if let Some(chip) = inside.chip {
+            nodes.push(read("chip", RenderOnce::render(chip, window, cx)));
+        }
+        if let Some(line) = inside.second_line {
+            nodes.push(read("second line", line));
+        }
+        nodes.push(read("badge", RenderOnce::render(inside.badge, window, cx)));
+        if let Some(keys) = inside.keys {
+            nodes.push(read("keys", keys));
+        }
+        nodes
+    }
+
+    /// Inside a row the tile, the title, the chip, the second line, the
+    /// vault badge and the keys have neither a role nor an element id, as
+    /// the row builds them, selected or not and with each kind of badge,
+    /// so GPUI writes no node for them: the row's name says what they show.
+    /// The verb is a button of its own, which the button's tests read.
+    #[gpui::test]
+    fn the_tile_the_chip_and_the_badge_write_no_node_in_a_row(cx: &mut TestAppContext) {
+        let teal = crate::ui::ds::tokens::LIGHT.team_teal.hsla;
+        let badges = [
+            VaultBadge::Personal,
+            VaultBadge::team(text("B"), teal),
+            VaultBadge::other(text("K")),
+        ];
+        for badge in badges {
+            for selected in [false, true] {
+                let shown = badge.clone();
+                let found = probe::in_frame(cx, move |window, cx| {
+                    let inside = Row::new(
+                        "row",
+                        0,
+                        2,
+                        nhp(),
+                        Tile::new(IconName::Globe),
+                        shown.clone(),
+                    )
+                    .chip(Chip::new(ChipTone::Production, text("PRD")).glyph(IconName::Info))
+                    .selected(selected)
+                    .shortcut_index(1)
+                    .verb(Button::ghost("sign-in", text("Sign in")))
+                    .inside(true, cx.ds().colors);
+                    nodes_inside(inside, window, cx)
+                });
+                let parts: Vec<&str> = found.iter().map(|(part, ..)| *part).collect();
+                assert_eq!(
+                    parts,
+                    ["tile", "title", "chip", "second line", "badge", "keys"],
+                    "every part is read"
+                );
+                for (part, role, id) in found {
+                    assert_eq!(
+                        (role, id),
+                        (None, None),
+                        "{badge:?}, selected: {selected}: the {part} writes a node"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A node needs an element id and a role. In `row.rs` only the row's
+    /// own node gets either, so neither the parts the test above reads nor
+    /// the boxes that line them up get one, and no part of the row is shown
+    /// on its own, which would give it a node inside the option. The source
+    /// is read through `code_only`, so comments and these tests do not
+    /// count.
+    #[test]
+    fn a_row_gives_an_id_and_a_role_to_its_own_node_only() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds/components/row.rs");
+        let source = std::fs::read_to_string(path).expect("row.rs");
+        let code = probe::code_only(&source);
+        for (call, allowed) in [
+            (".id(", 1),
+            (".role(", 1),
+            ("standalone(", 0),
+            ("Standalone", 0),
+        ] {
+            let found: Vec<String> = code
+                .lines()
+                .enumerate()
+                .flat_map(|(at, line)| {
+                    line.matches(call)
+                        .map(move |_| format!("row.rs:{}: {}", at + 1, line.trim()))
+                })
+                .collect();
+            assert_eq!(
+                found.len(),
+                allowed,
+                "a row writes one node, its own; {call} in row.rs: {found:#?}"
+            );
+        }
     }
 
     /// The naming rule: the kind and the title, then the role, the
