@@ -1,10 +1,12 @@
 //! One Touch ID flow for the lock screen and the quick access panel.
 //!
 //! Both unlock a vault the same way: [`AppState::begin_biometric_unlock`]
-//! stamps a new generation, the keychain read behind the Touch ID prompt and
-//! the open run in the background, and the answer is applied on the
-//! foreground with `begin_open` and `finish_open_attempt`, or
-//! `fail_biometric_unlock`. The prompt reads "Unlock <file name>". What
+//! stamps a new generation, and the keychain read behind the Touch ID prompt
+//! runs in the background. As soon as macOS has answered, `on_answered` runs
+//! on the foreground. With the password, the vault is then opened in the
+//! background, and the answer is applied on the foreground with `begin_open`
+//! and `finish_open_attempt`; a failed prompt goes to `fail_biometric_unlock`
+//! right after `on_answered`. The prompt reads "Unlock <file name>". What
 //! differs is who may start it and what happens around the answer:
 //!
 //! - The lock screen calls [`unlock_from_lock_screen`] when you click the
@@ -22,17 +24,22 @@
 //!   prompt comes back as [`Answer::Interrupted`] and nothing else happens.
 //!   And the panel never answers a cost question: while one is open, or the
 //!   vault's header has not been read yet, no attempt starts.
-//! - Before the answer is applied, `on_answered` runs on the foreground. The
-//!   Touch ID dialog takes key focus from the panel and macOS does not give
-//!   it back, so the panel makes itself key there and focuses the search
-//!   field or the list; the next Return reaches it only after that. The lock
-//!   screen has nothing to do there.
+//! - As soon as macOS has answered, before the vault is opened and before
+//!   the answer is applied, `on_answered` runs on the foreground. The Touch
+//!   ID dialog takes key focus from the panel and macOS does not give it
+//!   back, so the panel makes itself key there and focuses the search field
+//!   or the list. Opening the vault can take seconds with an expensive key
+//!   derivation, and keys typed in that time must not go to another app.
+//!   The next Return reaches the panel only after that. The lock screen has
+//!   nothing to do there.
 //!
 //! The rules both share:
 //!
 //! - An answer from an attempt that a newer one replaced (its generation no
 //!   longer matches) opens nothing and ends the attempt in flight
-//!   ([`Answer::Stale`]).
+//!   ([`Answer::Stale`]). That is checked when the answer comes, so a stale
+//!   password never goes on to the open, and again once the open is done,
+//!   for an attempt replaced while the vault was being opened.
 //! - The flow runs in a task this module detaches. Nobody holds a handle, so
 //!   no caller can cancel an unlock by dropping something, and neither the
 //!   shell nor the panel needs a field for it. The functions return only the
@@ -46,9 +53,10 @@ use std::time::Duration;
 use gpui::{App, AppContext as _, Context, Entity};
 
 use crate::app::{AppState, BiometricLaunch, VaultStatus};
-use crate::biometric::{BiometricError, RetrieveOptions};
+use crate::biometric::{BiometricError, BiometricResult, RetrieveOptions};
 use crate::keepass::KeePassRepository;
 use crate::ui::errors;
+use zeroize::Zeroizing;
 
 /// How long the panel's gate waits, after Touch ID, for the app it is about
 /// to fill to come back to the front. GlobalProtect took up to 1.3 seconds
@@ -129,7 +137,7 @@ pub fn confirm(trigger: PanelTrigger) -> Option<Confirmed> {
 }
 
 /// What runs on the foreground as soon as macOS has answered, before the
-/// answer is applied.
+/// vault is opened and before the answer is applied.
 pub type OnAnswered = Box<dyn FnOnce(&mut App) + 'static>;
 
 /// What runs once the answer is applied, with the answer.
@@ -173,9 +181,9 @@ pub fn unlock_from_lock_screen(
 }
 
 /// The quick access panel's Touch ID unlock, for the token a confirmation
-/// gave. `on_answered` runs as soon as macOS has answered and before the
-/// answer is applied: the panel makes itself key there. `on_done` gets the
-/// answer once it is applied. Returns the generation of the attempt, or
+/// gave. `on_answered` runs as soon as macOS has answered, before the vault
+/// is opened and before the answer is applied: the panel makes itself key
+/// there. `on_done` gets the answer once it is applied. Returns the generation of the attempt, or
 /// `None` when none started (no vault with an enrolment on the unlock screen,
 /// a cost question open, or the vault's header not read yet).
 pub fn unlock_from_panel(
@@ -227,32 +235,45 @@ fn run(
     };
 
     // The keychain read blocks for as long as the prompt is up, so it runs in
-    // the background, and the open with it. `begin_open` waits for the
-    // answer: until macOS has one, the unlock screen stays as it is.
-    let answered = cx.background_spawn(async move {
-        match store.retrieve(&id, &prompt, options) {
-            Ok(password) => {
-                let result = KeePassRepository::open(&path, &password, keyfile.as_deref());
-                // `password` (Zeroizing) drops here, wiping the buffer.
-                BiometricUnlockOutcome::Open {
-                    path,
-                    result,
-                    generation,
-                }
-            }
-            Err(err) => BiometricUnlockOutcome::Failed {
-                path,
-                err,
-                generation,
-            },
-        }
-    });
+    // the background. `begin_open` comes only with the opened vault: until
+    // then, the unlock screen stays as it is.
+    let asked = cx.background_spawn(async move { store.retrieve(&id, &prompt, options) });
 
     let state = state.downgrade();
     cx.spawn(async move |cx| {
-        let outcome = answered.await;
-        cx.update(|cx| {
+        let retrieved = asked.await;
+        // macOS has answered. `on_answered` comes first, before the open: the
+        // key derivation can take seconds, and the panel must not be without
+        // key focus for that long.
+        let Some((password, on_done)) = cx.update(|cx| {
             on_answered(cx);
+            let next = state
+                .update(cx, |state, cx| {
+                    take_answer(retrieved, &path, generation, state, cx)
+                })
+                .unwrap_or(Err(Answer::Stale));
+            match next {
+                Ok(password) => Some((password, on_done)),
+                Err(answer) => {
+                    on_done(answer, cx);
+                    None
+                }
+            }
+        }) else {
+            return;
+        };
+
+        let opened = cx.background_spawn(async move {
+            let result = KeePassRepository::open(&path, &password, keyfile.as_deref());
+            // `password` (Zeroizing) drops here, wiping the buffer.
+            BiometricUnlockOutcome::Open {
+                path,
+                result,
+                generation,
+            }
+        });
+        let outcome = opened.await;
+        cx.update(|cx| {
             let answer = state
                 .update(cx, |state, cx| apply(outcome, state, cx))
                 .unwrap_or(Answer::Stale);
@@ -261,6 +282,36 @@ fn run(
     })
     .detach();
     Some(generation)
+}
+
+/// What becomes of macOS's answer once `on_answered` has run. The password
+/// goes on to the open, unless a newer attempt replaced this one while the
+/// prompt was up: then it opens nothing and ends the attempt in flight, as
+/// [`apply`] does with a stale answer. A failed prompt is applied at once.
+fn take_answer(
+    retrieved: BiometricResult<Zeroizing<String>>,
+    path: &Path,
+    generation: u64,
+    state: &mut AppState,
+    cx: &mut Context<AppState>,
+) -> Result<Zeroizing<String>, Answer> {
+    match retrieved {
+        Ok(password) if state.biometric_unlock_is_current(generation) => Ok(password),
+        // The password drops unused with `retrieved`, which wipes it.
+        Ok(_) => {
+            state.clear_biometric_attempt_public();
+            Err(Answer::Stale)
+        }
+        Err(err) => Err(apply(
+            BiometricUnlockOutcome::Failed {
+                path: path.to_path_buf(),
+                err,
+                generation,
+            },
+            state,
+            cx,
+        )),
+    }
 }
 
 /// Whether the vault waiting on the unlock screen has had its header read
@@ -338,12 +389,11 @@ fn note_kdf_confirmation(
     }
 }
 
-/// Either-shaped result the biometric-unlock background task hands
-/// back to the foreground update. `Open` carries the KDF outcome so
-/// the success path runs the same `finish_open_attempt` codepath as a
-/// password-typed unlock; `Failed` carries the OS-side
-/// `BiometricError` so the Unlock screen can render the right error
-/// message and (when applicable) clear an invalidated enrolment.
+/// Either-shaped result of a Touch ID unlock, applied on the foreground.
+/// `Open` carries the KDF outcome so the success path runs the same
+/// `finish_open_attempt` codepath as a password-typed unlock; `Failed`
+/// carries the OS-side `BiometricError` so the Unlock screen can render the
+/// right error message and (when applicable) clear an invalidated enrolment.
 ///
 /// The `Open` variant is large (it owns a `VaultDocument`) while
 /// `Failed` is small; we don't box it because the value is moved

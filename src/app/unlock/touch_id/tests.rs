@@ -953,6 +953,58 @@ fn the_panel_regains_key_before_it_takes_return(cx: &mut TestAppContext) {
     assert_eq!(seen, wanted);
 }
 
+/// `on_answered` runs as soon as macOS has answered, before the vault is
+/// opened: the open can take seconds with an expensive key derivation, and
+/// the panel has to have key focus back before then. Here `on_answered`
+/// writes the vault file that the open reads, so the vault opens only if
+/// `on_answered` ran first. The flow runs once through the panel's way in
+/// and once with the lock screen's origin. The lock screen's own entry hands
+/// the flow an `on_answered` that does nothing, so that case calls the flow
+/// directly.
+#[gpui::test]
+fn on_answered_runs_before_the_vault_is_opened(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("on_answered_runs_before_the_vault_is_opened") {
+        return;
+    }
+    let mut seen = Vec::new();
+    let mut wanted = Vec::new();
+    for origin in [UnlockOrigin::Panel, UnlockOrigin::LockScreen] {
+        let dir = tempfile::tempdir().expect("a folder for the vault");
+        let path = dir.path().join("nordhafen.kdbx");
+        let vault = waiting(cx, &path, InMemoryBiometricStore::available());
+        header_read(cx, &vault, None);
+        let answers = Answers::default();
+
+        let folder = dir.path().to_path_buf();
+        let on_answered: OnAnswered = Box::new(move |_| {
+            vault_file(&folder);
+        });
+        let done = noting(&answers, "unlock");
+        let state = vault.state.clone();
+        cx.update(|cx| match origin {
+            UnlockOrigin::Panel => {
+                let token = confirm(PanelTrigger::ReturnKey).expect("Return confirms");
+                unlock_from_panel(token, state, false, on_answered, done, cx)
+            }
+            UnlockOrigin::LockScreen => run(origin, state, false, on_answered, done, cx),
+        })
+        .expect("the attempt starts");
+        cx.run_until_parked();
+
+        let answers = answers.borrow().clone();
+        seen.push((origin, answers, open_path(cx, &vault.state)));
+        wanted.push((
+            origin,
+            vec![("unlock", Answer::Opened(path.clone()))],
+            Some(path),
+        ));
+    }
+    assert_eq!(
+        seen, wanted,
+        "the vault was opened before on_answered had run"
+    );
+}
+
 #[gpui::test]
 fn the_panel_never_answers_a_cost_question(cx: &mut TestAppContext) {
     let start = |cx: &mut TestAppContext, vault: &Vault| {

@@ -135,7 +135,7 @@ impl AppShell {
     /// (`BiometricAttempt::Error`).
     ///
     /// Note on the cleartext password: it is held in a `Zeroizing` buffer
-    /// inside the background task and fed straight into
+    /// from the keychain read on and fed straight into
     /// `KeePassRepository::open`. It does not round-trip through `AppState`
     /// as a bare value, and the opened `VaultDocument` keeps only the derived
     /// key, so nothing retains the password for the life of the session.
