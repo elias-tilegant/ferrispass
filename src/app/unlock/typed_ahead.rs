@@ -6,11 +6,17 @@
 //!
 //! - The text sits in a `Zeroizing<String>`, which is overwritten when it is
 //!   wiped or dropped, spare capacity included. Growing it never leaves a
-//!   copy behind: a full buffer is copied into a bigger one and the old one
-//!   is overwritten as it drops. `typed_ahead_wipes_by_overwriting` in
-//!   `tests/architecture.rs` lists every method called on the text, so a
-//!   `wipe` that only clears it, or a call that regrows or shrinks it, fails
-//!   there.
+//!   copy behind. `String::push` would reallocate and free the old
+//!   allocation as it was, so when a character doesn't fit in the room
+//!   left, [`TypedAhead::push`] first copies the text into a bigger buffer
+//!   and the old one is overwritten as it drops. In debug builds `push`
+//!   asserts that `String::push` then finds room, and the tests here type up
+//!   to the last free byte with a character of every UTF-8 length.
+//!   `typed_ahead_wipes_by_overwriting` in `tests/architecture.rs` lists
+//!   every method called on the text, so a `wipe` that only clears it, or a
+//!   `reserve`, `push_str` or `shrink_to_fit`, fails there. That list
+//!   allows `String::push` in `push` and can't see whether it grows the
+//!   text; the assertion can.
 //! - Secure event input is held for as long as the buffer is live, so other
 //!   programs on the Mac don't see the keystrokes. If macOS refuses it,
 //!   [`TypedAhead::begin`] fails and there is no buffer; the panel then sends
@@ -99,6 +105,14 @@ impl TypedAhead {
             grown.push_str(&self.text);
             self.text = grown;
         }
+        // Checked apart from the condition above, so that a test typing up
+        // to the edge fails here if the condition misjudged it.
+        let room = self.text.capacity() - self.text.len();
+        debug_assert!(
+            c.len_utf8() <= room,
+            "String::push would have to grow the typed text and free the old \
+             allocation without overwriting it"
+        );
         self.text.push(c);
     }
 
@@ -324,6 +338,41 @@ mod tests {
         let buffer = typed(cx, &long);
         assert_eq!(buffer.len(), long.chars().count());
         assert_eq!(buffer.take_query().as_str(), long);
+    }
+
+    /// The edge of the allocation, for a character of each UTF-8 length.
+    /// With exactly its bytes left it goes in place; with one byte fewer the
+    /// text is copied into a bigger buffer first. A `push` that misjudged
+    /// this and left the growing to `String::push` fails its own assertion.
+    #[gpui::test]
+    fn a_character_that_does_not_fit_grows_the_buffer_by_copying(cx: &mut TestAppContext) {
+        install(cx, FakeApi::new());
+        for c in ['n', 'ä', '€', '🦀'] {
+            let width = c.len_utf8();
+            for left in [width, width - 1] {
+                let mut buffer = typed(cx, "");
+                let capacity = buffer.text.capacity();
+                let fill = "x".repeat(capacity - left);
+                for x in fill.chars() {
+                    buffer.push(x);
+                }
+                assert_eq!(buffer.text.capacity(), capacity);
+                buffer.push(c);
+                if left == width {
+                    assert_eq!(
+                        buffer.text.capacity(),
+                        capacity,
+                        "{c:?} with room for it grew the buffer"
+                    );
+                } else {
+                    assert!(
+                        buffer.text.capacity() > capacity,
+                        "{c:?} without room for it did not grow the buffer"
+                    );
+                }
+                assert_eq!(buffer.take_query().as_str(), format!("{fill}{c}"));
+            }
+        }
     }
 
     #[gpui::test]

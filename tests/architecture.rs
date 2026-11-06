@@ -1736,11 +1736,15 @@ const TYPED_TEXT_USERS: &[&str] = &[
 /// the buffer drops, and one that regrows or shrinks it (`reserve`,
 /// `push_str`, `shrink_to_fit`) frees the old allocation without
 /// overwriting it. No safe test can read those bytes, so this list holds the
-/// code to its shape instead: `wipe` overwrites, and nothing else changes
-/// the text in a way that could leave a copy.
+/// code to its shape instead: `wipe` overwrites, and no method beyond these
+/// is called on the text. `String::push` is one of them, and it too would
+/// regrow a string that is out of room. That `push` copies the text before
+/// it gets there is held by the assertion in front of that call and the
+/// tests in `typed_ahead.rs` that type up to the last free byte, not by
+/// this list.
 const TYPED_TEXT_CALLS: &[(&str, &str)] = &[
-    // Grows the buffer by copying it into a bigger one when it is full, and
-    // otherwise adds within the capacity it has.
+    // Copies the text into a bigger buffer when `c` doesn't fit in the room
+    // left, and asserts in debug builds that `String::push` then has room.
     ("push", "len"),
     ("push", "capacity"),
     ("push", "push"),
