@@ -482,6 +482,10 @@ fn appearance_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> imp
     )
 }
 
+/// The auto-lock, and below it the Mac idle time as the alternative. The two
+/// rows are independent: choosing a value in one keeps the other's, so the
+/// auto-lock time is still there when the Mac idle row goes back to Off. The
+/// auto-lock row's text says which one applies.
 fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
     let current = settings.auto_lock_secs;
     let items: Vec<_> = AUTO_LOCK_PRESETS
@@ -495,22 +499,78 @@ fn auto_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl
                 format_auto_lock_label(preset_value),
                 preset_value == current,
                 cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                    shell.update_settings(
-                        AppSettings {
-                            auto_lock_secs: preset_value,
-                            ..baseline.clone()
-                        },
-                        cx,
-                    );
+                    shell.update_settings(with_auto_lock(&baseline, preset_value), cx);
+                }),
+            )
+        })
+        .collect();
+    v_flex()
+        .gap_4()
+        .child(section_card(
+            "Auto-lock vault",
+            auto_lock_description(settings.mac_idle_lock_secs.is_some()),
+            option_group(items),
+        ))
+        .child(mac_idle_lock_section(settings, cx))
+}
+
+/// Off first: locking by the Mac's idle time is a choice, not the default.
+const MAC_IDLE_LOCK_PRESETS: &[Option<u64>] = &[None, Some(300), Some(900), Some(1800)];
+
+fn mac_idle_lock_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
+    let current = settings.mac_idle_lock_secs;
+    let items: Vec<_> = MAC_IDLE_LOCK_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(idx, preset)| {
+            let preset_value = *preset;
+            let baseline = settings.clone();
+            segment_item(
+                SharedString::from(format!("mac-idle-lock-preset-{idx}")),
+                format_mac_idle_lock_label(preset_value),
+                preset_value == current,
+                cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+                    shell.update_settings(with_mac_idle_lock(&baseline, preset_value), cx);
                 }),
             )
         })
         .collect();
     section_card(
-        "Auto-lock vault",
-        "Lock the vault after this much idle time without keyboard or mouse activity.",
+        "Or lock after the Mac is idle for",
+        "With a value here, FerrisPass stays open while you work in other apps and locks \
+         only after the Mac itself has seen no input for this long. Sleep and the lock \
+         screen still lock at once.",
         option_group(items),
     )
+}
+
+/// What the auto-lock row says. With the Mac idle row set, its time is not
+/// used: FerrisPass's own idle time then counts only when macOS cannot
+/// report idle time, against the Mac idle row's time.
+fn auto_lock_description(mac_idle_set: bool) -> &'static str {
+    if mac_idle_set {
+        "Lock the vault after this much idle time without keyboard or mouse activity. \
+         While the Mac idle setting below is on, this applies only when macOS cannot \
+         report idle time, and then with the time chosen there."
+    } else {
+        "Lock the vault after this much idle time without keyboard or mouse activity."
+    }
+}
+
+/// `baseline` with a new auto-lock time. The Mac idle time stays as it is.
+fn with_auto_lock(baseline: &AppSettings, secs: Option<u64>) -> AppSettings {
+    AppSettings {
+        auto_lock_secs: secs,
+        ..baseline.clone()
+    }
+}
+
+/// `baseline` with a new Mac idle time. The auto-lock time stays as it is.
+fn with_mac_idle_lock(baseline: &AppSettings, secs: Option<u64>) -> AppSettings {
+    AppSettings {
+        mac_idle_lock_secs: secs,
+        ..baseline.clone()
+    }
 }
 
 fn auto_sync_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
@@ -1022,6 +1082,13 @@ fn format_auto_lock_label(secs: Option<u64>) -> SharedString {
     }
 }
 
+fn format_mac_idle_lock_label(secs: Option<u64>) -> SharedString {
+    match secs {
+        None => SharedString::from("Off"),
+        Some(_) => format_auto_lock_label(secs),
+    }
+}
+
 fn format_clipboard_label(secs: Option<u64>) -> SharedString {
     match secs {
         None => SharedString::from("Never"),
@@ -1035,5 +1102,59 @@ fn format_auto_sync_label(secs: Option<u64>) -> SharedString {
         Some(60) => SharedString::from("1 min"),
         Some(s) if s % 60 == 0 => SharedString::from(format!("{} min", s / 60)),
         Some(s) => SharedString::from(format!("{s} s")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mac_idle_row_offers_off_5_15_and_30_minutes() {
+        let labels: Vec<String> = MAC_IDLE_LOCK_PRESETS
+            .iter()
+            .map(|preset| format_mac_idle_lock_label(*preset).to_string())
+            .collect();
+        assert_eq!(labels, ["Off", "5 min", "15 min", "30 min"]);
+        assert_eq!(
+            MAC_IDLE_LOCK_PRESETS,
+            &[None, Some(300), Some(900), Some(1800)]
+        );
+    }
+
+    #[test]
+    fn the_auto_lock_row_says_it_is_the_fallback_while_mac_idle_is_set() {
+        let alone = auto_lock_description(false);
+        assert_eq!(
+            alone,
+            "Lock the vault after this much idle time without keyboard or mouse activity."
+        );
+        let with_mac_idle = auto_lock_description(true);
+        assert!(with_mac_idle.starts_with(alone));
+        assert!(
+            with_mac_idle.contains(
+                "While the Mac idle setting below is on, this applies only when macOS \
+                 cannot report idle time"
+            ),
+            "{with_mac_idle}"
+        );
+
+        // Neither row clears the other.
+        let settings = AppSettings {
+            auto_lock_secs: Some(240),
+            mac_idle_lock_secs: None,
+            ..AppSettings::default()
+        };
+        let mac_idle_on = with_mac_idle_lock(&settings, Some(900));
+        assert_eq!(mac_idle_on.mac_idle_lock_secs, Some(900));
+        assert_eq!(mac_idle_on.auto_lock_secs, Some(240));
+        let auto_lock_changed = with_auto_lock(&mac_idle_on, Some(60));
+        assert_eq!(auto_lock_changed.auto_lock_secs, Some(60));
+        assert_eq!(auto_lock_changed.mac_idle_lock_secs, Some(900));
+        let auto_lock_never = with_auto_lock(&auto_lock_changed, None);
+        assert_eq!(auto_lock_never.mac_idle_lock_secs, Some(900));
+        let mac_idle_off = with_mac_idle_lock(&auto_lock_changed, None);
+        assert_eq!(mac_idle_off.mac_idle_lock_secs, None);
+        assert_eq!(mac_idle_off.auto_lock_secs, Some(60));
     }
 }

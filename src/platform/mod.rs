@@ -5,3 +5,4 @@
 //! New `unsafe` code goes here and nowhere else.
 
 pub mod secure_input;
+pub mod system_idle;

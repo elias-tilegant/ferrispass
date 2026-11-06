@@ -52,7 +52,10 @@ const LEGACY_EXCEPTIONS: &[(&str, &str)] = &[
 /// Audited platform modules (V8). Each is a file under `src/platform/` that
 /// opts in once with `#![allow(unsafe_code)]` below a `//!` header that says
 /// why it needs `unsafe`.
-const PLATFORM_MODULES: &[&str] = &["src/platform/secure_input.rs"];
+const PLATFORM_MODULES: &[&str] = &[
+    "src/platform/secure_input.rs",
+    "src/platform/system_idle.rs",
+];
 
 /// Top-level directories that are never scanned: build output and Git's own
 /// data. Everything else under the manifest directory is.
