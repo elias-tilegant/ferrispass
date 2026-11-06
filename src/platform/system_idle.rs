@@ -337,11 +337,11 @@ mod tests {
         for name in ["into_raw", "from_raw", "transmute"] {
             assert_eq!(mentions(name), 0, "`{name}` has no place here");
         }
-        let retains = tokens.iter().any(|token| {
-            matches!(token, Tok::Ident(name)
-                if name.contains("Retain") || name.contains("Release") || *name == "retain")
-        });
-        assert!(!retains, "nothing here retains or releases an object");
+        let refcounting = refcount_names(&tokens);
+        assert!(
+            refcounting.is_empty(),
+            "nothing here retains or releases an object: {refcounting:?}"
+        );
         for (pair, what) in [
             (
                 [Tok::Ident("as"), Tok::Punct('*')],
@@ -365,6 +365,41 @@ mod tests {
         assert_eq!(tokens.first(), Some(&Tok::Str("unsafe\\\" { ")));
         assert!(tokens.contains(&Tok::Ident("fn")));
         assert!(tokens.contains(&Tok::Punct('{')));
+    }
+
+    #[test]
+    fn the_refcount_scan_ignores_letter_case() {
+        let tokens = code_tokens(
+            "fn release() {} fn objc_retain() {} fn objc_release() {} CFRetain(x); CFRelease(x); \
+             object.Release(); // retain\n \"release\" fn hold() {}",
+        );
+        assert_eq!(
+            refcount_names(&tokens),
+            [
+                "release",
+                "objc_retain",
+                "objc_release",
+                "CFRetain",
+                "CFRelease",
+                "Release"
+            ]
+        );
+    }
+
+    /// Every name in `tokens` with "retain" or "release" in it, in any letter
+    /// case: `CFRetain`, `objc_release` and a plain `release` alike.
+    fn refcount_names<'s>(tokens: &[Tok<'s>]) -> Vec<&'s str> {
+        tokens
+            .iter()
+            .filter_map(|token| match token {
+                Tok::Ident(name) => Some(*name),
+                _ => None,
+            })
+            .filter(|name| {
+                let name = name.to_ascii_lowercase();
+                name.contains("retain") || name.contains("release")
+            })
+            .collect()
     }
 
     /// A token of code, for the scan above: a name, a string's contents, a

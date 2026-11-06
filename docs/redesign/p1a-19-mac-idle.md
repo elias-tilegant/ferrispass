@@ -13,7 +13,8 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 | `4838fd2` | This table and the time below |
 | `3e780db` | A shell test that a Mac in use does not hold off the lock while the Mac idle row is off |
 | `ee8f3ed` | When 0.9.2 writes its settings file, this table and the time below |
-| the last one | The trip back to 0.9.2 as an accepted limit, here and in SECURITY.md, this table and the time below |
+| `d23d3a8` | The trip back to 0.9.2 as an accepted limit, here and in SECURITY.md, this table and the time below |
+| the last one | The scan of the `unsafe` code fails on a name with retain or release in it in any letter case, a test of that name scan, the section on it here, the list of tests, this table and the time below |
 
 ## When the vault locks
 
@@ -47,7 +48,7 @@ The setting is a new field in `settings.json`, `mac_idle_lock_secs`, in seconds,
 
 `src/platform/system_idle.rs` is the second module under `src/platform/`, the one place new `unsafe` code may go. No crate we depend on offers the CoreGraphics function as a safe call, so the module declares it in an `unsafe extern` block and calls it in one `unsafe` block, with two integer constants from the header (`kCGEventSourceStateCombinedSessionState` is 0, `kCGAnyInputEventType` is `~0`). A `double` comes back. There is no pointer, nothing is retained or released, there is no callback and no state, and the function has no thread requirement. The reading is checked before it becomes a `Duration`: NaN, negative and infinite values are `IdleError::Invalid`, and `Duration::from_secs_f64` is never called on them. On other platforms the answer is `IdleError::Unsupported`.
 
-`system_idle_declares_one_foreign_function_and_one_unsafe_call` reads the file's own source with a small tokenizer, the one from `tests/architecture.rs` cut down, so comments and strings don't count. It requires exactly two `unsafe` tokens, the `extern` block with exactly the one declaration, the `unsafe` block with exactly the one call, both constants with their values, and none of `as *`, `*const`, `*mut`, `static mut`, `into_raw`, `from_raw`, `transmute` or anything named like retain or release. `tests/architecture.rs` lists the module in `PLATFORM_MODULES`, and SECURITY.md lists it under "Unsafe code".
+`system_idle_declares_one_foreign_function_and_one_unsafe_call` reads the file's own source with a small tokenizer, the one from `tests/architecture.rs` cut down, so comments and strings don't count. It requires exactly two `unsafe` tokens, the `extern` block with exactly the one declaration, the `unsafe` block with exactly the one call, both constants with their values, none of `as *`, `*const`, `*mut`, `static mut`, `into_raw`, `from_raw` or `transmute`, and no name with retain or release in it, in any letter case, such as `release`, `objc_retain` or `objc_release`. `the_refcount_scan_ignores_letter_case` runs that name scan over a few lines of code and expects it to report `release`, `objc_retain`, `objc_release`, `CFRetain`, `CFRelease` and `Release`, and nothing from the comment `// retain` or the string `"release"` in them. `tests/architecture.rs` lists the module in `PLATFORM_MODULES`, and SECURITY.md lists it under "Unsafe code".
 
 Tests reach the idle time through the `App`: `idle_for(cx)` reads a fake that the test put on its own `App` as a GPUI global, and without one a test build answers `Unsupported`. Tests that run side by side, each with its own context, never see each other's value, and no unit test depends on whether someone is using the Mac that runs it.
 
@@ -67,6 +68,7 @@ Each rule was checked by taking it out; the changed lines and the failing output
 | `idle_for_reads_core_graphics` (doctest) | `idle_for` in the library as the app builds it reads CoreGraphics, not the no-op |
 | `the_fake_is_read_through_the_app` | two test contexts, each with its own fake, each read their own value |
 | `system_idle_declares_one_foreign_function_and_one_unsafe_call`, `the_scan_skips_comments_and_strings` | the shape of the `unsafe` code, and the tokenizer that reads it |
+| `the_refcount_scan_ignores_letter_case` | the scan for names with retain or release in them finds them in any letter case, and not in a comment or a string with one of the words |
 | `unsafe_code_stays_on_the_exception_list` | the module is on the list, with its header and its attribute |
 | `auto_lock_without_mac_idle_ignores_the_mac` | with the Mac idle row off and the Mac in use, three idle minutes in FerrisPass keep the vault open, just over four lock it |
 | `auto_lock_with_mac_idle_ignores_the_app_clock` | with the Mac in use, five and twenty idle minutes in FerrisPass keep the vault open |
@@ -104,4 +106,4 @@ To try a shorter time, quit FerrisPass and set `mac_idle_lock_secs` to 60 in `~/
 - CI only builds for macOS, so the no-op for other platforms is compiled there only for the test build.
 - The shell tests build the real `AppShell` and read the real `settings.json`. They set both auto-lock settings themselves.
 
-The agents spent about 2.5 hours on this, including review and fixes.
+The agents spent about 3.5 hours on this, including review and fixes.
