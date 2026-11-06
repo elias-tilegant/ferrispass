@@ -1,6 +1,6 @@
 # P1a.05c: Test isolation
 
-Unit tests no longer read or write the FerrisPass data of the Mac they run on, and they never clear the launch directory of a FerrisPass running there. A test now also holds the rule that copying a password or a username marks an entry as recently used. Nothing changes in the app. The mutation probes and the readings from the manual check are in [PR #29](https://github.com/elias-tilegant/ferrispass/pull/29).
+Unit tests no longer read or write FerrisPass's folder in Application Support on the Mac they run on, and they never clear the launch directory of a FerrisPass running there. A test now also holds the rule that copying a password or a username marks an entry as recently used. Nothing changes in the app. The mutation probes and the readings from the manual check are in [PR #29](https://github.com/elias-tilegant/ferrispass/pull/29).
 
 ## What the tests read now
 
