@@ -688,6 +688,9 @@ mod tests {
     /// vault badge and the keys have neither a role nor an element id, as
     /// the row builds them, selected or not and with each kind of badge,
     /// so GPUI writes no node for them: the row's name says what they show.
+    /// This reads the element each part renders to; what the tile, the
+    /// chip and the badge draw inside it is read in their source, by
+    /// `the_tile_the_chip_and_the_badge_give_no_node_to_what_they_draw`.
     /// The verb is a button of its own, which the button's tests read.
     #[gpui::test]
     fn the_tile_the_chip_and_the_badge_write_no_node_in_a_row(cx: &mut TestAppContext) {
@@ -733,6 +736,30 @@ mod tests {
         }
     }
 
+    /// Each line of `file` in `src/ui/ds/components` that has `call` on
+    /// it, once for every time it does, read through `code_only`, so
+    /// comments and the file's tests do not count. A call that starts with
+    /// a letter counts only where no letter, digit or underscore comes
+    /// right before it: `id(` is found in `.id(` and in
+    /// `InteractiveElement::id(`, not in `accessibility_id(`.
+    fn calls_in(file: &str, call: &str) -> Vec<String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/ui/ds/components")
+            .join(file);
+        let source = std::fs::read_to_string(path).expect(file);
+        let code = probe::code_only(&source);
+        let in_word = |c: char| c.is_alphanumeric() || c == '_';
+        let word = call.starts_with(in_word);
+        code.lines()
+            .enumerate()
+            .flat_map(|(at, line)| {
+                line.match_indices(call)
+                    .filter(move |(start, _)| !word || !line[..*start].ends_with(in_word))
+                    .map(move |_| format!("{file}:{}: {}", at + 1, line.trim()))
+            })
+            .collect()
+    }
+
     /// A node needs an element id and a role. In `row.rs` only the row's
     /// own node gets either, so neither the parts the test above reads nor
     /// the boxes that line them up get one, and no part of the row is shown
@@ -741,29 +768,54 @@ mod tests {
     /// count.
     #[test]
     fn a_row_gives_an_id_and_a_role_to_its_own_node_only() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds/components/row.rs");
-        let source = std::fs::read_to_string(path).expect("row.rs");
-        let code = probe::code_only(&source);
         for (call, allowed) in [
             (".id(", 1),
             (".role(", 1),
             ("standalone(", 0),
             ("Standalone", 0),
         ] {
-            let found: Vec<String> = code
-                .lines()
-                .enumerate()
-                .flat_map(|(at, line)| {
-                    line.matches(call)
-                        .map(move |_| format!("row.rs:{}: {}", at + 1, line.trim()))
-                })
-                .collect();
+            let found = calls_in("row.rs", call);
             assert_eq!(
                 found.len(),
                 allowed,
                 "a row writes one node, its own; {call} in row.rs: {found:#?}"
             );
         }
+    }
+
+    /// What the tile, the chip and the badge draw inside the element the
+    /// tests above read gets no node either, so the tile's glyph, the
+    /// chip's text and the badge's initial stay out of the tree inside a
+    /// row. Their files give no element an id or a role, in either way of
+    /// writing the call, build no text with an id, which GPUI writes as a
+    /// label, and build one `Standalone` each, in the constructor of the
+    /// part on its own, which nothing in the file calls. The files are read
+    /// through `code_only`, so comments and their tests do not count.
+    #[test]
+    fn the_tile_the_chip_and_the_badge_give_no_node_to_what_they_draw() {
+        let mut wrong = Vec::new();
+        for file in ["tile.rs", "chip.rs", "vault_badge.rs"] {
+            for (call, allowed) in [
+                ("id(", 0),
+                ("role(", 0),
+                ("Text::new(", 0),
+                ("text!(", 0),
+                ("with_id(", 0),
+                ("InteractiveText", 0),
+                ("Standalone::new(", 1),
+                ("standalone(", 1),
+            ] {
+                let found = calls_in(file, call);
+                if found.len() != allowed {
+                    wrong.push(format!("{call} in {file}, {allowed} allowed: {found:#?}"));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the tile, the chip and the badge draw nothing with a node of its own:\n{}",
+            wrong.join("\n")
+        );
     }
 
     /// The naming rule: the kind and the title, then the role, the

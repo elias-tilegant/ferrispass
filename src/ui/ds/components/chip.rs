@@ -208,7 +208,9 @@ mod tests {
     }
 
     /// In a row the chip writes no node, with or without a glyph: the
-    /// row's name says what it means.
+    /// row's name says what it means. This reads the element the chip
+    /// renders to; what it draws inside it is read in this file by a test
+    /// in `row.rs`.
     #[gpui::test]
     fn a_chip_in_a_row_writes_no_node(cx: &mut TestAppContext) {
         let found = probe::in_frame(cx, |window, cx| {

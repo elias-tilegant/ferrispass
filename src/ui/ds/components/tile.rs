@@ -97,8 +97,10 @@ mod tests {
     }
 
     /// In a row the tile has no id and no role, so it writes no node: the
-    /// row's name carries the kind. It is 28 by 28 points at text size 13
-    /// and grows with the text size.
+    /// row's name carries the kind. This reads the element the tile renders
+    /// to; what it draws inside it is read in this file by a test in
+    /// `row.rs`. It is 28 by 28 points at text size 13 and grows with the
+    /// text size.
     #[gpui::test]
     fn a_tile_in_a_row_writes_no_node(cx: &mut TestAppContext) {
         let (role, id) = probe::in_frame(cx, |window, cx| {

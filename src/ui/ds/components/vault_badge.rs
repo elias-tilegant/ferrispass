@@ -247,7 +247,9 @@ mod tests {
     }
 
     /// In a row the badge writes no node; on its own it is an image named
-    /// after the vault.
+    /// after the vault. This reads the element the badge renders to; what
+    /// it draws inside it, the initial too, is read in this file by a test
+    /// in `row.rs`.
     #[gpui::test]
     fn a_badge_is_an_image_on_its_own_only(cx: &mut TestAppContext) {
         let (in_row, alone, id) = probe::in_frame(cx, |window, cx| {
