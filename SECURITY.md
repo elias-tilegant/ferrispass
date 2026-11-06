@@ -44,8 +44,11 @@ What FerrisPass promises from the release in the second column on. A build that 
 | While the master password field has focus, secure event input is on, so other programs do not see the keystrokes; it is released on blur, window deactivation, lock, quit and panic | the redesign release |
 | New `unsafe` code lives only in audited modules under `src/platform/`, listed under [Unsafe code](#unsafe-code) | the redesign release |
 | Activity for the auto-lock is input in a FerrisPass window, in the quick access panel, a global shortcut or a click on the menu bar item, and nothing that happens in other apps | the redesign release |
+| In the quick access panel, Touch ID starts only when you confirm with Return or click the unlock button; never when the panel opens, while you type, when it comes back to the front, or again after macOS withdrew the prompt | the redesign release |
 
 In the clipboard rule, FerrisPass's own copy actions are the ones that copy a value out of an entry for you: the copy buttons at the bottom of an entry's details and a click on its username, password, TOTP code or a custom field there; Cmd+Shift+U, Cmd+Shift+L, and Cmd+C while no text field has focus; and Copy Username, Copy Password and Copy URL in the Edit menu. The standard editing commands on text you select in a field are not among them. Text you select in one of the entry editor's unprotected fields (title, username, URL, notes, custom field names and the values of custom fields not marked protected) and copy or cut with Cmd+C, Cmd+X, Edit > Copy, Edit > Cut or the field's context menu is an ordinary copy, as it always was: it does not go through this path, carries none of the markers and is not cleared. The password, the TOTP secret and the values of custom fields marked protected can't be copied or cut out of the editor at all.
+
+What you type into the quick access panel while it is locked is held masked in memory, under secure event input, until Touch ID has unlocked the vault; then it becomes the panel's search. It is wiped after 30 seconds, when you cancel, and when it looks like a password rather than a search (several words, no match), and it is never written to disk, to the log or to the list of recently used entries.
 
 ## Supported versions
 
