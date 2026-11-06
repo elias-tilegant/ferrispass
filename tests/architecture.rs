@@ -1504,6 +1504,171 @@ const RESET_CALL_SITES: &[(&str, &str)] = &[
     ),
 ];
 
+// ------------------------------------------------- the locked quick access panel --
+
+/// The file that holds what is typed into the quick access panel while it is
+/// locked.
+const TYPED_AHEAD_SOURCE: &str = "src/app/unlock/typed_ahead.rs";
+
+/// Names through which typed text could leave the buffer: the file system,
+/// the log, the print macros, formatting other than the hand-written `Debug`
+/// that shows only a count, and derives (a derived `Debug` prints every
+/// field).
+const TEXT_OUTLETS: &[&str] = &[
+    "fs",
+    "File",
+    "OpenOptions",
+    "log",
+    "tracing",
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "dbg",
+    "Display",
+    "Serialize",
+    "derive",
+    "write_str",
+    "write_fmt",
+    "debug_struct",
+    "debug_tuple",
+];
+
+/// The functions in the typed-ahead file that may touch the field `text`.
+/// Each keeps the text in the buffer, counts it, wipes it, or hands it to
+/// the caller as a `Zeroizing<String>`. Anything new that reads the text is
+/// a line here and stands out in review.
+const TYPED_TEXT_USERS: &[&str] = &[
+    "begin",
+    "push",
+    "backspace",
+    "len",
+    "is_empty",
+    "wipe_if_password_like",
+    "wipe",
+    "take_query",
+];
+
+#[test]
+fn typed_ahead_never_logs_or_writes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join(TYPED_AHEAD_SOURCE))
+        .unwrap_or_else(|err| panic!("cannot read {TYPED_AHEAD_SOURCE}: {err}"));
+    let scan = typed_text_scan(&source)
+        .unwrap_or_else(|err| panic!("cannot tokenize {TYPED_AHEAD_SOURCE}: {err}"));
+    let leaks: Vec<String> = scan
+        .leaks
+        .iter()
+        .map(|(line, what)| format!("{TYPED_AHEAD_SOURCE}:{line}: {what}"))
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "what is typed into the locked panel could get out of its buffer:\n{}",
+        leaks.join("\n")
+    );
+    // The scan has to see the field it guards, or it proves nothing.
+    for known in ["push", "wipe", "take_query"] {
+        assert!(
+            scan.users.iter().any(|name| name == known),
+            "the scan no longer sees `fn {known}` touch the text; found {:?}",
+            scan.users
+        );
+    }
+}
+
+/// What the scan of the typed-ahead file found.
+struct TextScan {
+    /// Each place, by line, where the text could get out.
+    leaks: Vec<(usize, String)>,
+    /// The functions that touch the field `text`.
+    users: Vec<String>,
+}
+
+/// Reads the typed-ahead file outside items switched off by `#[cfg(test)]`.
+/// A name from [`TEXT_OUTLETS`] anywhere is a leak, and so is the field
+/// `text` inside a macro call (`format!`, `panic!`, `write!` and the like),
+/// in a function not on [`TYPED_TEXT_USERS`], or outside a function other
+/// than in the declaration of `struct TypedAhead`.
+fn typed_text_scan(source: &str) -> Result<TextScan, String> {
+    let p = parse(source)?;
+    let t = &p.tokens;
+    let test_items = cfg_test_items(&p);
+    let mut scan = TextScan {
+        leaks: Vec::new(),
+        users: Vec::new(),
+    };
+    for (i, token) in t.iter().enumerate() {
+        if test_items.iter().any(|item| item.contains(&i)) {
+            continue;
+        }
+        let Some(name) = token.name() else {
+            continue;
+        };
+        let line = token.line;
+        if TEXT_OUTLETS.contains(&name) {
+            scan.leaks.push((line, format!("`{name}`")));
+            continue;
+        }
+        if name != "text" {
+            continue;
+        }
+        if p.in_macro_call[i] {
+            scan.leaks
+                .push((line, "the text in a macro call".to_string()));
+            continue;
+        }
+        match enclosing_fn(&p, i) {
+            Some(function) if TYPED_TEXT_USERS.contains(&function.as_str()) => {
+                if !scan.users.contains(&function) {
+                    scan.users.push(function);
+                }
+            }
+            Some(function) => scan.leaks.push((
+                line,
+                format!("the text in `fn {function}`, which is not on TYPED_TEXT_USERS"),
+            )),
+            None if p.enclosing_brace[i].is_some_and(|open| {
+                anchor(&t[header_start(&p, open)..open]) == "struct TypedAhead"
+            }) => {}
+            None => scan
+                .leaks
+                .push((line, "the text outside a function".to_string())),
+        }
+    }
+    Ok(scan)
+}
+
+#[test]
+fn typed_text_leaks_are_found() {
+    let source = r##"
+        use std::fs;
+        struct TypedAhead { text: Zeroizing<String>, started: SystemTime }
+        impl TypedAhead {
+            fn push(&mut self, c: char) { self.text.push(c); }
+            fn note(&self) { log::info!("{}", self.len()); }
+            fn shout(&self) { eprintln!("{}", self.text.as_str()); }
+            fn leak(&self) -> String { self.text.to_string() }
+            // self.text in a comment, and "text" in a string
+            fn save(&self) { std::fs::write("/tmp/x", "y").ok(); }
+        }
+        impl fmt::Display for TypedAhead {}
+        #[derive(Debug)]
+        struct Other;
+        static COPY: &str = text;
+        #[cfg(test)]
+        mod tests { fn helper(b: &TypedAhead) { println!("{}", b.text.as_str()); } }
+    "##;
+    let scan = typed_text_scan(source).expect("scan");
+    let lines: Vec<usize> = scan.leaks.iter().map(|(line, _)| *line).collect();
+    assert_eq!(
+        lines,
+        vec![2, 6, 7, 7, 8, 10, 12, 13, 15],
+        "{:?}",
+        scan.leaks
+    );
+    assert_eq!(scan.users, vec!["push".to_string()]);
+}
+
 #[test]
 fn activity_is_touched_only_where_listed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
