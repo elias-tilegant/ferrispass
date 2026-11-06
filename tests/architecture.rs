@@ -1506,11 +1506,16 @@ const RESET_CALL_SITES: &[(&str, &str)] = &[
 
 // ------------------------------------------------- the locked quick access panel --
 
-/// Every call that can raise the Touch ID prompt, one line per call, with
-/// the function it is in and the name it calls: `begin_biometric_unlock`
-/// starts an attempt in the app, and `retrieve` shows the prompt and reads
-/// the stored password. A new caller is a new line here and stands out in
-/// review.
+/// Every call that can raise the Touch ID prompt or lead to it, one line per
+/// call, with the function it is in and the name it calls:
+/// `begin_biometric_unlock` starts an attempt in the app, `retrieve` shows the
+/// prompt and reads the stored password, `unlock_from_lock_screen` and
+/// `unlock_from_panel` are the two ways into the shared flow, and `confirm`
+/// turns something that happened in the quick access panel into the token the
+/// panel's way in takes. A token only says that `confirm` was asked with
+/// Return or the unlock button, so the function that asks has to be the one
+/// that handles that key or click; a timer or an activation handler on this
+/// list would stand out in review, as would any other new caller.
 const TOUCH_ID_CALL_SITES: &[(&str, &str, &str)] = &[
     // The one flow for the lock screen and the quick access panel: the
     // attempt, then the prompt in the background.
@@ -1520,13 +1525,25 @@ const TOUCH_ID_CALL_SITES: &[(&str, &str, &str)] = &[
         "begin_biometric_unlock",
     ),
     ("src/app/unlock/touch_id.rs", "run", "retrieve"),
+    // The unlock screen: the Touch ID button and its automatic prompt.
+    (
+        "src/ui/legacy/shell/unlock.rs",
+        "start_biometric_unlock",
+        "unlock_from_lock_screen",
+    ),
     // The command line, with --touch-id, or at a terminal for an enrolled
     // vault.
     ("src/cli.rs", "unlock_password", "retrieve"),
 ];
 
 /// The names whose calls [`TOUCH_ID_CALL_SITES`] lists.
-const TOUCH_ID_ENTRIES: &[&str] = &["begin_biometric_unlock", "retrieve"];
+const TOUCH_ID_ENTRIES: &[&str] = &[
+    "begin_biometric_unlock",
+    "retrieve",
+    "unlock_from_lock_screen",
+    "unlock_from_panel",
+    "confirm",
+];
 
 #[test]
 fn touch_id_starts_only_where_listed() {
@@ -1634,6 +1651,10 @@ fn touch_id_calls_are_found_with_their_function() {
         const NOTE: &str = "retrieve(";
         fn later(store: &Store) { let f = BiometricStore::retrieve; }
         use crate::app::AppState::begin_biometric_unlock;
+        fn on_timer(cx: &mut App) { let token = touch_id::confirm(PanelTrigger::ReturnKey); }
+        fn on_open(state: Entity<AppState>, cx: &mut App) { touch_id::unlock_from_lock_screen(state, true, done, cx); }
+        pub fn confirm(trigger: PanelTrigger) -> Option<Confirmed> { None }
+        use crate::app::unlock::touch_id::unlock_from_panel;
         #[cfg(test)]
         mod tests { fn helper(store: &Store) { store.retrieve(&id, "p", o); } }
     "##;
@@ -1659,9 +1680,11 @@ fn touch_id_calls_are_found_with_their_function() {
             call(3, "unlock", "retrieve"),
             call(5, "start", "begin_biometric_unlock"),
             call(6, "full", "retrieve"),
+            call(10, "on_timer", "confirm"),
+            call(11, "on_open", "unlock_from_lock_screen"),
         ]
     );
-    assert_eq!(problems, vec![8, 9]);
+    assert_eq!(problems, vec![8, 9, 13]);
 }
 
 /// The file that holds what is typed into the quick access panel while it is

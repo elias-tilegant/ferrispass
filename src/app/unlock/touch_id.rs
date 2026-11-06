@@ -88,10 +88,15 @@ pub enum PanelTrigger {
     AfterExpiry,
 }
 
-/// Proof that the user asked to unlock from the panel. Only [`confirm`]
-/// makes one. The field is private, so no code outside this module can
-/// build one, and it is neither `Clone` nor `Copy`: [`unlock_from_panel`]
+/// Proof that [`confirm`] was asked with Return or the unlock button. Only
+/// `confirm` makes one. The field is private, so no code outside this module
+/// can build one, and it is neither `Clone` nor `Copy`: [`unlock_from_panel`]
 /// takes it by value, so each attempt uses one up.
+///
+/// The token can't tell whether the key press was real; the code that asks
+/// `confirm` has to be the panel's handler for that key or click.
+/// `TOUCH_ID_CALL_SITES` in `tests/architecture.rs` lists every call of
+/// `confirm` and of both ways into the flow with the function it is in.
 ///
 /// Neither of these compiles:
 ///

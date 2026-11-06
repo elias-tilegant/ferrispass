@@ -11,7 +11,8 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 | `77df130` | The panel's way in, with the confirmation token |
 | `0511acc` | When the panel takes Return, and what the locked panel offers |
 | `b2dc438` | The list of places that can raise the Touch ID prompt, and the automatic prompt kept inside the shell |
-| the last one | SECURITY.md and this page |
+| `2189398` | SECURITY.md and this page |
+| the last one | The call-site list also holds every call of `confirm` and of the two ways into the flow |
 
 ## The typed-ahead buffer
 
@@ -47,7 +48,7 @@ Rules both ways share:
 
 The unlock screen's own rule, one more automatic prompt after macOS withdrew it, stays in the shell: `start_biometric_unlock` passes an `on_done` that calls `note_automatic_biometric_interruption` for an interrupted automatic attempt. `schedule_automatic_biometric_unlock` stays `pub(super)`, and `the_automatic_prompt_has_no_public_entry` in `tests/architecture.rs` holds it and the three functions around it to no more than that.
 
-`TOUCH_ID_CALL_SITES` in `tests/architecture.rs` lists every call of `begin_biometric_unlock` and `retrieve` outside tests, one line per call with the function it is in: the two in `run` and the command line's `unlock_password`. `touch_id_starts_only_where_listed` fails on a call that is not on the list, on a line that has no call left, and on either name used without being called.
+`TOUCH_ID_CALL_SITES` in `tests/architecture.rs` lists every call outside tests of `begin_biometric_unlock` and `retrieve`, of the two ways into the flow and of `confirm`, one line per call with the function it is in: the two calls in `run`, the unlock screen's `start_biometric_unlock`, and the command line's `unlock_password`. Nothing calls `confirm` or `unlock_from_panel` yet. A token only says that `confirm` was asked with Return or the unlock button, not that the key was really pressed, so the panel's calls will come in as lines that name the key and click handlers they sit in; a timer or an activation handler on the list would stand out. `touch_id_starts_only_where_listed` fails on a call that is not on the list, on a line that has no call left, and on any of these names used without being called.
 
 ## When the panel takes Return, and what it offers while locked
 
@@ -123,6 +124,7 @@ The panel's own checks need the panel: Return working after Touch ID without a c
 - A stale answer ends the attempt it finds in flight, as the unlock screen always did. Two attempts on top of each other therefore both end, and the user tries again. In practice the second prompt makes macOS withdraw the first, which then comes back as `Interrupted`, not as a stale success.
 - `kind` looks at the file system once, to see whether the vault's file is there. A file that can't be checked counts as needing the main window, which shows the real error.
 - Opening a vault writes the list of recent vaults under `~/Library/Application Support/ferrispass`, and the shell reads its settings from there. Tests that open a vault or build the shell therefore run again in a child process of the test binary whose `HOME` and `TMPDIR` point at a temporary folder; the parent only checks that exactly that test passed there.
+- A token only shows that `confirm` was asked with Return or the unlock button. That the panel asks it only from its handlers for that key and that click is held by the call-site list and by review, not by the type.
 - The scans in `tests/architecture.rs` read names, not values. A helper in another file that is handed the text, or a call through a trait object that renames `retrieve`, is out of their sight. The compiler carries the first line: the token's private field, no `Clone`, the buffer not `Send`, `run` private.
 - That the Touch ID dialog leaves the panel without key focus was measured on one Mac with macOS 27.0.1. The test only shows the order: `on_answered` before the answer is applied and before Return counts.
 
