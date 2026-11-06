@@ -2,7 +2,9 @@
 //! panel footer ("⌘C Password").
 //!
 //! A pair cannot be built without its word, so a keycap never stands alone
-//! on a screen. The pair is not in the accessibility tree at all: it has no
+//! on a screen. A pair for a command takes both from the command table in
+//! `src/app/registry`: the command's first key and its word, so a command
+//! never goes by two names. The pair is not in the accessibility tree at all: it has no
 //! id and no role, and neither have its keycaps and its word, so GPUI writes
 //! no node for any of them. The keys reach VoiceOver only through
 //! `aria_keyshortcuts` on the control they act on, for which
@@ -17,6 +19,7 @@ use gpui::{
 };
 
 use super::keycap::{Keycap, keys_text, parse_keys};
+use crate::app::registry::{self, CommandId};
 use crate::ui::ds::ActiveTokens as _;
 use crate::ui::ds::tokens::dimension;
 use crate::ui::ds::typography::{TextStyle, TextStyled as _, u};
@@ -44,6 +47,20 @@ impl Shortcut {
             label,
             style: StyleRefinement::default(),
         }
+    }
+
+    /// The pair for a command: the first of its keys in the command table
+    /// and its word, `(spec.label)()`, both read from the table. A command
+    /// without keys shows its word alone, with no keycap.
+    ///
+    /// Panics if the command has no row in the table. Every `CommandId` is
+    /// one of the names the table declares, and the registry's tests give
+    /// each of them a row.
+    pub fn for_command(id: CommandId) -> Self {
+        let spec = registry::command(id)
+            .unwrap_or_else(|| panic!("{} has no row in the command table", id.as_str()));
+        let keys = spec.keys.first().copied().unwrap_or_default();
+        Self::from_keystroke(keys, (spec.label)())
     }
 
     /// The word next to the keycaps.
@@ -90,6 +107,7 @@ mod tests {
 
     use super::super::{Button, probe};
     use super::*;
+    use crate::app::registry::{self, CommandId};
 
     fn word(text: &'static str) -> SharedString {
         SharedString::new_static(text)
@@ -180,5 +198,66 @@ mod tests {
             inside(keycap, button),
             "the keycap {keycap:?} lies outside the button {button:?}"
         );
+    }
+
+    /// The pair for copying the password shows ⌘C, the first key the
+    /// command table gives the command, and the table's word for it. Closing
+    /// the panel has two keys, ⌘W and Esc, and its pair shows the first.
+    #[gpui::test]
+    fn a_shortcut_for_a_command_shows_its_first_key_and_its_word(cx: &mut TestAppContext) {
+        let pair = Shortcut::for_command(CommandId::ENTRY_COPY_PASSWORD);
+        assert_eq!(pair.keys_text(), "⌘C");
+        // The English of `action.copy_password.label`, written out.
+        assert_eq!(pair.label().as_ref(), "Copy password");
+        let close = Shortcut::for_command(CommandId::PANEL_CLOSE);
+        assert_eq!(close.keys_text(), "⌘W", "the first of ⌘W and Esc");
+        assert_eq!(close.label().as_ref(), "Close");
+
+        let cx = probe::window(cx, |_, _| {
+            Shortcut::for_command(CommandId::ENTRY_COPY_PASSWORD).into_any_element()
+        });
+        let keycap = cx.debug_bounds("fp-keycap").expect("its keycap");
+        let label = cx.debug_bounds("fp-shortcut-label").expect("its word");
+        assert!(keycap.right() <= label.left(), "the keycap comes first");
+    }
+
+    /// Signing in to an SAP system has no keys of its own; Return reaches
+    /// it through the main action. Its pair is the word alone, with no
+    /// keycap.
+    #[gpui::test]
+    fn a_command_without_keys_shows_only_its_word(cx: &mut TestAppContext) {
+        let spec = registry::command(CommandId::ENTRY_SAP_LOGIN).expect("a row");
+        assert!(spec.keys.is_empty(), "the command has no keys");
+        let pair = Shortcut::for_command(CommandId::ENTRY_SAP_LOGIN);
+        assert_eq!(pair.keys_text(), "");
+        assert_eq!(pair.label().as_ref(), "Sign in");
+
+        let cx = probe::window(cx, |_, _| {
+            Shortcut::for_command(CommandId::ENTRY_SAP_LOGIN).into_any_element()
+        });
+        assert_eq!(cx.debug_bounds("fp-keycap"), None, "no keycap");
+        assert!(cx.debug_bounds("fp-shortcut-label").is_some(), "the word");
+    }
+
+    /// Every command in the table makes a pair: its first key as the
+    /// keycaps show it, or none, and the word the table gives it.
+    #[test]
+    fn every_command_with_keys_makes_a_shortcut() {
+        let mut with_keys = 0;
+        for spec in registry::commands() {
+            let pair = Shortcut::for_command(spec.id);
+            let name = spec.id.as_str();
+            match spec.keys.first() {
+                Some(first) => {
+                    with_keys += 1;
+                    let shown = keys_text(&parse_keys(first));
+                    assert!(!shown.is_empty(), "{name}: {first} reads as no key");
+                    assert_eq!(pair.keys_text(), shown, "{name}");
+                }
+                None => assert_eq!(pair.keys_text(), "", "{name}"),
+            }
+            assert_eq!(pair.label(), &(spec.label)(), "{name}");
+        }
+        assert!(with_keys > 1, "the table has commands with keys");
     }
 }
