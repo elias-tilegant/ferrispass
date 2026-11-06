@@ -18,6 +18,8 @@ Started from `rebuild` at `7566d72` on 2026-11-06.
 | `63b4241` | Only the two ways in call the flow, and only the panel's way in makes a panel origin |
 | `67ca17e` | This page, with what the tests cover |
 | `99e744b` | `push` asserts that `String::push` finds room, with a test that types up to the edge of the allocation |
+| `0bbbad1` | This page, on how the buffer grows |
+| `3ae5e2f` | Tests that the Touch ID prompt takes the Mac password only when it is allowed, from the unlock screen and from the panel |
 | the last one | This page |
 
 ## The typed-ahead buffer
@@ -103,7 +105,8 @@ PR #28 has a table of changes that each break one of these rules, with the test 
 | Without secure event input on the platform, the buffer still works | `typed_ahead_runs_without_a_guard_where_there_is_none` |
 | The buffer can't leave the main thread | `typed_ahead_is_not_send` (doctest) |
 | No log, print, file or derive in the buffer's file | `typed_ahead_never_logs_or_writes` |
-| The unlock screen unlocks through the shared flow, one prompt, the setting for the Mac password passed on | `the_lock_screen_unlocks_through_the_shared_flow` |
+| The unlock screen unlocks through the shared flow with one prompt, named after the vault; with the settings at their defaults, the prompt takes the Mac password as the default allows | `the_lock_screen_unlocks_through_the_shared_flow` |
+| The prompt takes the Mac password only when it is allowed: from the unlock screen as its setting says, turned off and then on again while the app runs, and from the panel as `unlock_from_panel` is told, first not and then yes | `the_lock_screen_prompt_follows_the_mac_password_setting`, `the_panel_prompt_takes_the_mac_password_only_when_allowed` |
 | A withdrawn automatic prompt is asked again once, a withdrawn click is not | `an_interrupted_automatic_prompt_is_retried_once_on_the_lock_screen` |
 | Dropping what the call returns doesn't cancel the unlock | `an_unlock_completes_without_anyone_holding_a_task` |
 | A stale answer opens nothing | `a_stale_answer_opens_nothing` |
@@ -139,4 +142,4 @@ The panel's own checks need the panel: Return working after Touch ID without a c
 - The scans in `tests/architecture.rs` read names, not values. A helper in another file that is handed the text, a call through a trait object that renames `retrieve`, a method called on the typed text through a dereference in parentheses, or a panel origin reached without its name is out of their sight. The compiler carries the first line: the token's private field, no `Clone`, the buffer not `Send`, `run` private to its module. Inside the module, who calls `run` and where a panel origin is made rests on the scan.
 - That the Touch ID dialog leaves the panel without key focus was measured on one Mac with macOS 27.0.1. The test only shows the order, for every way the prompt can end: `on_answered` before the answer is applied and before Return counts.
 
-The agents spent about 3.5 hours on this, including review and fixes.
+The agents spent about 4 hours on this, including review and fixes.
