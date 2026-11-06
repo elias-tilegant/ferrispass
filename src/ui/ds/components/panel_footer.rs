@@ -26,7 +26,7 @@ use gpui::{
 use gpui_component::{Icon, IconName};
 
 use super::button::ClickHandler;
-use super::{IconButton, Shortcut};
+use super::{IconButton, Shortcut, counted};
 use crate::tr;
 use crate::ui::ds::ActiveTokens as _;
 use crate::ui::ds::tokens::{ColorSet, dimension};
@@ -34,6 +34,11 @@ use crate::ui::ds::typography::{TextStyle, TextStyled as _, u};
 
 /// The footer shows at most this many shortcut pairs after the first line.
 pub const MAX_MORE: usize = 3;
+
+/// The boxes of the pairs on the second line, first to third: the debug
+/// selector of each, which is also the name it counts its children under
+/// in the tests.
+const MORE_PLACES: [&str; MAX_MORE] = ["fp-footer-more-0", "fp-footer-more-1", "fp-footer-more-2"];
 
 /// Size of the glyph on the first line, in points.
 const MAIN_GLYPH: f32 = 16.0;
@@ -242,7 +247,9 @@ mod debug_check {
 
 /// Every element the footer builds, before `assemble` puts them in place.
 /// None of them but the menu button has an element id, so none of them but
-/// the button writes a node, and none of them takes focus.
+/// the button writes a node, and none of them takes focus. Its boxes are
+/// `counted`, so the tests find a child put into one of them in `build`
+/// that `parts()` does not read.
 struct Built {
     footer: Div,
     lines: Div,
@@ -260,7 +267,7 @@ impl PanelFooter {
     fn build(self, cx: &mut App) -> Built {
         let colors = cx.ds().colors;
         let main_color = self.tone.main_color(colors);
-        let footer = div()
+        let footer = counted(div(), "fp-footer")
             .debug_selector(|| "fp-footer".into())
             .flex()
             .items_start()
@@ -269,13 +276,13 @@ impl PanelFooter {
             .pt(u(dimension::SPACE_8))
             .border_t_1()
             .border_color(colors.border_separator.hsla);
-        let lines = div()
+        let lines = counted(div(), "fp-footer-lines")
             .flex()
             .flex_col()
             .gap(u(dimension::SPACE_6))
             .flex_1()
             .min_w(px(0.));
-        let main = div()
+        let main = counted(div(), "fp-footer-main")
             .debug_selector(|| "fp-footer-main".into())
             .flex()
             .items_center()
@@ -289,7 +296,7 @@ impl PanelFooter {
                 .text_style(TextStyle::Headline)
                 .text_color(main_color)
         });
-        let second = div()
+        let second = counted(div(), "fp-footer-more")
             .debug_selector(|| "fp-footer-more".into())
             .flex()
             .flex_wrap()
@@ -298,23 +305,23 @@ impl PanelFooter {
         let more = self
             .more
             .into_iter()
-            .enumerate()
-            .map(|(index, pair)| {
-                let place = div()
-                    .debug_selector(move || format!("fp-footer-more-{index}"))
+            .zip(MORE_PLACES)
+            .map(|(pair, name)| {
+                let place = counted(div(), name)
+                    .debug_selector(move || name.into())
                     .flex_none();
                 (place, pair)
             })
             .collect();
         let note = self.tone.note().map(|note| {
-            let place = div()
+            let place = counted(div(), "fp-footer-note")
                 .debug_selector(|| "fp-footer-note".into())
                 .text_style(TextStyle::Callout)
                 .text_color(self.tone.note_color(colors));
             (place, note.clone())
         });
         let via = self.connect_first.map(|text| {
-            let place = div()
+            let place = counted(div(), "fp-footer-via")
                 .debug_selector(|| "fp-footer-via".into())
                 .flex()
                 .items_center()
@@ -477,10 +484,12 @@ mod tests {
     }
 
     /// The footer takes no focus and writes no node of its own: of every
-    /// element it builds, the footer itself read as `render` returns it,
+    /// part `parts()` lists, the footer itself read as `render` returns it,
     /// only the menu button has an element id and a role, it is a button,
-    /// and no element is a live region or a role that announces itself. In
-    /// a window that holds the footer alone, Tab finds one stop, the button.
+    /// and no part is a live region or a role that announces itself.
+    /// `every_rendered_child_is_a_part` holds what `render` draws to that
+    /// list. In a window that holds the footer alone, Tab finds one stop,
+    /// the button.
     #[gpui::test]
     fn the_footer_is_not_focusable_and_writes_no_live_node(cx: &mut TestAppContext) {
         let tones = [

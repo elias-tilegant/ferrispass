@@ -23,7 +23,7 @@
 //! `render` returns it, and its containers note how many children they
 //! hold, so the tests read each element, hidden and shown, with and
 //! without assistive technology, and find a child that is not on the list.
-//! The panel footer is built and listed the same way.
+//! The panel footer is built, listed and counted the same way.
 //!
 //! The panel footer is no node and takes no focus; the one node in it is
 //! the button that opens its menu. The panel hands what it says to
@@ -1324,6 +1324,51 @@ mod tests {
         );
     }
 
+    /// Every tone of the footer, each note written out.
+    fn footer_tones() -> [FooterTone; 7] {
+        [
+            FooterTone::Normal,
+            FooterTone::ProductionSelectFirst,
+            FooterTone::Decision { stale: false },
+            FooterTone::Decision { stale: true },
+            FooterTone::Offline(SharedString::new_static("As of 13:40")),
+            FooterTone::Tie(SharedString::new_static("2 identical matches")),
+            FooterTone::UpdateReady(SharedString::new_static("Update ready")),
+        ]
+    }
+
+    /// A footer in `tone` with `more` more pairs, with or without its first
+    /// line and its line about what to connect to first, and its menu open
+    /// or closed.
+    fn footer(tone: FooterTone, primary: bool, more: usize, via: bool, open: bool) -> PanelFooter {
+        let pairs = [
+            ("cmd-c", "Password"),
+            ("shift-enter", "Type into SAP GUI"),
+            ("right", "More"),
+        ];
+        let mut footer = PanelFooter::new("footer", |_, _, _| {})
+            .tone(tone)
+            .menu_open(open);
+        if primary {
+            footer = footer.primary(Shortcut::from_keystroke(
+                "enter",
+                SharedString::new_static("Sign in to NHP, client 100 as N.WEISS"),
+            ));
+        }
+        for (keys, word) in pairs.into_iter().take(more) {
+            footer = footer.more(Shortcut::from_keystroke(
+                keys,
+                SharedString::new_static(word),
+            ));
+        }
+        if via {
+            footer = footer.connect_first(SharedString::new_static(
+                "Connect first: Nordhafen GP (VPN)",
+            ));
+        }
+        footer
+    }
+
     /// How many children the counted containers of `build` held, with the
     /// element `build` returns itself, in a window of its own.
     fn drawn_elements(
@@ -1335,18 +1380,22 @@ mod tests {
         1 + cx.update(|window, _| probe::counted_children(window))
     }
 
-    /// Every element the secret field and the ring put into their containers
-    /// is one of their parts, which `no_secret_in_ax_tree` reads: the parts
-    /// each lists are as many as the elements it draws, the one it returns
-    /// and the children its containers hold. The field is drawn hidden and
-    /// revealed, without and with assistive technology, in every copy
-    /// state, without and with its handlers and without and with a secret;
-    /// the ring masked and unmasked, without and with assistive technology,
-    /// with 18 and with 3 seconds left and without and with a code. So a
-    /// child that only one state adds shows up too. The count covers the
-    /// containers the two files build; what a button of their own draws
-    /// inside it is the button's. That `assemble` puts no element around a
-    /// part is `assemble_only_places_parts`.
+    /// Every element the secret field, the ring and the panel footer put
+    /// into their containers is one of their parts, which
+    /// `no_secret_in_ax_tree` and `the_footer_is_not_focusable_and_writes_no_live_node`
+    /// read: the parts each lists are as many as the elements it draws, the
+    /// one it returns and the children its containers hold. The field is
+    /// drawn hidden and revealed, without and with assistive technology, in
+    /// every copy state, without and with its handlers and without and with
+    /// a secret; the ring masked and unmasked, without and with assistive
+    /// technology, with 18 and with 3 seconds left and without and with a
+    /// code; the footer in every tone, so with and without its glyph and its
+    /// note, without and with its first line and its line about what to
+    /// connect to first, with none to three more pairs and with its menu
+    /// closed and open. So a child that only one state adds shows up too.
+    /// The count covers the containers the three files build; what a button
+    /// of their own draws inside it is the button's. That `assemble` puts no
+    /// element around a part is `assemble_only_places_parts`.
     #[gpui::test]
     fn every_rendered_child_is_a_part(cx: &mut gpui::TestAppContext) {
         let both = [false, true];
@@ -1399,6 +1448,28 @@ mod tests {
                 }
             }
         }
+        for tone in footer_tones() {
+            for primary in both {
+                for via in both {
+                    for open in both {
+                        for more in 0..=panel_footer::MAX_MORE {
+                            let shown = tone.clone();
+                            let build = move || footer(shown.clone(), primary, more, via, open);
+                            let make = build.clone();
+                            let parts = probe::in_frame(cx, move |window, cx| {
+                                PanelFooter::parts(&make, window, cx).len()
+                            });
+                            let drawn = drawn_elements(cx, move || build().into_any_element());
+                            assert_eq!(
+                                drawn, parts,
+                                "footer, {tone:?}, first line: {primary}, more: {more}, \
+                                 connect first: {via}, menu open: {open}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The words of `code`, runs of letters, digits and underscores, each
@@ -1424,9 +1495,10 @@ mod tests {
     }
 
     /// `assemble` in the secret field, the ring and the footer puts the
-    /// elements `build` made into one another and does nothing else, so
-    /// every element `render` draws is one that `parts()` reads, and no
-    /// element gets a node, a role or a name on the way. Read through
+    /// elements `build` made into one another and does nothing else, so no
+    /// element gets a node, a role or a name on the way, and, with the
+    /// child count of `every_rendered_child_is_a_part`, every element
+    /// `render` draws is one that `parts()` reads. Read through
     /// `code_only`, its body may call `child`, `children`, `map`,
     /// `into_iter` and `into_any_element` on an element, read a field of
     /// `Built`, call the variants it matches and a closure of its own, and
