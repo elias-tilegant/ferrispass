@@ -2163,6 +2163,7 @@ dependencies = [
  "enigo",
  "flate2",
  "global-hotkey",
+ "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
