@@ -363,13 +363,14 @@ mod tests {
     }
 
     /// A selection past the end of the list, such as one kept from longer
-    /// results, selects no row and the list draws as it would without one,
-    /// in every build.
+    /// results, selects no row, and the list does not scroll for it: a
+    /// list of forty with the forty-sixth selected stays at its top.
     #[gpui::test]
     fn a_selection_past_the_end_selects_no_row(cx: &mut TestAppContext) {
+        const ROWS: usize = 40;
         let selected = probe::in_frame(cx, |window, cx| {
-            let list = list(3).selected(Some(5));
-            (0..3)
+            let list = list(ROWS).selected(Some(45));
+            (0..ROWS)
                 .map(|index| {
                     let row = list.row_at(index, window, cx);
                     probe::node(RenderOnce::render(row, window, cx))
@@ -378,15 +379,27 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         });
-        assert_eq!(selected, [Some(false); 3]);
-        let cx = probe::window(cx, |_, _| {
-            div()
-                .h(u(200.))
-                .child(list(3).selected(Some(5)))
-                .into_any_element()
+        assert_eq!(selected, [Some(false); ROWS]);
+
+        let built = Rc::new(RefCell::new(Vec::new()));
+        let seen = built.clone();
+        let cx = probe::window(cx, move |_, _| {
+            let seen = seen.clone();
+            let list = ResultList::new("results", text("Results"), ROWS, move |index, _, _| {
+                seen.borrow_mut().push(index);
+                row(index, ROWS)
+            })
+            .selected(Some(45));
+            div().h(u(200.)).child(list).into_any_element()
         });
+        built.borrow_mut().clear();
         redraw(cx);
-        assert!(cx.debug_bounds("fp-row").is_some(), "the rows are drawn");
+        let rows = built.borrow().clone();
+        assert!(rows.contains(&0), "the list stays at its top: {rows:?}");
+        assert!(
+            !rows.contains(&(ROWS - 1)),
+            "no scroll to the end: {rows:?}"
+        );
     }
 
     #[gpui::test]
