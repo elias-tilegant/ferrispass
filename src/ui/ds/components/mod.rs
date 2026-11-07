@@ -23,7 +23,9 @@
 //! `render` returns it, and its containers note how many children they
 //! hold, so the tests read each element, hidden and shown, with and
 //! without assistive technology, and find a child that is not on the list.
-//! The panel footer is built, listed and counted the same way.
+//! The panel footer is built, listed and counted the same way. The search
+//! group is built and listed the same way, without a count, so that a test
+//! reads the list it places for what is typed into the field.
 //!
 //! The panel footer is no node and takes no focus; the one node in it is
 //! the button that opens its menu. The panel hands what it says to
@@ -1294,10 +1296,14 @@ mod tests {
     /// The search group and the result list repeat nothing that is typed
     /// into the search field, which in the locked panel can be a password
     /// typed ahead. With the secret in the field, masked by the GPUI Kit
-    /// input or not, the node of the group, the list box and every row the
-    /// list draws hold no piece of it in their label, value, description,
-    /// tooltip, author id or placeholder. The field's own node is the Kit
-    /// input's, which holds the text as its value unless the input masks it.
+    /// input or not, every part `SearchGroup::parts` reads holds no piece of
+    /// it in its label, value, description, tooltip, author id or
+    /// placeholder: the node of the group as `render` returns it, and the
+    /// list box and every row of the list the group places, taken from the
+    /// same `build` that `render` uses. `assemble_only_places_parts` keeps
+    /// `assemble` from changing that list on the way. The field's own node
+    /// is the Kit input's, which holds the text as its value unless the
+    /// input masks it.
     #[gpui::test]
     fn no_secret_in_the_search_group_or_the_result_list(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -1333,26 +1339,24 @@ mod tests {
                         .masked(masked)
                         .default_value(SECRET)
                 });
-                let mut parts = Vec::new();
-                let list = results();
-                for index in 0..2 {
-                    let row = RenderOnce::render(list.row_at(index, window, cx), window, cx);
-                    parts.push(probe::part("row", row));
-                }
-                parts.push(probe::part("list", RenderOnce::render(list, window, cx)));
-                let field = TextField::new("query", &state, SharedString::new_static("Search"));
-                let group = SearchGroup::new(
-                    "search",
-                    SharedString::new_static("Search"),
-                    field,
-                    results(),
-                )
-                .description(SharedString::new_static("No matches."));
-                parts.push(probe::part("group", RenderOnce::render(group, window, cx)));
-                parts
+                let make = || {
+                    let field = TextField::new("query", &state, SharedString::new_static("Search"));
+                    SearchGroup::new(
+                        "search",
+                        SharedString::new_static("Search"),
+                        field,
+                        results(),
+                    )
+                    .description(SharedString::new_static("No matches."))
+                };
+                SearchGroup::parts(make, window, cx)
             });
             let names: Vec<_> = parts.iter().map(|part| part.name).collect();
-            assert_eq!(names, ["row", "row", "list", "group"], "every node is read");
+            assert_eq!(
+                names,
+                ["group", "frame", "row", "row", "list"],
+                "every node is read"
+            );
             found.extend(leaks(&format!("masked: {masked}"), &parts, &[SECRET], None));
         }
         assert!(
@@ -1583,11 +1587,13 @@ mod tests {
         words
     }
 
-    /// `assemble` in the secret field, the ring and the footer puts the
-    /// elements `build` made into one another and does nothing else, so no
-    /// element gets a node, a role or a name on the way, and, with the
-    /// child count of `every_rendered_child_is_a_part`, every element
-    /// `render` draws is one that `parts()` reads. Read through
+    /// `assemble` in the secret field, the ring, the footer and the search
+    /// group puts the elements `build` made into one another and does
+    /// nothing else, so no element gets a node, a role or a name on the
+    /// way, and the search group places the list `build` made, which its
+    /// `parts()` reads, as it is. With the child count of
+    /// `every_rendered_child_is_a_part`, every element the field, the ring
+    /// and the footer draw is one that `parts()` reads. Read through
     /// `code_only`, its body may call `child`, `children`, `map`,
     /// `into_iter` and `into_any_element` on an element, read a field of
     /// `Built`, call the variants it matches and a closure of its own, and
@@ -1603,7 +1609,7 @@ mod tests {
         // Each file, the names `assemble` binds there and the types it
         // names, and what it calls that is no method: the variants it
         // matches and its own closure.
-        let files: [(&str, &[&str], &[&str]); 3] = [
+        let files: [(&str, &[&str], &[&str]); 4] = [
             (
                 "secret_field.rs",
                 &["Shown", "Value", "shown", "text", "value"],
@@ -1621,6 +1627,7 @@ mod tests {
                 ],
                 &[],
             ),
+            ("search_group.rs", &[], &[]),
         ];
         let mut found = Vec::new();
         for (file, names, calls) in files {

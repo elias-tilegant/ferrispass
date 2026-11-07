@@ -19,6 +19,13 @@
 //! tracks it, and the Kit input tracks the field's handle too. The group's
 //! copy of the handle is no tab stop, so Tab and Shift-Tab reach the field
 //! once, as without the group.
+//!
+//! In the locked panel the field can hold a password typed ahead, which
+//! must not reach the group, the list or a row. Like the secret field, the
+//! group makes its elements in `build` and only puts them into one another
+//! in `assemble`. Under `cfg(test)`, `parts` reads the group's node off what
+//! `render` returns, and the list it places and that list's rows from the
+//! same `build` that `render` uses.
 
 use gpui::{
     App, Div, ElementId, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -66,6 +73,60 @@ impl SearchGroup {
         self.description = Some(description.into());
         self
     }
+
+    /// The group's elements, before `assemble` puts them in place. The
+    /// field and the list go on as the caller made them.
+    fn build(self, cx: &App) -> Built {
+        let focus = self.field.focus_handle(cx);
+        Built {
+            group: group(self.id, self.name, self.description, &focus)
+                .flex()
+                .flex_col()
+                .gap(u(dimension::SPACE_8))
+                .size_full(),
+            field: self.field,
+            frame: div().flex_1().min_h(px(0.)),
+            list: self.list,
+        }
+    }
+
+    /// Every element `render` builds from the group `make` returns, each
+    /// read as the tests read it: the group off the element `render`
+    /// returns, so whatever is set on it on the way counts too, the box
+    /// around the list, and the list box and every row of the list that
+    /// `build` hands to `assemble`. The field is left out: its node is the
+    /// Kit input's, which holds what is typed as its value unless the input
+    /// masks it. `make` builds the group once for its node and once for the
+    /// elements inside.
+    #[cfg(test)]
+    pub(super) fn parts(
+        make: impl Fn() -> Self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<super::probe::ComponentPart> {
+        use super::probe::part;
+        let group = part("group", RenderOnce::render(make(), window, cx));
+        // Every field by name, so an element added to `Built` does not
+        // compile until it is listed here. The group is read above.
+        let Built {
+            group: _,
+            field: _,
+            frame,
+            list,
+        } = make().build(cx);
+        let mut parts = vec![group, part("frame", frame)];
+        parts.extend(list.parts(window, cx));
+        parts
+    }
+}
+
+/// Every element the group builds: its own node, the field, the box that
+/// gives the list the room below the field, and the list.
+struct Built {
+    group: Stateful<Div>,
+    field: TextField,
+    frame: Div,
+    list: ResultList,
 }
 
 /// The group's own node: a group with its name and description that tracks
@@ -94,16 +155,17 @@ fn group(
     group
 }
 
+/// Puts what the group builds in place: the field, then the list in its box.
+fn assemble(built: Built) -> Stateful<Div> {
+    built
+        .group
+        .child(built.field)
+        .child(built.frame.child(built.list))
+}
+
 impl RenderOnce for SearchGroup {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let focus = self.field.focus_handle(cx);
-        group(self.id, self.name, self.description, &focus)
-            .flex()
-            .flex_col()
-            .gap(u(dimension::SPACE_8))
-            .size_full()
-            .child(self.field)
-            .child(div().flex_1().min_h(px(0.)).child(self.list))
+        assemble(self.build(cx))
     }
 }
 

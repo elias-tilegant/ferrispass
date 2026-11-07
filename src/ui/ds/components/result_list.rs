@@ -195,6 +195,25 @@ impl ResultList {
         )
     }
 
+    /// Every row of the list as the list draws it, then the list box as
+    /// `render` returns it, each read as the tests read it.
+    #[cfg(test)]
+    pub(super) fn parts(
+        self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<super::probe::ComponentPart> {
+        use super::probe::part;
+        let mut parts: Vec<_> = (0..self.count)
+            .map(|index| {
+                let row = self.row_at(index, window, cx);
+                part("row", RenderOnce::render(row, window, cx))
+            })
+            .collect();
+        parts.push(part("list", RenderOnce::render(self, window, cx)));
+        parts
+    }
+
     /// The rows in GPUI's `uniform_list`, which has no role and so writes
     /// no node: the rows' nodes are options of the list box around it.
     fn rows(&self, scroll: &UniformListScrollHandle) -> UniformList {
