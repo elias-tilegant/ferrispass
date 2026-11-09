@@ -1128,8 +1128,9 @@ mod tests {
     const CODE: &str = "739114";
     const NEXT_CODE: &str = "205881";
 
-    /// `secret` and the pieces of it that would give it away: all of it, and
-    /// its groups of three and of four, alone and in a row with spaces.
+    /// `secret` and the pieces of it that would give it away: all of it, its
+    /// groups of three and of four, alone and in a row with spaces, and every
+    /// two of its characters that stand side by side, wherever they start.
     fn giveaways(secret: &str) -> Vec<String> {
         let chars: Vec<char> = secret.chars().collect();
         let mut found = vec![secret.to_string()];
@@ -1145,6 +1146,7 @@ mod tests {
                     .filter(|group| group.chars().count() == size),
             );
         }
+        found.extend(chars.windows(2).map(|pair| pair.iter().collect::<String>()));
         found
     }
 
@@ -1191,15 +1193,29 @@ mod tests {
 
     /// Where `parts` hand any piece of `secrets` to assistive technology,
     /// other than `allowed`: the part, the property and the exact text that
-    /// may hold it.
+    /// may hold it. `quiet` are the same parts built without the secrets. A
+    /// piece counts where a text holds it more often than the same property
+    /// of the same part in `quiet`, the part of that name with as many of
+    /// that name before it, since two characters side by side also turn up
+    /// in plain words: "es" of the test secret in "expires", "20" of the
+    /// next code in "expires in 20 seconds".
     fn leaks(
         case: &str,
         parts: &[probe::ComponentPart],
+        quiet: &[probe::ComponentPart],
         secrets: &[&str],
         allowed: Option<(&str, &str, &str)>,
     ) -> Vec<String> {
         let mut found = Vec::new();
-        for part in parts {
+        for (index, part) in parts.iter().enumerate() {
+            let before = parts[..index]
+                .iter()
+                .filter(|other| other.name == part.name)
+                .count();
+            let same = quiet
+                .iter()
+                .filter(|other| other.name == part.name)
+                .nth(before);
             for (property, said) in part.texts() {
                 let Some(said) = said else {
                     continue;
@@ -1207,9 +1223,13 @@ mod tests {
                 if allowed == Some((part.name, property, said)) {
                     continue;
                 }
+                let plain = same
+                    .and_then(|same| same.texts().into_iter().find(|(name, _)| *name == property))
+                    .and_then(|(_, text)| text)
+                    .unwrap_or_default();
                 for secret in secrets {
                     for piece in giveaways(secret) {
-                        if said.contains(&piece) {
+                        if said.matches(&piece).count() > plain.matches(&piece).count() {
                             found.push(format!(
                                 "{case}: the {property} of the {} holds {piece:?}: {said:?}",
                                 part.name
@@ -1227,13 +1247,15 @@ mod tests {
     /// ring build, read one by one, the group and the timer as `render`
     /// returns them, holds neither the secret nor the code, nor a group of
     /// three or four of either, in its label, value, description, tooltip,
-    /// author id or placeholder: the field hidden
-    /// without and with assistive technology and revealed without it, in
-    /// every copy state, with and without its handlers, and the ring masked
-    /// without and with assistive technology and unmasked without it, with
-    /// and without the next code. Revealed with assistive technology, the
-    /// secret is the value of the value button and nothing else, and the
-    /// code the value of the timer; the next code never reaches the tree.
+    /// author id or placeholder, nor two of their characters side by side
+    /// more often than the same part built without them (see `leaks`): the
+    /// field hidden without and with assistive technology and revealed
+    /// without it, in every copy state, with and without its handlers, and
+    /// the ring masked without and with assistive technology and unmasked
+    /// without it, with and without the next code. Revealed with assistive
+    /// technology, the secret is the value of the value button and nothing
+    /// else, and the code the value of the timer; the next code never
+    /// reaches the tree.
     #[gpui::test]
     fn no_secret_in_ax_tree(cx: &mut gpui::TestAppContext) {
         let mut found = Vec::new();
@@ -1241,8 +1263,11 @@ mod tests {
         for (revealed, assistive) in [(false, false), (false, true), (true, false), (true, true)] {
             for copied in CopyState::ALL {
                 for handlers in [true, false] {
-                    let parts = probe::in_frame(cx, move |window, cx| {
-                        field(revealed, assistive, copied, handlers).parts(window, cx)
+                    let (parts, quiet) = probe::in_frame(cx, move |window, cx| {
+                        (
+                            field(revealed, assistive, copied, handlers).parts(window, cx),
+                            empty_field(revealed, assistive, copied, handlers).parts(window, cx),
+                        )
                     });
                     let case = format!(
                         "field, revealed: {revealed}, assistive: {assistive}, {copied:?}, handlers: {handlers}"
@@ -1256,14 +1281,17 @@ mod tests {
                         assert!(holds, "{case}: the value button holds the secret");
                         shown += 1;
                     }
-                    found.extend(leaks(&case, &parts, &[SECRET], allowed));
+                    found.extend(leaks(&case, &parts, &quiet, &[SECRET], allowed));
                 }
             }
         }
         for (masked, assistive) in [(true, false), (true, true), (false, false), (false, true)] {
             for remaining in [18, 3] {
-                let parts = probe::in_frame(cx, move |window, cx| {
-                    ring(remaining, masked, assistive).parts(window, cx)
+                let (parts, quiet) = probe::in_frame(cx, move |window, cx| {
+                    (
+                        ring(remaining, masked, assistive).parts(window, cx),
+                        empty_ring(remaining, masked, assistive).parts(window, cx),
+                    )
                 });
                 let case =
                     format!("ring, masked: {masked}, assistive: {assistive}, {remaining} s left");
@@ -1282,7 +1310,7 @@ mod tests {
                         "{case}: the next code shows"
                     );
                 }
-                found.extend(leaks(&case, &parts, &[CODE, NEXT_CODE], allowed));
+                found.extend(leaks(&case, &parts, &quiet, &[CODE, NEXT_CODE], allowed));
             }
         }
         assert_eq!(shown, 3 + 2, "the cases that may show a secret");
@@ -1296,14 +1324,15 @@ mod tests {
     /// The search group and the result list repeat nothing that is typed
     /// into the search field, which in the locked panel can be a password
     /// typed ahead. With the secret in the field, masked by the GPUI Kit
-    /// input or not, every part `SearchGroup::parts` reads holds no piece of
-    /// it in its label, value, description, tooltip, author id or
-    /// placeholder: the node of the group as `render` returns it, and the
-    /// list box and every row of the list the group places, taken from the
-    /// same `build` that `render` uses. `assemble_only_places_parts` keeps
-    /// `assemble` from changing that list on the way. The field's own node
-    /// is the Kit input's, which holds the text as its value unless the
-    /// input masks it.
+    /// input or not, no part `SearchGroup::parts` reads holds a piece of it
+    /// in its label, value, description, tooltip, author id or placeholder
+    /// more often than the same part with nothing typed (see `leaks`): the
+    /// node of the group as `render` returns it, and the list box and every
+    /// row of the list the group places, taken from the same `build` that
+    /// `render` uses. `assemble_only_places_parts` keeps `assemble` from
+    /// changing that list on the way. The field's own node is the Kit
+    /// input's, which holds the text as its value unless the input masks
+    /// it.
     #[gpui::test]
     fn no_secret_in_the_search_group_or_the_result_list(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -1331,25 +1360,38 @@ mod tests {
             .selected(Some(0))
         }
 
+        /// The parts of a search group with `typed` in its field.
+        fn read(
+            typed: &'static str,
+            masked: bool,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> Vec<probe::ComponentPart> {
+            let state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(masked)
+                    .default_value(typed)
+            });
+            let make = || {
+                let field = TextField::new("query", &state, SharedString::new_static("Search"));
+                SearchGroup::new(
+                    "search",
+                    SharedString::new_static("Search"),
+                    field,
+                    results(),
+                )
+                .description(SharedString::new_static("No matches."))
+            };
+            SearchGroup::parts(make, window, cx)
+        }
+
         let mut found = Vec::new();
         for masked in [true, false] {
-            let parts = probe::in_frame(cx, move |window, cx| {
-                let state = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .masked(masked)
-                        .default_value(SECRET)
-                });
-                let make = || {
-                    let field = TextField::new("query", &state, SharedString::new_static("Search"));
-                    SearchGroup::new(
-                        "search",
-                        SharedString::new_static("Search"),
-                        field,
-                        results(),
-                    )
-                    .description(SharedString::new_static("No matches."))
-                };
-                SearchGroup::parts(make, window, cx)
+            let (parts, quiet) = probe::in_frame(cx, move |window, cx| {
+                (
+                    read(SECRET, masked, window, cx),
+                    read("", masked, window, cx),
+                )
             });
             let names: Vec<_> = parts.iter().map(|part| part.name).collect();
             assert_eq!(
@@ -1357,7 +1399,13 @@ mod tests {
                 ["group", "frame", "row", "row", "list"],
                 "every node is read"
             );
-            found.extend(leaks(&format!("masked: {masked}"), &parts, &[SECRET], None));
+            found.extend(leaks(
+                &format!("masked: {masked}"),
+                &parts,
+                &quiet,
+                &[SECRET],
+                None,
+            ));
         }
         assert!(
             found.is_empty(),
