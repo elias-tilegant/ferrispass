@@ -17,6 +17,7 @@ use super::*;
 use crate::app::AppSettings;
 use crate::app::BiometricAttempt;
 use crate::app::services::clipboard::ClipboardService;
+use crate::app::unlock::locked_panel::{self, Kind};
 use crate::app::unlock::typed_ahead::TypedAhead;
 use crate::biometric::memory::InMemoryBiometricStore;
 use crate::biometric::registry::{BiometricEnrollment, BiometricRegistry};
@@ -32,7 +33,7 @@ use gpui_component::Root;
 use keepass::config::{DatabaseConfig, KdfConfig};
 use keepass::db::fields;
 use keepass::{Database, DatabaseKey};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -1080,5 +1081,109 @@ fn the_panel_prompt_takes_the_mac_password_only_when_allowed(cx: &mut TestAppCon
         asked,
         [false, true],
         "the panel's prompt did not take the Mac password as it was told, not and then yes"
+    );
+}
+
+/// An `on_answered` that sets `flag`.
+fn flagging(flag: &Rc<Cell<bool>>) -> OnAnswered {
+    let flag = flag.clone();
+    Box::new(move |_| flag.set(true))
+}
+
+/// Runs the executor one task at a time until `answered` is set. The step
+/// that sets it is the one that took macOS's answer; an open it spawned has
+/// not run yet when this returns.
+fn tick_until_answered(cx: &mut TestAppContext, answered: &Cell<bool>) {
+    while !answered.get() {
+        assert!(cx.executor().tick(), "the prompt was never answered");
+    }
+}
+
+/// A vault file on the unlock screen, enrolled, the sensor in reach and the
+/// header read: the panel can unlock it, and Touch ID's password opens it.
+fn openable(cx: &mut TestAppContext, dir: &Path) -> Vault {
+    let vault = waiting(cx, &vault_file(dir), InMemoryBiometricStore::available());
+    header_read(cx, &vault, None);
+    vault
+}
+
+/// Starts the panel's attempt with Return. `on_answered` sets `answered`.
+fn panel_unlocks(
+    cx: &mut TestAppContext,
+    vault: &Vault,
+    answered: &Rc<Cell<bool>>,
+    answers: &Answers,
+) {
+    let token = confirm(PanelTrigger::ReturnKey).expect("Return confirms");
+    let state = vault.state.clone();
+    let (on_answered, on_done) = (flagging(answered), noting(answers, "unlock"));
+    cx.update(|cx| unlock_from_panel(token, state, false, on_answered, on_done, cx))
+        .expect("the attempt starts");
+}
+
+/// While an attempt is under way, from the prompt until its vault is open,
+/// neither Return nor the unlock button starts another one, and `kind` tells
+/// the panel so. A second prompt would make the first attempt stale; the
+/// first answer would then end the second attempt too, and the vault would
+/// stay locked after two prompts answered with a finger. The open is held by
+/// running the executor one task at a time: the step that takes macOS's
+/// answer spawns the open, and the test confirms again before it runs.
+#[gpui::test]
+fn the_panel_starts_no_second_prompt_while_one_is_under_way(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("the_panel_starts_no_second_prompt_while_one_is_under_way") {
+        return;
+    }
+    let mut seen = Vec::new();
+    let mut wanted = Vec::new();
+    for when in ["while the prompt is up", "while the vault opens"] {
+        let dir = tempfile::tempdir().expect("a folder for the vault");
+        let vault = openable(cx, dir.path());
+        let answers = Answers::default();
+        let answered = Rc::new(Cell::new(false));
+
+        panel_unlocks(cx, &vault, &answered, &answers);
+        if when == "while the vault opens" {
+            tick_until_answered(cx, &answered);
+        }
+        let open_before = open_path(cx, &vault.state);
+        let kind = vault
+            .state
+            .read_with(cx, |state, _| locked_panel::kind(state, false));
+        let mut again = Vec::new();
+        for trigger in [PanelTrigger::ReturnKey, PanelTrigger::UnlockButtonClick] {
+            let token = confirm(trigger).expect("confirms");
+            let state = vault.state.clone();
+            let on_done = noting(&answers, "again");
+            let started = cx
+                .update(|cx| unlock_from_panel(token, state, false, Box::new(|_| {}), on_done, cx));
+            again.push((trigger, started.is_some()));
+        }
+        cx.run_until_parked();
+
+        seen.push((
+            when,
+            open_before,
+            kind,
+            again,
+            vault.store.retrieves(),
+            answers.borrow().clone(),
+            open_path(cx, &vault.state),
+        ));
+        wanted.push((
+            when,
+            None,
+            Kind::Unlocking,
+            vec![
+                (PanelTrigger::ReturnKey, false),
+                (PanelTrigger::UnlockButtonClick, false),
+            ],
+            1,
+            vec![("unlock", Answer::Opened(vault.path.clone()))],
+            Some(vault.path.clone()),
+        ));
+    }
+    assert_eq!(
+        seen, wanted,
+        "a second prompt went up while the first attempt was under way"
     );
 }

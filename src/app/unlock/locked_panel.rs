@@ -1,9 +1,12 @@
 //! What the quick access panel offers while it is locked, and when it takes
 //! Return.
 //!
-//! [`kind`] sorts the locked panel into one of four cases, from the state
+//! [`kind`] sorts the locked panel into one of five cases, from the state
 //! alone:
 //!
+//! - An unlock is under way: Touch ID waits for its answer, or the vault is
+//!   being opened. Return and the unlock button start nothing until it is
+//!   done; the panel's way into Touch ID refuses them as well.
 //! - Nothing is set up: no vault waits on the unlock screen and there is no
 //!   recent one.
 //! - The vault's file is missing.
@@ -29,7 +32,7 @@ use std::time::{Duration, Instant};
 use crate::app::AppState;
 use crate::app::kinds::EntryKind;
 
-use super::touch_id::cost_question_settled;
+use super::touch_id::{cost_question_settled, unlock_under_way};
 
 /// What the locked panel offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +47,11 @@ pub enum Kind {
     NotSetUp,
     /// The vault's file is not where it was.
     FileMissing(PathBuf),
+    /// An unlock is under way: Touch ID waits for its answer, or the vault
+    /// is being opened. Return and the unlock button start nothing until it
+    /// is done, and [`unlock_from_panel`](super::touch_id::unlock_from_panel)
+    /// refuses too.
+    Unlocking,
 }
 
 /// The case the locked panel is in. The vault is the one waiting on the
@@ -55,6 +63,9 @@ pub enum Kind {
 /// Meant for a locked app: with a vault open, the panel is not locked and
 /// does not ask.
 pub fn kind(state: &AppState, allow_device_passcode: bool) -> Kind {
+    if unlock_under_way(state) {
+        return Kind::Unlocking;
+    }
     let Some(path) = state
         .pending_unlock_path()
         .or_else(|| state.recents().first().map(|recent| recent.path.clone()))
@@ -91,7 +102,8 @@ pub const RETURN_SETTLE: Duration = Duration::from_millis(300);
 pub struct ReturnGate {
     /// When the results on screen were drawn; `None` while there are none.
     pub results_drawn_at: Option<Instant>,
-    /// Whether every vault the panel searches has finished unlocking.
+    /// Whether every vault the panel searches has finished unlocking. One
+    /// for which [`kind`] says [`Kind::Unlocking`] has not.
     pub all_vaults_done: bool,
     /// Whether the results are one exact match in a vault that was already
     /// open, and not a production system. Set it from
@@ -128,10 +140,10 @@ mod tests {
     use crate::app::kinds::classify;
     use crate::biometric::memory::InMemoryBiometricStore;
     use crate::biometric::registry::{BiometricEnrollment, BiometricRegistry};
-    use crate::biometric::{BiometricStore, EnrollmentId};
+    use crate::biometric::{BiometricError, BiometricStore, EnrollmentId};
     use crate::domain::VaultEntry;
     use crate::keepass::limits::{Argon2Variant, KdfCost};
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, Entity, TestAppContext};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -153,6 +165,17 @@ mod tests {
         header: Header,
         allow_device_passcode: bool,
     ) -> Kind {
+        let state = locked_state(cx, path, enrolled, sensor, header);
+        state.read_with(cx, |state, _| kind(state, allow_device_passcode))
+    }
+
+    fn locked_state(
+        cx: &mut TestAppContext,
+        path: &Path,
+        enrolled: bool,
+        sensor: bool,
+        header: Header,
+    ) -> Entity<AppState> {
         let store: Arc<dyn BiometricStore> = Arc::new(if sensor {
             InMemoryBiometricStore::available()
         } else {
@@ -169,7 +192,7 @@ mod tests {
                 },
             );
         }
-        let state = cx.new(|cx| {
+        cx.new(|cx| {
             let mut state = AppState::with_biometric(store, registry);
             state.request_password(path.to_path_buf(), cx);
             let cost = match header {
@@ -185,8 +208,7 @@ mod tests {
             let check = state.begin_kdf_check(cx);
             state.finish_kdf_check(check, path.to_path_buf(), cost, cx);
             state
-        });
-        state.read_with(cx, |state, _| kind(state, allow_device_passcode))
+        })
     }
 
     #[gpui::test]
@@ -274,6 +296,37 @@ mod tests {
                 "case {index}"
             );
         }
+    }
+
+    /// While Touch ID waits for its answer, and while the vault is being
+    /// opened, the locked panel is unlocking. A cancelled prompt is not.
+    #[gpui::test]
+    fn the_locked_panel_says_when_an_unlock_is_under_way(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().expect("a folder for the vault");
+        let vault = dir.path().join("nordhafen.kdbx");
+        std::fs::write(&vault, b"not opened here").expect("a vault file");
+        let ready = Kind::TouchId {
+            device_password: false,
+        };
+        let state = locked_state(cx, &vault, true, true, Header::Fine);
+        let now = |cx: &mut TestAppContext| state.read_with(cx, |state, _| kind(state, false));
+        assert_eq!(now(cx), ready);
+
+        let generation = state
+            .update(cx, |state, cx| state.begin_biometric_unlock(cx))
+            .expect("an attempt starts")
+            .generation;
+        assert_eq!(now(cx), Kind::Unlocking, "while Touch ID was up");
+
+        let path = vault.clone();
+        state.update(cx, |state, cx| {
+            state.fail_biometric_unlock(path, generation, BiometricError::UserCancelled, cx);
+        });
+        assert_eq!(now(cx), ready, "after the prompt was cancelled");
+
+        let path = vault.clone();
+        state.update(cx, |state, cx| state.begin_open(path, cx));
+        assert_eq!(now(cx), Kind::Unlocking, "while the vault was being opened");
     }
 
     fn drawn_at(at: Instant) -> ReturnGate {

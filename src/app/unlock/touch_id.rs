@@ -23,7 +23,10 @@
 //!   a new confirmation. There is no second attempt either: a withdrawn
 //!   prompt comes back as [`Answer::Interrupted`] and nothing else happens.
 //!   And the panel never answers a cost question: while one is open, or the
-//!   vault's header has not been read yet, no attempt starts.
+//!   vault's header has not been read yet, no attempt starts. Nor does one
+//!   start while an unlock is under way, from the prompt until the vault is
+//!   open or the attempt has ended: a Return or a click then starts nothing,
+//!   and `locked_panel::kind` says `Unlocking`.
 //! - As soon as macOS has answered, before the vault is opened and before
 //!   the answer is applied, `on_answered` runs on the foreground. The Touch
 //!   ID dialog takes key focus from the panel and macOS does not give it
@@ -52,7 +55,7 @@ use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity};
 
-use crate::app::{AppState, BiometricLaunch, VaultStatus};
+use crate::app::{AppState, BiometricAttempt, BiometricLaunch, VaultStatus};
 use crate::biometric::{BiometricError, BiometricResult, RetrieveOptions};
 use crate::keepass::KeePassRepository;
 use crate::ui::errors;
@@ -183,9 +186,11 @@ pub fn unlock_from_lock_screen(
 /// The quick access panel's Touch ID unlock, for the token a confirmation
 /// gave. `on_answered` runs as soon as macOS has answered, before the vault
 /// is opened and before the answer is applied: the panel makes itself key
-/// there. `on_done` gets the answer once it is applied. Returns the generation of the attempt, or
-/// `None` when none started (no vault with an enrolment on the unlock screen,
-/// a cost question open, or the vault's header not read yet).
+/// there. `on_done` gets the answer once it is applied. Returns the
+/// generation of the attempt, or `None` when none started: no vault with an
+/// enrolment on the unlock screen, a cost question open, the vault's header
+/// not read yet, or an unlock already under way. A refused token is used up
+/// all the same, and neither callback runs.
 pub fn unlock_from_panel(
     token: Confirmed,
     state: Entity<AppState>,
@@ -216,7 +221,13 @@ fn run(
 ) -> Option<u64> {
     // The panel never answers a cost question: the lock screen's click
     // counts as allowing the cost it shows, a Return in the panel must not.
-    if origin == UnlockOrigin::Panel && !cost_question_settled(state.read(cx)) {
+    // Nor does it start a second attempt while one is under way: the new
+    // generation would make the first answer stale, that answer would end
+    // the new attempt too, and the vault would stay locked after two
+    // prompts answered with a finger.
+    if origin == UnlockOrigin::Panel
+        && (!cost_question_settled(state.read(cx)) || unlock_under_way(state.read(cx)))
+    {
         return None;
     }
     // Only valid while a vault with an enrolment waits on the unlock screen;
@@ -318,6 +329,14 @@ fn take_answer(
 /// and has no cost left to confirm.
 pub(super) fn cost_question_settled(state: &AppState) -> bool {
     state.kdf_check_settled_for_pending() && state.kdf_confirmation_for_pending().is_none()
+}
+
+/// Whether an unlock is under way: a Touch ID attempt waits for its answer
+/// or for its vault to open (the attempt stays in flight until the answer is
+/// applied), or the vault is being opened with its password.
+pub(super) fn unlock_under_way(state: &AppState) -> bool {
+    matches!(state.biometric_attempt(), BiometricAttempt::InFlight { .. })
+        || matches!(state.vault_status(), VaultStatus::Opening { .. })
 }
 
 /// Applies the answer to the state, or drops it when it is stale.
