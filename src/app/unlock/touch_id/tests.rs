@@ -650,7 +650,7 @@ fn the_typed_query_never_reaches_last_used(cx: &mut TestAppContext) {
     for c in "nhq".chars() {
         typed.push(c);
     }
-    let query = typed.take_query();
+    let query = typed.take_query(std::time::SystemTime::now());
     state.update(cx, |state, cx| state.set_search_query(query.as_str(), cx));
     assert!(
         last_used(cx).is_empty(),
