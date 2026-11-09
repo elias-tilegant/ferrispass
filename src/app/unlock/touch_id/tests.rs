@@ -1187,3 +1187,124 @@ fn the_panel_starts_no_second_prompt_while_one_is_under_way(cx: &mut TestAppCont
         "a second prompt went up while the first attempt was under way"
     );
 }
+
+/// How the user ends an attempt before its answer is applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MoveOn {
+    /// The vault is locked: the auto-lock, or the lock command.
+    Lock,
+    /// Another vault is asked for and waits on the unlock screen.
+    AnotherVault,
+}
+
+impl MoveOn {
+    fn other(vault: &Vault) -> PathBuf {
+        vault.path.with_file_name("elbe.kdbx")
+    }
+
+    fn now(self, cx: &mut TestAppContext, vault: &Vault) {
+        let other = Self::other(vault);
+        vault.state.update(cx, |state, cx| match self {
+            MoveOn::Lock => assert!(state.lock_vault(cx), "the lock waited for a save"),
+            MoveOn::AnotherVault => state.request_password(other, cx),
+        });
+    }
+
+    /// The vault on the unlock screen after that.
+    fn waiting_after(self, vault: &Vault) -> Option<PathBuf> {
+        match self {
+            MoveOn::Lock => None,
+            MoveOn::AnotherVault => Some(Self::other(vault)),
+        }
+    }
+}
+
+/// The open attempts so far and the vault on the unlock screen.
+fn unlock_screen(cx: &mut TestAppContext, vault: &Vault) -> (u64, Option<PathBuf>) {
+    vault.state.read_with(cx, |state, _| {
+        (state.open_attempt(), state.pending_unlock_path())
+    })
+}
+
+/// An attempt the user ended while the prompt was up, by locking the vault
+/// or asking for another one, gets its answer as stale in the step that
+/// takes it: the password never goes on to the open. Had it gone on,
+/// `on_done` would come only after the open, in a later step.
+#[gpui::test]
+fn a_stale_password_never_goes_on_to_the_open(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("a_stale_password_never_goes_on_to_the_open") {
+        return;
+    }
+    let mut seen = Vec::new();
+    let mut wanted = Vec::new();
+    for how in [MoveOn::Lock, MoveOn::AnotherVault] {
+        let dir = tempfile::tempdir().expect("a folder for the vault");
+        let vault = openable(cx, dir.path());
+        let answers = Answers::default();
+        let answered = Rc::new(Cell::new(false));
+
+        panel_unlocks(cx, &vault, &answered, &answers);
+        // The user moves on while the prompt is up, and then answers it.
+        how.now(cx, &vault);
+        tick_until_answered(cx, &answered);
+        let in_that_step = answers.borrow().clone();
+        cx.run_until_parked();
+
+        seen.push((
+            how,
+            in_that_step,
+            answers.borrow().clone(),
+            open_path(cx, &vault.state),
+            unlock_screen(cx, &vault),
+        ));
+        wanted.push((
+            how,
+            vec![("unlock", Answer::Stale)],
+            vec![("unlock", Answer::Stale)],
+            None,
+            (0, how.waiting_after(&vault)),
+        ));
+    }
+    assert_eq!(seen, wanted, "a stale password went on to the open");
+}
+
+/// An attempt the user ended while its vault was being opened, by locking
+/// the vault or asking for another one, opens nothing once the open is done.
+#[gpui::test]
+fn an_attempt_ended_while_the_vault_opens_opens_nothing(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("an_attempt_ended_while_the_vault_opens_opens_nothing") {
+        return;
+    }
+    let mut seen = Vec::new();
+    let mut wanted = Vec::new();
+    for how in [MoveOn::Lock, MoveOn::AnotherVault] {
+        let dir = tempfile::tempdir().expect("a folder for the vault");
+        let vault = openable(cx, dir.path());
+        let answers = Answers::default();
+        let answered = Rc::new(Cell::new(false));
+
+        panel_unlocks(cx, &vault, &answered, &answers);
+        // macOS answers with the password and the open is spawned. The user
+        // moves on before it is done.
+        tick_until_answered(cx, &answered);
+        let held = answers.borrow().is_empty();
+        how.now(cx, &vault);
+        cx.run_until_parked();
+
+        seen.push((
+            how,
+            held,
+            answers.borrow().clone(),
+            open_path(cx, &vault.state),
+            unlock_screen(cx, &vault),
+        ));
+        wanted.push((
+            how,
+            true,
+            vec![("unlock", Answer::Stale)],
+            None,
+            (0, how.waiting_after(&vault)),
+        ));
+    }
+    assert_eq!(seen, wanted, "an attempt the user ended opened its vault");
+}

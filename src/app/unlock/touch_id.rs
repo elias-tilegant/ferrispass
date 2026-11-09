@@ -38,11 +38,14 @@
 //!
 //! The rules both share:
 //!
-//! - An answer from an attempt that a newer one replaced (its generation no
-//!   longer matches) opens nothing and ends the attempt in flight
-//!   ([`Answer::Stale`]). That is checked when the answer comes, so a stale
-//!   password never goes on to the open, and again once the open is done,
-//!   for an attempt replaced while the vault was being opened.
+//! - An answer from an attempt that a newer one replaced, or that ended
+//!   because the vault was locked or another vault was asked for (its
+//!   generation no longer matches), opens nothing and ends the attempt in
+//!   flight ([`Answer::Stale`]). That is checked when the answer comes, so a
+//!   stale password never goes on to the open
+//!   (`a_stale_password_never_goes_on_to_the_open`), and again once the open
+//!   is done, for an attempt that ended while the vault was being opened
+//!   (`an_attempt_ended_while_the_vault_opens_opens_nothing`).
 //! - The flow runs in a task this module detaches. Nobody holds a handle, so
 //!   no caller can cancel an unlock by dropping something, and neither the
 //!   shell nor the panel needs a field for it. The functions return only the
