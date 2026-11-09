@@ -158,7 +158,12 @@ impl TypedAhead {
 
     /// Removes the last character. Its bytes stay in the spare capacity
     /// until the buffer is wiped or dropped, which overwrites all of it.
+    /// Like [`TypedAhead::push`], does nothing once the buffer is wiped, or
+    /// while the panel has let go of secure event input.
     pub fn backspace(&mut self) {
+        if self.wiped || self.released {
+            return;
+        }
         self.text.pop();
     }
 
@@ -644,6 +649,35 @@ mod tests {
         buffer.push('x');
         assert!(buffer.is_empty(), "a key went in without secure input");
         assert!(!refusing.held());
+    }
+
+    /// Backspace is a key like any other: while the panel has let go of
+    /// secure input it changes nothing, and once secure input is back it
+    /// takes the last character. A wiped buffer takes no key at all.
+    #[gpui::test]
+    fn backspace_takes_no_key_while_released_or_wiped(cx: &mut TestAppContext) {
+        install(cx, FakeApi::new());
+        let mut buffer = typed(cx, "nhq");
+        let start = buffer.started.expect("the first key started the clock");
+
+        buffer.release_secure_input();
+        buffer.backspace();
+        assert_eq!(buffer.len(), 3, "a backspace went in without secure input");
+
+        cx.update(|cx| buffer.rearm_secure_input(cx))
+            .expect("secure input again");
+        buffer.backspace();
+        assert_eq!(buffer.len(), 2, "with secure input back, backspace works");
+        assert_eq!(
+            buffer.take_query(start + Duration::from_secs(29)).as_str(),
+            "nh"
+        );
+
+        let mut wiped = typed(cx, "nhq");
+        wiped.wipe();
+        wiped.backspace();
+        wiped.push('x');
+        assert!(wiped.is_empty(), "a wiped buffer took a key");
     }
 
     #[gpui::test]
