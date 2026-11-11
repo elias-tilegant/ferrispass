@@ -14,7 +14,9 @@
 //!
 //! 1. The targets are checked. Each is a `u32` from the command line,
 //!    converted to `c_int` with `try_from`, from 3 to 255, and no two are the
-//!    same; 0, 1 and 2 are the program's standard streams.
+//!    same; 0, 1 and 2 are the program's standard streams. The numbers the
+//!    program must not get (step 5) are converted the same way and have to
+//!    be 3 or above.
 //! 2. One pipe per target, from `std::io::pipe`. Both ends are close-on-exec.
 //!    On macOS the standard library sets that flag right after `pipe`, so a
 //!    program another thread starts in between would keep both ends. Nothing
@@ -35,7 +37,9 @@
 //!    exist look started.
 //! 5. The spawn runs a `pre_exec` closure in the child, between fork and exec:
 //!    for each target, `dup2(copy, target)`, then `close(copy)` if the copy is
-//!    not the target. `dup2` leaves close-on-exec off the target, so the
+//!    not the target. After that it closes each number the program must not
+//!    get, unless the number is also a target, where `dup2` has already put
+//!    the program's pipe. `dup2` leaves close-on-exec off the target, so the
 //!    program keeps it across exec; the copies, the write ends and the held
 //!    `/dev/null` descriptors all close at exec. A failed `dup2` returns its
 //!    errno through `io::Error::last_os_error`, the spawn fails with it and the
@@ -52,6 +56,15 @@
 //!    spawn, each pipe on its own thread, so a secret larger than the pipe
 //!    buffer (64 KiB on macOS) does not block before the program reads.
 //! 8. [`RunningChild::wait`] waits for the program, then for the writers.
+//!
+//! The numbers the program must not get are descriptors this process
+//! inherited without close-on-exec, which the program would otherwise inherit
+//! in turn: for `run`, the one `--master-password-fd` named, which a program
+//! could seek back to the start and read again. The caller keeps each of them
+//! open until the spawn has returned. While a number is open here, nothing
+//! the steps above open can get it: no copy from step 3, no `/dev/null` from
+//! step 4 and no descriptor of `Command::spawn`'s own. So closing that number
+//! in the child closes the inherited descriptor and nothing else.
 //!
 //! This process holds each secret only in a `Zeroizing` buffer, which the
 //! writer wipes when it is done. A write that stops early, because the
@@ -219,12 +232,22 @@ pub fn check_targets(targets: impl IntoIterator<Item = u32>) -> Result<(), Secre
 }
 
 /// Starts `cmd` with each secret on a pipe whose read end the program has as
-/// the given descriptor number. The steps are in the module header.
+/// the given descriptor number, and without the descriptors numbered in
+/// `close_in_child`. The steps are in the module header.
+///
+/// `close_in_child` is for descriptors this process inherited without
+/// close-on-exec and must not pass on, such as the one the master password
+/// was read from. Each of them that is not also a target has to stay open in
+/// this process until this returns, so that nothing this function opens can
+/// take its number. A number that is also a target stays open in the
+/// program, which gets its secret there.
 pub fn spawn_with_secret_fds(
     cmd: Command,
     secrets: Vec<(u32, Zeroizing<Vec<u8>>)>,
+    close_in_child: &[u32],
 ) -> Result<RunningChild, SecretFdError> {
     check_targets(secrets.iter().map(|(target, _)| *target))?;
+    closable(close_in_child)?;
     let mut pipes = Vec::with_capacity(secrets.len());
     for (target, secret) in secrets {
         let (reader, writer) =
@@ -236,7 +259,7 @@ pub fn spawn_with_secret_fds(
             secret,
         });
     }
-    spawn(cmd, pipes)
+    spawn(cmd, pipes, close_in_child)
 }
 
 struct Pipe {
@@ -283,8 +306,32 @@ fn bounds(targets: impl IntoIterator<Item = u32>) -> Result<Bounds, SecretFdErro
     })
 }
 
-fn spawn(mut cmd: Command, pipes: Vec<Pipe>) -> Result<RunningChild, SecretFdError> {
+/// The numbers the program must not get, as step 1 says: converted with
+/// `try_from` and 3 or above, since the child must not close one of the
+/// program's standard streams. A number too large for a `c_int` cannot be a
+/// descriptor and is refused as a bad one.
+fn closable(close_in_child: &[u32]) -> Result<Vec<c_int>, SecretFdError> {
+    close_in_child
+        .iter()
+        .map(|&given| {
+            let number = c_int::try_from(given).map_err(|_| {
+                SecretFdError::Setup(Cause::of(&io::Error::from_raw_os_error(libc::EBADF)))
+            })?;
+            if number < LOWEST_TARGET {
+                return Err(SecretFdError::BelowThree(given));
+            }
+            Ok(number)
+        })
+        .collect()
+}
+
+fn spawn(
+    mut cmd: Command,
+    pipes: Vec<Pipe>,
+    close_in_child: &[u32],
+) -> Result<RunningChild, SecretFdError> {
     let bounds = bounds(pipes.iter().map(|pipe| pipe.target))?;
+    let close_in_child = closable(close_in_child)?;
 
     // Step 3: every read end moves above the targets.
     let mut copies: Vec<(OwnedFd, c_int)> = Vec::with_capacity(pipes.len());
@@ -303,22 +350,34 @@ fn spawn(mut cmd: Command, pipes: Vec<Pipe>) -> Result<RunningChild, SecretFdErr
     let held =
         hold_up_to(bounds.highest).map_err(|error| SecretFdError::Setup(Cause::of(&error)))?;
 
-    // Step 5. Only numbers go into the closure; the vector is built here, in
-    // this process, and the child only reads it.
+    // Step 5. Only numbers go into the closure; the vectors are built here,
+    // in this process, and the child only reads them.
     let pairs: Vec<(c_int, c_int)> = copies
         .iter()
         .map(|(copy, target)| (copy.as_raw_fd(), *target))
         .collect();
+    // A number that is also a target holds the program's pipe once the
+    // `dup2` loop has run, so it stays.
+    let withheld: Vec<c_int> = close_in_child
+        .into_iter()
+        .filter(|number| pairs.iter().all(|&(_, target)| target != *number))
+        .collect();
     // SAFETY: `pre_exec` runs the closure in the child after fork, where only
-    // async-signal-safe calls are allowed. The closure reads `pairs`, which
-    // was allocated before the fork and is not changed, and calls `dup2` and
-    // `close` on numbers from it, and `io::Error::last_os_error` when `dup2`
-    // fails; none of them allocates or takes a lock. Each copy is open in the
-    // parent until the spawn has returned, so it is open in the child, and
-    // each target is a valid descriptor number from 3 to 255. `close` only
-    // touches a copy, never a target, a standard stream or a descriptor of
-    // `Command`'s own: step 4 put those above every target, and the copies
-    // are above every target too, but distinct from them by number.
+    // async-signal-safe calls are allowed. The closure reads `pairs` and
+    // `withheld`, which were allocated before the fork and are not changed,
+    // and calls `dup2` and `close` on numbers from them, and
+    // `io::Error::last_os_error` when `dup2` fails; none of them allocates or
+    // takes a lock. Each copy is open in the parent until the spawn has
+    // returned, so it is open in the child, and each target is a valid
+    // descriptor number from 3 to 255. `close` never touches a target, a
+    // standard stream or a descriptor of `Command`'s own. It closes either a
+    // copy, which is above every target and open in the parent alongside
+    // `Command`'s descriptors, so it has a number of its own; or a number
+    // from `withheld`, which is 3 or above and no target, and which the
+    // caller keeps open in the parent until the spawn has returned, so no
+    // copy, no held `/dev/null` descriptor and no descriptor of `Command`'s
+    // own can have that number: in the child it is the descriptor this
+    // process inherited.
     unsafe {
         cmd.pre_exec(move || {
             for &(copy, target) in &pairs {
@@ -328,6 +387,9 @@ fn spawn(mut cmd: Command, pipes: Vec<Pipe>) -> Result<RunningChild, SecretFdErr
                 if copy != target {
                     libc::close(copy);
                 }
+            }
+            for &number in &withheld {
+                libc::close(number);
             }
             Ok(())
         });
@@ -519,7 +581,7 @@ mod tests {
     /// writers are done.
     fn run(script: &str, secrets: Vec<(u32, Zeroizing<Vec<u8>>)>) -> (Finished, String) {
         let (cmd, out) = sh(script);
-        let running = spawn_with_secret_fds(cmd, secrets).expect("start the program");
+        let running = spawn_with_secret_fds(cmd, secrets, &[]).expect("start the program");
         let finished = finish(running);
         (finished, read_back(out))
     }
@@ -574,7 +636,7 @@ mod tests {
     fn descriptors_below_three_are_refused() {
         for target in [0, 1, 2] {
             let (cmd, out) = sh("echo started");
-            let refused = spawn_with_secret_fds(cmd, vec![(target, secret("x"))]).err();
+            let refused = spawn_with_secret_fds(cmd, vec![(target, secret("x"))], &[]).err();
             assert_eq!(refused, Some(SecretFdError::BelowThree(target)));
             assert_eq!(read_back(out), "", "the program must not start");
             assert_eq!(
@@ -587,7 +649,8 @@ mod tests {
     #[test]
     fn duplicate_target_descriptor_is_refused() {
         let (cmd, out) = sh("echo started");
-        let refused = spawn_with_secret_fds(cmd, vec![(3, secret("a")), (3, secret("b"))]).err();
+        let refused =
+            spawn_with_secret_fds(cmd, vec![(3, secret("a")), (3, secret("b"))], &[]).err();
         assert_eq!(refused, Some(SecretFdError::Duplicate(3)));
         assert_eq!(read_back(out), "", "the program must not start");
     }
@@ -621,7 +684,7 @@ mod tests {
     fn target_fd_3_works_when_the_pipe_got_fd_3() {
         let (pipe, number) = own_pipe("on its own number");
         let (cmd, out) = sh(&format!("cat <&{number}"));
-        let running = spawn(cmd, vec![pipe]).expect("start the program");
+        let running = spawn(cmd, vec![pipe], &[]).expect("start the program");
         let finished = finish(running);
         assert!(finished.status.success(), "{finished:?}");
         assert_eq!(read_back(out), "on its own number");
@@ -645,7 +708,7 @@ mod tests {
         let (cmd, out) = sh(&format!(
             "cat <&{second_number}; printf '|'; cat <&{first_number}"
         ));
-        let running = spawn(cmd, vec![first, second]).expect("start the program");
+        let running = spawn(cmd, vec![first, second], &[]).expect("start the program");
         let finished = finish(running);
         assert!(finished.status.success(), "{finished:?}");
         assert_eq!(read_back(out), "first|second");
@@ -709,7 +772,7 @@ mod tests {
         first.target = 40;
         second.target = 41;
 
-        let refused = spawn(Command::new(MISSING_PROGRAM), vec![first, second]).err();
+        let refused = spawn(Command::new(MISSING_PROGRAM), vec![first, second], &[]).err();
         assert!(
             matches!(
                 refused,
@@ -749,8 +812,11 @@ mod tests {
     #[test]
     fn a_failed_exec_is_reported_whatever_the_target() {
         for target in 3..=24 {
-            match spawn_with_secret_fds(Command::new(MISSING_PROGRAM), vec![(target, secret("x"))])
-            {
+            match spawn_with_secret_fds(
+                Command::new(MISSING_PROGRAM),
+                vec![(target, secret("x"))],
+                &[],
+            ) {
                 Err(SecretFdError::Spawn(cause)) => {
                     assert_eq!(cause.kind, io::ErrorKind::NotFound, "target {target}")
                 }
@@ -767,7 +833,7 @@ mod tests {
     fn secret_is_not_in_argv_or_environment() {
         let (mut cmd, out) = sh("env; echo \"$0\" \"$@\"");
         cmd.arg("program-name").arg("first-argument");
-        let running = spawn_with_secret_fds(cmd, vec![(3, secret("only-on-the-descriptor"))])
+        let running = spawn_with_secret_fds(cmd, vec![(3, secret("only-on-the-descriptor"))], &[])
             .expect("start the program");
         let finished = finish(running);
         assert!(finished.status.success(), "{finished:?}");
@@ -780,6 +846,48 @@ mod tests {
             !out.contains("only-on-the-descriptor"),
             "the secret is in the program's arguments or environment: {out}"
         );
+    }
+
+    /// A number the program must not get that is also a target: the child
+    /// leaves it alone after `dup2` has put the pipe there, so the program
+    /// still reads its secret on it. The close of a number that is not a
+    /// target needs a descriptor without close-on-exec in this process, and
+    /// the standard library opens none; the shell gives the CLI one in
+    /// `run_keeps_the_master_password_descriptor_from_the_program`.
+    #[test]
+    fn a_number_to_close_that_is_a_target_keeps_its_secret() {
+        let (cmd, out) = sh("cat <&3; printf '|'; cat <&4");
+        let running =
+            spawn_with_secret_fds(cmd, vec![(3, secret("three")), (4, secret("four"))], &[4])
+                .expect("start the program");
+        let finished = finish(running);
+        assert!(finished.status.success(), "{finished:?}");
+        assert_eq!(read_back(out), "three|four");
+    }
+
+    #[test]
+    fn numbers_to_close_below_three_or_past_any_descriptor_are_refused() {
+        for number in [0, 1, 2] {
+            let (cmd, out) = sh("echo started");
+            let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[number]).err();
+            assert_eq!(refused, Some(SecretFdError::BelowThree(number)));
+            assert_eq!(read_back(out), "", "the program must not start");
+        }
+        for number in [1 << 31, u32::MAX] {
+            let (cmd, out) = sh("echo started");
+            let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[number]).err();
+            assert!(
+                matches!(
+                    refused,
+                    Some(SecretFdError::Setup(Cause {
+                        code: Some(libc::EBADF),
+                        ..
+                    }))
+                ),
+                "{number}: {refused:?}"
+            );
+            assert_eq!(read_back(out), "", "the program must not start");
+        }
     }
 
     /// A writer that takes `accept` bytes and then fails with an error whose

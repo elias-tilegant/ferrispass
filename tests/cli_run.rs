@@ -230,6 +230,34 @@ fn run_never_puts_the_secret_in_argv_or_env() {
     assert_eq!(on_the_descriptor, PASSWORD);
 }
 
+/// The CLI reads the master password from descriptor 9, which the shell
+/// opened on a file. A program that had that descriptor could seek it back to
+/// the start and read the master password, as the `zsh` line does when it
+/// can. The program gets only its `--secret-fd` descriptors, and one on the
+/// same number as the master password still gets its secret.
+#[test]
+fn run_keeps_the_master_password_descriptor_from_the_program() {
+    let fixture = Fixture::new(PASSWORD);
+    let outcome = fixture.run(
+        &["3:password"],
+        "cat <&3; \
+         if { true <&9; } 2>/dev/null; then printf '|9 is open'; else printf '|9 is closed'; fi; \
+         /bin/zsh -c 'zmodload zsh/system && sysseek -u 9 0 && cat <&9' 2>/dev/null; \
+         printf '|end'",
+        &[],
+    );
+    assert_ok(&outcome);
+    assert!(
+        !outcome.stdout.contains(MASTER_PASSWORD),
+        "the program read the master password: {outcome:?}"
+    );
+    assert_eq!(outcome.stdout, format!("{PASSWORD}|9 is closed|end"));
+
+    let outcome = fixture.run(&["9:password"], "cat <&9", &[]);
+    assert_ok(&outcome);
+    assert_eq!(outcome.stdout, PASSWORD);
+}
+
 /// Whether `text` holds `SENTINEL` or any four characters in a row of it.
 fn part_of_sentinel(text: &str) -> Option<&'static str> {
     (0..=SENTINEL.len() - 4)

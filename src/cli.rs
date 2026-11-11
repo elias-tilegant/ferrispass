@@ -513,8 +513,16 @@ fn run_program(
     };
     let mut command = std::process::Command::new(program);
     command.args(arguments);
-    let running =
-        crate::platform::secret_fd::spawn_with_secret_fds(command, secrets).map_err(run_error)?;
+    // The descriptor the master password came from is the caller's and has
+    // no close-on-exec, so the program would inherit it and could read the
+    // master password again from a file. The child closes it. Here it stays
+    // open, as `spawn_with_secret_fds` needs, until this process exits.
+    let running = crate::platform::secret_fd::spawn_with_secret_fds(
+        command,
+        secrets,
+        cli.master_password_fd.as_slice(),
+    )
+    .map_err(run_error)?;
     let finished = running.wait().map_err(run_error)?;
     // Numbers only: which descriptor, how many bytes of how many.
     for undelivered in &finished.undelivered {
