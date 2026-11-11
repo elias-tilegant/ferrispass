@@ -31,6 +31,8 @@
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use crate::platform::system_idle::IdleError;
+
 /// Where input that counts as activity comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivitySource {
@@ -73,6 +75,34 @@ pub fn idle_for(now: SystemTime) -> Duration {
 /// `None` means the auto-lock is off.
 pub fn lock_is_due(idle: Duration, threshold: Option<Duration>) -> bool {
     threshold.is_some_and(|threshold| idle >= threshold)
+}
+
+/// Whether the auto-lock is due when the user may also have chosen to lock
+/// after the Mac has been idle. `app_idle` is this clock, `mac_idle` what
+/// `platform::system_idle::idle_for` reported, and the thresholds are the two
+/// settings, `None` meaning off.
+///
+/// - Without a Mac threshold nothing changes: this is [`lock_is_due`] with the
+///   app's clock and the app's threshold.
+/// - With a Mac threshold, only the Mac's idle time counts, against that
+///   threshold. The app's clock and threshold play no part.
+/// - With a Mac threshold and no reading from macOS (an error of any kind),
+///   the app's clock counts, against the Mac threshold. An error never
+///   postpones the lock, so with the Mac threshold set there is no reading on
+///   which the lock is never due.
+///
+/// A clock that went backwards reads as [`Duration::MAX`] in `app_idle` and
+/// makes the lock due wherever the app's clock counts.
+pub fn lock_is_due_with(
+    app_idle: Duration,
+    mac_idle: Result<Duration, IdleError>,
+    app_threshold: Option<Duration>,
+    mac_threshold: Option<Duration>,
+) -> bool {
+    let Some(mac_threshold) = mac_threshold else {
+        return lock_is_due(app_idle, app_threshold);
+    };
+    mac_idle.unwrap_or(app_idle) >= mac_threshold
 }
 
 /// The time of the last input. It starts at the epoch, so a clock that was
@@ -218,5 +248,136 @@ mod tests {
     #[test]
     fn a_clock_never_set_reads_as_idle() {
         assert!(lock_is_due(idle_for(SystemTime::now()), Some(FOUR_MINUTES)));
+    }
+
+    const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
+
+    fn minutes(minutes: u64) -> Duration {
+        Duration::from_secs(minutes * 60)
+    }
+
+    #[test]
+    fn mac_idle_wins_when_the_alternative_is_set() {
+        // Ten minutes away from FerrisPass would lock with the app's clock,
+        // but the Mac was in use two minutes ago.
+        assert!(lock_is_due(minutes(10), Some(FOUR_MINUTES)));
+        assert!(!lock_is_due_with(
+            minutes(10),
+            Ok(minutes(2)),
+            Some(FOUR_MINUTES),
+            Some(FIFTEEN_MINUTES)
+        ));
+        assert!(!lock_is_due_with(
+            Duration::MAX,
+            Ok(Duration::ZERO),
+            Some(FOUR_MINUTES),
+            Some(FIFTEEN_MINUTES)
+        ));
+        // The Mac idle for fifteen minutes locks, whatever the app's clock
+        // says.
+        for app_idle in [Duration::ZERO, minutes(2), minutes(10)] {
+            assert!(lock_is_due_with(
+                app_idle,
+                Ok(FIFTEEN_MINUTES),
+                Some(FOUR_MINUTES),
+                Some(FIFTEEN_MINUTES)
+            ));
+            assert!(!lock_is_due_with(
+                app_idle,
+                Ok(FIFTEEN_MINUTES - Duration::from_secs(1)),
+                Some(FOUR_MINUTES),
+                Some(FIFTEEN_MINUTES)
+            ));
+        }
+        // The app's threshold may be off; the Mac's still applies.
+        assert!(lock_is_due_with(
+            Duration::ZERO,
+            Ok(FIFTEEN_MINUTES),
+            None,
+            Some(FIFTEEN_MINUTES)
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_mac_idle_falls_back_to_the_app_clock_with_the_mac_threshold() {
+        for error in [IdleError::Unsupported, IdleError::Invalid] {
+            for app_threshold in [Some(FOUR_MINUTES), None] {
+                assert!(
+                    !lock_is_due_with(
+                        minutes(14),
+                        Err(error),
+                        app_threshold,
+                        Some(FIFTEEN_MINUTES)
+                    ),
+                    "{error:?} with {app_threshold:?}: locked before the Mac threshold"
+                );
+                assert!(
+                    lock_is_due_with(
+                        FIFTEEN_MINUTES,
+                        Err(error),
+                        app_threshold,
+                        Some(FIFTEEN_MINUTES)
+                    ),
+                    "{error:?} with {app_threshold:?}: an error postponed the lock"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn without_the_alternative_the_app_clock_rules() {
+        let idles = [
+            Duration::ZERO,
+            minutes(2),
+            FOUR_MINUTES - Duration::from_secs(1),
+            FOUR_MINUTES,
+            minutes(10),
+            Duration::MAX,
+        ];
+        let readings = [
+            Ok(Duration::ZERO),
+            Ok(Duration::MAX),
+            Err(IdleError::Unsupported),
+            Err(IdleError::Invalid),
+        ];
+        for app_idle in idles {
+            for app_threshold in [Some(FOUR_MINUTES), Some(FIFTEEN_MINUTES), None] {
+                for mac_idle in readings {
+                    assert_eq!(
+                        lock_is_due_with(app_idle, mac_idle, app_threshold, None),
+                        lock_is_due(app_idle, app_threshold),
+                        "{app_idle:?} against {app_threshold:?}, Mac {mac_idle:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_backwards_clock_is_due_at_once() {
+        let now = SystemTime::now();
+        reset(now);
+        let backwards = idle_for(now - Duration::from_secs(60));
+        assert_eq!(backwards, Duration::MAX);
+        assert!(lock_is_due_with(
+            backwards,
+            Ok(Duration::ZERO),
+            Some(FOUR_MINUTES),
+            None
+        ));
+        for error in [IdleError::Unsupported, IdleError::Invalid] {
+            assert!(lock_is_due_with(
+                backwards,
+                Err(error),
+                Some(FOUR_MINUTES),
+                Some(FIFTEEN_MINUTES)
+            ));
+            assert!(lock_is_due_with(
+                backwards,
+                Err(error),
+                None,
+                Some(Duration::from_secs(u64::MAX))
+            ));
+        }
     }
 }

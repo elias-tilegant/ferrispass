@@ -42,7 +42,7 @@ use gpui_component::{
     slider::{SliderState, SliderValue},
 };
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use zeroize::Zeroizing;
 
@@ -705,44 +705,6 @@ impl AppShell {
         // through the pending-notice channel the observer drains.
         window.push_notification("Cloud sync disconnected.", cx);
     }
-}
-
-/// Either-shaped result the biometric-unlock background task hands
-/// back to the foreground update. `Open` carries the KDF outcome so
-/// the success path runs the same `finish_open_attempt` codepath as a
-/// password-typed unlock; `Failed` carries the OS-side
-/// `BiometricError` so the Unlock screen can render the right error
-/// message and (when applicable) clear an invalidated enrolment.
-///
-/// The `Open` variant is large (it owns a `VaultDocument`) while
-/// `Failed` is small; we don't box it because the value is moved
-/// exactly once per unlock and the surrounding unlock path already
-/// passes `VaultDocument` by value.
-#[allow(clippy::large_enum_variant)]
-enum BiometricUnlockOutcome {
-    Open {
-        path: PathBuf,
-        result: Result<crate::keepass::VaultDocument, keepass::db::DatabaseOpenError>,
-        /// Generation of the launch that produced this outcome, so a
-        /// stale resolution can be discarded.
-        generation: u64,
-    },
-    Failed {
-        path: PathBuf,
-        err: crate::biometric::BiometricError,
-        generation: u64,
-    },
-}
-
-/// UI-friendly file name for the Touch ID prompt header. Strips the
-/// `.kdbx` suffix so the prompt reads "Unlock my-vault" rather than
-/// "Unlock my-vault.kdbx". Used only for human-facing strings - never
-/// as a keychain account or any other security-relevant identifier.
-fn file_name_for_prompt(path: &std::path::Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "vault".to_string())
 }
 
 fn matches_path_needle(path: &std::path::Path, needle: &str) -> bool {

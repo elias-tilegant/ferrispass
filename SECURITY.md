@@ -44,8 +44,14 @@ What FerrisPass promises from the release in the second column on. A build that 
 | While the master password field has focus, secure event input is on, so other programs do not see the keystrokes; it is released on blur, window deactivation, lock, quit and panic | the redesign release |
 | New `unsafe` code lives only in audited modules under `src/platform/`, listed under [Unsafe code](#unsafe-code) | the redesign release |
 | Activity for the auto-lock is input in a FerrisPass window, in the quick access panel, a global shortcut or a click on the menu bar item, and nothing that happens in other apps | the redesign release |
+| In the quick access panel, Touch ID starts only when you confirm with Return or click the unlock button; never when the panel opens, while you type, when it comes back to the front, or again after macOS withdrew the prompt | the redesign release |
+| If you choose to lock after the Mac has been idle instead, FerrisPass locks when the login session has seen no input for that long, counting input from any program, and falls back to its own idle clock with the same threshold when macOS cannot report it; sleep, the lock screen and the screen saver lock at once as before | the redesign release |
 
 In the clipboard rule, FerrisPass's own copy actions are the ones that copy a value out of an entry for you: the copy buttons at the bottom of an entry's details and a click on its username, password, TOTP code or a custom field there; Cmd+Shift+U, Cmd+Shift+L, and Cmd+C while no text field has focus; and Copy Username, Copy Password and Copy URL in the Edit menu. The standard editing commands on text you select in a field are not among them. Text you select in one of the entry editor's unprotected fields (title, username, URL, notes, custom field names and the values of custom fields not marked protected) and copy or cut with Cmd+C, Cmd+X, Edit > Copy, Edit > Cut or the field's context menu is an ordinary copy, as it always was: it does not go through this path, carries none of the markers and is not cleared. The password, the TOTP secret and the values of custom fields marked protected can't be copied or cut out of the editor at all.
+
+While the quick access panel is locked, secure event input is on for as long as the panel has keyboard focus, from the moment it gets it and before you type anything, so other programs do not see even the first keystroke. What you type there is held masked in memory, also while the Touch ID dialog has keyboard focus: secure event input is off for that time and the panel takes no keystrokes, and it is on again as soon as the panel has focus back. The text is wiped 30 seconds after the first keystroke, also while the Touch ID dialog is up, when you cancel, and when it looks like a password rather than a search (several words, no match). Only if it is still there once Touch ID has unlocked the vault does it become the panel's search; otherwise the search starts empty. It is never written to disk, to the log or to the list of recently used entries.
+
+The Mac idle rule changes what holds off the auto-lock. With it chosen, any input macOS sees in your login session counts, in any app, and so does input that a program posts as if it were typed or moved: FerrisPass's own Auto-Type, a presentation remote, remote-control software, or a tool that nudges the mouse to keep the Mac awake. While one of those runs, the Mac never looks idle and the vault stays open until you lock it, the Mac sleeps or the screen locks. If that is not what you want, keep the default, which counts only input you give FerrisPass. Going back to 0.9.2 drops the Mac idle setting, because 0.9.2 rewrites `settings.json` with only the fields it knows, so with the FerrisPass auto-lock at Never there is then no idle lock until you choose the Mac idle time again; sleep and the lock screen still lock the vault at once.
 
 ## Supported versions
 
@@ -84,6 +90,7 @@ The crate denies `unsafe_code`. The places below opt in, each for a system API t
 | `src/keepass/document.rs`, `publish_new_no_clobber` | `renamex_np` with `RENAME_EXCL`, which puts a new vault file in place without replacing a file that appeared in the meantime |
 | `src/keepass/document.rs`, `macos_full_sync` | `fcntl` with `F_FULLFSYNC`, so a saved vault is on the disk and not only in the drive's cache |
 | `src/sync/icloud.rs`, `platform` | resolving a stored bookmark and using the URL `NSFileCoordinator` hands to its block, for vaults in iCloud Drive; the bindings mark both `unsafe` |
+| `src/platform/system_idle.rs` | one CoreGraphics call that reads the seconds since the last input in the login session, for the auto-lock alternative |
 
 ## Master-password handling - what FerrisPass does and doesn't do
 
@@ -93,7 +100,7 @@ The crate denies `unsafe_code`. The places below opt in, each for a system API t
 | Password persisted to disk | **never** |
 | Password sent over the network | **never** - the cloud provider only sees ciphertext |
 | Password stored in Keychain | **only if you enable Touch ID for that vault** - see below |
-| Auto-lock timeout | configurable in Settings; default 4 minutes without input in a FerrisPass window, the quick access panel, the global shortcuts or the menu bar item. Input in other apps does not count |
+| Auto-lock timeout | configurable in Settings; default 4 minutes without input in a FerrisPass window, the quick access panel, the global shortcuts or the menu bar item. Input in other apps does not count, unless you choose to lock after the Mac itself has been idle for 5, 15 or 30 minutes instead; then input in any app counts |
 | Clipboard auto-clear after copy | for what you copy with FerrisPass's own copy actions: configurable, default 10 seconds; also at quit and at launch (at launch only with "Paste from Other Apps" set to Always Allow). Text you copy or cut out of an editor field with the standard editing commands is an ordinary copy and is not cleared |
 
 ### Touch ID and the login keychain
