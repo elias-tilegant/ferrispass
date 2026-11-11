@@ -4,5 +4,6 @@
 //! keeps the list, and SECURITY.md describes every entry under "Unsafe code".
 //! New `unsafe` code goes here and nowhere else.
 
+pub mod secret_fd;
 pub mod secure_input;
 pub mod system_idle;
