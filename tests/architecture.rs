@@ -1,7 +1,6 @@
-//! Architecture rules checked by reading the source (redesign plan, part 20,
-//! section 2.10; test T0.3).
+//! Architecture rules checked by reading the source.
 //!
-//! Rule 4: new `unsafe` goes only into `src/platform/`, one opt-in per file,
+//! New `unsafe` goes only into `src/platform/`, one opt-in per file,
 //! with the reason in the module header. `Cargo.toml` sets the lint
 //! `unsafe_code = "deny"`, so the compiler already rejects `unsafe` wherever it
 //! is not allowed. What it accepts without a second look is a new
