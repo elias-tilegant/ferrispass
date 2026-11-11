@@ -1103,9 +1103,9 @@ mod tests {
         }
     }
 
-    /// The header says how many `unsafe` blocks there are; the file has that
-    /// many, and the only `libc` functions it calls are the ones the header
-    /// names.
+    /// The header says how many `unsafe` blocks there are and which `libc`
+    /// functions they call. The file has that many, and calls exactly the
+    /// `libc` functions the header names, no other and none fewer.
     #[test]
     fn secret_fd_has_exactly_the_declared_unsafe_sites() {
         let header: String = SOURCE
@@ -1125,6 +1125,12 @@ mod tests {
             .position(|word| *word == declared)
             .map(|at| at + 1)
             .unwrap_or_else(|| panic!("`{declared}` is not a number word"));
+        let named: Vec<&str> = header
+            .split("the `libc` calls in them are ")
+            .nth(1)
+            .and_then(|rest| rest.split_once(':'))
+            .map(|(list, _)| list.split('`').skip(1).step_by(2).collect())
+            .expect("the header names the `libc` calls");
 
         let tokens = code_tokens(SOURCE);
         let found = tokens
@@ -1151,14 +1157,14 @@ mod tests {
             .collect();
         for name in &libc_calls {
             assert!(
-                ["pipe", "fcntl", "dup2", "close"].contains(name),
-                "the file calls libc::{name}"
+                named.contains(name),
+                "the file calls libc::{name}, which the header does not name: {named:?}"
             );
         }
-        for name in ["fcntl", "dup2", "close"] {
+        for name in &named {
             assert!(
-                libc_calls.contains(&name),
-                "the scan no longer sees libc::{name}: {libc_calls:?}"
+                libc_calls.contains(name),
+                "the header names libc::{name}, which the scan does not see: {libc_calls:?}"
             );
         }
     }
