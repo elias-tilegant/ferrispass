@@ -1055,11 +1055,31 @@ mod tests {
         }
     }
 
-    /// No line of this module's code logs or prints, and no formatting macro
-    /// is handed a secret.
+    /// No line of this module's code logs or prints, and no macro gets a
+    /// secret buffer by its name, `secret` or `secrets`: neither as an
+    /// argument, `format!("{:?}", secret)`, nor captured in its format string,
+    /// `format!("{secret:?}")`. The scan goes by those names. The same bytes
+    /// under another name are left to `errors_display_and_debug_hold_no_secret`
+    /// and the process tests, which look at what comes out.
     #[test]
     fn secret_fd_never_logs_the_secret() {
         let tokens = code_tokens(production());
+        let leaks = leaks(&tokens);
+        assert!(
+            leaks.is_empty(),
+            "the secret could reach a log or a message: {leaks:?}"
+        );
+        // The scan has to see the buffer it guards, or it proves nothing.
+        assert!(
+            tokens.contains(&Tok::Ident("secret")),
+            "the scan no longer sees `secret` in this file's code"
+        );
+    }
+
+    /// What `secret_fd_never_logs_the_secret` reports in `tokens`: every
+    /// printing macro, every `log::` or `tracing::` path, and every macro that
+    /// gets a buffer by name.
+    fn leaks(tokens: &[Tok<'_>]) -> Vec<String> {
         let mut leaks = Vec::new();
         for pair in tokens.windows(2) {
             match pair {
@@ -1074,22 +1094,78 @@ mod tests {
                 _ => {}
             }
         }
-        for (name, arguments) in macros(&tokens) {
+        for (name, arguments) in macros(tokens) {
             for buffer in ["secret", "secrets"] {
-                if arguments.contains(&Tok::Ident(buffer)) {
+                let passed = arguments.contains(&Tok::Ident(buffer));
+                let captured = arguments.iter().any(|token| match token {
+                    Tok::Str(text) => captures(text).contains(&buffer),
+                    _ => false,
+                });
+                if passed || captured {
                     leaks.push(format!("{name}! with `{buffer}`"));
                 }
             }
         }
-        assert!(
-            leaks.is_empty(),
-            "the secret could reach a log or a message: {leaks:?}"
-        );
-        // The scan has to see the buffer it guards, or it proves nothing.
-        assert!(
-            tokens.contains(&Tok::Ident("secret")),
-            "the scan no longer sees `secret` in this file's code"
-        );
+        leaks
+    }
+
+    /// The names a format string reads in its braces: `secret` in
+    /// `{secret}`, `{secret:?}` and `{0:>secret$}`, but none in
+    /// `{{secret}}`, which prints the braces and the word. It does not ask
+    /// whether `text` is the format string: in any string a macro gets,
+    /// `{secret}` counts.
+    fn captures(text: &str) -> Vec<&str> {
+        let mut names = Vec::new();
+        let mut rest = text;
+        while let Some(at) = rest.find(['{', '}']) {
+            let brace = &rest[at..=at];
+            let after = &rest[at + 1..];
+            if after.starts_with(brace) {
+                rest = &after[1..];
+            } else if brace == "}" {
+                rest = after;
+            } else {
+                let end = after.find('}').unwrap_or(after.len());
+                names.extend(
+                    after[..end]
+                        .split(|c: char| c != '_' && !c.is_ascii_alphanumeric())
+                        .filter(|name| !name.is_empty()),
+                );
+                rest = after.get(end + 1..).unwrap_or("");
+            }
+        }
+        names
+    }
+
+    /// The leak scan on code it has to report and code it has to let
+    /// through.
+    #[test]
+    fn the_leak_scan_sees_a_buffer_captured_in_a_format_string() {
+        for reported in [
+            r#"format!("could not write {secret}")"#,
+            r#"format!("could not write {secret:?}")"#,
+            r#"format!("{} of {secrets:?}", len)"#,
+            r#"write!(f, "{0:>secret$}", len)"#,
+            r#"panic!("{{{secret}}}")"#,
+            r#"format!("could not write {:?}", secret)"#,
+        ] {
+            assert_eq!(
+                leaks(&code_tokens(reported)).len(),
+                1,
+                "the scan lets `{reported}` through"
+            );
+        }
+        for clean in [
+            r#"format!("{{secret}}")"#,
+            r#"format!("{secret_len} of {len}")"#,
+            r#"format!("the secret is {}", len)"#,
+        ] {
+            assert_eq!(
+                leaks(&code_tokens(clean)),
+                Vec::<String>::new(),
+                "the scan reports `{clean}`"
+            );
+        }
     }
 
     #[test]
