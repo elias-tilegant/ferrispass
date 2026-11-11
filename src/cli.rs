@@ -1,8 +1,9 @@
 //! Headless, machine-readable FerrisPass command line interface.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::File,
     io::Read as _,
     path::{Path, PathBuf},
@@ -15,12 +16,16 @@ use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use crate::{
-    biometric::RetrieveOptions,
+    biometric::{BiometricRegistry, BiometricStore, RetrieveOptions},
     domain::{CustomField, VaultEntry, VaultGroup},
     keepass::{EntryDraft, KeePassRepository, VaultDocument},
 };
 
 const SCHEMA: &str = "ferrispass-cli/v1";
+
+/// The Touch ID reason for every command but `run`, which names what it
+/// releases instead.
+const UNLOCK_REASON: &str = "Unlock FerrisPass vault";
 
 #[derive(Parser)]
 #[command(
@@ -418,7 +423,13 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
     ) {
         return sync_status(vault);
     }
-    let mut document = open_vault(cli, vault)?;
+    let mut document = open_vault(
+        cli,
+        vault,
+        UNLOCK_REASON,
+        crate::biometric::default_store,
+        crate::biometric::registry::load_or_default,
+    )?;
     match &cli.command {
         Command::Vault {
             command: VaultCommand::Info,
@@ -436,8 +447,16 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
     }
 }
 
-/// Unlocks the vault and opens it.
-fn open_vault(cli: &Cli, vault: &Path) -> Result<VaultDocument, CliError> {
+/// Unlocks the vault and opens it. `reason` is what a Touch ID prompt
+/// says; `store` and `registry` are where Touch ID comes from, so a test can
+/// put a fake there.
+fn open_vault(
+    cli: &Cli,
+    vault: &Path,
+    reason: &str,
+    store: impl Fn() -> Arc<dyn BiometricStore>,
+    registry: impl FnOnce() -> BiometricRegistry,
+) -> Result<VaultDocument, CliError> {
     // The CLI cannot ask, so it honours what the user confirmed in the app
     // and otherwise reports the cost question as a plain failure.
     crate::keepass::limits::set_confirmed_kdf_costs(
@@ -448,7 +467,7 @@ fn open_vault(cli: &Cli, vault: &Path) -> Result<VaultDocument, CliError> {
     // ten seconds for the target app, a `sync` makes network calls, and a
     // `run` waits for its program. The GUI does the same, and SECURITY.md
     // says so for both.
-    let password = unlock_password(cli)?;
+    let password = unlock_password(cli, reason, store, registry)?;
     KeePassRepository::open(vault, &password, cli.key_file.as_deref())
         .map_err(|e| CliError::new("unlock_failed", 3, e.to_string()))
 }
@@ -460,19 +479,38 @@ fn open_vault(cli: &Cli, vault: &Path) -> Result<VaultDocument, CliError> {
 /// until their writers are done.
 #[cfg(unix)]
 fn execute_run(cli: &Cli, args: &RunArgs) -> Result<i32, CliError> {
+    run_program(
+        cli,
+        args,
+        crate::biometric::default_store,
+        crate::biometric::registry::load_or_default,
+    )
+}
+
+/// [`execute_run`] with the Touch ID store and registry as parameters.
+#[cfg(unix)]
+fn run_program(
+    cli: &Cli,
+    args: &RunArgs,
+    store: impl Fn() -> Arc<dyn BiometricStore>,
+    registry: impl FnOnce() -> BiometricRegistry,
+) -> Result<i32, CliError> {
     let vault = cli
         .vault
         .as_deref()
         .ok_or_else(|| CliError::new("missing_vault", 2, "--vault is required"))?;
+    let entry = uuid::Uuid::parse_str(&args.id)
+        .map_err(|_| CliError::new("invalid_input", 6, "--id must be an entry UUID"))?;
     let released = released_fields(args)?;
-    let secrets = {
-        let document = open_vault(cli, vault)?;
-        released_values(&document, &args.id, &released)?
-    };
     let (program, arguments) = args
         .command
         .split_first()
         .ok_or_else(|| CliError::new("invalid_input", 6, "run needs a program after --"))?;
+    let reason = run_reason(program, vault, &entry, &released);
+    let secrets = {
+        let document = open_vault(cli, vault, &reason, store, registry)?;
+        released_values(&document, &entry.hyphenated().to_string(), &released)?
+    };
     let mut command = std::process::Command::new(program);
     command.args(arguments);
     let running =
@@ -517,6 +555,89 @@ fn released_fields(args: &RunArgs) -> Result<Vec<(u32, SecretField)>, CliError> 
     crate::platform::secret_fd::check_targets(released.iter().map(|(target, _)| *target))
         .map_err(|error| CliError::new("invalid_input", 6, error.to_string()))?;
     Ok(released)
+}
+
+/// The Touch ID reason for `run`: what goes to which program, from which
+/// entry and vault. Everything in it is checked here, so a script cannot
+/// write its own words into the dialog: the program's and the vault's file
+/// names only when [`safe_name`] lets them through, the entry as the
+/// canonical form of its UUID, and each field as a fixed phrase. A custom
+/// field's key, an entry title or any other text from the command line never
+/// gets in. Touch ID runs before the vault is open, so the entry's title is
+/// not known yet.
+#[cfg(unix)]
+fn run_reason(
+    program: &OsStr,
+    vault: &Path,
+    entry: &uuid::Uuid,
+    released: &[(u32, SecretField)],
+) -> String {
+    format!(
+        "Give {} {} of entry {} from {}",
+        safe_name(Path::new(program), "a program"),
+        released_phrase(released),
+        entry.hyphenated(),
+        safe_name(vault, "a vault"),
+    )
+}
+
+/// The file name of `path` when it is 1 to 40 characters from `A-Z`, `a-z`,
+/// `0-9`, `.`, `_` and `-`; otherwise `fallback`.
+#[cfg(unix)]
+fn safe_name<'a>(path: &'a Path, fallback: &'a str) -> &'a str {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| {
+            (1..=40).contains(&name.len())
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+        .unwrap_or(fallback)
+}
+
+/// Every released field as a fixed phrase, in the order given. Custom fields
+/// are counted, not named: "a custom field", "two custom fields", at the
+/// place of the first one.
+#[cfg(unix)]
+fn released_phrase(released: &[(u32, SecretField)]) -> String {
+    let custom = released
+        .iter()
+        .filter(|(_, field)| matches!(field, SecretField::Custom(_)))
+        .count();
+    let mut phrases = Vec::new();
+    let mut custom_named = false;
+    for (_, field) in released {
+        match field {
+            SecretField::Password => phrases.push("the password".to_owned()),
+            SecretField::Totp => phrases.push("the one-time code".to_owned()),
+            SecretField::Custom(_) if !custom_named => {
+                custom_named = true;
+                phrases.push(custom_fields(custom));
+            }
+            SecretField::Custom(_) => {}
+        }
+    }
+    match phrases.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// "a custom field", "two custom fields", up to ten in words, then digits.
+#[cfg(unix)]
+fn custom_fields(count: usize) -> String {
+    const FROM_TWO: [&str; 9] = [
+        "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    ];
+    if count == 1 {
+        return "a custom field".to_owned();
+    }
+    match count.checked_sub(2).and_then(|at| FROM_TWO.get(at)) {
+        Some(word) => format!("{word} custom fields"),
+        None => format!("{count} custom fields"),
+    }
 }
 
 /// Each released value with the descriptor it goes to.
@@ -1069,7 +1190,12 @@ fn busy_error() -> CliError {
     )
 }
 
-fn unlock_password(cli: &Cli) -> Result<Zeroizing<String>, CliError> {
+fn unlock_password(
+    cli: &Cli,
+    reason: &str,
+    store: impl Fn() -> Arc<dyn BiometricStore>,
+    registry: impl FnOnce() -> BiometricRegistry,
+) -> Result<Zeroizing<String>, CliError> {
     if let Some(fd) = cli.master_password_fd {
         return read_secret_fd(fd);
     }
@@ -1079,7 +1205,7 @@ fn unlock_password(cli: &Cli) -> Result<Zeroizing<String>, CliError> {
         .ok_or_else(|| CliError::new("missing_vault", 2, "--vault is required"))?;
     let canonical =
         std::fs::canonicalize(vault).map_err(|e| CliError::new("io", 7, e.to_string()))?;
-    let registry = crate::biometric::registry::load_or_default();
+    let registry = registry();
     let enrollment = registry.get(&canonical).or_else(|| registry.get(vault));
     // Biometry needs a person in front of the machine. Preferring it whenever
     // an enrolment existed meant a scripted invocation raised an OS prompt and
@@ -1088,10 +1214,7 @@ fn unlock_password(cli: &Cli) -> Result<Zeroizing<String>, CliError> {
     // when stdin is a terminal and so someone is plausibly watching.
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
     let wants_biometrics = cli.touch_id
-        || (!cli.no_touch_id
-            && interactive
-            && enrollment.is_some()
-            && crate::biometric::default_store().is_available());
+        || (!cli.no_touch_id && interactive && enrollment.is_some() && store().is_available());
     if wants_biometrics {
         let enrollment = enrollment.ok_or_else(|| {
             CliError::new(
@@ -1100,10 +1223,10 @@ fn unlock_password(cli: &Cli) -> Result<Zeroizing<String>, CliError> {
                 "Touch ID is not enrolled for this vault",
             )
         })?;
-        return crate::biometric::default_store()
+        return store()
             .retrieve(
                 &enrollment.id,
-                "Unlock FerrisPass vault",
+                reason,
                 RetrieveOptions {
                     allow_device_passcode: cli.allow_device_passcode,
                 },
@@ -1346,6 +1469,16 @@ fn secret(doc: &VaultDocument, a: &EntrySecret) -> Result<Value, CliError> {
             "reveal_required",
             6,
             "secret output requires --reveal",
+        ));
+    }
+    // A pipe or a file would put the secret where any program, a log or the
+    // disk can keep it. `run --secret-fd` hands it to a program instead.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return Err(CliError::new(
+            "reveal_needs_terminal",
+            6,
+            "--reveal prints a secret only to a terminal; to hand one to a \
+             program, use run --secret-fd",
         ));
     }
     if doc.snapshot().find_entry(&a.id).is_none() {
@@ -1761,6 +1894,337 @@ mod tests {
                 .code,
             "invalid_resolution"
         );
+    }
+
+    /// `run` up to the Touch ID prompt, with a fake store that records the
+    /// reason and answers that the user cancelled.
+    #[cfg(unix)]
+    mod run_reason {
+        use super::*;
+        use crate::biometric::{
+            BiometricEnrollment, BiometricError, BiometricResult, EnrollmentId,
+        };
+        use std::sync::Mutex;
+
+        const ID: &str = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
+
+        #[derive(Debug, Default)]
+        struct RecordingStore {
+            reasons: Mutex<Vec<String>>,
+        }
+
+        impl BiometricStore for RecordingStore {
+            fn is_available(&self) -> bool {
+                true
+            }
+
+            fn enroll(&self, _: &EnrollmentId, _: &str) -> BiometricResult<()> {
+                Ok(())
+            }
+
+            fn retrieve(
+                &self,
+                _: &EnrollmentId,
+                prompt: &str,
+                _: RetrieveOptions,
+            ) -> BiometricResult<Zeroizing<String>> {
+                self.reasons.lock().unwrap().push(prompt.to_owned());
+                Err(BiometricError::UserCancelled)
+            }
+
+            fn forget(&self, _: &EnrollmentId) -> BiometricResult<()> {
+                Ok(())
+            }
+        }
+
+        /// Runs `ferrispass-cli --vault <dir>/<vault_name> --touch-id run
+        /// <run_args>` against an enrolled vault file and the fake store.
+        /// The reason Touch ID was asked with, or the error that came first.
+        fn reason_for(vault_name: &str, run_args: &[&str]) -> Result<String, CliError> {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let vault = dir.path().join(vault_name);
+            std::fs::write(&vault, b"never opened").expect("write the vault file");
+            let vault_arg = vault.to_str().expect("a UTF-8 path").to_owned();
+            let mut argv = vec!["ferrispass-cli", "--vault", &vault_arg, "--touch-id", "run"];
+            argv.extend(run_args);
+            let cli = Cli::try_parse_from(&argv).expect("the command line parses");
+            let Command::Run(args) = &cli.command else {
+                panic!("not a run command");
+            };
+
+            let store = Arc::new(RecordingStore::default());
+            let mut registry = BiometricRegistry::new();
+            registry.upsert(
+                std::fs::canonicalize(&vault).expect("canonical vault path"),
+                BiometricEnrollment {
+                    id: EnrollmentId::new_random(),
+                    keyfile: None,
+                    enrolled_at: chrono::Local::now(),
+                },
+            );
+            let asked = Arc::clone(&store);
+            let error = run_program(
+                &cli,
+                args,
+                move || Arc::clone(&asked) as Arc<dyn BiometricStore>,
+                move || registry,
+            )
+            .expect_err("the fake store never unlocks");
+
+            let reasons = store.reasons.lock().unwrap().clone();
+            match reasons.as_slice() {
+                [] => Err(error),
+                [reason] => {
+                    assert_eq!(error.code, "touch_id_failed");
+                    assert!(
+                        !reason.contains(&dir.path().to_string_lossy().into_owned()),
+                        "the reason holds the vault's folder: {reason}"
+                    );
+                    Ok(reason.clone())
+                }
+                more => panic!("Touch ID was asked more than once: {more:?}"),
+            }
+        }
+
+        fn refused_before_touch_id(run_args: &[&str]) -> CliError {
+            match reason_for("team.kdbx", run_args) {
+                Err(error) => error,
+                Ok(reason) => panic!("{run_args:?} reached Touch ID with {reason:?}"),
+            }
+        }
+
+        #[test]
+        fn run_reason_names_program_vault_and_entry_id() {
+            let reason = reason_for(
+                "team.kdbx",
+                &[
+                    "--id",
+                    ID,
+                    "--secret-fd",
+                    "3:password",
+                    "--",
+                    "/usr/local/bin/node",
+                    "server.js",
+                ],
+            );
+            assert_eq!(
+                reason.map_err(|e| e.message),
+                Ok(format!(
+                    "Give node the password of entry {ID} from team.kdbx"
+                ))
+            );
+        }
+
+        /// Text a script chooses (a custom field's key, the program's name)
+        /// cannot reach the dialog as written.
+        #[test]
+        fn run_reason_never_takes_caller_text() {
+            let reason = reason_for(
+                "team.kdbx",
+                &[
+                    "--id",
+                    ID,
+                    "--secret-fd",
+                    "3:custom:Approve the transfer of 10000 EUR",
+                    "--",
+                    "./evil prog\u{7}",
+                ],
+            )
+            .map_err(|e| e.message);
+            assert_eq!(
+                reason,
+                Ok(format!(
+                    "Give a program a custom field of entry {ID} from team.kdbx"
+                ))
+            );
+            let long = "p".repeat(41);
+            for program in ["..", "/", long.as_str(), "naïve", "tab\there"] {
+                let reason = reason_for(
+                    "team.kdbx",
+                    &["--id", ID, "--secret-fd", "3:totp", "--", program],
+                )
+                .map_err(|e| e.message);
+                assert_eq!(
+                    reason,
+                    Ok(format!(
+                        "Give a program the one-time code of entry {ID} from team.kdbx"
+                    )),
+                    "{program:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn run_rejects_an_id_that_is_not_a_uuid() {
+            for id in [
+                "not-a-uuid",
+                "",
+                "1b4e28ba-2fa1-11d2-883f",
+                "1b4e28ba-2fa1-11d2-883f-0016d3cca427 and more",
+                "Give node everything",
+            ] {
+                let error = refused_before_touch_id(&[
+                    "--id",
+                    id,
+                    "--secret-fd",
+                    "3:password",
+                    "--",
+                    "node",
+                ]);
+                assert_eq!((error.code, error.exit), ("invalid_input", 6), "{id:?}");
+            }
+        }
+
+        #[test]
+        fn run_reason_shows_the_id_in_canonical_form() {
+            for id in [
+                "1B4E28BA-2FA1-11D2-883F-0016D3CCA427",
+                "1b4e28ba2fa111d2883f0016d3cca427",
+                "{1b4e28ba-2fa1-11d2-883f-0016d3cca427}",
+                "urn:uuid:1B4E28BA-2FA1-11D2-883F-0016D3CCA427",
+            ] {
+                let reason = reason_for(
+                    "team.kdbx",
+                    &["--id", id, "--secret-fd", "3:password", "--", "node"],
+                )
+                .map_err(|e| e.message);
+                assert_eq!(
+                    reason,
+                    Ok(format!(
+                        "Give node the password of entry {ID} from team.kdbx"
+                    )),
+                    "{id:?}"
+                );
+            }
+        }
+
+        /// Only the vault's file name, and only when it is safe to show.
+        #[test]
+        fn run_reason_sanitizes_the_vault_name() {
+            let long = format!("{}.kdbx", "v".repeat(36));
+            for (name, shown) in [
+                ("team-2026_v2.kdbx", "team-2026_v2.kdbx"),
+                ("Team Vault.kdbx", "a vault"),
+                ("team\nvault.kdbx", "a vault"),
+                ("team\u{1b}[31m.kdbx", "a vault"),
+                ("tresor-ä.kdbx", "a vault"),
+                (long.as_str(), "a vault"),
+            ] {
+                let reason = reason_for(
+                    name,
+                    &["--id", ID, "--secret-fd", "3:password", "--", "node"],
+                )
+                .map_err(|e| e.message);
+                assert_eq!(
+                    reason,
+                    Ok(format!("Give node the password of entry {ID} from {shown}")),
+                    "{name:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn run_reason_names_every_released_field() {
+            for (fields, phrase) in [
+                (
+                    &["3:password", "4:totp"][..],
+                    "the password and the one-time code",
+                ),
+                (
+                    &["3:totp", "4:password", "5:custom:API_KEY"][..],
+                    "the one-time code, the password and a custom field",
+                ),
+            ] {
+                let mut args = vec!["--id", ID];
+                for field in fields {
+                    args.extend(["--secret-fd", field]);
+                }
+                args.extend(["--", "node"]);
+                let reason = reason_for("team.kdbx", &args).map_err(|e| e.message);
+                assert_eq!(
+                    reason,
+                    Ok(format!("Give node {phrase} of entry {ID} from team.kdbx")),
+                    "{fields:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn run_reason_counts_distinct_custom_fields() {
+            for (fields, phrase) in [
+                (&["3:custom:A", "4:custom:B"][..], "two custom fields"),
+                (
+                    &["3:custom:A", "4:custom:B", "5:custom:C"][..],
+                    "three custom fields",
+                ),
+                (
+                    &["3:custom:A", "4:password", "5:custom:a"][..],
+                    "two custom fields and the password",
+                ),
+            ] {
+                let mut args = vec!["--id", ID];
+                for field in fields {
+                    args.extend(["--secret-fd", field]);
+                }
+                args.extend(["--", "node"]);
+                let reason = reason_for("team.kdbx", &args).map_err(|e| e.message);
+                assert_eq!(
+                    reason,
+                    Ok(format!("Give node {phrase} of entry {ID} from team.kdbx")),
+                    "{fields:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_same_field_twice_is_refused() {
+            for fields in [
+                ["3:password", "4:password"],
+                ["3:custom:API_KEY", "4:custom:API_KEY"],
+            ] {
+                let error = refused_before_touch_id(&[
+                    "--id",
+                    ID,
+                    "--secret-fd",
+                    fields[0],
+                    "--secret-fd",
+                    fields[1],
+                    "--",
+                    "node",
+                ]);
+                assert_eq!((error.code, error.exit), ("invalid_input", 6), "{fields:?}");
+                assert!(error.message.contains("only once"), "{}", error.message);
+            }
+        }
+
+        #[test]
+        fn run_rejects_target_fds_outside_3_to_255_and_duplicates() {
+            for (spec, says) in [
+                ("0:password", "below 3"),
+                ("2:password", "below 3"),
+                ("256:password", "above 255"),
+                ("4294967295:password", "above 255"),
+                ("4294967296:password", "number from 3 to 255"),
+                ("three:password", "number from 3 to 255"),
+            ] {
+                let error =
+                    refused_before_touch_id(&["--id", ID, "--secret-fd", spec, "--", "node"]);
+                assert_eq!((error.code, error.exit), ("invalid_input", 6), "{spec}");
+                assert!(error.message.contains(says), "{spec}: {}", error.message);
+            }
+            let error = refused_before_touch_id(&[
+                "--id",
+                ID,
+                "--secret-fd",
+                "3:password",
+                "--secret-fd",
+                "3:totp",
+                "--",
+                "node",
+            ]);
+            assert_eq!((error.code, error.exit), ("invalid_input", 6));
+            assert!(error.message.contains("named twice"), "{}", error.message);
+        }
     }
 
     /// `launch` keeps a 0600 file holding a cleartext password alive while

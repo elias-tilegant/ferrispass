@@ -367,3 +367,37 @@ fn run_never_leaks_the_secret_into_output_or_errors() {
         }
     }
 }
+
+/// `entry secret --reveal` with stdout on a pipe, as in a script.
+#[test]
+fn reveal_is_refused_when_stdout_is_not_a_terminal() {
+    let fixture = Fixture::new(PASSWORD);
+    let id = fixture.id.clone();
+    let outcome = fixture.cli(
+        "json",
+        &[
+            "entry", "secret", "--id", &id, "--field", "password", "--reveal",
+        ],
+    );
+    assert_eq!(outcome.code, Some(6), "{outcome:?}");
+    assert_eq!(outcome.error_code(), "reveal_needs_terminal");
+    assert_eq!(outcome.stdout, "", "nothing on stdout");
+    assert!(!outcome.stderr.contains(PASSWORD), "{outcome:?}");
+}
+
+#[test]
+fn reveal_error_points_to_run() {
+    let fixture = Fixture::new(PASSWORD);
+    let id = fixture.id.clone();
+    let outcome = fixture.cli(
+        "human",
+        &[
+            "entry", "secret", "--id", &id, "--field", "password", "--reveal",
+        ],
+    );
+    assert_eq!(outcome.code, Some(6), "{outcome:?}");
+    assert!(
+        outcome.stderr.contains("run --secret-fd"),
+        "the error says what to use instead: {outcome:?}"
+    );
+}
