@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
+    ffi::OsString,
     fs::File,
     io::Read as _,
     path::{Path, PathBuf},
@@ -77,6 +78,25 @@ enum Command {
         #[command(subcommand)]
         command: LaunchCommand,
     },
+    /// Start a program with secrets of one entry on file descriptors, never
+    /// in its arguments, its environment or a file.
+    Run(RunArgs),
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// Exact KeePass entry UUID whose fields the program gets.
+    #[arg(long)]
+    id: String,
+    /// FD:FIELD, for example 3:password. The program reads FIELD on
+    /// descriptor FD, 3 to 255. FIELD is password, totp or custom:KEY. Repeat
+    /// for more fields, each on its own descriptor.
+    #[arg(long = "secret-fd", value_name = "FD:FIELD", required = true)]
+    secret_fd: Vec<String>,
+    /// The program and its arguments, after `--`. It is started directly,
+    /// not through a shell.
+    #[arg(last = true, required = true, value_name = "PROGRAM")]
+    command: Vec<OsString>,
 }
 
 #[derive(Subcommand)]
@@ -367,11 +387,17 @@ pub fn run() -> i32 {
             return 2;
         }
     };
-    match execute(&cli) {
-        Ok(out) => {
+    // `run` prints nothing of its own on success: stdout belongs to the
+    // program it starts, and the exit code is the program's.
+    let outcome = match &cli.command {
+        Command::Run(args) => execute_run(&cli, args),
+        _ => execute(&cli).map(|out| {
             print_success(cli.format, out);
             0
-        }
+        }),
+    };
+    match outcome {
+        Ok(code) => code,
         Err(error) => {
             print_error(cli.format, &error);
             error.exit
@@ -392,20 +418,7 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
     ) {
         return sync_status(vault);
     }
-    // Scoped, so it is wiped as soon as the vault is open rather than living
-    // through the rest of the command: a `launch` waits ten seconds for the
-    // target app, and a `sync` makes network calls. The GUI does the same,
-    // and SECURITY.md says so for both.
-    // The CLI cannot ask, so it honours what the user confirmed in the app
-    // and otherwise reports the cost question as a plain failure.
-    crate::keepass::limits::set_confirmed_kdf_costs(
-        &crate::app::settings::load().confirmed_kdf_costs,
-    );
-    let mut document = {
-        let password = unlock_password(cli)?;
-        KeePassRepository::open(vault, &password, cli.key_file.as_deref())
-            .map_err(|e| CliError::new("unlock_failed", 3, e.to_string()))?
-    };
+    let mut document = open_vault(cli, vault)?;
     match &cli.command {
         Command::Vault {
             command: VaultCommand::Info,
@@ -418,8 +431,141 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         } => execute_sync(args, &mut document, vault),
         Command::Sync {
             command: SyncCommand::Status,
-        } => unreachable!(),
+        }
+        | Command::Run(_) => unreachable!(),
     }
+}
+
+/// Unlocks the vault and opens it.
+fn open_vault(cli: &Cli, vault: &Path) -> Result<VaultDocument, CliError> {
+    // The CLI cannot ask, so it honours what the user confirmed in the app
+    // and otherwise reports the cost question as a plain failure.
+    crate::keepass::limits::set_confirmed_kdf_costs(
+        &crate::app::settings::load().confirmed_kdf_costs,
+    );
+    // Local to this function, so it is wiped as soon as the vault is open
+    // rather than living through the rest of the command: a `launch` waits
+    // ten seconds for the target app, a `sync` makes network calls, and a
+    // `run` waits for its program. The GUI does the same, and SECURITY.md
+    // says so for both.
+    let password = unlock_password(cli)?;
+    KeePassRepository::open(vault, &password, cli.key_file.as_deref())
+        .map_err(|e| CliError::new("unlock_failed", 3, e.to_string()))
+}
+
+/// `run`: starts the program with the released fields on their descriptors
+/// and returns its exit code. What the command line asks for is checked
+/// before the vault is unlocked, and the vault is closed again before the
+/// program starts, so only the released values outlive the unlock, and only
+/// until their writers are done.
+#[cfg(unix)]
+fn execute_run(cli: &Cli, args: &RunArgs) -> Result<i32, CliError> {
+    let vault = cli
+        .vault
+        .as_deref()
+        .ok_or_else(|| CliError::new("missing_vault", 2, "--vault is required"))?;
+    let released = released_fields(args)?;
+    let secrets = {
+        let document = open_vault(cli, vault)?;
+        released_values(&document, &args.id, &released)?
+    };
+    let (program, arguments) = args
+        .command
+        .split_first()
+        .ok_or_else(|| CliError::new("invalid_input", 6, "run needs a program after --"))?;
+    let mut command = std::process::Command::new(program);
+    command.args(arguments);
+    let running =
+        crate::platform::secret_fd::spawn_with_secret_fds(command, secrets).map_err(run_error)?;
+    let finished = running.wait().map_err(run_error)?;
+    // Numbers only: which descriptor, how many bytes of how many.
+    for undelivered in &finished.undelivered {
+        eprintln!("warning: {undelivered}");
+    }
+    Ok(exit_code(finished.status))
+}
+
+#[cfg(not(unix))]
+fn execute_run(_cli: &Cli, _args: &RunArgs) -> Result<i32, CliError> {
+    Err(CliError::new(
+        "unsupported",
+        6,
+        "run is unsupported on this platform",
+    ))
+}
+
+/// The fields `--secret-fd` releases, each with its descriptor, checked
+/// before anything is unlocked: the syntax, the field names, each field at
+/// most once, and the descriptors as the platform module wants them.
+#[cfg(unix)]
+fn released_fields(args: &RunArgs) -> Result<Vec<(u32, SecretField)>, CliError> {
+    let invalid = |message: &'static str| CliError::new("invalid_input", 6, message);
+    let mut released: Vec<(u32, SecretField)> = Vec::with_capacity(args.secret_fd.len());
+    for spec in &args.secret_fd {
+        let (target, field) = spec
+            .split_once(':')
+            .ok_or_else(|| invalid("--secret-fd takes FD:FIELD, for example 3:password"))?;
+        let target: u32 = target
+            .parse()
+            .map_err(|_| invalid("the FD in --secret-fd must be a number from 3 to 255"))?;
+        let field = SecretField::parse(field)?;
+        if released.iter().any(|(_, earlier)| *earlier == field) {
+            return Err(invalid("each field can go to the program only once"));
+        }
+        released.push((target, field));
+    }
+    crate::platform::secret_fd::check_targets(released.iter().map(|(target, _)| *target))
+        .map_err(|error| CliError::new("invalid_input", 6, error.to_string()))?;
+    Ok(released)
+}
+
+/// Each released value with the descriptor it goes to.
+#[cfg(unix)]
+type ReleasedValues = Vec<(u32, Zeroizing<Vec<u8>>)>;
+
+/// The values of the released fields, moved into wiped buffers without a
+/// copy.
+#[cfg(unix)]
+fn released_values(
+    document: &VaultDocument,
+    id: &str,
+    released: &[(u32, SecretField)],
+) -> Result<ReleasedValues, CliError> {
+    if document.snapshot().find_entry(id).is_none() {
+        return Err(not_found());
+    }
+    released
+        .iter()
+        .map(|(target, field)| {
+            let mut value = secret_value(document, id, field)?;
+            Ok((
+                *target,
+                Zeroizing::new(std::mem::take(&mut *value).into_bytes()),
+            ))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn run_error(error: crate::platform::secret_fd::SecretFdError) -> CliError {
+    use crate::platform::secret_fd::SecretFdError;
+    match error {
+        SecretFdError::BelowThree(_)
+        | SecretFdError::AboveLimit(_)
+        | SecretFdError::Duplicate(_) => CliError::new("invalid_input", 6, error.to_string()),
+        _ => CliError::new("run_failed", 7, error.to_string()),
+    }
+}
+
+/// The program's exit code, or 128 plus the signal that ended it, as a shell
+/// reports it.
+#[cfg(unix)]
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt as _;
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
 }
 
 fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<Value, CliError> {
@@ -1205,39 +1351,70 @@ fn secret(doc: &VaultDocument, a: &EntrySecret) -> Result<Value, CliError> {
     if doc.snapshot().find_entry(&a.id).is_none() {
         return Err(not_found());
     }
-    let value = if a.field == "password" {
-        // Unwrapped here on purpose: the JSON envelope below owns it from
-        // this point, and wrapping the whole envelope would buy nothing.
-        doc.password_for_entry(&a.id)
-            .map(|password| password.to_string())
-    } else if a.field == "totp" {
-        doc.totp_for_entry(&a.id)
-            .map(|v| v.code.chars().filter(|c| c.is_ascii_digit()).collect())
-    } else if let Some(key) = a.field.strip_prefix("custom:") {
-        let entry = doc.snapshot().find_entry(&a.id).ok_or_else(not_found)?;
-        if !entry
-            .custom_fields
-            .iter()
-            .any(|f| f.key == key && f.protected)
-        {
-            return Err(CliError::new(
-                "not_secret",
+    let field = SecretField::parse(&a.field)?;
+    let value = secret_value(doc, &a.id, &field)?;
+    // Copied out of the wiped buffer here on purpose: the JSON envelope below
+    // owns it from this point, and wrapping the whole envelope would buy
+    // nothing.
+    Ok(json!({"entry_id":a.id,"field":a.field,"value":value.as_str()}))
+}
+
+/// A secret field of an entry, as `entry secret --field` and
+/// `run --secret-fd` name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SecretField {
+    Password,
+    Totp,
+    Custom(String),
+}
+
+impl SecretField {
+    fn parse(field: &str) -> Result<Self, CliError> {
+        if field == "password" {
+            Ok(Self::Password)
+        } else if field == "totp" {
+            Ok(Self::Totp)
+        } else if let Some(key) = field.strip_prefix("custom:") {
+            Ok(Self::Custom(key.to_owned()))
+        } else {
+            Err(CliError::new(
+                "invalid_field",
                 6,
-                "custom field is missing or is not protected",
-            ));
+                "field must be password, totp, or custom:KEY",
+            ))
         }
-        doc.custom_field_value(&a.id, key)
-            .map(|secret| secret.to_string())
-    } else {
-        return Err(CliError::new(
-            "invalid_field",
-            6,
-            "field must be password, totp, or custom:KEY",
-        ));
+    }
+}
+
+/// The value of `field` in the entry `id`, which the caller has found. A
+/// custom field counts only when it is protected.
+fn secret_value(
+    doc: &VaultDocument,
+    id: &str,
+    field: &SecretField,
+) -> Result<Zeroizing<String>, CliError> {
+    let value = match field {
+        SecretField::Password => doc.password_for_entry(id),
+        SecretField::Totp => doc
+            .totp_for_entry(id)
+            .map(|v| Zeroizing::new(v.code.chars().filter(|c| c.is_ascii_digit()).collect())),
+        SecretField::Custom(key) => {
+            let entry = doc.snapshot().find_entry(id).ok_or_else(not_found)?;
+            if !entry
+                .custom_fields
+                .iter()
+                .any(|f| f.key == *key && f.protected)
+            {
+                return Err(CliError::new(
+                    "not_secret",
+                    6,
+                    "custom field is missing or is not protected",
+                ));
+            }
+            doc.custom_field_value(id, key)
+        }
     };
-    value
-        .map(|v| json!({"entry_id":a.id,"field":a.field,"value":v}))
-        .ok_or_else(|| CliError::new("secret_not_found", 4, "secret is not present"))
+    value.ok_or_else(|| CliError::new("secret_not_found", 4, "secret is not present"))
 }
 
 impl EntryInput {
