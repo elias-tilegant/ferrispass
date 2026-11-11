@@ -40,14 +40,18 @@ keepass = { git = "https://github.com/elias-tilegant/keepass-rs", rev = "b1093d2
 # or resolution fails loudly instead of drifting. On every bump: diff the snapshot
 # against its Zed commit (scripts/verify-gpui-pre.sh), read the GPUI Kit release
 # notes, and keep CI on --locked.
-# Held by Cargo.lock alone, not by these pins: gpui-base and
-# gpui-component-macros at 0.7.1 (gpui-component asks only for ^0.7.1; set with
+# Held by Cargo.lock alone, not by these pins: gpui-component-macros at 0.7.1
+# (gpui-component asks only for ^0.7.1; set with
 # `cargo update -p <crate> --precise 0.7.1`), and the Zed exact pins gpui-pre
-# relaxed to `^` (objc2-*, cocoa, taffy). A bare `cargo update` lifts them all,
-# and gpui-base 0.7.2 also brings gpui-fast into the lock.
+# relaxed to `^` (objc2-*, cocoa, taffy). A bare `cargo update` lifts them all.
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
 gpui-component = "=0.7.1"
+# The unstyled controls under gpui-component. The design system's button draws
+# its own look on `gpui_base::Button`, which gpui-component does not re-export.
+# Same version as the one gpui-component already pulls in; 0.7.2 would also
+# bring gpui-fast into the lock.
+gpui-base = "=0.7.1"
 gpui-kit-assets = "=0.7.1"
 # Text keys (src/i18n/, locales/). GPUI Kit already uses rust-i18n for its own
 # texts and asks for ^4.2.0. The app compiles its catalogues with the same
