@@ -2,7 +2,7 @@
 
 While the master password field on the unlock screen has focus, FerrisPass turns on macOS secure event input. Programs that watch the keyboard, through an event tap or the older Carbon hooks, stop seeing what is typed until the field loses focus. Nothing changes on screen. If macOS refuses, a notice says the field is not protected.
 
-Started from `p1a-06-clipboard-path` at `5da7f72` on 2026-11-01. Two merges took in its later commits: `0fc6974` brought `3b140de` (its own page only), `a2b5a96` brought `3810673`, which narrows the clipboard rule in SECURITY.md to what FerrisPass copies for you. The secure input rows sit below the clipboard row, and its new paragraph follows the table.
+This step builds on the clipboard path ([p1a-06-clipboard-path.md](p1a-06-clipboard-path.md)). In SECURITY.md its rule is the row after the clipboard rule in the security contract, and the guard is listed under "Unsafe code".
 
 | Commit | What |
 |---|---|
@@ -12,7 +12,7 @@ Started from `p1a-06-clipboard-path` at `5da7f72` on 2026-11-01. Two merges took
 | `0a989da` | The test with the real Carbon calls runs on a real main thread, and the calls check for it |
 | `aab10f4` | SECURITY.md and this page |
 | `a5c2d5e` | The check by hand as steps that work with the guard in place, and the time in the progress log |
-| `d945e97` | The note on the second merge above |
+| `d945e97` | Where the secure input rows sit in SECURITY.md |
 | the last one | The panic tests go through the hook `install_hooks` sets, with a real panic, instead of calling its release directly |
 
 ## How the guard works
