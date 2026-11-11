@@ -101,6 +101,7 @@ fn default_auto_sync_secs() -> Option<u64> {
 fn every_field_set(theme: ThemeChoice) -> AppSettings {
     AppSettings {
         auto_lock_secs: Some(60),
+        mac_idle_lock_secs: Some(1800),
         clipboard_clear_secs: Some(25),
         auto_update_check_enabled: false,
         launch_cleanup_secs: 45,
@@ -161,5 +162,23 @@ fn new_settings_load_into_the_092_struct() {
             &every_field_set(theme),
             &format!("every field set, {theme:?}"),
         );
+    }
+}
+
+/// The Mac idle setting is a field 0.9.2 does not know. A file with it, set
+/// or off, has to load into 0.9.2 with every other choice as written.
+#[test]
+fn a_settings_file_with_the_mac_idle_field_loads_into_092() {
+    for mac_idle_lock_secs in [Some(300), Some(1800), None] {
+        let settings = AppSettings {
+            mac_idle_lock_secs,
+            ..AppSettings::default()
+        };
+        let written = serde_json::to_string_pretty(&settings).expect("settings serialize");
+        assert!(
+            written.contains("\"mac_idle_lock_secs\""),
+            "the field is not in the file:\n{written}"
+        );
+        assert_loads_into_092(&settings, &format!("Mac idle {mac_idle_lock_secs:?}"));
     }
 }

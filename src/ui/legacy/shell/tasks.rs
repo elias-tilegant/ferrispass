@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app::services::activity;
+use crate::platform::system_idle;
 
 impl AppShell {
     /// Start the per-second TOTP refresh loop only when the currently-selected
@@ -48,20 +49,25 @@ impl AppShell {
     }
 
     /// Mirror of `sync_totp_tick` for the idle-timeout auto-lock
-    /// checker. Runs only while a vault is open AND `auto_lock_secs`
-    /// is configured; cancelled (= dropped) otherwise. The task wakes
-    /// every `AUTO_LOCK_TICK_SECS` and triggers a lock once the app-wide
-    /// idle clock (`services::activity`) has been silent for the
-    /// configured threshold. It only reads the clock; input moves it.
-    /// Reads the threshold inside the loop so settings changes apply
-    /// at the next tick without restarting the task.
+    /// checker. Runs only while a vault is open AND an auto-lock is
+    /// configured, `auto_lock_secs`, `mac_idle_lock_secs` or both;
+    /// cancelled (= dropped) otherwise. The task wakes every
+    /// `AUTO_LOCK_TICK_SECS` and triggers a lock once
+    /// `activity::lock_is_due_with` says so: by the app-wide idle clock
+    /// (`services::activity`) against `auto_lock_secs`, or, with
+    /// `mac_idle_lock_secs` set, by the Mac's idle time against that,
+    /// falling back to the app-wide clock when macOS cannot report it. It
+    /// only reads the clocks; input moves them. Reads both settings inside
+    /// the loop so settings changes apply at the next tick without
+    /// restarting the task.
     pub(super) fn sync_auto_lock_task(&mut self, cx: &mut Context<Self>) {
         // "Any vault in memory" - keeps the timer ticking when the active
         // slot is on the unlock screen but parked sessions are still
         // decrypted. Global auto-lock semantics: a single idle timeout
         // sweeps active + parked together via `AppState::lock_vault`.
         let any_unlocked = self.state.read(cx).has_any_unlocked();
-        let auto_lock_enabled = self.settings.auto_lock_secs.is_some();
+        let auto_lock_enabled =
+            self.settings.auto_lock_secs.is_some() || self.settings.mac_idle_lock_secs.is_some();
         let should_run = any_unlocked && auto_lock_enabled;
 
         match (should_run, self.auto_lock_task.is_some()) {
@@ -76,18 +82,31 @@ impl AppShell {
                         cx.background_executor()
                             .timer(Duration::from_secs(AUTO_LOCK_TICK_SECS))
                             .await;
-                        let decision = this.update(cx, |shell, _| {
-                            // Re-read on each tick so toggling the
+                        let decision = this.update(cx, |shell, cx| {
+                            // Re-read on each tick so changing either
                             // setting takes effect within ~5 s.
-                            let Some(threshold) = shell.settings.auto_lock_secs else {
+                            let app_threshold =
+                                shell.settings.auto_lock_secs.map(Duration::from_secs);
+                            let mac_threshold =
+                                shell.settings.mac_idle_lock_secs.map(Duration::from_secs);
+                            if app_threshold.is_none() && mac_threshold.is_none() {
                                 return None; // settings disabled - exit.
-                            };
+                            }
                             // A backwards clock jump must not postpone a
                             // lock; `idle_for` reads it as idle long enough.
-                            let idle = activity::idle_for(SystemTime::now());
-                            Some(activity::lock_is_due(
-                                idle,
-                                Some(Duration::from_secs(threshold)),
+                            let app_idle = activity::idle_for(SystemTime::now());
+                            // The Mac's idle time is only asked for while
+                            // it counts; `lock_is_due_with` ignores it
+                            // without a Mac threshold.
+                            let mac_idle = match mac_threshold {
+                                Some(_) => system_idle::idle_for(cx),
+                                None => Err(system_idle::IdleError::Unsupported),
+                            };
+                            Some(activity::lock_is_due_with(
+                                app_idle,
+                                mac_idle,
+                                app_threshold,
+                                mac_threshold,
                             ))
                         });
                         match decision {
@@ -115,8 +134,7 @@ impl AppShell {
 
     #[cfg(target_os = "macos")]
     pub(super) fn start_session_lock_task(&mut self, cx: &mut Context<Self>) {
-        let events = self._session_lock_monitor.events();
-        let lock_latch = self._session_lock_monitor.lock_latch();
+        let (events, lock_latch) = session_lock_events(&self._session_lock_monitor, cx);
         let window_handle = self.window_handle;
         self._session_lock_task = Some(cx.spawn(async move |this, cx| {
             while events.recv().await.is_ok() {
@@ -347,5 +365,69 @@ impl AppShell {
         self.pending_launches.clear();
         self.launch_cleanup_tasks.clear();
         crate::launch::sweeper::purge_all();
+    }
+}
+
+/// The session lock monitor's events and its latch, where the session lock
+/// task reads them. A test that installed a `fake_session_lock` on the
+/// `App` gets that one's instead, so it can send a lock without locking
+/// the Mac.
+#[cfg(target_os = "macos")]
+fn session_lock_events(
+    monitor: &crate::session_lock::SessionLockMonitor,
+    #[cfg_attr(not(test), allow(unused_variables))] cx: &gpui::App,
+) -> (
+    async_channel::Receiver<crate::session_lock::SessionLockEvent>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    #[cfg(test)]
+    if let Some(fake) = cx.try_global::<fake_session_lock::Installed>() {
+        return (fake.events.clone(), fake.lock_latch.clone());
+    }
+    (monitor.events(), monitor.lock_latch())
+}
+
+/// Session lock events for tests: what a test sends here reaches the shell's
+/// session lock task the way the monitor's events do.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) mod fake_session_lock {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use async_channel::{Receiver, Sender};
+
+    use crate::session_lock::SessionLockEvent;
+
+    pub(super) struct Installed {
+        pub(super) events: Receiver<SessionLockEvent>,
+        pub(super) lock_latch: Arc<AtomicBool>,
+    }
+
+    impl gpui::Global for Installed {}
+
+    pub(in crate::ui::legacy::shell) struct FakeSessionLock {
+        sender: Sender<SessionLockEvent>,
+        lock_latch: Arc<AtomicBool>,
+    }
+
+    impl FakeSessionLock {
+        /// From here on, a shell built on `cx` takes its session lock events
+        /// from the returned fake instead of from macOS.
+        pub(in crate::ui::legacy::shell) fn install(cx: &mut gpui::App) -> Self {
+            let (sender, events) = async_channel::bounded(8);
+            let lock_latch = Arc::new(AtomicBool::new(false));
+            cx.set_global(Installed {
+                events,
+                lock_latch: lock_latch.clone(),
+            });
+            Self { sender, lock_latch }
+        }
+
+        /// What the monitor does when the screen locks, the screen saver
+        /// starts or the Mac goes to sleep: set the latch, then wake the task.
+        pub(in crate::ui::legacy::shell) fn lock(&self) {
+            self.lock_latch.store(true, Ordering::Release);
+            let _ = self.sender.try_send(SessionLockEvent::Lock);
+        }
     }
 }

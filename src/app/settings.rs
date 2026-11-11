@@ -23,6 +23,17 @@ const FILE_NAME: &str = "settings.json";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     pub auto_lock_secs: Option<u64>,
+    /// Lock after the Mac itself has had no input for this many seconds,
+    /// instead of going by input in FerrisPass. `None` means off, and then
+    /// `auto_lock_secs` alone applies, as before. While this is set,
+    /// `auto_lock_secs` is not used: when macOS cannot report its idle
+    /// time, FerrisPass's own idle clock counts against this threshold
+    /// instead (`activity::lock_is_due_with`).
+    ///
+    /// `#[serde(default)]` so a settings.json without the field reads it as
+    /// off. Older builds ignore it.
+    #[serde(default)]
+    pub mac_idle_lock_secs: Option<u64>,
     pub clipboard_clear_secs: Option<u64>,
     /// When `true`, FerrisPass quietly checks GitHub Releases on app start
     /// (rate-limited to ~1×/24h) and surfaces a banner if a newer build
@@ -297,6 +308,7 @@ impl Default for AppSettings {
         // from a build without a settings file see no behavior change.
         Self {
             auto_lock_secs: Some(240),
+            mac_idle_lock_secs: None,
             clipboard_clear_secs: Some(10),
             auto_update_check_enabled: true,
             launch_cleanup_secs: DEFAULT_LAUNCH_CLEANUP_SECS,
@@ -425,6 +437,35 @@ mod tests {
             launch_cleanup_secs: secs,
             ..AppSettings::default()
         }
+    }
+
+    #[test]
+    fn mac_idle_lock_secs_is_off_by_default_and_round_trips() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.mac_idle_lock_secs, None);
+        assert_eq!(defaults.auto_lock_secs, Some(240));
+        let json = serde_json::to_string(&defaults).unwrap();
+        assert!(json.contains("\"mac_idle_lock_secs\":null"), "{json}");
+
+        let dir = TempDir::new().unwrap();
+        for value in [Some(900), Some(300), None] {
+            let settings = AppSettings {
+                mac_idle_lock_secs: value,
+                ..AppSettings::default()
+            };
+            save_in(dir.path(), &settings).unwrap();
+            assert_eq!(load_in(dir.path()).unwrap(), settings);
+        }
+    }
+
+    /// A settings.json from before the Mac idle setting has to parse, not
+    /// fall back to the defaults, and leave the setting off.
+    #[test]
+    fn an_older_settings_file_reads_the_field_as_off() {
+        let older = r#"{"auto_lock_secs":240,"clipboard_clear_secs":10}"#;
+        let parsed: AppSettings = serde_json::from_str(older).expect("older file parses");
+        assert_eq!(parsed.mac_idle_lock_secs, None);
+        assert_eq!(parsed.auto_lock_secs, Some(240));
     }
 
     /// Settings files written before these fields existed have to keep

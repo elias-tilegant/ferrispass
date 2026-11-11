@@ -1,12 +1,16 @@
 //! The auto-lock reads the app-wide idle clock. Input in the window moves
 //! it, the TOTP tick and the auto-lock check don't, and the pointer counts
-//! only while the window is in front.
+//! only while the window is in front. With the Mac idle setting on, the
+//! Mac's idle time decides instead, and the app's clock with the Mac
+//! threshold when macOS cannot report it. With it off, the Mac's idle time
+//! plays no part.
 use super::*;
 use crate::app::services::activity;
 use crate::app::services::clipboard::ClipboardService;
 use crate::app::{LibrarySelection, VaultStatus};
 use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
 use crate::keepass::VaultDocument;
+use crate::platform::system_idle;
 use gpui::{
     Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
     VisualTestContext, WindowHandle, point,
@@ -27,6 +31,16 @@ struct Harness {
 /// An open vault with one TOTP entry, selected, so the TOTP tick runs, and
 /// the auto-lock set to `auto_lock_secs`. The window is not in front.
 fn open_vault(cx: &mut TestAppContext, auto_lock_secs: Option<u64>) -> Harness {
+    open_vault_with(cx, auto_lock_secs, None)
+}
+
+/// The same, with the Mac idle setting at `mac_idle_lock_secs`. Both are set
+/// here, whatever the settings file on this Mac says.
+fn open_vault_with(
+    cx: &mut TestAppContext,
+    auto_lock_secs: Option<u64>,
+    mac_idle_lock_secs: Option<u64>,
+) -> Harness {
     cx.update(|cx| {
         gpui_component::init(cx);
         crate::app::actions::init(cx);
@@ -59,6 +73,7 @@ fn open_vault(cx: &mut TestAppContext, auto_lock_secs: Option<u64>) -> Harness {
         let view = cx.new(|cx| {
             let mut shell = AppShell::new(state.clone(), window, cx);
             shell.settings.auto_lock_secs = auto_lock_secs;
+            shell.settings.mac_idle_lock_secs = mac_idle_lock_secs;
             shell
         });
         shell = Some(view.clone());
@@ -74,7 +89,11 @@ fn open_vault(cx: &mut TestAppContext, auto_lock_secs: Option<u64>) -> Harness {
     cx.run_until_parked();
     shell.read_with(cx, |shell, _| {
         assert!(shell.totp_tick.is_some(), "the TOTP tick has to run");
-        assert_eq!(shell.auto_lock_task.is_some(), auto_lock_secs.is_some());
+        assert_eq!(
+            shell.auto_lock_task.is_some(),
+            auto_lock_secs.is_some() || mac_idle_lock_secs.is_some(),
+            "the auto-lock task runs exactly when one of the two settings is on"
+        );
     });
     Harness {
         state,
@@ -277,4 +296,141 @@ fn pointer_over_a_dialog_resets_the_clock(cx: &mut TestAppContext) {
     move_pointer(cx, &harness);
 
     assert_clock_moved("the pointer over a dialog");
+}
+
+const AUTO_LOCK: Option<u64> = Some(240);
+const MAC_IDLE_LOCK: Option<u64> = Some(15 * 60);
+const FIVE_MINUTES: Duration = Duration::from_secs(5 * 60);
+const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
+
+/// From here on the Mac reports `idle` as its idle time.
+fn mac_idle_for(cx: &mut TestAppContext, idle: Duration) {
+    cx.update(|cx| system_idle::fake::install_idle(cx, idle));
+}
+
+/// From here on the app's own clock reads as idle for `idle`.
+fn app_idle_for(idle: Duration) {
+    activity::reset(SystemTime::now() - idle);
+}
+
+#[gpui::test]
+fn auto_lock_without_mac_idle_ignores_the_mac(cx: &mut TestAppContext) {
+    // Someone at work in another app, with the Mac idle setting off: the
+    // Mac's idle time plays no part, FerrisPass's own clock decides alone.
+    // Without the fake the tick could not tell the two clocks apart, since a
+    // test build answers `Unsupported` and the fallback reads the app clock.
+    mac_idle_for(cx, Duration::ZERO);
+    let harness = open_vault_with(cx, AUTO_LOCK, None);
+
+    app_idle_for(Duration::from_secs(180));
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(is_open(cx, &harness), "locked after three idle minutes");
+
+    app_idle_for(Duration::from_secs(241));
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        !is_open(cx, &harness),
+        "input in another app held off the lock while the Mac idle setting was off"
+    );
+}
+
+#[gpui::test]
+fn auto_lock_with_mac_idle_ignores_the_app_clock(cx: &mut TestAppContext) {
+    // Someone at work in another app: the Mac is busy, FerrisPass is not.
+    mac_idle_for(cx, Duration::ZERO);
+    let harness = open_vault_with(cx, AUTO_LOCK, MAC_IDLE_LOCK);
+
+    // Past FerrisPass's own four minutes.
+    app_idle_for(FIVE_MINUTES);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        is_open(cx, &harness),
+        "locked by the app's own threshold while the Mac was in use"
+    );
+
+    // Past the Mac threshold too, on the app's clock.
+    app_idle_for(FIFTEEN_MINUTES + FIVE_MINUTES);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        is_open(cx, &harness),
+        "locked by the app's clock while the Mac was in use"
+    );
+}
+
+#[gpui::test]
+fn auto_lock_with_mac_idle_locks_when_the_mac_is_idle(cx: &mut TestAppContext) {
+    mac_idle_for(cx, FIFTEEN_MINUTES - Duration::from_secs(1));
+    let harness = open_vault_with(cx, AUTO_LOCK, MAC_IDLE_LOCK);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        is_open(cx, &harness),
+        "locked before the Mac was idle for fifteen minutes"
+    );
+
+    mac_idle_for(cx, FIFTEEN_MINUTES);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        !is_open(cx, &harness),
+        "still open after the Mac was idle for fifteen minutes"
+    );
+}
+
+#[gpui::test]
+fn auto_lock_with_mac_idle_falls_back_when_macos_cannot_say(cx: &mut TestAppContext) {
+    // A reading that is not a number of seconds, which `idle_for` turns into
+    // an error.
+    cx.update(|cx| system_idle::fake::install(cx, Ok(f64::NAN)));
+    let harness = open_vault_with(cx, AUTO_LOCK, MAC_IDLE_LOCK);
+
+    // Past the app's own four minutes, short of the Mac threshold, which is
+    // the one that applies.
+    app_idle_for(FIVE_MINUTES);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        is_open(cx, &harness),
+        "locked by the app's own threshold while the Mac idle setting was on"
+    );
+
+    app_idle_for(FIFTEEN_MINUTES);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        !is_open(cx, &harness),
+        "an unreadable Mac idle time postponed the lock"
+    );
+}
+
+#[gpui::test]
+fn the_auto_lock_task_runs_with_only_the_alternative_set(cx: &mut TestAppContext) {
+    mac_idle_for(cx, Duration::ZERO);
+    // `open_vault_with` fails if the task does not start.
+    let harness = open_vault_with(cx, None, MAC_IDLE_LOCK);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(is_open(cx, &harness), "locked while the Mac was in use");
+
+    mac_idle_for(cx, FIFTEEN_MINUTES);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(
+        !is_open(cx, &harness),
+        "the Mac idle setting alone did not lock"
+    );
+}
+
+/// Sleep, the lock screen and the screen saver lock at once, whatever the
+/// idle clocks say. The event comes from a fake in place of macOS's
+/// notifications, through the task the shell starts when it is built.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_session_lock_event_still_locks_with_the_alternative(cx: &mut TestAppContext) {
+    let session = cx.update(super::tasks::fake_session_lock::FakeSessionLock::install);
+    mac_idle_for(cx, Duration::ZERO);
+    let harness = open_vault_with(cx, AUTO_LOCK, MAC_IDLE_LOCK);
+    advance(cx, AUTO_LOCK_TICK_SECS);
+    assert!(is_open(cx, &harness));
+
+    session.lock();
+    cx.run_until_parked();
+    assert!(
+        !is_open(cx, &harness),
+        "a screen lock left the vault open while the Mac idle setting was on"
+    );
 }
