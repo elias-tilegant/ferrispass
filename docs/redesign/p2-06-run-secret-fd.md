@@ -35,7 +35,9 @@ Started from `rebuild` at `da54801` on 2026-11-11, in three parts on one branch:
 | `545e531` | Whether a number to close is open is asked with `fcntl(F_GETFD)`, the fifth `unsafe` block |
 | `11367dc` | `custom:` with an empty key is refused before Touch ID; a `--env` warning that cannot be written ends `run` with 7 before the program starts |
 | `9b66e9d` | SIGINT reaches the program with `--env` alone |
-| the last one | The limits near the open file limit and between the reap and the clearing of the pid, and this page |
+| `b59ffce` | The limits near the open file limit and between the reap and the clearing of the pid, and this page |
+| `279ed68` | The comment of the test for the `--env` warning wrapped at the file's width |
+| the last one | This page lists those two |
 
 ## What `run` does
 
