@@ -27,7 +27,11 @@ Started from `rebuild` at `da54801` on 2026-11-11, in three parts on one branch:
 | `2e288f3` | The test of the field order in the prompt: a field named twice never reaches it |
 | `99c0a83` | `docs/cli.md`, README and `docs/architecture.md` |
 | `c134e95` | The signal test waits for its program before it asserts, so a failing run leaves nothing behind |
-| the last one | This page |
+| `9207552` | This page |
+| `2b7340a` | The master password's descriptor stays closed in the program with `--env` alone |
+| `ee35488` | SIGTERM reaches the program with `--env` alone |
+| `f16ea34` | The test that the `--env` warning is written before the program starts |
+| the last one | This page lists those tests |
 
 ## What `run` does
 
@@ -61,6 +65,8 @@ warning: GITHUB_TOKEN is set only for this program, not exported, and readable b
 
 The warning names the variable, never the value. `NAME` starts with a letter or `_` and has only letters, digits and `_`.
 
+With `--env` alone nothing goes on a descriptor, and the program still starts through the descriptor module: it does not get the master password's descriptor either, and SIGINT and SIGTERM reach it as they do with `--secret-fd`.
+
 ## Signals
 
 While the program runs, `run` passes SIGINT and SIGTERM on to it and keeps waiting, so the program decides how it ends and `run` still returns its exit code. Before, a SIGTERM killed the CLI and a SIGINT ended it with 130, and the program ran on without anyone waiting for its exit code.
@@ -77,7 +83,7 @@ The unit tests in `src/platform/secret_fd.rs` start `/bin/sh` with secrets on de
 
 The unit tests in `src/cli.rs` run `run` up to the Touch ID prompt with a store that records the reason: the reason word for word, caller text kept out, the UUID in canonical form, the vault's name, every field in order with descriptors first, custom fields counted, and every command line that has to fail before Touch ID failing there.
 
-`tests/cli_run.rs` runs the CLI as a process against a vault on disk, with an empty home folder of its own: the password on 3, TOTP and custom fields, the exit code passed through, the program's environment and arguments, the master password's descriptor closed in the program on 9 and on 11 and refused when it is not open, a sentinel password on every error path in JSON and human output with no four characters of it on stdout or stderr, `--env` setting only its variable and leaking nowhere else, the warning once per variable, SIGTERM and SIGINT passed on with the program's exit code returned, the CLI waiting for a program that takes a second to end, 143 for a program the signal kills, `--reveal` refused on a pipe, and `launch sap` removing its staged file and exiting with 130 when SIGINT hits it. The last one runs the CLI in a sandbox that refuses every Mach lookup, so the `open` it starts cannot reach Launch Services and no SAP GUI opens on the Mac running the tests.
+`tests/cli_run.rs` runs the CLI as a process against a vault on disk, with an empty home folder of its own: the password on 3, TOTP and custom fields, the exit code passed through, the program's environment and arguments, the master password's descriptor closed in the program on 9 and on 11, also with `--env` alone, where nothing goes on a descriptor, and refused when it is not open, a sentinel password on every error path in JSON and human output with no four characters of it on stdout or stderr, `--env` setting only its variable and leaking nowhere else, the warning once per variable and before the program starts (with stderr on a socket shut down for writing, writing the warning fails and the program never starts), SIGTERM and SIGINT passed on with the program's exit code returned, SIGTERM also with `--env` alone, the CLI waiting for a program that takes a second to end, 143 for a program the signal kills, `--reveal` refused on a pipe, and `launch sap` removing its staged file and exiting with 130 when SIGINT hits it. The last one runs the CLI in a sandbox that refuses every Mach lookup, so the `open` it starts cannot reach Launch Services and no SAP GUI opens on the Mac running the tests.
 
 The characterization tests and `src/i18n/tests.rs` are unchanged and pass.
 
@@ -116,6 +122,8 @@ Each rule was checked by taking it out on a clean tree and running the tests nam
 | 21 | SIGINT passed on as well as SIGTERM | `run_passes_sigint_on` |
 | 22 | 128 plus the signal for a program a signal ended | `a_program_killed_by_a_signal_gives_128_plus_the_signal` |
 | 23 | the handler's comparison of the pid with 0 | `the_signal_handler_only_forwards`, `a_signal_before_the_pid_is_known_reaches_the_child_after_the_spawn` |
+| 24 | the descriptor module also for a program that gets nothing on a descriptor | `run_with_only_env_keeps_the_master_password_descriptor_from_the_program`, `run_with_only_env_passes_sigterm_on` |
+| 25 | the `--env` warning written before the spawn | `the_env_warning_comes_before_the_program_starts` |
 
 Creating the guard after the spawn, the other half of probe 18, cannot be written: the guard is an argument of the spawn, so the change does not compile.
 
@@ -137,4 +145,4 @@ Creating the guard after the spawn, the other half of probe 18, cannot be writte
 - The launch test needs `sandbox-exec`, which macOS still ships but calls deprecated.
 - CI builds and tests on macOS only. The module is written for any Unix, but nothing here builds it for Linux.
 
-The agents spent about 3.5 hours on this, including review and fixes.
+The agents spent about 5 hours on this, including review and fixes.
