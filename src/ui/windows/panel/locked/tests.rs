@@ -605,6 +605,32 @@ fn the_tick_calls_expire_if_due(cx: &mut TestAppContext) {
     assert_eq!(app.disables(), 1, "secure input stayed with the old buffer");
 }
 
+/// A key wipes the buffer too once its 30 seconds are up, before it does
+/// anything, without a tick first: Backspace and a character each find the
+/// old text gone with its secure input, and a new buffer under secure input
+/// of its own, which the character is the first key of.
+#[gpui::test]
+fn a_key_calls_expire_if_due(cx: &mut TestAppContext) {
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    // GPUI's clock stays where it is from here on, so no tick runs.
+    for (key, left) in [("backspace", 0), ("s", 1)] {
+        type_into(cx, panel, "nhq");
+        move_wall_clock(Duration::from_secs(30));
+        let (enables, disables) = (app.enables(), app.disables());
+        keys(cx, panel, key);
+        reset_wall_clock();
+        assert_eq!(dots(cx), left, "{key}: the key found the old text");
+        assert_eq!(
+            (app.enables(), app.disables()),
+            (enables + 1, disables + 1),
+            "{key}: the old buffer's secure input, then the new one's"
+        );
+        assert!(app.secure.held(), "{key}");
+    }
+}
+
 /// Every way of closing the locked panel wipes what was typed and lets go
 /// of secure input: the shortcut, Cmd+W, and Escape with nothing typed.
 #[gpui::test]
