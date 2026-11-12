@@ -25,7 +25,10 @@
 //! 4. The field is a plain element with the role of a text input and the
 //!    name "Search". It never has a value: the dots are drawn as text that
 //!    assistive technology does not read, and nothing typed reaches a node,
-//!    a log line or a `Debug` output.
+//!    a log line or a `Debug` output. Every element the window draws comes
+//!    from [`PanelView::locked_parts`], which the tests read; only `build`
+//!    and `button` give one an id, a role, a name or a text, and `assemble`
+//!    only puts them in place.
 //! 5. While locked, the panel shows nothing from a vault: no favorite, no
 //!    recently used entry, no row and no title. A missing vault file is
 //!    named by its file name, cleaned up for display. Every text comes from
@@ -54,7 +57,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use gpui::{
-    AnyElement, App, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
+    AnyElement, App, Context, ElementId, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Role, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, Task, Text, Window, div,
 };
@@ -236,8 +239,9 @@ pub(super) struct Look {
     pub(super) vault: SharedString,
 }
 
-/// Every element the locked panel draws. Built in one place, so the tests
-/// read what the window shows.
+/// Every element the locked panel draws, as [`PanelView::locked_parts`]
+/// hands them to `assemble`. The tests read these, so what the window shows
+/// of the locked panel is what they read.
 pub(super) struct Built {
     pub(super) field: Stateful<gpui::Div>,
     pub(super) sentence: Text,
@@ -303,8 +307,9 @@ fn dots(count: usize) -> SharedString {
     "\u{2022}".repeat(count).into()
 }
 
-/// Builds every element of the locked panel for `look`. The field tracks
-/// `focus`; the caller adds the handlers.
+/// Builds every element of the locked panel for `look`, with every id,
+/// role, name and text they carry. The field tracks `focus`;
+/// [`PanelView::locked_parts`] adds the handlers and the text style.
 pub(super) fn build(look: &Look, focus: &FocusHandle) -> Built {
     let field = div()
         .id("panel-locked-field")
@@ -321,6 +326,33 @@ pub(super) fn build(look: &Look, focus: &FocusHandle) -> Built {
         button: button(&look.kind),
         footer: super::view::footer(&footer_model(look)),
     }
+}
+
+/// Puts the parts of the locked panel in place: the field over the sentence
+/// and the button, the footer apart. It adds nothing to them that assistive
+/// technology reads.
+fn assemble(built: Built, secondary: Hsla) -> (AnyElement, PanelFooter) {
+    let Built {
+        field,
+        sentence,
+        button,
+        footer,
+    } = built;
+    let body = div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap(u(dimension::SPACE_8))
+        .child(field)
+        .child(
+            div()
+                .text_style(TextStyle::Body)
+                .text_color(secondary)
+                .child(sentence),
+        )
+        .children(button.map(|button| div().child(button)))
+        .into_any_element();
+    (body, footer)
 }
 
 impl PanelView {
@@ -609,12 +641,13 @@ impl PanelView {
         })
     }
 
-    /// The locked panel: the field with its dots, the sentence for the case,
-    /// the button, and the footer.
-    pub(super) fn render_locked(&mut self, cx: &mut Context<Self>) -> (AnyElement, PanelFooter) {
+    /// Every element of the locked panel as the window draws it: the parts
+    /// `build` makes for what the panel shows now, with the field's key
+    /// handler and text style and the button's click handler. Nothing is
+    /// added to them on the way to the window.
+    pub(super) fn locked_parts(&self, cx: &mut Context<Self>) -> Built {
         let look = self.look(cx);
         let text = cx.ds().colors.text_primary.hsla;
-        let secondary = cx.ds().colors.text_secondary.hsla;
         let Built {
             field,
             sentence,
@@ -634,21 +667,19 @@ impl PanelView {
                 view.on_unlock_click(window, cx);
             })),
         });
-        let body = div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .gap(u(dimension::SPACE_8))
-            .child(field)
-            .child(
-                div()
-                    .text_style(TextStyle::Body)
-                    .text_color(secondary)
-                    .child(sentence),
-            )
-            .children(button.map(|button| div().child(button)))
-            .into_any_element();
-        (body, footer)
+        Built {
+            field,
+            sentence,
+            button,
+            footer,
+        }
+    }
+
+    /// The locked panel: the field with its dots, the sentence for the case,
+    /// the button, and the footer.
+    pub(super) fn render_locked(&mut self, cx: &mut Context<Self>) -> (AnyElement, PanelFooter) {
+        let secondary = cx.ds().colors.text_secondary.hsla;
+        assemble(self.locked_parts(cx), secondary)
     }
 }
 

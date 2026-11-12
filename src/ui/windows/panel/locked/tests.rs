@@ -4,7 +4,7 @@
 //! one, and "another app" is a window of its own that the test brings to the
 //! front.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -340,8 +340,9 @@ fn tick(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-/// The parts of the locked panel for `look`, read one by one as assistive
-/// technology gets them.
+/// The parts `build` makes for `look`, read one by one as assistive
+/// technology gets them. For the cases a test sets up by hand; the open
+/// panel is read with `drawn_parts`.
 fn parts_of(cx: &mut TestAppContext, look: Look) -> Vec<probe::ComponentPart> {
     probe::in_frame(cx, move |window, cx| {
         let focus = cx.focus_handle();
@@ -362,6 +363,38 @@ fn parts_of(cx: &mut TestAppContext, look: Look) -> Vec<probe::ComponentPart> {
         ];
         parts.extend(crate::ui::ds::components::PanelFooter::parts(
             || build(&look, &focus).footer,
+            window,
+            cx,
+        ));
+        parts
+    })
+}
+
+/// The parts of the open locked panel as its window draws them: what
+/// `locked_parts` builds for the panel's own view as it is now, handlers
+/// and text style included, read one by one as assistive technology gets
+/// them.
+fn drawn_parts(cx: &mut TestAppContext) -> Vec<probe::ComponentPart> {
+    let view = view(cx);
+    probe::in_frame(cx, move |window, cx| {
+        // Every element by name, as in `parts_of`; the button is read by
+        // `button_name` there.
+        let Built {
+            field,
+            sentence,
+            button: _,
+            footer,
+        } = view.update(cx, |view, cx| view.locked_parts(cx));
+        // The footer's parts are read from two footers, one for the node
+        // it writes and one for the elements inside it.
+        let again = view.update(cx, |view, cx| view.locked_parts(cx)).footer;
+        let footers = RefCell::new(vec![again, footer]);
+        let mut parts = vec![
+            probe::part("field", field),
+            probe::part("sentence", sentence),
+        ];
+        parts.extend(crate::ui::ds::components::PanelFooter::parts(
+            || footers.borrow_mut().pop().expect("a footer for each read"),
             window,
             cx,
         ));
@@ -707,24 +740,26 @@ fn escape_wipes_and_closes(cx: &mut TestAppContext) {
 /// The field shows a dot for each key and never the keys: its node is a
 /// text input named "Search" without a value, and no node of the locked
 /// panel holds the typed text, nor two of its characters side by side more
-/// often than with nothing typed.
+/// often than with nothing typed. The parts are read as the panel's window
+/// draws them, from its own view, before and after typing.
 #[gpui::test]
 fn typed_keys_show_as_dots_and_never_as_a_value(cx: &mut TestAppContext) {
     let app = locked_app(cx, Setup::TouchId);
     let panel = app.open_panel(cx);
     activate(cx, panel);
+    let quiet = drawn_parts(cx);
+    assert!(is_key(cx, panel), "reading the panel took its keyboard");
     type_into(cx, panel, "sp-t");
     assert_eq!(dots(cx), 4);
     type_into(cx, panel, &SENTINEL[4..]);
     assert_eq!(dots(cx), SENTINEL.chars().count());
 
-    let look = view(cx).read_with(cx, |view, cx| view.look(cx));
-    let quiet = Look {
-        dots: 0,
-        ..look.clone()
-    };
-    let parts = parts_of(cx, look);
-    let quiet = parts_of(cx, quiet);
+    let parts = drawn_parts(cx);
+    assert_eq!(
+        dots(cx),
+        SENTINEL.chars().count(),
+        "reading the panel wiped the text"
+    );
     let field = parts
         .iter()
         .find(|part| part.name == "field")
@@ -855,8 +890,7 @@ fn the_locked_panel_shows_nothing_from_a_vault(cx: &mut TestAppContext) {
         assert!(vm.results().is_empty(), "rows while locked");
         assert_eq!(vm.vault_name(), None);
     });
-    let look = view(cx).read_with(cx, |view, cx| view.look(cx));
-    let parts = parts_of(cx, look);
+    let parts = drawn_parts(cx);
     for part in &parts {
         for (property, text) in part.texts() {
             let Some(text) = text else {
@@ -1351,5 +1385,69 @@ fn the_locked_panel_never_logs() {
     assert!(
         code.contains("fn on_locked_key_down("),
         "the scan reads the panel"
+    );
+}
+
+/// Only `build` and `button` give an element of the locked panel an id, a
+/// role, a name, a value or a text of its own. The rest of `locked.rs`,
+/// `locked_parts` with the handlers and `assemble` with the layout among
+/// it, gives none, so the parts `drawn_parts` reads are everything the
+/// locked panel hands to assistive technology. Read through `code_only`,
+/// so comments and the tests do not count; a call made through a macro or
+/// a function in another file is past it.
+#[test]
+fn only_build_names_what_the_locked_panel_draws() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/windows/panel/locked.rs");
+    let code = probe::code_only(&std::fs::read_to_string(&path).expect("read locked.rs"));
+    let mut code = code
+        .split("#[cfg(test)]\npub(crate) mod tests;")
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    for function in ["fn build(", "fn button("] {
+        let start = code
+            .find(function)
+            .unwrap_or_else(|| panic!("{function} in locked.rs"));
+        let open = start + code[start..].find('{').expect("a body");
+        let end = open + probe::braced(&code[open..]).len();
+        // Blanked rather than cut, so a line found below is the line in
+        // the file.
+        let blank: String = code[open..end]
+            .chars()
+            .map(|c| if c == '\n' { '\n' } else { ' ' })
+            .collect();
+        code.replace_range(open..end, &blank);
+    }
+    for function in ["fn locked_parts(", "fn assemble(", "fn render_locked("] {
+        assert!(code.contains(function), "the scan reads {function}");
+    }
+    let mut found = Vec::new();
+    for (number, line) in code.lines().enumerate() {
+        for call in [
+            ".id(",
+            ".role(",
+            "Role::",
+            "aria_",
+            "a11y_",
+            "accessibility_",
+            "tooltip",
+            "Text::new(",
+            "text!(",
+            "ElementId::",
+            "with_id(",
+            "InteractiveText",
+            "Label",
+            "Button::",
+            ".description(",
+        ] {
+            if line.contains(call) {
+                found.push(format!("locked.rs:{}: {}", number + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "an element of the locked panel gets a node or a text outside build:\n{}",
+        found.join("\n")
     );
 }
