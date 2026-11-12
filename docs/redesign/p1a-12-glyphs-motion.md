@@ -5,7 +5,7 @@ The design system gets its own glyphs, a single place where motion takes its tim
 | Commit | What |
 |---|---|
 | `e201f6b` | The glyph set under `assets/icons/fp/`, `ui::ds::icons` with `FpIcon` and `glyph` |
-| `083bbde` | The twelve Lucide glyphs the Kit's components draw, redrawn at the same weight |
+| `083bbde` | Twelve of the Lucide glyphs the Kit's components draw, redrawn at the same weight |
 | `a3cb542` | `ui::ds::motion`, the input kind noted by the root handlers, the Kit's motion values |
 | `ed9ed85` | The text size setting and its row in Settings, General |
 
@@ -39,7 +39,7 @@ The old screens keep their own glyphs under `assets/icons/app/` and `src/ui/icon
 
 ## The Kit's glyphs
 
-Kit components draw Lucide glyphs on a 24 grid with a stroke of 2, which comes out at 1.33 at 16 points, lighter than the app's own. `AppAssets` asks the app's files before the Kit's, so a file at the path the Kit loads replaces the Kit's glyph wherever a Kit component draws it. Twelve files directly under `assets/icons/` do that, for the glyphs the Kit's components use:
+Kit components draw Lucide glyphs on a 24 grid with a stroke of 2, which comes out at 1.33 at 16 points, lighter than the app's own. `AppAssets` asks the app's files before the Kit's, so a file at the path the Kit loads replaces the Kit's glyph wherever a Kit component draws it. Twelve files directly under `assets/icons/` do that, for twelve of the glyphs the Kit's components use:
 
 - `eye`, `eye-off`: the password field
 - `close`: dialogs, sheets, the clear button of a field
@@ -49,7 +49,7 @@ Kit components draw Lucide glyphs on a 24 grid with a stroke of 2, which comes o
 - `search`, `external-link`: lists and menus
 - `minus`, `plus`: number fields
 
-Each is Lucide's own shape moved onto the 16 grid, 2 to 22 on the 24 grid onto the live area 1.75 to 14.25, with a stroke of 1.5. They are derived works of Lucide, under the licence in `assets/licenses/ISC-Lucide.txt`. A few more Lucide glyphs appear in rarer places of the Kit (`asterisk`, `chevron-left`, `case-sensitive`, `replace`, `info`, `circle-check`, `triangle-alert`, `circle-x`); they stay as the Kit draws them until a screen needs them.
+Each is Lucide's own shape moved onto the 16 grid, 2 to 22 on the 24 grid onto the live area 1.75 to 14.25, with a stroke of 1.5. They are derived works of Lucide, under the licence in `assets/licenses/ISC-Lucide.txt`. The Kit draws many more Lucide glyphs, among them `asterisk`, `chevron-left`, `chevron-up`, `calendar`, `ellipsis` and `info`; they stay as the Kit draws them until a screen needs them.
 
 ## Motion
 
@@ -138,6 +138,10 @@ Each probe changed one thing on a clean tree, ran the module's tests and was rev
 | `no_fixed_text_size_outside_tokens` | `.text_size(px(15.))` in the tile | `src/ui/ds/components/tile.rs:83: .text_size(px(15.))` |
 | `large_text_sets_fifteen_points_in_the_kit_theme_and_the_tokens`, `switching_the_text_size_applies_without_a_restart` | `text_size_points` maps Large to the standard token | `left: 13.0`, `right: 15.0` |
 | `a_settings_file_without_the_text_size_reads_it_as_standard` | `text_size` without `#[serde(default)]` | ``this build reads what 0.9.2 wrote: Error("missing field `text_size`", ...)`` |
+| `a_moment_runs_once_per_occasion`, `the_wake_moment_runs_after_touch_id_but_not_after_return_in_the_password_field` | `may_run` no longer asks `cx.reduce_motion()` | `left: Some(120ms)`, `right: None` |
+| `the_kit_theme_takes_the_motion_values` | `kit_theme::switch` without the call that sets the motion values | `left: [0, 120, 180, 280]`, `right: [0, 120, 180, 240]` |
+| `glyph_grid` | a fill of `#C0392B` on the rect in `copy.svg` and a rotated group around `clock.svg` | `clock.svg: <g> has transform`, `copy.svg: <rect> fill="#C0392B"` |
+| `no_animation_outside_the_design_system` | a function named `with_spring_probe` in the old Settings screen | `src/ui/legacy/screens/settings.rs:487: fn with_spring_probe() {}` |
 
 ## How to check by hand
 
@@ -145,7 +149,7 @@ Not run yet; it comes with the preview build and the design gallery.
 
 - In the gallery, every glyph at 12, 16 and 20 points in light, dark and both contrast modes, at text size 13 and 15. The four status glyphs side by side.
 - In the password field of a Kit input, the eye and the crossed eye; in a select, the chevron. They should look as heavy as the app's own glyphs next to them.
-- Settings, General, Text size: Large. The Kit's controls and the new screens grow at once, without a restart; note which parts of the old screens keep their size. Back to Standard, they shrink again. Quit and start: the size is kept.
+- Settings, General, Text size: Large. The Kit's controls and the new screens grow at once, without a restart; note which parts of the old screens keep their size. Back to Standard, they shrink again. Quit and start: the size is kept. With Large set, change the theme in the theme row and with Cmd+Shift+D, and switch macOS between light and dark: the size stays at Large each time.
 - macOS Reduce Motion on and off while the app runs, then a theme change: nothing that moved before slides or springs any more.
 
 ## Limits
@@ -154,6 +158,9 @@ Not run yet; it comes with the preview build and the design gallery.
 - The test platform loads no assets into a window, so the tests stop at GPUI's renderer and at the layout. What a glyph looks like on screen is not tested.
 - `glyph_grid` does not hold coordinates to quarter points or a drawing to the live area. The spec's drawings use finer steps in places (the shield, the keyhole), and the shell's base line runs from 1.25 to 14.75; the files keep them as drawn.
 - `status_shapes_differ` compares commands, not rendered masks. Two shapes drawn with the same commands in different places would pass.
+- No test checks that `glyph` points at the glyph's own file. `a_glyph_renders_as_a_mask_in_the_text_color` renders each file through the renderer directly and checks the element `glyph` returns only for its color and size, so a `glyph` with a wrong path passes it. `glyph` has no callers yet.
+- `the_root_handlers_note_the_input_kind` presses a key, clicks and presses a shortcut. It does not move the pointer or scroll, so the `note_input` lines in those two handlers can go without a test failing.
+- No test holds startup, the theme row, the theme shortcut or the observer for the macOS appearance to the size that is set. Each passes it today, but if one passed Standard instead, every test would stay green. The check by hand covers them.
 - `duration` gives a time, not the kind of change. That a transition with Reduce Motion only fades, and that a caller asks `springs_allowed` before it moves anything, rests on the callers, and there are none yet.
 - Only the old main window notes the input kind. A window that does not go through its root handlers, such as the quick access panel, has to call `note_input` itself.
 - `no_animation_outside_the_design_system` reads source text. A call through a macro, a re-export under another name, or gpui-base's lower level `transition` and `spring` functions would pass it.

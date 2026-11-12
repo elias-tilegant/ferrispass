@@ -14,10 +14,11 @@
 //!
 //! Kit components draw Lucide glyphs on a 24 grid with a stroke of 2, which is
 //! 1.33 at 16 points. `AppAssets` asks the app's files before the Kit's, so
-//! the twelve Lucide glyphs the Kit's components use lie redrawn under
+//! twelve of the Lucide glyphs the Kit's components use lie redrawn under
 //! `assets/icons/` with the names the Kit loads, at the same weight as these.
 //! They are Lucide's shapes moved onto the 16 grid, derived works under the
-//! licence in `assets/licenses/ISC-Lucide.txt`.
+//! licence in `assets/licenses/ISC-Lucide.txt`. The Kit's other glyphs keep
+//! its own weight.
 
 use gpui::{SharedString, Styled as _, Svg, svg};
 use gpui_component::IconNamed;
