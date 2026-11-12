@@ -709,6 +709,8 @@ mod activity_tests;
 #[cfg(test)]
 mod appearance_tests;
 #[cfg(test)]
+mod biometric_tests;
+#[cfg(test)]
 mod characterization_tests;
 #[cfg(test)]
 mod clipboard_tests;

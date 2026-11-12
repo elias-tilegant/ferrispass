@@ -149,9 +149,14 @@ impl AppShell {
     /// The Touch ID prompt the unlock screen raises on its own. Never an
     /// answer to a cost notice: if one is up, or the header check has not
     /// come back yet, it stays quiet and leaves the decision to the user.
+    /// Nor does it start while an unlock is under way, such as one the quick
+    /// access panel started after this prompt was scheduled: a second
+    /// attempt would make that one stale. It is not scheduled again.
     fn start_automatic_biometric_unlock(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        if !state.kdf_check_settled_for_pending() || state.kdf_confirmation_for_pending().is_some()
+        if !state.kdf_check_settled_for_pending()
+            || state.kdf_confirmation_for_pending().is_some()
+            || touch_id::unlock_under_way(state)
         {
             return;
         }
