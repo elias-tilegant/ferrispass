@@ -52,6 +52,7 @@ const LEGACY_EXCEPTIONS: &[(&str, &str)] = &[
 /// opts in once with `#![allow(unsafe_code)]` below a `//!` header that says
 /// why it needs `unsafe`.
 const PLATFORM_MODULES: &[&str] = &[
+    "src/platform/secret_fd.rs",
     "src/platform/secure_input.rs",
     "src/platform/system_idle.rs",
 ];

@@ -25,6 +25,7 @@ The bundled executable remains part of the app. Verify a registration with
 vault info
 group list | create | rename | move | trash | restore
 entry list | search | get | secret | create | update | move | favorite | trash | restore
+run --id UUID [--secret-fd FD:FIELD]... [--env NAME=FIELD]... -- PROGRAM [ARGUMENTS]
 launch sap
 sync status | now
 ```
@@ -75,7 +76,126 @@ ferrispass-cli --vault team.kdbx --format json entry secret --id UUID --field pa
 
 Normal entry output never includes passwords, TOTP values, OTP seeds, or values
 of protected custom fields. Secret access requires a specific UUID, field, and
-`--reveal`. Treat stdout from a secret command as sensitive.
+`--reveal`, and `--reveal` prints only to a terminal: with stdout on a pipe or
+in a file, `entry secret` fails with `reveal_needs_terminal` (exit code 6)
+and prints nothing. A script or an agent that needs a secret hands it to the
+program that uses it with `run`, below, instead of reading it.
+
+## Handing a secret to a program
+
+`run` starts a program with secrets of one entry on file descriptors. The
+secret never passes through the script or agent that starts it, and it is in
+no argument, no file and, unless you choose the `--env` fallback below, no
+environment variable:
+
+```sh
+ferrispass-cli --vault team.kdbx --touch-id \
+  run --id UUID --secret-fd 3:custom:API_TOKEN -- node server.js
+```
+
+Before anything is unlocked, `run` checks the command line: the UUID, each
+`FD:FIELD`, each descriptor from 3 to 255 and no descriptor or field named
+twice. Then it unlocks the vault, reads the fields it releases, closes the
+vault again, and starts `node server.js` directly, not through a shell. The
+program reads the custom field `API_TOKEN` (which has to be protected, as for
+`entry secret`) on descriptor 3, up to end of file; `run` writes it into a
+pipe and closes its end. `password`, `totp` and `custom:KEY` can each go to a
+descriptor of their own: `--secret-fd 3:password --secret-fd 4:totp`.
+
+While it starts the program, `run` needs free descriptor numbers above the
+highest one it hands over: one per secret, and more for the start itself.
+Close to the limit on open files (`ulimit -n`), it fails with exit code 7
+after the unlock, before the program starts, and hands nothing over. With the
+soft limit of 256 a macOS shell has by default, one secret on 253, 254 or 255
+fails that way, and lower ones do too when the caller already holds the
+numbers above them. A lower descriptor with nothing open above it, or
+`ulimit -n 1024` before `run`, avoids it.
+
+`run` prints nothing of its own on stdout and leaves the program its stdin,
+stdout and stderr, so it also starts an MCP server that talks over stdio. In
+the agent's configuration, the server's command is `ferrispass-cli` and its
+arguments are the `run` line:
+
+```json
+{
+  "mcpServers": {
+    "tickets": {
+      "command": "ferrispass-cli",
+      "args": ["--vault", "/Users/you/team.kdbx", "--touch-id",
+               "run", "--id", "UUID", "--secret-fd", "3:custom:API_TOKEN",
+               "--", "node", "server.js"]
+    }
+  }
+}
+```
+
+`server.js` reads its token once when it starts, from descriptor 3 as from a
+file, and never sees it in its arguments or environment:
+
+```js
+const fs = require("node:fs");
+
+// FerrisPass wrote the token into descriptor 3 and closed the pipe.
+const token = fs.readFileSync(3, "utf8");
+```
+
+A shell script reads it with `token=$(cat <&3)`, Python with `open(3).read()`.
+
+With Touch ID, the prompt says what `run` gives to which program:
+
+> Give node a custom field of entry 1b4e28ba-2fa1-11d2-883f-0016d3cca427 from team.kdbx
+
+The program and the vault appear by their file names, and only when a name is
+1 to 40 characters from `A-Z a-z 0-9 . _ -`; otherwise as "a program" and "a
+vault". The entry is its UUID: Touch ID runs before the vault is open, so its
+title is not known yet. Each field appears by its kind ("the password", "the
+one-time code", "a custom field", "two custom fields"): those on descriptors
+in the order given, then those in variables (below) in the order given.
+Nothing else from the command line reaches the prompt, so a script cannot
+write its own words into it.
+
+The program does not get the descriptor `--master-password-fd` named: a
+program with that descriptor could read a master password kept in a file
+again. `run` closes it in the program before it starts, and fails with exit
+code 6 before it unlocks anything when that descriptor is not open.
+
+### Programs that cannot read a descriptor
+
+Some programs only take a secret from an environment variable. For those,
+`--env NAME=FIELD` is the explicit fallback:
+
+```sh
+ferrispass-cli --vault team.kdbx --touch-id \
+  run --id UUID --env GITHUB_TOKEN=password -- gh repo list
+```
+
+The program gets the variable, and the shell that started `run` does not.
+It is still an environment variable: programs running as your user can read
+another program's environment, and the program passes it on to everything it
+starts. `run` says so on stderr before the program starts, once per variable,
+also with `--format json`:
+
+```text
+warning: GITHUB_TOKEN is set only for this program, not exported, and readable by programs running as your user
+```
+
+If the warning cannot be written, the program does not start and `run` exits
+with 7.
+
+`NAME` starts with a letter or `_` and has only letters, digits and `_`.
+`--secret-fd` and `--env` can be combined, but each field goes to the program
+only once, either on a descriptor or in a variable, and each variable is named
+once. The Touch ID prompt names the fields in variables after those on
+descriptors, and never a variable's name.
+
+### Signals
+
+While the program runs, `run` passes SIGINT and SIGTERM on to it and keeps
+waiting for it. The program decides how it ends, and `run` exits with its exit
+code, or with 128 plus the signal that ended it, as a shell reports it. So a
+supervisor that stops `run` with `kill -TERM` stops the program, and gets its
+exit code. Ctrl+C in a terminal reaches the program twice, once from the
+terminal and once from `run`.
 
 ## Mutating
 
@@ -189,11 +309,20 @@ both the process exit code and the error `code` instead of matching messages.
 | 6 | Invalid input, validation error or missing sync setup |
 | 7 | I/O, save, network or sync service failure |
 
+`run` uses these codes for what goes wrong before the program starts; a
+program that cannot be started is 7, and so is a `--env` warning that cannot
+be written. Once the program has started, `run` exits with the program's exit
+code, or with 128 plus the signal that ended it. The program's code can be any
+of the numbers above; an error of `run` itself also writes the error envelope
+to stderr, unless stderr cannot be written.
+
 Agent workflows should follow these rules:
 
 - Request JSON output.
 - Address entries by UUID, not by title.
-- Read one explicit secret field at a time and only with `--reveal`.
+- Hand a secret to the program that needs it with `run --secret-fd`; `--reveal`
+  prints one only to a terminal.
 - Pass passwords through an inherited descriptor, never an argument or
-  environment variable.
+  environment variable, except through the explicit `--env` fallback of
+  `run`.
 - Review mutation and sync plans before repeating them with `--commit`.

@@ -21,7 +21,7 @@ For headless and agent-oriented workflows, see the [FerrisPass CLI](docs/cli.md)
 - **Resume**: most-recently-opened vault auto-loads at startup; Recents list on the welcome screen
 - **Cloud sync**: SharePoint via Microsoft Graph (device-code OAuth, ETag-based conflict detection, merge on conflict) and iCloud Drive - see [Getting Started: SharePoint Sync](./docs/getting-started-sharepoint.md) and [Getting Started: iCloud Drive](./docs/getting-started-icloud.md)
 - **Appearance**: light, dark, or follow macOS (⌘⇧D cycles); the window remembers where you left it
-- **CLI**: headless vault access for scripts and local AI agents, with JSON output, explicit secret reads, dry-run writes, Touch ID and two-step sync for SharePoint and iCloud Drive
+- **CLI**: headless vault access for scripts and local AI agents, with JSON output, explicit secret reads, dry-run writes, Touch ID and two-step sync for SharePoint and iCloud Drive; scripts and agents hand a secret to a program with `run --secret-fd`, and `--reveal` prints one only on a terminal
 
 ## Feature matrix
 
@@ -92,8 +92,10 @@ ferrispass-cli --touch-id --allow-device-passcode \
 ```
 
 Use `--format json` for scripts and agents. Secret fields are redacted unless a
-specific entry, field and `--reveal` are requested. Mutations are dry runs until
-`--commit` is supplied. See the [CLI guide](./docs/cli.md) for the complete
+specific entry, field and `--reveal` are requested, and `--reveal` prints only
+on a terminal; scripts and agents get a secret through `run --secret-fd`, which
+hands it to the program they start on a file descriptor. Mutations are dry runs
+until `--commit` is supplied. See the [CLI guide](./docs/cli.md) for the complete
 command overview, safe password input and the two-step sync flow.
 
 ## Auto-updates
