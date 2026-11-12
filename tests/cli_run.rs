@@ -681,8 +681,8 @@ fn env_fallback_prints_the_warning_once() {
 /// is a socket already shut down for writing, so writing the warning fails
 /// and the CLI goes no further: it exits with 7, the code for an I/O
 /// failure, although its error message cannot be written either. Had it
-/// started the program first, the program's line would be on stdout. With a stderr that takes the warning, the same
-/// command line starts the program.
+/// started the program first, the program's line would be on stdout. With a
+/// stderr that takes the warning, the same command line starts the program.
 ///
 /// A socket rather than a pipe without a reader: a copy of the reading end
 /// that another test's program inherits in the moment before close-on-exec
