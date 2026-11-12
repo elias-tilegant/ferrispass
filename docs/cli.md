@@ -107,8 +107,9 @@ highest one it hands over: one per secret, and more for the start itself.
 Close to the limit on open files (`ulimit -n`), it fails with exit code 7
 after the unlock, before the program starts, and hands nothing over. With the
 soft limit of 256 a macOS shell has by default, one secret on 253, 254 or 255
-fails that way; a lower descriptor, or `ulimit -n 1024` before `run`, avoids
-it.
+fails that way, and lower ones do too when the caller already holds the
+numbers above them. A lower descriptor with nothing open above it, or
+`ulimit -n 1024` before `run`, avoids it.
 
 `run` prints nothing of its own on stdout and leaves the program its stdin,
 stdout and stderr, so it also starts an MCP server that talks over stdio. In
@@ -313,7 +314,7 @@ program that cannot be started is 7, and so is a `--env` warning that cannot
 be written. Once the program has started, `run` exits with the program's exit
 code, or with 128 plus the signal that ended it. The program's code can be any
 of the numbers above; an error of `run` itself also writes the error envelope
-to stderr.
+to stderr, unless stderr cannot be written.
 
 Agent workflows should follow these rules:
 
