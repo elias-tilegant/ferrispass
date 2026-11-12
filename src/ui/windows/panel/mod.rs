@@ -28,9 +28,13 @@
 //! 8. No notification, no live region, and no title, user name or host in a
 //!    log line, an accessibility id or an error text. Ids are
 //!    `fp.panel.<component>.<index>`.
-//! 9. While the panel is open, the Auto-Type shortcut types nothing
-//!    (`services::hotkeys`): the panel has the keyboard, so the user name
-//!    and the password would land in its search field.
+//! 9. Auto-Type never types into the panel: it has the keyboard while the
+//!    app behind it stays in front, so the user name and the password would
+//!    land in its search field. Opening the panel stops a run that is
+//!    counting down or typing, before the panel takes the keyboard; while
+//!    the panel is open, the Auto-Type shortcut runs nothing
+//!    (`services::hotkeys`), and a run that starts anyway types nothing and
+//!    says so in the main window (`perform_auto_type` in the shell).
 //! 10. While no vault is open, the panel is the locked panel of `locked.rs`:
 //!     what is typed waits under secure event input for Touch ID, and
 //!     nothing from a vault is shown. When no vault waits on the unlock
@@ -141,6 +145,10 @@ pub fn open(cx: &mut App) {
     let Some((vm, state)) = panel(cx) else {
         return;
     };
+    // A run that counts down or types stops here, before the panel takes
+    // the keyboard. `cancel` returns once no key of the run can still go
+    // out; the typer looks at it before every character.
+    state.update(cx, |state, _| state.rotate_auto_type_context());
     put_recent_vault_on_the_unlock_screen(&state, cx);
     let now = cx.background_executor().now();
     vm.update(cx, |vm, cx| {

@@ -58,14 +58,19 @@ impl AppShell {
             ),
             cx,
         );
+        self.auto_type_after_countdown(entry_id, cx);
+    }
+
+    /// Types `entry_id` once the countdown has run out. A lock or another
+    /// vault on the way ends the run silently, and so does the quick access
+    /// panel opening meanwhile, unless it is still open when the countdown
+    /// ends: then `perform_auto_type` says why nothing was typed.
+    fn auto_type_after_countdown(&mut self, entry_id: String, cx: &mut Context<Self>) {
         let cancellation = self.state.read(cx).auto_type_cancellation();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_secs(AUTO_TYPE_COUNTDOWN_SECS))
                 .await;
-            if cancellation.is_cancelled() {
-                return;
-            }
             let _ = this.update_in(cx, |shell, window, cx| {
                 shell.perform_auto_type(Some(entry_id.clone()), cancellation.clone(), window, cx);
             });
@@ -111,8 +116,21 @@ impl AppShell {
     ) {
         #[cfg(test)]
         tests::note_run(window.window_handle());
-        // Stale countdowns and queued hotkey work are deliberately silent.
+        // The quick access panel has the keyboard while the app behind it
+        // stays in front: whatever Auto-Type typed now would land in the
+        // panel's search field. Opening the panel stops a run
+        // (`ui::windows::panel::open`), and no run types while it is open.
+        let panel_open = crate::ui::windows::panel::is_open(cx);
+        // Stale countdowns and queued hotkey work are deliberately silent,
+        // except a run the panel stopped while the panel is still open.
         if cancellation.is_cancelled() {
+            if panel_open {
+                say_the_panel_is_open(window, cx);
+            }
+            return;
+        }
+        if panel_open {
+            say_the_panel_is_open(window, cx);
             return;
         }
         let Some(foreground) = autotype::window::foreground() else {
@@ -273,6 +291,14 @@ impl AppShell {
     }
 }
 
+/// Tells the main window that Auto-Type typed nothing because the quick
+/// access panel is open.
+fn say_the_panel_is_open(window: &mut Window, cx: &mut gpui::App) {
+    #[cfg(test)]
+    tests::note_held_back();
+    window.push_notification("Auto-Type typed nothing because Quick Access is open.", cx);
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -287,6 +313,17 @@ mod tests {
 
     thread_local! {
         static RUNS: RefCell<Vec<AnyWindowHandle>> = const { RefCell::new(Vec::new()) };
+        static HELD_BACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Called where a run types nothing because the quick access panel is
+    /// open, in test builds.
+    pub(super) fn note_held_back() {
+        HELD_BACK.with(|held| held.set(held.get() + 1));
+    }
+
+    fn held_back() -> usize {
+        HELD_BACK.with(std::cell::Cell::get)
     }
 
     /// Called at the top of `perform_auto_type` in test builds, with the
@@ -467,6 +504,100 @@ mod tests {
             runs(),
             vec![main_window],
             "with the panel closed, a press runs Auto-Type in the main window"
+        );
+    }
+
+    /// Shift-Command-T types after a countdown. When quick access opens
+    /// meanwhile, the run stops: the countdown ends without typing, and the
+    /// main window says why. A run that reaches the main window while the
+    /// panel is open, as the Auto-Type shortcut's would if its loop let it
+    /// through, types nothing either and says so.
+    #[gpui::test]
+    fn the_countdown_types_nothing_when_the_panel_opened_meanwhile(cx: &mut TestAppContext) {
+        use crate::ui::windows::panel;
+
+        let app = panel::tests::open_app(cx, &[panel::tests::entry("Zq panel fixture")]);
+        RUNS.with(|runs| runs.borrow_mut().clear());
+        HELD_BACK.with(|held| held.set(0));
+        let shell = cx
+            .update(|cx| crate::app::with_shared_shell(cx, |_, cx| cx.entity()))
+            .expect("the main window's shell");
+        let main_window = shell.read_with(cx, |shell, _| shell.window_handle);
+        let notices = |cx: &mut TestAppContext| {
+            main_window
+                .update(cx, |_, window, cx| window.notifications(cx).len())
+                .expect("the main window")
+        };
+        let before = notices(cx);
+
+        // The countdown for an entry the vault does not hold: a run that
+        // went on anyway would find nothing to type.
+        shell.update(cx, |shell, cx| {
+            shell.auto_type_after_countdown("not-in-the-vault".to_string(), cx);
+        });
+        app.open_panel(cx);
+        cx.executor()
+            .advance_clock(Duration::from_secs(AUTO_TYPE_COUNTDOWN_SECS));
+        cx.run_until_parked();
+        assert_eq!(runs(), vec![main_window], "the countdown did not end");
+        assert_eq!(held_back(), 1, "the countdown went on into the panel");
+        assert_eq!(notices(cx), before + 1, "the main window does not say why");
+        assert!(cx.update(|cx| panel::is_open(cx)));
+
+        cx.update(|cx| AppShell::dispatch_global_auto_type(shell.clone(), cx));
+        cx.run_until_parked();
+        assert_eq!(runs().len(), 2);
+        assert_eq!(held_back(), 2, "a run went on while the panel was open");
+        assert_eq!(notices(cx), before + 2);
+    }
+
+    /// Opening quick access stops an Auto-Type run that is still typing,
+    /// before the panel takes the keyboard. The run holds the token it
+    /// started with, as `autotype::execute` does: a key already on its way
+    /// out reaches the app it was meant for before the panel opens, and no
+    /// key goes out after that. A run that starts later is not stopped.
+    #[gpui::test]
+    fn opening_the_panel_cancels_a_running_auto_type(cx: &mut TestAppContext) {
+        use crate::ui::windows::panel;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, mpsc};
+
+        let app = panel::tests::open_app(cx, &[panel::tests::entry("Zq panel fixture")]);
+        let run = app
+            .state
+            .read_with(cx, |state, _| state.auto_type_cancellation());
+        // The typer sends every character inside the token's dispatch gate.
+        let (inside, entered) = mpsc::channel();
+        let sent = Arc::new(AtomicBool::new(false));
+        let typer = {
+            let (run, sent) = (run.clone(), sent.clone());
+            std::thread::spawn(move || {
+                run.dispatch_if_active(|| {
+                    inside.send(()).expect("the test waits");
+                    std::thread::sleep(Duration::from_millis(50));
+                    sent.store(true, Ordering::SeqCst);
+                })
+            })
+        };
+        entered.recv().expect("a key on its way out");
+        app.open_panel(cx);
+        assert!(
+            sent.load(Ordering::SeqCst),
+            "the panel took the keyboard while a key was still going out"
+        );
+        assert!(run.is_cancelled(), "the run goes on typing into the panel");
+        assert_eq!(
+            run.dispatch_if_active(|| ()),
+            None,
+            "a key went out after the panel opened"
+        );
+        assert_eq!(typer.join().expect("the typer"), Some(()));
+        let later = app
+            .state
+            .read_with(cx, |state, _| state.auto_type_cancellation());
+        assert!(
+            !later.is_cancelled(),
+            "a run that starts later is stopped too"
         );
     }
 }

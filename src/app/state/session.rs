@@ -8,7 +8,7 @@ impl AppState {
         self.auto_type_cancellation.clone()
     }
 
-    pub(super) fn rotate_auto_type_context(&mut self) {
+    pub(crate) fn rotate_auto_type_context(&mut self) {
         self.auto_type_cancellation.cancel();
         self.auto_type_cancellation = CancellationToken::new();
     }
