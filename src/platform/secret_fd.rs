@@ -18,9 +18,10 @@
 //!    same; 0, 1 and 2 are the program's standard streams. The numbers the
 //!    program must not get (step 5) are converted the same way and have to
 //!    be 3 or above, and each of them that is not also a target has to be
-//!    open in this process: [`check_open`] looks for it in `/dev/fd`, which
-//!    has an entry for each open descriptor, and a closed one is
-//!    [`SecretFdError::NotOpen`]. Nothing is opened before that check.
+//!    open in this process: [`check_open`] asks for its flags with
+//!    `fcntl(F_GETFD)`, which fails for a number that is not open, and a
+//!    closed one is [`SecretFdError::NotOpen`]. Nothing is opened before
+//!    that check.
 //! 2. One pipe per target, from `std::io::pipe`. Both ends are close-on-exec.
 //!    On macOS the standard library sets that flag right after `pipe`, so a
 //!    program another thread starts in between would keep both ends. Nothing
@@ -112,9 +113,13 @@
 //! error here carries a buffer, the message of an `io::Error` or a path: only
 //! numbers, and the kind and OS error code of what the system refused.
 //!
-//! There are exactly four `unsafe` blocks in this file, and the `libc` calls
+//! There are exactly five `unsafe` blocks in this file, and the `libc` calls
 //! in them are `fcntl`, `dup2`, `close`, `sigaction` and `kill`:
 //!
+//! - in `is_open`, `fcntl(F_GETFD)`, which only reads the flags of a
+//!   descriptor to learn whether it is open: it takes no pointer, opens,
+//!   closes and changes nothing and takes no ownership, and a number that is
+//!   not open gives `EBADF`;
 //! - in `copy_above`, `fcntl(F_DUPFD_CLOEXEC)` on a read end this module
 //!   holds, and `OwnedFd::from_raw_fd` on the new descriptor, which nothing
 //!   else owns;
@@ -282,16 +287,34 @@ pub fn check_targets(targets: impl IntoIterator<Item = u32>) -> Result<(), Secre
 }
 
 /// Checks that each number is a descriptor open in this process, as step 1
-/// says, without opening anything: `/dev/fd` has an entry for each open
-/// descriptor (on Linux it is `/proc/self/fd`), and asking for one's
-/// metadata opens nothing. The CLI calls this before it unlocks the vault.
+/// says, without opening anything: [`is_open`] asks for the descriptor's
+/// flags with `fcntl(F_GETFD)`, which fails with `EBADF` for a number that
+/// is not open, on macOS and Linux alike. The CLI calls this before it
+/// unlocks the vault.
+///
+/// Not `stat` on `/dev/fd/N`: on macOS that fails now and then with `EBADF`
+/// for a descriptor that is open, while other processes look up the same
+/// number.
 pub fn check_open(numbers: impl IntoIterator<Item = u32>) -> Result<(), SecretFdError> {
     for number in numbers {
-        if std::fs::metadata(format!("/dev/fd/{number}")).is_err() {
+        if !is_open(number) {
             return Err(SecretFdError::NotOpen(number));
         }
     }
     Ok(())
+}
+
+/// Whether `number` is a descriptor open in this process. One too large for
+/// a `c_int` cannot be.
+fn is_open(number: u32) -> bool {
+    let Ok(fd) = c_int::try_from(number) else {
+        return false;
+    };
+    // SAFETY: `F_GETFD` takes no pointer and only reads the descriptor's
+    // flags: it opens, closes and changes nothing, and nothing here takes
+    // ownership of `fd`. For a number that is not an open descriptor,
+    // `fcntl` returns -1 with `EBADF`, so any `c_int` may be passed.
+    unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
 }
 
 /// Starts `cmd` with each secret on a pipe whose read end the program has as

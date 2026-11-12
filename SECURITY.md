@@ -93,7 +93,7 @@ The crate denies `unsafe_code`. The places below opt in, each for a system API t
 | `src/keepass/document.rs`, `macos_full_sync` | `fcntl` with `F_FULLFSYNC`, so a saved vault is on the disk and not only in the drive's cache |
 | `src/sync/icloud.rs`, `platform` | resolving a stored bookmark and using the URL `NSFileCoordinator` hands to its block, for vaults in iCloud Drive; the bindings mark both `unsafe` |
 | `src/platform/system_idle.rs` | one CoreGraphics call that reads the seconds since the last input in the login session, for the auto-lock alternative |
-| `src/platform/secret_fd.rs` | for `ferrispass-cli run --secret-fd`: `fcntl` with `F_DUPFD_CLOEXEC`, which moves the read end of each secret's pipe above the descriptors the program gets, and, between fork and exec, `dup2` and `close`, which put it on the descriptor the program reads and close the one the master password was read from; and, while the program runs, a signal handler, set and removed with `sigaction`, that passes SIGINT and SIGTERM on with `kill` |
+| `src/platform/secret_fd.rs` | for `ferrispass-cli run --secret-fd`: `fcntl` with `F_GETFD`, which only reads a descriptor's flags, to check before anything is unlocked that the one the master password was read from is open; `fcntl` with `F_DUPFD_CLOEXEC`, which moves the read end of each secret's pipe above the descriptors the program gets, and, between fork and exec, `dup2` and `close`, which put it on the descriptor the program reads and close the one the master password was read from; and, while the program runs, a signal handler, set and removed with `sigaction`, that passes SIGINT and SIGTERM on with `kill` |
 
 ## Master-password handling - what FerrisPass does and doesn't do
 
