@@ -52,6 +52,8 @@ pub(crate) struct Fixture {
     url: &'static str,
     starred: bool,
     fields: Vec<(&'static str, &'static str)>,
+    notes: &'static str,
+    protected: Vec<(&'static str, &'static str)>,
 }
 
 pub(crate) fn entry(title: &'static str) -> Fixture {
@@ -85,6 +87,15 @@ impl Fixture {
         self.fields.push((key, value));
         self
     }
+
+    fn notes(self, notes: &'static str) -> Self {
+        Self { notes, ..self }
+    }
+
+    fn protected(mut self, key: &'static str, value: &'static str) -> Self {
+        self.protected.push((key, value));
+        self
+    }
 }
 
 fn document(entries: &[Fixture]) -> VaultDocument {
@@ -105,6 +116,12 @@ fn document(entries: &[Fixture]) -> VaultDocument {
             }
             for (key, value) in &fixture.fields {
                 entry.set_unprotected(*key, *value);
+            }
+            if !fixture.notes.is_empty() {
+                entry.set_unprotected(fields::NOTES, fixture.notes);
+            }
+            for (key, value) in &fixture.protected {
+                entry.set_protected(*key, *value);
             }
             if fixture.starred {
                 entry.tags.push(FAVORITE_TAG.to_string());
@@ -1008,6 +1025,65 @@ fn panel_ids_carry_no_title_user_or_host(cx: &mut TestAppContext) {
             assert!(!id.contains(secret), "{id} names {secret}");
         }
     }
+}
+
+/// The panel reads an entry without its notes and its protected custom
+/// fields. An SAP system with a note, a protected SAP user and a protected
+/// token of its own: neither the model, its `Debug` output included, nor a
+/// row's node nor the footer holds any of them, and the row and the footer
+/// name the user from the entry's user name field instead.
+#[gpui::test]
+fn the_panel_reads_no_notes_and_no_protected_fields(cx: &mut TestAppContext) {
+    const NOTE: &str = "sp-note-4Kd";
+    const USER: &str = "SP-PROT-9WZ";
+    const TOKEN: &str = "sp-token-2Hm";
+    let app = open_app(
+        cx,
+        &[entry("NHQ 100")
+            .user("N.WEISS")
+            .password("sp-nhq")
+            .field("SAP_HOST", "nhq.example")
+            .field("SAP_INSTANCE", "00")
+            .notes(NOTE)
+            .protected("SAP_USER", USER)
+            .protected("Token", TOKEN)],
+    );
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "nhq");
+    let model = app.vm(cx).read_with(cx, |vm, _| vm.clone());
+    assert_eq!(model.results().len(), 1, "the test needs the entry listed");
+    let hit = &model.results()[0];
+    let mut seen = vec![
+        format!("{model:?}"),
+        format!("{:?}", hit.kind),
+        hit.parts.accessible_name().to_string(),
+        footer(&model.footer()).description_text().to_string(),
+    ];
+    let row_model = model.clone();
+    let nodes: Vec<String> = probe::in_frame(cx, move |window, cx| {
+        rows_of(&row_model)
+            .into_iter()
+            .map(|row| {
+                let (_, node) = probe::node(RenderOnce::render(row, window, cx));
+                format!(
+                    "{:?} {:?} {:?}",
+                    node.label(),
+                    node.description(),
+                    node.value()
+                )
+            })
+            .collect()
+    });
+    seen.extend(nodes);
+    for text in &seen {
+        for secret in [NOTE, USER, TOKEN] {
+            assert!(!text.contains(secret), "{secret} reached the panel: {text}");
+        }
+    }
+    assert!(
+        hit.parts.accessible_name().contains("N.WEISS"),
+        "the row names the user from the user name field"
+    );
 }
 
 #[gpui::test]
