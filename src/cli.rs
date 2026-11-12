@@ -84,7 +84,7 @@ enum Command {
         command: LaunchCommand,
     },
     /// Start a program with secrets of one entry on file descriptors, never
-    /// in its arguments, its environment or a file.
+    /// in its arguments or a file, and in its environment only with --env.
     Run(RunArgs),
 }
 
@@ -96,8 +96,19 @@ struct RunArgs {
     /// FD:FIELD, for example 3:password. The program reads FIELD on
     /// descriptor FD, 3 to 255. FIELD is password, totp or custom:KEY. Repeat
     /// for more fields, each on its own descriptor.
-    #[arg(long = "secret-fd", value_name = "FD:FIELD", required = true)]
+    #[arg(
+        long = "secret-fd",
+        value_name = "FD:FIELD",
+        required_unless_present = "env"
+    )]
     secret_fd: Vec<String>,
+    /// NAME=FIELD, for example API_TOKEN=password, for a program that cannot
+    /// read a descriptor: the program gets FIELD in the environment variable
+    /// NAME. Only this program gets it, but programs running as your user
+    /// can read another program's environment, so run prints a warning for
+    /// each. Prefer --secret-fd.
+    #[arg(long = "env", value_name = "NAME=FIELD")]
+    env: Vec<String>,
     /// The program and its arguments, after `--`. It is started directly,
     /// not through a shell.
     #[arg(last = true, required = true, value_name = "PROGRAM")]
@@ -472,11 +483,12 @@ fn open_vault(
         .map_err(|e| CliError::new("unlock_failed", 3, e.to_string()))
 }
 
-/// `run`: starts the program with the released fields on their descriptors
-/// and returns its exit code. What the command line asks for is checked
-/// before the vault is unlocked, and the vault is closed again before the
-/// program starts, so only the released values outlive the unlock, and only
-/// until their writers are done.
+/// `run`: starts the program with the released fields on their descriptors,
+/// and with `--env` in their variables, and returns its exit code. What the
+/// command line asks for is checked before the vault is unlocked, and the
+/// vault is closed again before the program starts, so only the released
+/// values outlive the unlock: those on descriptors until their writers are
+/// done, those for variables until the program starts.
 #[cfg(unix)]
 fn execute_run(cli: &Cli, args: &RunArgs) -> Result<i32, CliError> {
     run_program(
@@ -495,6 +507,8 @@ fn run_program(
     store: impl Fn() -> Arc<dyn BiometricStore>,
     registry: impl FnOnce() -> BiometricRegistry,
 ) -> Result<i32, CliError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
     let vault = cli
         .vault
         .as_deref()
@@ -506,20 +520,37 @@ fn run_program(
         .command
         .split_first()
         .ok_or_else(|| CliError::new("invalid_input", 6, "run needs a program after --"))?;
+    // The descriptor the master password comes from is the caller's and has
+    // no close-on-exec, so the program would inherit it and could read the
+    // master password again from a file. The child closes it, and that is
+    // safe only while it is open here, so a closed one stops `run` before
+    // anything is unlocked. It then stays open, as `spawn_with_secret_fds`
+    // needs, until this process exits.
+    crate::platform::secret_fd::check_open(cli.master_password_fd).map_err(run_error)?;
     let reason = run_reason(program, vault, &entry, &released);
-    let secrets = {
+    let (on_descriptors, in_environment) = {
         let document = open_vault(cli, vault, &reason, store, registry)?;
         released_values(&document, &entry.hyphenated().to_string(), &released)?
     };
     let mut command = std::process::Command::new(program);
     command.args(arguments);
-    // The descriptor the master password came from is the caller's and has
-    // no close-on-exec, so the program would inherit it and could read the
-    // master password again from a file. The child closes it. Here it stays
-    // open, as `spawn_with_secret_fds` needs, until this process exits.
+    // `Command` copies each value into an environment block of its own, which
+    // nothing can wipe; the program's copy is its own as well. Only the
+    // buffers here are wiped, when `in_environment` is dropped.
+    for (name, value) in &in_environment {
+        command.env(name, OsStr::from_bytes(value));
+    }
+    drop(in_environment);
+    for spec in &released.env {
+        eprintln!(
+            "warning: {} is set only for this program, not exported, and readable by \
+             programs running as your user",
+            spec.name
+        );
+    }
     let running = crate::platform::secret_fd::spawn_with_secret_fds(
         command,
-        secrets,
+        on_descriptors,
         cli.master_password_fd.as_slice(),
     )
     .map_err(run_error)?;
@@ -540,13 +571,43 @@ fn execute_run(_cli: &Cli, _args: &RunArgs) -> Result<i32, CliError> {
     ))
 }
 
-/// The fields `--secret-fd` releases, each with its descriptor, checked
-/// before anything is unlocked: the syntax, the field names, each field at
-/// most once, and the descriptors as the platform module wants them.
+/// What `run` releases: the fields `--secret-fd` puts on descriptors, then
+/// the ones `--env` puts into variables, each in the order given.
 #[cfg(unix)]
-fn released_fields(args: &RunArgs) -> Result<Vec<(u32, SecretField)>, CliError> {
+struct Released {
+    fds: Vec<(u32, SecretField)>,
+    env: Vec<EnvSpec>,
+}
+
+/// One `--env NAME=FIELD`.
+#[cfg(unix)]
+struct EnvSpec {
+    name: String,
+    field: SecretField,
+}
+
+#[cfg(unix)]
+impl Released {
+    /// Every released field, descriptors first, then variables.
+    fn fields(&self) -> impl Iterator<Item = &SecretField> {
+        self.fds
+            .iter()
+            .map(|(_, field)| field)
+            .chain(self.env.iter().map(|spec| &spec.field))
+    }
+}
+
+/// The fields `--secret-fd` and `--env` release, checked before anything is
+/// unlocked: the syntax, the field names, each field at most once whichever
+/// way it goes, each variable at most once and with a name a shell would
+/// take, and the descriptors as the platform module wants them.
+#[cfg(unix)]
+fn released_fields(args: &RunArgs) -> Result<Released, CliError> {
     let invalid = |message: &'static str| CliError::new("invalid_input", 6, message);
-    let mut released: Vec<(u32, SecretField)> = Vec::with_capacity(args.secret_fd.len());
+    let mut released = Released {
+        fds: Vec::with_capacity(args.secret_fd.len()),
+        env: Vec::with_capacity(args.env.len()),
+    };
     for spec in &args.secret_fd {
         let (target, field) = spec
             .split_once(':')
@@ -555,31 +616,59 @@ fn released_fields(args: &RunArgs) -> Result<Vec<(u32, SecretField)>, CliError> 
             .parse()
             .map_err(|_| invalid("the FD in --secret-fd must be a number from 3 to 255"))?;
         let field = SecretField::parse(field)?;
-        if released.iter().any(|(_, earlier)| *earlier == field) {
+        if released.fields().any(|earlier| *earlier == field) {
             return Err(invalid("each field can go to the program only once"));
         }
-        released.push((target, field));
+        released.fds.push((target, field));
     }
-    crate::platform::secret_fd::check_targets(released.iter().map(|(target, _)| *target))
+    for spec in &args.env {
+        let (name, field) = spec
+            .split_once('=')
+            .ok_or_else(|| invalid("--env takes NAME=FIELD, for example API_TOKEN=password"))?;
+        if !is_variable_name(name) {
+            return Err(invalid(
+                "the NAME in --env has to start with a letter or _ and have only \
+                 letters, digits and _",
+            ));
+        }
+        let field = SecretField::parse(field)?;
+        if released.fields().any(|earlier| *earlier == field) {
+            return Err(invalid("each field can go to the program only once"));
+        }
+        if released.env.iter().any(|earlier| earlier.name == name) {
+            return Err(invalid("each variable can be set only once"));
+        }
+        released.env.push(EnvSpec {
+            name: name.to_owned(),
+            field,
+        });
+    }
+    crate::platform::secret_fd::check_targets(released.fds.iter().map(|(target, _)| *target))
         .map_err(|error| CliError::new("invalid_input", 6, error.to_string()))?;
     Ok(released)
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`, the names a POSIX shell takes for variables.
+#[cfg(unix)]
+fn is_variable_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// The Touch ID reason for `run`: what goes to which program, from which
 /// entry and vault. Everything in it is checked here, so a script cannot
 /// write its own words into the dialog: the program's and the vault's file
 /// names only when [`safe_name`] lets them through, the entry as the
-/// canonical form of its UUID, and each field as a fixed phrase. A custom
-/// field's key, an entry title or any other text from the command line never
-/// gets in. Touch ID runs before the vault is open, so the entry's title is
-/// not known yet.
+/// canonical form of its UUID, and each field as a fixed phrase, whether it
+/// goes on a descriptor or into a variable. A custom field's key, a
+/// variable's name, an entry title or any other text from the command line
+/// never gets in. Touch ID runs before the vault is open, so the entry's
+/// title is not known yet.
 #[cfg(unix)]
-fn run_reason(
-    program: &OsStr,
-    vault: &Path,
-    entry: &uuid::Uuid,
-    released: &[(u32, SecretField)],
-) -> String {
+fn run_reason(program: &OsStr, vault: &Path, entry: &uuid::Uuid, released: &Released) -> String {
     format!(
         "Give {} {} of entry {} from {}",
         safe_name(Path::new(program), "a program"),
@@ -604,18 +693,18 @@ fn safe_name<'a>(path: &'a Path, fallback: &'a str) -> &'a str {
         .unwrap_or(fallback)
 }
 
-/// Every released field as a fixed phrase, in the order given. Custom fields
-/// are counted, not named: "a custom field", "two custom fields", at the
-/// place of the first one.
+/// Every released field as a fixed phrase, in the order of
+/// [`Released::fields`]. Custom fields are counted, not named: "a custom
+/// field", "two custom fields", at the place of the first one.
 #[cfg(unix)]
-fn released_phrase(released: &[(u32, SecretField)]) -> String {
+fn released_phrase(released: &Released) -> String {
     let custom = released
-        .iter()
-        .filter(|(_, field)| matches!(field, SecretField::Custom(_)))
+        .fields()
+        .filter(|field| matches!(field, SecretField::Custom(_)))
         .count();
     let mut phrases = Vec::new();
     let mut custom_named = false;
-    for (_, field) in released {
+    for field in released.fields() {
         match field {
             SecretField::Password => phrases.push("the password".to_owned()),
             SecretField::Totp => phrases.push("the one-time code".to_owned()),
@@ -648,9 +737,13 @@ fn custom_fields(count: usize) -> String {
     }
 }
 
-/// Each released value with the descriptor it goes to.
+/// The released values: each with the descriptor it goes to, and each with
+/// the variable it goes into.
 #[cfg(unix)]
-type ReleasedValues = Vec<(u32, Zeroizing<Vec<u8>>)>;
+type ReleasedValues = (
+    Vec<(u32, Zeroizing<Vec<u8>>)>,
+    Vec<(String, Zeroizing<Vec<u8>>)>,
+);
 
 /// The values of the released fields, moved into wiped buffers without a
 /// copy.
@@ -658,21 +751,26 @@ type ReleasedValues = Vec<(u32, Zeroizing<Vec<u8>>)>;
 fn released_values(
     document: &VaultDocument,
     id: &str,
-    released: &[(u32, SecretField)],
+    released: &Released,
 ) -> Result<ReleasedValues, CliError> {
     if document.snapshot().find_entry(id).is_none() {
         return Err(not_found());
     }
-    released
+    let value = |field: &SecretField| -> Result<Zeroizing<Vec<u8>>, CliError> {
+        let mut value = secret_value(document, id, field)?;
+        Ok(Zeroizing::new(std::mem::take(&mut *value).into_bytes()))
+    };
+    let on_descriptors = released
+        .fds
         .iter()
-        .map(|(target, field)| {
-            let mut value = secret_value(document, id, field)?;
-            Ok((
-                *target,
-                Zeroizing::new(std::mem::take(&mut *value).into_bytes()),
-            ))
-        })
-        .collect()
+        .map(|(target, field)| Ok((*target, value(field)?)))
+        .collect::<Result<_, CliError>>()?;
+    let in_environment = released
+        .env
+        .iter()
+        .map(|spec| Ok((spec.name.clone(), value(&spec.field)?)))
+        .collect::<Result<_, CliError>>()?;
+    Ok((on_descriptors, in_environment))
 }
 
 #[cfg(unix)]
@@ -681,7 +779,8 @@ fn run_error(error: crate::platform::secret_fd::SecretFdError) -> CliError {
     match error {
         SecretFdError::BelowThree(_)
         | SecretFdError::AboveLimit(_)
-        | SecretFdError::Duplicate(_) => CliError::new("invalid_input", 6, error.to_string()),
+        | SecretFdError::Duplicate(_)
+        | SecretFdError::NotOpen(_) => CliError::new("invalid_input", 6, error.to_string()),
         _ => CliError::new("run_failed", 7, error.to_string()),
     }
 }
@@ -2202,6 +2301,129 @@ mod tests {
                 ]);
                 assert_eq!((error.code, error.exit), ("invalid_input", 6), "{fields:?}");
                 assert!(error.message.contains("only once"), "{}", error.message);
+            }
+        }
+
+        /// `run --id ID <options> -- node`, each option split at the first
+        /// space.
+        fn with_options(options: &[&'static str]) -> Vec<&'static str> {
+            let mut args = vec!["--id", ID];
+            for option in options {
+                let (name, value) = option.split_once(' ').expect("an option and its value");
+                args.extend([name, value]);
+            }
+            args.extend(["--", "node"]);
+            args
+        }
+
+        /// A field goes to the program one way: on a descriptor or in a
+        /// variable, never both, and never in two variables.
+        #[test]
+        fn env_and_fd_cannot_name_the_same_field() {
+            for options in [
+                &["--secret-fd 3:password", "--env PW=password"][..],
+                &["--env PW=password", "--secret-fd 3:password"][..],
+                &["--env A=totp", "--env B=totp"][..],
+                &["--secret-fd 3:custom:API_KEY", "--env KEY=custom:API_KEY"][..],
+            ] {
+                let error = refused_before_touch_id(&with_options(options));
+                assert_eq!(
+                    (error.code, error.exit),
+                    ("invalid_input", 6),
+                    "{options:?}"
+                );
+                assert!(
+                    error
+                        .message
+                        .contains("field can go to the program only once"),
+                    "{options:?}: {}",
+                    error.message
+                );
+            }
+        }
+
+        #[test]
+        fn the_same_variable_twice_is_refused() {
+            let error = refused_before_touch_id(&with_options(&[
+                "--env TOKEN=password",
+                "--env TOKEN=totp",
+            ]));
+            assert_eq!((error.code, error.exit), ("invalid_input", 6));
+            assert!(
+                error.message.contains("variable can be set only once"),
+                "{}",
+                error.message
+            );
+        }
+
+        #[test]
+        fn an_invalid_variable_name_is_refused() {
+            for spec in [
+                "1X=password",
+                "A-B=password",
+                "=password",
+                "A B=password",
+                "TÖKEN=password",
+                "A.B=password",
+            ] {
+                let error = refused_before_touch_id(&["--id", ID, "--env", spec, "--", "node"]);
+                assert_eq!((error.code, error.exit), ("invalid_input", 6), "{spec}");
+                assert!(
+                    error.message.contains("has to start with a letter or _"),
+                    "{spec}: {}",
+                    error.message
+                );
+            }
+            let error = refused_before_touch_id(&["--id", ID, "--env", "TOKEN", "--", "node"]);
+            assert_eq!((error.code, error.exit), ("invalid_input", 6));
+            assert!(error.message.contains("NAME=FIELD"), "{}", error.message);
+
+            // What a shell takes is taken.
+            for spec in ["X=password", "_=password", "api_token_2=password"] {
+                let reason = reason_for("team.kdbx", &["--id", ID, "--env", spec, "--", "node"])
+                    .map_err(|e| e.message);
+                assert_eq!(
+                    reason,
+                    Ok(format!(
+                        "Give node the password of entry {ID} from team.kdbx"
+                    )),
+                    "{spec}"
+                );
+            }
+        }
+
+        /// Fields on descriptors first, then fields in variables, each in
+        /// the order given; the variable's name never shows.
+        #[test]
+        fn the_reason_names_fields_from_env_and_fd_in_order() {
+            for (options, phrase) in [
+                (
+                    &["--env PW=password", "--secret-fd 3:totp"][..],
+                    "the one-time code and the password",
+                ),
+                (
+                    &[
+                        "--secret-fd 3:password",
+                        "--env CODE=totp",
+                        "--env KEY=custom:API_KEY",
+                    ][..],
+                    "the password, the one-time code and a custom field",
+                ),
+                (
+                    &[
+                        "--env Approve_the_transfer=custom:A",
+                        "--secret-fd 3:custom:B",
+                    ][..],
+                    "two custom fields",
+                ),
+                (&["--env PW=password"][..], "the password"),
+            ] {
+                let reason = reason_for("team.kdbx", &with_options(options)).map_err(|e| e.message);
+                assert_eq!(
+                    reason,
+                    Ok(format!("Give node {phrase} of entry {ID} from team.kdbx")),
+                    "{options:?}"
+                );
             }
         }
 

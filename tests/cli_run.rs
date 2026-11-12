@@ -2,7 +2,8 @@
 //!
 //! Each test writes a vault with one entry, starts the CLI with the master
 //! password on descriptor 9 and has it start `/bin/sh` with secrets of that
-//! entry on descriptors. The CLI runs with an empty home folder of its own,
+//! entry on descriptors, or with `--env` in variables. The CLI runs with an
+//! empty home folder of its own,
 //! so it reads no settings and no Touch ID enrolment of the Mac running the
 //! tests.
 //!
@@ -74,26 +75,48 @@ impl Fixture {
         self.dir.path().join("home")
     }
 
-    /// Runs the CLI with `args` after the global options, in JSON or human
-    /// format.
-    fn cli(&self, format: &str, args: &[&str]) -> Outcome {
-        let command = format!(
-            "exec {} --vault {} --master-password-fd 9 --format {format} {} 9<{}",
+    /// A path in the fixture's folder.
+    fn path(&self, name: &str) -> String {
+        self.dir.path().join(name).to_string_lossy().into_owned()
+    }
+
+    /// The shell line that starts the CLI with `args` after the global
+    /// options, in JSON or human format, with the master password file open
+    /// on descriptor `master_fd`, or with that descriptor closed.
+    fn command_line(&self, format: &str, master_fd: u32, open: bool, args: &[&str]) -> String {
+        let redirect = if open {
+            format!(
+                "{master_fd}<{}",
+                shell_quote(&self.master_password.to_string_lossy())
+            )
+        } else {
+            format!("{master_fd}<&-")
+        };
+        format!(
+            "exec {} --vault {} --master-password-fd {master_fd} --format {format} {} {redirect}",
             shell_quote(cli()),
             shell_quote(&self.vault.to_string_lossy()),
             args.iter()
                 .map(|arg| shell_quote(arg))
                 .collect::<Vec<_>>()
                 .join(" "),
-            shell_quote(&self.master_password.to_string_lossy()),
-        );
-        let output = Command::new("/bin/sh")
+        )
+    }
+
+    /// `/bin/sh -c <line>` with the fixture's home folder and no stdin.
+    fn shell(&self, line: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
             .arg("-c")
-            .arg(&command)
+            .arg(line)
             .env("HOME", self.home())
-            .stdin(Stdio::null())
-            .output()
-            .expect("run the cli");
+            .stdin(Stdio::null());
+        command
+    }
+
+    /// Runs `line` to the end.
+    fn output(&self, line: &str) -> Outcome {
+        let output = self.shell(line).output().expect("run the cli");
         Outcome {
             code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -101,16 +124,36 @@ impl Fixture {
         }
     }
 
+    /// Runs the CLI with `args` after the global options, in JSON or human
+    /// format, with the master password on descriptor 9.
+    fn cli(&self, format: &str, args: &[&str]) -> Outcome {
+        self.output(&self.command_line(format, 9, true, args))
+    }
+
     /// `run --id <the entry> <secret_fds> -- /bin/sh -c <script> <args>`.
     fn run(&self, secret_fds: &[&str], script: &str, args: &[&str]) -> Outcome {
+        self.cli("json", &self.run_args(secret_fds, &[], script, args))
+    }
+
+    /// The arguments for `run --id <the entry> <secret_fds> <env> -- /bin/sh
+    /// -c <script> <args>`, each of `env` after an `--env`.
+    fn run_args<'a>(
+        &'a self,
+        secret_fds: &[&'a str],
+        env: &[&'a str],
+        script: &'a str,
+        args: &[&'a str],
+    ) -> Vec<&'a str> {
         let mut all = vec!["run", "--id", &self.id];
         for spec in secret_fds {
-            all.push("--secret-fd");
-            all.push(spec);
+            all.extend(["--secret-fd", spec]);
+        }
+        for spec in env {
+            all.extend(["--env", spec]);
         }
         all.extend(["--", "/bin/sh", "-c", script]);
         all.extend(args);
-        self.cli("json", &all)
+        all
     }
 }
 
@@ -228,6 +271,41 @@ fn run_never_puts_the_secret_in_argv_or_env() {
         "the password is in the program's environment or arguments: {seen}"
     );
     assert_eq!(on_the_descriptor, PASSWORD);
+
+    // With `--env` for another field, the password on the descriptor is
+    // still in neither, and the variable holds only its own field.
+    let outcome = fixture.cli(
+        "json",
+        &fixture.run_args(
+            &["3:password"],
+            &["FP_CODE=totp"],
+            "env; echo \"$0 $*\"; printf '%s' '--descriptor--'; cat <&3",
+            &["program-name", "first"],
+        ),
+    );
+    assert_ok(&outcome);
+    let (seen, on_the_descriptor) = outcome
+        .stdout
+        .split_once("--descriptor--")
+        .unwrap_or_else(|| panic!("{outcome:?}"));
+    assert!(seen.contains("program-name first"), "{seen}");
+    assert!(
+        !seen.contains(PASSWORD),
+        "the password is in the program's environment or arguments: {seen}"
+    );
+    let code = seen
+        .lines()
+        .find_map(|line| line.strip_prefix("FP_CODE="))
+        .unwrap_or_else(|| panic!("no FP_CODE in the environment: {seen}"));
+    assert!(
+        code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
+        "FP_CODE holds the one-time code: {code:?}"
+    );
+    assert!(
+        !seen.contains(&format!("program-name first {code}")),
+        "the code is in the program's arguments: {seen}"
+    );
+    assert_eq!(on_the_descriptor, PASSWORD);
 }
 
 /// The CLI reads the master password from descriptor 9, which the shell
@@ -258,6 +336,165 @@ fn run_keeps_the_master_password_descriptor_from_the_program() {
     assert_eq!(outcome.stdout, PASSWORD);
 }
 
+/// The child closes the master password's descriptor, which is safe only
+/// while it is open in the CLI. One that is not open stops `run` before the
+/// vault is unlocked, with exit code 6, not 3 for a failed unlock.
+#[test]
+fn run_refuses_a_master_password_descriptor_that_is_not_open() {
+    let fixture = Fixture::new(PASSWORD);
+    let line = fixture.command_line(
+        "json",
+        9,
+        false,
+        &fixture.run_args(&["3:password"], &[], "echo started", &[]),
+    );
+    let outcome = fixture.output(&line);
+    assert_eq!(outcome.code, Some(6), "{outcome:?}");
+    assert_eq!(outcome.error_code(), "invalid_input");
+    assert!(
+        outcome.stderr.contains("descriptor 9 is not open"),
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.stdout, "", "the program must not start");
+}
+
+/// The warning `--env` prints for `name`.
+fn env_warning(name: &str) -> String {
+    format!(
+        "warning: {name} is set only for this program, not exported, and readable by \
+         programs running as your user"
+    )
+}
+
+/// The program prints its environment. The password is in exactly one line,
+/// the variable `--env` names, and nowhere else.
+#[test]
+fn env_fallback_sets_only_the_named_variable() {
+    let fixture = Fixture::new(PASSWORD);
+    let outcome = fixture.cli(
+        "json",
+        &fixture.run_args(&[], &["FP_SECRET=password"], "env", &[]),
+    );
+    assert_ok(&outcome);
+    let holding: Vec<&str> = outcome
+        .stdout
+        .lines()
+        .filter(|line| line.contains(PASSWORD))
+        .collect();
+    assert_eq!(holding, [format!("FP_SECRET={PASSWORD}")], "{outcome:?}");
+    assert!(
+        outcome.stdout.contains("HOME="),
+        "the environment was printed: {outcome:?}"
+    );
+}
+
+/// `--env` puts the secret in the program's environment, and only there:
+/// not in its arguments, not on the CLI's stdout or stderr, not in the
+/// warning, and not in an error after the vault was unlocked.
+#[test]
+fn the_env_fallback_leaks_the_secret_nowhere_else() {
+    let fixture = Fixture::new(SENTINEL);
+    let argv = fixture.path("argv.txt");
+    let env = fixture.path("env.txt");
+    let script = format!(
+        "printf '%s\\n' \"$0\" \"$@\" > {}; printenv FP_SECRET > {}",
+        shell_quote(&argv),
+        shell_quote(&env)
+    );
+    for format in ["json", "human"] {
+        let outcome = fixture.cli(
+            format,
+            &fixture.run_args(
+                &[],
+                &["FP_SECRET=password"],
+                &script,
+                &["program-name", "first"],
+            ),
+        );
+        assert_ok(&outcome);
+        let argv_seen = std::fs::read_to_string(&argv).expect("the program wrote argv.txt");
+        assert_eq!(argv_seen, "program-name\nfirst\n", "{format}");
+        assert_eq!(part_of_sentinel(&argv_seen), None, "{format}: {argv_seen}");
+        let env_seen = std::fs::read_to_string(&env).expect("the program wrote env.txt");
+        assert_eq!(env_seen, format!("{SENTINEL}\n"), "{format}");
+        assert_eq!(outcome.stdout, "", "{format}");
+        assert_eq!(
+            outcome.stderr.trim_end(),
+            env_warning("FP_SECRET"),
+            "{format}"
+        );
+        assert_eq!(
+            part_of_sentinel(&outcome.stderr),
+            None,
+            "{format}: {outcome:?}"
+        );
+
+        // Unlocked, the value read, and then the program is missing.
+        let outcome = fixture.cli(
+            format,
+            &[
+                "run",
+                "--id",
+                &fixture.id,
+                "--env",
+                "FP_SECRET=password",
+                "--",
+                "/nonexistent/ferrispass-cli-run-test",
+            ],
+        );
+        assert_eq!(outcome.code, Some(7), "{format}: {outcome:?}");
+        assert!(
+            outcome.stderr.starts_with(&env_warning("FP_SECRET")),
+            "{format}: {outcome:?}"
+        );
+        if format == "json" {
+            assert_eq!(outcome.error_code(), "run_failed");
+        }
+        for (stream, text) in [("stdout", &outcome.stdout), ("stderr", &outcome.stderr)] {
+            assert_eq!(
+                part_of_sentinel(text),
+                None,
+                "{format}: {stream} holds part of the secret: {text}"
+            );
+        }
+    }
+}
+
+/// One warning line per variable, on stderr, before the program starts; with
+/// `--format json` too, since stderr is not the JSON envelope.
+#[test]
+fn env_fallback_prints_the_warning_once() {
+    let fixture = Fixture::new(PASSWORD);
+    for format in ["json", "human"] {
+        let outcome = fixture.cli(
+            format,
+            &fixture.run_args(&[], &["FP_SECRET=password"], "printf started >&2", &[]),
+        );
+        assert_ok(&outcome);
+        assert_eq!(
+            outcome.stderr,
+            format!("{}\nstarted", env_warning("FP_SECRET")),
+            "{format}: the warning comes once and before the program"
+        );
+
+        let outcome = fixture.cli(
+            format,
+            &fixture.run_args(
+                &["3:custom:API_KEY"],
+                &["FP_SECRET=password", "FP_CODE=totp"],
+                "cat <&3 >/dev/null",
+                &[],
+            ),
+        );
+        assert_ok(&outcome);
+        assert_eq!(
+            outcome.stderr,
+            format!("{}\n{}\n", env_warning("FP_SECRET"), env_warning("FP_CODE")),
+            "{format}: one line per variable, none for the descriptor"
+        );
+    }
+}
+
 /// Whether `text` holds `SENTINEL` or any four characters in a row of it.
 fn part_of_sentinel(text: &str) -> Option<&'static str> {
     (0..=SENTINEL.len() - 4)
@@ -267,14 +504,77 @@ fn part_of_sentinel(text: &str) -> Option<&'static str> {
 
 /// The password is the sentinel many times over, more than a pipe holds, so
 /// a program that does not read it makes the write fail. On every way `run`
-/// can go wrong, nothing the CLI or the program prints holds any part of it.
+/// can go wrong, with the password on a descriptor or in a variable, nothing
+/// the CLI or the program prints holds any part of it.
 #[test]
 fn run_never_leaks_the_secret_into_output_or_errors() {
     let password = SENTINEL.repeat(10_000);
     let fixture = Fixture::new(&password);
     let missing = "/nonexistent/ferrispass-cli-run-test";
     let id = fixture.id.clone();
-    let cases: [(&str, Vec<&str>, Option<i32>); 7] = [
+    let env_cases = [
+        (
+            "the program is missing, with --env",
+            vec!["run", "--id", &id, "--env", "FP_PW=password", "--", missing],
+            Some(7),
+        ),
+        (
+            "the program exits, with --env",
+            vec![
+                "run",
+                "--id",
+                &id,
+                "--env",
+                "FP_PW=password",
+                "--",
+                "/bin/sh",
+                "-c",
+                "exit 0",
+            ],
+            Some(0),
+        ),
+        (
+            "the field goes on a descriptor and into a variable",
+            vec![
+                "run",
+                "--id",
+                &id,
+                "--secret-fd",
+                "3:password",
+                "--env",
+                "FP_PW=password",
+                "--",
+                "/bin/sh",
+            ],
+            Some(6),
+        ),
+        (
+            "the variable name is invalid",
+            vec!["run", "--id", &id, "--env", "1X=password", "--", "/bin/sh"],
+            Some(6),
+        ),
+        (
+            "the variable is named twice",
+            vec![
+                "run",
+                "--id",
+                &id,
+                "--env",
+                "FP_PW=password",
+                "--env",
+                "FP_PW=totp",
+                "--",
+                "/bin/sh",
+            ],
+            Some(6),
+        ),
+        (
+            "the field in --env is unknown",
+            vec!["run", "--id", &id, "--env", "FP_PW=secret", "--", "/bin/sh"],
+            Some(6),
+        ),
+    ];
+    let fd_cases = [
         (
             "the program is missing",
             vec![
@@ -373,7 +673,7 @@ fn run_never_leaks_the_secret_into_output_or_errors() {
             Some(6),
         ),
     ];
-    for (what, args, code) in &cases {
+    for (what, args, code) in fd_cases.iter().chain(&env_cases) {
         for format in ["json", "human"] {
             let outcome = fixture.cli(format, args);
             assert_eq!(outcome.code, *code, "{what}, {format}: {outcome:?}");

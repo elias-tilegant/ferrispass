@@ -16,7 +16,10 @@
 //!    converted to `c_int` with `try_from`, from 3 to 255, and no two are the
 //!    same; 0, 1 and 2 are the program's standard streams. The numbers the
 //!    program must not get (step 5) are converted the same way and have to
-//!    be 3 or above.
+//!    be 3 or above, and each of them that is not also a target has to be
+//!    open in this process: [`check_open`] looks for it in `/dev/fd`, which
+//!    has an entry for each open descriptor, and a closed one is
+//!    [`SecretFdError::NotOpen`]. Nothing is opened before that check.
 //! 2. One pipe per target, from `std::io::pipe`. Both ends are close-on-exec.
 //!    On macOS the standard library sets that flag right after `pipe`, so a
 //!    program another thread starts in between would keep both ends. Nothing
@@ -115,6 +118,8 @@ pub enum SecretFdError {
     AboveLimit(u32),
     #[error("descriptor {0} is named twice")]
     Duplicate(u32),
+    #[error("descriptor {0} is not open")]
+    NotOpen(u32),
     #[error("could not set up the descriptors for the program: {0}")]
     Setup(Cause),
     #[error("could not start the program: {0}")]
@@ -231,16 +236,30 @@ pub fn check_targets(targets: impl IntoIterator<Item = u32>) -> Result<(), Secre
     bounds(targets).map(|_| ())
 }
 
+/// Checks that each number is a descriptor open in this process, as step 1
+/// says, without opening anything: `/dev/fd` has an entry for each open
+/// descriptor (on Linux it is `/proc/self/fd`), and asking for one's
+/// metadata opens nothing. The CLI calls this before it unlocks the vault.
+pub fn check_open(numbers: impl IntoIterator<Item = u32>) -> Result<(), SecretFdError> {
+    for number in numbers {
+        if std::fs::metadata(format!("/dev/fd/{number}")).is_err() {
+            return Err(SecretFdError::NotOpen(number));
+        }
+    }
+    Ok(())
+}
+
 /// Starts `cmd` with each secret on a pipe whose read end the program has as
 /// the given descriptor number, and without the descriptors numbered in
 /// `close_in_child`. The steps are in the module header.
 ///
 /// `close_in_child` is for descriptors this process inherited without
 /// close-on-exec and must not pass on, such as the one the master password
-/// was read from. Each of them that is not also a target has to stay open in
-/// this process until this returns, so that nothing this function opens can
-/// take its number. A number that is also a target stays open in the
-/// program, which gets its secret there.
+/// was read from. Each of them that is not also a target has to be open in
+/// this process when this is called and stay open until it returns, so that
+/// nothing this function opens can take its number; one that is not open is
+/// refused before anything is opened. A number that is also a target stays
+/// open in the program, which gets its secret there.
 pub fn spawn_with_secret_fds(
     cmd: Command,
     secrets: Vec<(u32, Zeroizing<Vec<u8>>)>,
@@ -248,6 +267,12 @@ pub fn spawn_with_secret_fds(
 ) -> Result<RunningChild, SecretFdError> {
     check_targets(secrets.iter().map(|(target, _)| *target))?;
     closable(close_in_child)?;
+    check_open(
+        close_in_child
+            .iter()
+            .copied()
+            .filter(|number| secrets.iter().all(|(target, _)| target != number)),
+    )?;
     let mut pipes = Vec::with_capacity(secrets.len());
     for (target, secret) in secrets {
         let (reader, writer) =
@@ -890,6 +915,34 @@ mod tests {
         }
     }
 
+    /// A number to close has to be open here when the spawn starts. If it
+    /// were not, a pipe or a copy could get it, and the child would close
+    /// that instead. No process holds a million descriptors, so 1000000 is
+    /// closed in this one whatever the other tests open.
+    #[test]
+    fn a_closed_number_to_close_is_refused_before_touch_id() {
+        const CLOSED: u32 = 1_000_000;
+        assert_eq!(check_open([CLOSED]), Err(SecretFdError::NotOpen(CLOSED)));
+
+        let (cmd, out) = sh("echo started");
+        let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[CLOSED]).err();
+        assert_eq!(refused, Some(SecretFdError::NotOpen(CLOSED)));
+        assert_eq!(read_back(out), "", "the program must not start");
+
+        // One this test holds open passes. A number that is also a target is
+        // not asked about, open here or not: `dup2` puts the program's pipe
+        // there.
+        let held = File::open("/dev/null").expect("open /dev/null");
+        let number = u32::try_from(held.as_raw_fd()).expect("a descriptor number");
+        assert_eq!(check_open([number]), Ok(()));
+        let (cmd, out) = sh("cat <&3");
+        let running = spawn_with_secret_fds(cmd, vec![(3, secret("on 3"))], &[number, 3])
+            .expect("start the program");
+        let finished = finish(running);
+        assert!(finished.status.success(), "{finished:?}");
+        assert_eq!(read_back(out), "on 3");
+    }
+
     /// A writer that takes `accept` bytes and then fails with an error whose
     /// message is the sentinel.
     struct FailingWriter {
@@ -929,6 +982,7 @@ mod tests {
             SecretFdError::BelowThree(2),
             SecretFdError::AboveLimit(256),
             SecretFdError::Duplicate(3),
+            SecretFdError::NotOpen(9),
         ];
         for error in &errors {
             let mut texts = vec![format!("{error}"), format!("{error:?}")];
