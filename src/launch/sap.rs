@@ -18,7 +18,9 @@
 //!   (e.g. `3200`) and non-numeric values pass through unchanged for
 //!   non-standard setups.
 //! - `SAP_LANG`     - logon language (e.g. `DE`)
-//! - `SAP_CLIENT`   - SAP client / mandant (e.g. `100`)
+//! - `SAP_CLIENT`   - SAP client / mandant (e.g. `100`). Written as the
+//!   `clnt` parameter, the name SAP GUI for Java reads; numeric values
+//!   shorter than three digits are zero-padded (`1` → `001`).
 //! - `SAP_USER`     - *optional* username override; falls back to
 //!   the entry's standard Username field. Only useful when the
 //!   primary identity on the entry differs from the SAP user (e.g.
@@ -36,7 +38,14 @@
 //! GUI does NOT URL-decode. Encoding `/` to `%2F` was the bug behind
 //! "No valid host specification for connection" - SAP GUI couldn't
 //! parse the conn string and fell back to picking text from the
-//! file path. We now write characters as-is. Passwords containing
+//! file path. We now write characters as-is.
+//!
+//! The parameter names are SAP GUI for Java's own (`conn`, `user`, `pass`,
+//! `lang`, `clnt`, `expert`), the ones its connection document writes when
+//! it saves a `.sapc` itself. Anything else lands in its list of ignored
+//! parameters without a word: `client=` used to be written here, so every
+//! launch logged on to the system's default client instead of the one in
+//! the entry. Passwords containing
 //! `&` or `=` aren't representable in this format; that's a SAP GUI
 //! limitation, not ours, and is rare enough in practice to ignore.
 //!
@@ -115,7 +124,7 @@ impl Launcher for SapGuiMacLauncher {
             .map(|v| v.trim().to_string())
             .unwrap_or_default();
         let client = lookup(ctx.custom_fields, KEY_CLIENT)
-            .map(|v| v.trim().to_string())
+            .map(|v| normalize_client(v.trim()))
             .unwrap_or_default();
         let expert = expert_flag(ctx.custom_fields);
 
@@ -181,6 +190,18 @@ fn resolve_instance_port(raw: &str) -> String {
     }
 }
 
+/// SAP clients are three digits, and SAP GUI compares them as text: `1`
+/// is not client `001`. Numeric values shorter than three digits get their
+/// leading zeros back (a spreadsheet or a hand-typed field often drops
+/// them); anything else passes through for SAP GUI to judge.
+fn normalize_client(raw: &str) -> String {
+    if !raw.is_empty() && raw.len() < 3 && raw.chars().all(|c| c.is_ascii_digit()) {
+        format!("{raw:0>3}")
+    } else {
+        raw.to_string()
+    }
+}
+
 /// `SAP_EXPERT` is opt-OUT: explicit "false" / "0" / "no" turns it
 /// off, anything else (including the field being absent) leaves it
 /// on. The user's reference payload had `expert=true`; we keep that
@@ -237,7 +258,9 @@ pub(crate) fn render_sapc_body(
         body.push_str(lang);
     }
     if !client.is_empty() {
-        body.push_str("&client=");
+        // `clnt`, not `client`: SAP GUI for Java ignores unknown parameters
+        // silently and logs on to the default client instead.
+        body.push_str("&clnt=");
         body.push_str(client);
     }
     body.push_str("&pass=");
@@ -288,7 +311,7 @@ mod tests {
         // Each known param appears exactly once with no encoding.
         assert!(body.contains("&user=alice"));
         assert!(body.contains("&lang=DE"));
-        assert!(body.contains("&client=100"));
+        assert!(body.contains("&clnt=100"));
         assert!(body.contains("&pass=hunter2"));
         assert!(body.contains("&expert=true"));
         // No percent-encoded leftover from a prior implementation.
@@ -323,11 +346,34 @@ mod tests {
     fn render_sapc_body_omits_empty_optional_params() {
         let body = render_sapc_body("host", "00", "u", "", "", "p", true).expect("body");
         assert!(!body.contains("lang="));
-        assert!(!body.contains("client="));
+        assert!(!body.contains("clnt="));
         // user + pass + expert still present.
         assert!(body.contains("&user=u"));
         assert!(body.contains("&pass=p"));
         assert!(body.contains("&expert=true"));
+    }
+
+    /// SAP GUI for Java knows the client as `clnt`. `client=` is not one of
+    /// its parameters and was dropped without a word, so every launch landed
+    /// in the system's default client.
+    #[test]
+    fn client_is_written_under_the_name_sap_gui_reads() {
+        let body = render_sapc_body("h", "00", "u", "DE", "200", "p", false).expect("body");
+        assert!(
+            body.contains("&clnt=200"),
+            "client must travel as clnt: {body}"
+        );
+        assert!(!body.contains("client="), "no unknown parameter: {body}");
+    }
+
+    #[test]
+    fn short_numeric_clients_get_their_leading_zeros_back() {
+        assert_eq!(normalize_client("1"), "001");
+        assert_eq!(normalize_client("10"), "010");
+        assert_eq!(normalize_client("100"), "100");
+        assert_eq!(normalize_client("001"), "001");
+        assert_eq!(normalize_client(""), "");
+        assert_eq!(normalize_client("X1"), "X1");
     }
 
     /// Without an explicit `SAP_EXPERT=false`, `expert=true` is on -
