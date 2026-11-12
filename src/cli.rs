@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     ffi::{OsStr, OsString},
     fs::File,
-    io::Read as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -541,12 +541,21 @@ fn run_program(
         command.env(name, OsStr::from_bytes(value));
     }
     drop(in_environment);
+    // A warning that cannot be written stops `run` here, before the program
+    // starts, with the exit code for an I/O failure.
     for spec in &released.env {
-        eprintln!(
+        writeln!(
+            std::io::stderr(),
             "warning: {} is set only for this program, not exported, and readable by \
              programs running as your user",
             spec.name
-        );
+        )
+        .map_err(|error| {
+            let message = format!(
+                "could not write the warning for --env, so the program did not start: {error}"
+            );
+            CliError::new("run_failed", 7, message)
+        })?;
     }
     // From here until the program has been reaped, SIGINT and SIGTERM go on
     // to the program and this process keeps waiting, so a signal to the CLI
@@ -1619,12 +1628,17 @@ enum SecretField {
 }
 
 impl SecretField {
+    /// `custom:` with an empty `KEY` is refused like any other bad field, so
+    /// `run` stops before Touch ID and not after the unlock, where no custom
+    /// field has an empty key.
     fn parse(field: &str) -> Result<Self, CliError> {
         if field == "password" {
             Ok(Self::Password)
         } else if field == "totp" {
             Ok(Self::Totp)
-        } else if let Some(key) = field.strip_prefix("custom:") {
+        } else if let Some(key) = field.strip_prefix("custom:")
+            && !key.is_empty()
+        {
             Ok(Self::Custom(key.to_owned()))
         } else {
             Err(CliError::new(
@@ -1760,14 +1774,18 @@ fn print_success(format: OutputFormat, data: Value) {
         OutputFormat::Human => print_human(&data),
     }
 }
+/// Writes the error to stderr. A stderr that cannot be written loses the
+/// text, but the CLI still exits with the error's code instead of the 101
+/// of a panic in `eprintln!`.
 fn print_error(format: OutputFormat, e: &CliError) {
-    match format {
-        OutputFormat::Json => eprintln!(
+    let _ = match format {
+        OutputFormat::Json => writeln!(
+            std::io::stderr(),
             "{}",
             json!({"schema":SCHEMA,"ok":false,"error":{"code":e.code,"message":e.message}})
         ),
-        OutputFormat::Human => eprintln!("error [{}]: {}", e.code, e.message),
-    }
+        OutputFormat::Human => writeln!(std::io::stderr(), "error [{}]: {}", e.code, e.message),
+    };
 }
 fn print_human(data: &Value) {
     if let Some(value) = data.get("value").and_then(Value::as_str) {

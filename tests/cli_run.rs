@@ -339,10 +339,20 @@ fn run_forwards_the_exit_code() {
     assert_eq!(outcome.code, Some(128 + 15), "{outcome:?}");
 }
 
+/// `invalid_field` comes from the check of the command line, before the
+/// vault is unlocked. `custom:` with no key would otherwise fail only after
+/// the unlock, as `not_secret`.
 #[test]
 fn run_refuses_unknown_fields_with_exit_6() {
     let fixture = Fixture::new(PASSWORD);
-    for field in ["3:username", "3:title", "3:", "3:custom", "3:Password"] {
+    for field in [
+        "3:username",
+        "3:title",
+        "3:",
+        "3:custom",
+        "3:custom:",
+        "3:Password",
+    ] {
         let outcome = fixture.run(&[field], "echo started", &[]);
         assert_eq!(outcome.code, Some(6), "{field}: {outcome:?}");
         assert_eq!(outcome.error_code(), "invalid_field", "{field}");
@@ -669,9 +679,10 @@ fn env_fallback_prints_the_warning_once() {
 
 /// The warning is on stderr before the program starts. Here the CLI's stderr
 /// is a socket already shut down for writing, so writing the warning fails
-/// and the CLI goes no further. Had it started the program first, the
-/// program's line would be on stdout. With a stderr that takes the warning,
-/// the same command line starts the program.
+/// and the CLI goes no further: it exits with 7, the code for an I/O
+/// failure, although its error message cannot be written either. Had it
+/// started the program first, the program's line would be on stdout. With a stderr that takes the warning, the same
+/// command line starts the program.
 ///
 /// A socket rather than a pipe without a reader: a copy of the reading end
 /// that another test's program inherits in the moment before close-on-exec
@@ -704,9 +715,9 @@ fn the_env_warning_comes_before_the_program_starts() {
             "",
             "{format}: the program started although its warning could not be written"
         );
-        assert_ne!(
+        assert_eq!(
             output.status.code(),
-            Some(0),
+            Some(7),
             "{format}: {:?}",
             output.status
         );
