@@ -89,13 +89,16 @@
 //! - Between fork and exec the child runs `on_signal` too, with its own
 //!   `CHILD_PID` still 0, so there it only sets `PENDING`, in its own
 //!   memory. Exec puts the default action back for the program.
-//! - Dropping the guard sets `CHILD_PID` to 0 first, so no signal goes to a
-//!   pid that another process may get once the program is reaped, then puts
-//!   the old actions back and clears `PENDING`. The guard is dropped on
-//!   every path: after the wait, and on a failed spawn or a failed wait. A
-//!   signal that comes after `CHILD_PID` is 0 and before the old action is
-//!   back is dropped; one after that meets the old action, which can end
-//!   this process before it returns the program's exit code.
+//! - Dropping the guard sets `CHILD_PID` to 0 first, then puts the old
+//!   actions back and clears `PENDING`. The guard is dropped on every path:
+//!   right after the wait has reaped the program, and on a failed spawn or a
+//!   failed wait. From that store on, no signal goes to the program's pid,
+//!   which is free once the program is reaped. A signal in the few
+//!   instructions between the reap and the store still goes to that pid,
+//!   and a `kill` that fails there changes `errno` under the code the signal
+//!   interrupted. A signal that comes after `CHILD_PID` is 0 and before the
+//!   old action is back is dropped; one after that meets the old action,
+//!   which can end this process before it returns the program's exit code.
 //!
 //! The numbers the program must not get are descriptors this process
 //! inherited without close-on-exec, which the program would otherwise inherit

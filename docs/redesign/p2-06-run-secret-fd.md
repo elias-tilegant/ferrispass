@@ -31,11 +31,15 @@ Started from `rebuild` at `da54801` on 2026-11-11, in three parts on one branch:
 | `2b7340a` | The master password's descriptor stays closed in the program with `--env` alone |
 | `ee35488` | SIGTERM reaches the program with `--env` alone |
 | `f16ea34` | The test that the `--env` warning is written before the program starts |
-| the last one | This page lists those tests |
+| `5f435e2` | This page lists those tests |
+| `545e531` | Whether a number to close is open is asked with `fcntl(F_GETFD)`, the fifth `unsafe` block |
+| `11367dc` | `custom:` with an empty key is refused before Touch ID; a `--env` warning that cannot be written ends `run` with 7 before the program starts |
+| `9b66e9d` | SIGINT reaches the program with `--env` alone |
+| the last one | The limits near the open file limit and between the reap and the clearing of the pid, and this page |
 
 ## What `run` does
 
-`run --id UUID` names one entry, by its UUID. Each `--secret-fd FD:FIELD` puts one field on one descriptor, from 3 to 255; each `--env NAME=FIELD` puts one into one variable. A field is `password`, `totp` or `custom:KEY`, and a custom field has to be protected, as for `entry secret`. Everything after `--` is the program and its arguments, started directly, not through a shell.
+`run --id UUID` names one entry, by its UUID. Each `--secret-fd FD:FIELD` puts one field on one descriptor, from 3 to 255 (close to the open file limit, see Limits); each `--env NAME=FIELD` puts one into one variable. A field is `password`, `totp` or `custom:KEY` with a `KEY` that is not empty, and a custom field has to be protected, as for `entry secret`. Everything after `--` is the program and its arguments, started directly, not through a shell.
 
 Before anything is unlocked, `run` checks the command line: the UUID, the syntax of each option, the field names, the descriptors, that no descriptor is named twice, that each field goes to the program once (on a descriptor or in a variable, not both, and not in two variables), that each variable is named once and has a name a shell takes, and that the descriptor `--master-password-fd` named is open. Each of these fails with exit code 6. Then `run` unlocks the vault, reads the released fields into buffers that are wiped when dropped, closes the vault and starts the program. It prints nothing of its own on stdout, so the program has stdin, stdout and stderr to itself, and an MCP server can talk over them. Once the program has started, `run` exits with its exit code, or with 128 plus the signal that ended it. A secret the program did not read in full is reported on stderr as a byte count.
 
@@ -45,11 +49,11 @@ Before anything is unlocked, `run` checks the command line: the UUID, the syntax
 
 - One pipe per descriptor. Each read end is copied with `fcntl(F_DUPFD_CLOEXEC)` above the highest target and the original is closed, so no read end sits on a target when the program starts. Every number up to the highest target that is still free is held with `/dev/null` during the spawn, so the descriptors `Command::spawn` opens for itself land above the targets too.
 - Between fork and exec the child runs `dup2(copy, target)` for each target and `close` on the copy, then `close` on each number it must not pass on that is not a target: for `run`, the descriptor the master password was read from. Nothing else happens there: no allocation, no lock, no formatting. A failed `dup2` fails the spawn.
-- A number to close has to be open in this process, and stays open until the spawn has returned, so nothing the spawn opens can have that number. `spawn_with_secret_fds` refuses one that is not open, and the CLI asks before it unlocks the vault.
+- A number to close has to be open in this process, and stays open until the spawn has returned, so nothing the spawn opens can have that number. `spawn_with_secret_fds` refuses one that is not open, and the CLI asks before it unlocks the vault. Whether a number is open is asked with `fcntl(F_GETFD)`, which only reads the descriptor's flags and fails with `EBADF` for a number that is not open. Not `stat` on `/dev/fd/N`: on macOS that fails now and then with `EBADF` for an open descriptor while other processes look up the same number; with the CLI started 6400 times from 16 shells in parallel, 1 to 3 runs in each of three rounds refused an open master password descriptor that way, and none with `fcntl`.
 - Right after the spawn, the parent closes its copies and the held descriptors, whether the spawn worked or not. Then one thread per pipe writes the secret and closes the write end, so a secret larger than the pipe buffer arrives while the program reads, and a program that exits without reading leaves no writer waiting.
 - Errors carry descriptor numbers, byte counts and the kind and OS code of what the system refused, never the bytes, an `io::Error`'s message or a path.
 
-The module has four `unsafe` blocks: the `fcntl` call, the `pre_exec` closure with `dup2` and `close`, `sigaction` and `kill`. Tests read the file and hold it to that, below.
+The module has five `unsafe` blocks: `fcntl(F_GETFD)` in the open check, `fcntl(F_DUPFD_CLOEXEC)`, the `pre_exec` closure with `dup2` and `close`, `sigaction` and `kill`. Tests read the file and hold it to that, below.
 
 ## The Touch ID prompt
 
@@ -63,7 +67,7 @@ With Touch ID, the prompt says what `run` gives to which program, for example "G
 warning: GITHUB_TOKEN is set only for this program, not exported, and readable by programs running as your user
 ```
 
-The warning names the variable, never the value. `NAME` starts with a letter or `_` and has only letters, digits and `_`.
+The warning names the variable, never the value. If it cannot be written, the program does not start and `run` exits with 7, the code for an I/O failure. `NAME` starts with a letter or `_` and has only letters, digits and `_`.
 
 With `--env` alone nothing goes on a descriptor, and the program still starts through the descriptor module: it does not get the master password's descriptor either, and SIGINT and SIGTERM reach it as they do with `--secret-fd`.
 
@@ -71,7 +75,7 @@ With `--env` alone nothing goes on a descriptor, and the program still starts th
 
 While the program runs, `run` passes SIGINT and SIGTERM on to it and keeps waiting, so the program decides how it ends and `run` still returns its exit code. Before, a SIGTERM killed the CLI and a SIGINT ended it with 130, and the program ran on without anyone waiting for its exit code.
 
-The handler is installed with `sigaction` before the spawn. It stores the signal in one atomic, reads the program's pid from a second one and calls `kill` when the pid is above 0; that is all it does. Right after the spawn, the pid goes into the second atomic and a signal that arrived in between is sent. Both sides store first and read second, so such a signal reaches the program once or twice and is never lost. The guard that holds the old actions is an argument of the spawn, so it exists before the program does, and it is dropped as soon as the program has been reaped, before the writers are joined: the pid is cleared, the old actions are back. That happens on every path, also when the spawn or the wait fails. For SIGINT the old action is the Ctrl+C cleanup of `launch`, which `run` has nothing to clean up for.
+The handler is installed with `sigaction` before the spawn. It stores the signal in one atomic, reads the program's pid from a second one and calls `kill` when the pid is above 0; that is all it does. Right after the spawn, the pid goes into the second atomic and a signal that arrived in between is sent. Both sides store first and read second, so such a signal reaches the program once or twice and is never lost. The guard that holds the old actions is an argument of the spawn, so it exists before the program does, and it is dropped right after the program has been reaped, before the writers are joined: the pid is cleared first, then the old actions are back. A signal in the few instructions between the reap and the clearing of the pid still goes to the reaped pid (Limits). That happens on every path, also when the spawn or the wait fails. For SIGINT the old action is the Ctrl+C cleanup of `launch`, which `run` has nothing to clean up for.
 
 ## `--reveal`
 
@@ -83,7 +87,7 @@ The unit tests in `src/platform/secret_fd.rs` start `/bin/sh` with secrets on de
 
 The unit tests in `src/cli.rs` run `run` up to the Touch ID prompt with a store that records the reason: the reason word for word, caller text kept out, the UUID in canonical form, the vault's name, every field in order with descriptors first, custom fields counted, and every command line that has to fail before Touch ID failing there.
 
-`tests/cli_run.rs` runs the CLI as a process against a vault on disk, with an empty home folder of its own: the password on 3, TOTP and custom fields, the exit code passed through, the program's environment and arguments, the master password's descriptor closed in the program on 9 and on 11, also with `--env` alone, where nothing goes on a descriptor, and refused when it is not open, a sentinel password on every error path in JSON and human output with no four characters of it on stdout or stderr, `--env` setting only its variable and leaking nowhere else, the warning once per variable and before the program starts (with stderr on a socket shut down for writing, writing the warning fails and the program never starts), SIGTERM and SIGINT passed on with the program's exit code returned, SIGTERM also with `--env` alone, the CLI waiting for a program that takes a second to end, 143 for a program the signal kills, `--reveal` refused on a pipe, and `launch sap` removing its staged file and exiting with 130 when SIGINT hits it. The last one runs the CLI in a sandbox that refuses every Mach lookup, so the `open` it starts cannot reach Launch Services and no SAP GUI opens on the Mac running the tests.
+`tests/cli_run.rs` runs the CLI as a process against a vault on disk, with an empty home folder of its own: the password on 3, TOTP and custom fields, the exit code passed through, the program's environment and arguments, unknown fields and `custom:` with no key refused before the unlock, the master password's descriptor closed in the program on 9 and on 11, and on 9 also with `--env` alone, where nothing goes on a descriptor, and refused when it is not open, a sentinel password on every error path in JSON and human output with no four characters of it on stdout or stderr, `--env` setting only its variable and leaking nowhere else, the warning once per variable and before the program starts (with stderr on a socket shut down for writing, writing the warning fails, the program never starts and the CLI exits with 7), SIGTERM and SIGINT passed on with the program's exit code returned, both also with `--env` alone, the CLI waiting for a program that takes a second to end, 143 for a program the signal kills, `--reveal` refused on a pipe, and `launch sap` removing its staged file and exiting with 130 when SIGINT hits it. The last one runs the CLI in a sandbox that refuses every Mach lookup, so the `open` it starts cannot reach Launch Services and no SAP GUI opens on the Mac running the tests.
 
 The characterization tests and `src/i18n/tests.rs` are unchanged and pass.
 
@@ -124,6 +128,11 @@ Each rule was checked by taking it out on a clean tree and running the tests nam
 | 23 | the handler's comparison of the pid with 0 | `the_signal_handler_only_forwards`, `a_signal_before_the_pid_is_known_reaches_the_child_after_the_spawn` |
 | 24 | the descriptor module also for a program that gets nothing on a descriptor | `run_with_only_env_keeps_the_master_password_descriptor_from_the_program`, `run_with_only_env_passes_sigterm_on` |
 | 25 | the `--env` warning written before the spawn | `the_env_warning_comes_before_the_program_starts` |
+| 26 | the guard clears the pid when it is dropped | `signals_are_restored_after_the_program_ends` |
+| 27 | the master password's descriptor closed in the child also when nothing goes on a descriptor | `run_with_only_env_keeps_the_master_password_descriptor_from_the_program` |
+| 28 | the guard handed to the spawn also when nothing goes on a descriptor | `run_with_only_env_passes_sigterm_on`, `run_with_only_env_passes_sigint_on` |
+| 29 | the open check asks `fcntl` about each number | `a_closed_number_to_close_is_refused_before_touch_id`, `run_refuses_a_master_password_descriptor_that_is_not_open` |
+| 30 | `custom:` with an empty key refused when the command line is checked | `run_refuses_unknown_fields_with_exit_6` |
 
 Creating the guard after the spawn, the other half of probe 18, cannot be written: the guard is an argument of the spawn, so the change does not compile.
 
@@ -134,6 +143,7 @@ Creating the guard after the spawn, the other half of probe 18, cannot be writte
 - Ctrl+C in a terminal goes to the whole foreground process group, so the program gets SIGINT twice: once from the terminal, once from `run`.
 - A signal that arrives in the moment between the spawn and the pid being known can reach the program twice as well, once from the handler and once from the delivery after the spawn. Of two different signals in that moment, the program gets the later one.
 - A signal that arrives after the program has been reaped and the old actions are back meets those actions: a SIGTERM ends the CLI, a SIGINT ends it with 130, and the program's exit code is lost although the program has already ended. One that arrives between the clearing of the pid and the old actions coming back is dropped.
+- Between the reap and the clearing of the pid there are a few instructions on the waiting thread. A signal in them goes to the reaped pid, which macOS hands out again only after a full cycle of pids. A `kill` that fails there changes `errno` under the code the signal interrupted, which at worst shows a wrong OS code in a warning line on stderr that holds only numbers. Closing that window would take `waitid` with `WNOWAIT` or saving `errno`, each one more `libc` function.
 - While `run` waits, it takes SIGINT and SIGTERM even if its caller set them to be ignored, and the program starts with the default action for both. For SIGINT that was so before: the Ctrl+C cleanup of `launch` takes it when the CLI starts.
 - A value given with `--env` is copied into the environment `Command` builds and into the program's environment, and neither copy can be wiped; only the CLI's own buffer is.
 - If the program hands its descriptor to a process that outlives it and never reads, the writer of a secret larger than the pipe buffer waits for that process, and so does `run` after the program has ended. SIGINT and SIGTERM end the CLI then, since the program has been reaped.
@@ -143,6 +153,7 @@ Creating the guard after the spawn, the other half of probe 18, cannot be writte
 - The structural tests read the source as tokens and do not see what a macro would generate; the closure and the handler have no macro, and the same tests fail on one. The leak scan finds the buffers by their names, `secret` and `secrets`; the same bytes under another name are left to the tests that look at what comes out.
 - `entry secret` is refused on a non-terminal after the vault is unlocked, as the check lives where the field is read. A script that asks for it with `--touch-id` sees the Touch ID prompt first.
 - The launch test needs `sandbox-exec`, which macOS still ships but calls deprecated.
+- While it starts the program, `run` needs free descriptor numbers above the highest target: one per secret for the copies of the read ends, and two more for `Command::spawn`. Close to the open file limit it fails with exit code 7 after the unlock (with Touch ID, after the prompt) and before the program starts. Under `ulimit -n 256`, the soft limit a macOS shell has by default, one secret on 255 fails with `EINVAL` from the copy, on 254 with `EMFILE` while the numbers below are held, and on 253 with `EMFILE` from the spawn; 252 and below start the program. Nothing is handed over then, and no part of the secret is on stdout or stderr.
 - CI builds and tests on macOS only. The module is written for any Unix, but nothing here builds it for Linux.
 
 The agents spent about 5 hours on this, including review and fixes.

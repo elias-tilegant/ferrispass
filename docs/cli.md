@@ -102,6 +102,14 @@ program reads the custom field `API_TOKEN` (which has to be protected, as for
 pipe and closes its end. `password`, `totp` and `custom:KEY` can each go to a
 descriptor of their own: `--secret-fd 3:password --secret-fd 4:totp`.
 
+While it starts the program, `run` needs free descriptor numbers above the
+highest one it hands over: one per secret, and more for the start itself.
+Close to the limit on open files (`ulimit -n`), it fails with exit code 7
+after the unlock, before the program starts, and hands nothing over. With the
+soft limit of 256 a macOS shell has by default, one secret on 253, 254 or 255
+fails that way; a lower descriptor, or `ulimit -n 1024` before `run`, avoids
+it.
+
 `run` prints nothing of its own on stdout and leaves the program its stdin,
 stdout and stderr, so it also starts an MCP server that talks over stdio. In
 the agent's configuration, the server's command is `ferrispass-cli` and its
@@ -169,6 +177,9 @@ also with `--format json`:
 ```text
 warning: GITHUB_TOKEN is set only for this program, not exported, and readable by programs running as your user
 ```
+
+If the warning cannot be written, the program does not start and `run` exits
+with 7.
 
 `NAME` starts with a letter or `_` and has only letters, digits and `_`.
 `--secret-fd` and `--env` can be combined, but each field goes to the program
@@ -298,10 +309,11 @@ both the process exit code and the error `code` instead of matching messages.
 | 7 | I/O, save, network or sync service failure |
 
 `run` uses these codes for what goes wrong before the program starts; a
-program that cannot be started is 7. Once the program has started, `run`
-exits with the program's exit code, or with 128 plus the signal that ended
-it. The program's code can be any of the numbers above; an error of `run`
-itself also writes the error envelope to stderr.
+program that cannot be started is 7, and so is a `--env` warning that cannot
+be written. Once the program has started, `run` exits with the program's exit
+code, or with 128 plus the signal that ended it. The program's code can be any
+of the numbers above; an error of `run` itself also writes the error envelope
+to stderr.
 
 Agent workflows should follow these rules:
 
