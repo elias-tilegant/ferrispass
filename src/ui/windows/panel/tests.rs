@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use ::keepass::db::{Database, fields};
-use gpui::{AnyWindowHandle, Entity, RenderOnce, TestAppContext, WindowKind};
+use gpui::{AnyWindowHandle, Entity, RenderOnce, Role, TestAppContext, WindowKind};
 use gpui_component::WindowExt as _;
 
 use super::view::{footer, rows_of, search_group};
@@ -1130,7 +1130,8 @@ fn copies_go_through_the_clipboard_service_and_keep_the_panel_open(cx: &mut Test
     keys(cx, panel, "cmd-c");
     assert_eq!(app.copied(), (1, Some("sp-sales".to_string())));
     assert!(
-        cx.update(|cx| ClipboardService::handle(cx).read(cx).has_pending()),
+        cx.update(|cx| ClipboardService::handle(cx).read(cx).deadline())
+            .is_some(),
         "the copy has a clear timer"
     );
     assert!(panel_is_open(cx), "a copy keeps the panel open");
@@ -1157,6 +1158,204 @@ fn copies_go_through_the_clipboard_service_and_keep_the_panel_open(cx: &mut Test
     keys(cx, panel, "escape");
     keys(cx, panel, "down");
     assert_eq!(note(cx), None);
+}
+
+/// Runs the test called `test` again in a child process whose home and
+/// temporary folder are a new, empty directory, and returns `false` once
+/// that run has passed. In the child it returns `true`, and the test goes
+/// on there. A test that saves the settings runs in a child, so no other
+/// test reads the file it writes.
+fn in_a_home_of_its_own(test: &str) -> bool {
+    const OWN_HOME: &str = "FERRISPASS_TEST_OWN_HOME";
+    if let Some(home) = std::env::var_os(OWN_HOME) {
+        assert_eq!(
+            std::env::var_os("HOME"),
+            Some(home),
+            "a child run has to have the home it was given"
+        );
+        return true;
+    }
+    let home = tempfile::tempdir().expect("a temporary home");
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, rest)| rest);
+    let name = format!("{module}::{test}");
+    let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([name.as_str(), "--exact", "--test-threads=1"])
+        .env(OWN_HOME, home.path())
+        .env("HOME", home.path())
+        .env("TMPDIR", home.path())
+        .output()
+        .expect("run the test binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{name} failed in a home of its own:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+/// A copy from the panel is cleared after the time the settings give, as a
+/// copy from the main window is. The test saves 17 seconds, which no preset
+/// offers, so the time can only come from the settings; saving them is why
+/// it runs in a home of its own.
+#[gpui::test]
+fn a_copy_is_cleared_after_the_time_the_settings_give(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("a_copy_is_cleared_after_the_time_the_settings_give") {
+        return;
+    }
+    let app = open_app(cx, &sample());
+    cx.update(|cx| {
+        crate::app::with_shared_shell(cx, |shell, cx| {
+            let settings = crate::app::AppSettings {
+                clipboard_clear_secs: Some(17),
+                ..shell.settings().clone()
+            };
+            shell.update_settings(settings, cx);
+        })
+    })
+    .expect("the main window's shell");
+    cx.run_until_parked();
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "salesforce");
+    keys(cx, panel, "cmd-c");
+    assert_eq!(app.copied(), (1, Some("sp-sales".to_string())));
+    let left = cx
+        .update(|cx| ClipboardService::handle(cx).read(cx).deadline())
+        .expect("the copy has a clear timer")
+        .saturating_duration_since(std::time::Instant::now());
+    assert!(
+        left > Duration::from_secs(10) && left <= Duration::from_secs(17),
+        "the copy is cleared in {left:?}, the settings say 17 s"
+    );
+
+    cx.executor().advance_clock(Duration::from_secs(16));
+    cx.run_until_parked();
+    assert_eq!(
+        app.copied().1.as_deref(),
+        Some("sp-sales"),
+        "cleared before the 17 s were up"
+    );
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(app.copied().1, None, "still on the pasteboard after 17 s");
+    assert!(!cx.update(|cx| ClipboardService::handle(cx).read(cx).has_pending()));
+}
+
+/// The roles that make VoiceOver read a node out as soon as it changes.
+fn announces(role: Option<Role>) -> bool {
+    matches!(
+        role,
+        Some(Role::Alert | Role::Status | Role::Log | Role::Marquee | Role::Timer)
+    )
+}
+
+/// What the panel has to say goes into its footer and nowhere else: no
+/// copy, failed copy, refused website or sign-in puts up a notification, in
+/// the panel or in the main window, and neither a row nor the group around
+/// the list is a live region or has a role that announces itself.
+#[gpui::test]
+fn what_the_panel_says_stays_in_its_footer(cx: &mut TestAppContext) {
+    let mut entries = sample();
+    entries.push(entry("Locker").user("nobody"));
+    entries.push(entry("Script portal").url("javascript:alert(1)"));
+    let app = open_app(cx, &entries);
+    let notices = |cx: &mut TestAppContext, window: AnyWindowHandle| {
+        window
+            .update(cx, |_, window, cx| window.notifications(cx).len())
+            .expect("the window")
+    };
+    let in_main = notices(cx, app.main);
+    let panel = app.open_panel(cx);
+    let vm = app.vm(cx);
+    for (query, keystrokes, said) in [
+        ("salesforce", "cmd-c", tr!("quick.footer.copied.password")),
+        ("salesforce", "cmd-shift-c", tr!("quick.footer.copied.user")),
+        ("locker", "cmd-c", tr!("quick.error.copy_failed")),
+        ("script portal", "enter", tr!("quick.error.website_failed")),
+    ] {
+        if !app.query(cx).is_empty() {
+            keys(cx, panel, "escape");
+        }
+        type_into(cx, panel, query);
+        keys(cx, panel, keystrokes);
+        let step = format!("{query}, {keystrokes}");
+        assert_eq!(
+            vm.read_with(cx, |vm, _| vm.footer().note),
+            Some(said),
+            "{step}: the footer says it"
+        );
+        assert_eq!(notices(cx, panel), 0, "{step}: a notification in the panel");
+        assert_eq!(
+            notices(cx, app.main),
+            in_main,
+            "{step}: a notification in the main window"
+        );
+
+        // The rows and the group, drawn with that sentence in the footer.
+        let model = vm.read_with(cx, |vm, _| vm.clone());
+        let nodes: Vec<(String, Option<Role>, bool)> = probe::in_frame(cx, move |window, cx| {
+            let mut nodes = Vec::new();
+            for (index, row) in rows_of(&model).into_iter().enumerate() {
+                let (role, node) = probe::node(RenderOnce::render(row, window, cx));
+                nodes.push((format!("row {index}"), role, node.live().is_some()));
+            }
+            let input = cx.new(|cx| gpui_component::input::InputState::new(window, cx));
+            let vault = model.vault_name().cloned().unwrap_or_default();
+            for part in SearchGroup::parts(|| search_group(&model, &input, &vault), window, cx) {
+                nodes.push((part.name.to_string(), part.role, part.node.live().is_some()));
+            }
+            nodes
+        });
+        assert!(nodes.iter().any(|(name, _, _)| name == "row 0"), "{step}");
+        for (name, role, live) in nodes {
+            assert!(!announces(role), "{step}: the {name} is {role:?}");
+            assert!(!live, "{step}: the {name} is live");
+        }
+    }
+
+    // Signing in hands over to SAP GUI and closes the panel, quietly too.
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "nhq");
+    keys(cx, panel, "enter");
+    assert!(!panel_is_open(cx));
+    assert_eq!(
+        notices(cx, app.main),
+        in_main,
+        "signing in from the panel: a notification in the main window"
+    );
+}
+
+/// No notification and no live region in the panel's code either, so a
+/// path the tests above do not drive is held too. The one sentence the
+/// panel has for an action stands in its footer.
+#[test]
+fn the_panel_builds_no_notification_and_no_live_region() {
+    let mut found = Vec::new();
+    for (file, code) in panel_sources() {
+        for (at, line) in code.lines().enumerate() {
+            for forbidden in [
+                "notification",
+                "Notification",
+                "Role::Alert",
+                "Role::Status",
+                "Role::Log",
+                "Role::Marquee",
+                "Role::Timer",
+                "set_live(",
+                "Live::",
+            ] {
+                if line.contains(forbidden) {
+                    found.push(format!("{file}:{}: {}", at + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "the panel announces something itself: {found:#?}"
+    );
 }
 
 /// Two rows can stand for the same system, the same SID and client at two
