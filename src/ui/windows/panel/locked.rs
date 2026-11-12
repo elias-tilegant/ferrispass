@@ -16,10 +16,12 @@
 //! 2. Every tick and every key wipes the buffer once 30 seconds have passed
 //!    since its first key. It is also wiped when the panel closes, when you
 //!    click into another app, and on Escape.
-//! 3. When the panel loses key status while an unlock is under way, the
-//!    Touch ID dialog has taken it: the panel stays open and lets go of
-//!    secure input, and the buffer keeps its text and its clock. Losing key
-//!    status any other way closes the panel and wipes the buffer.
+//! 3. When the panel loses key status while its own Touch ID prompt is up,
+//!    from Return or the button until macOS answers, the dialog has taken
+//!    it: the panel stays open and lets go of secure input, and the buffer
+//!    keeps its text and its clock. Losing key status any other way closes
+//!    the panel and wipes the buffer, also while the vault still opens after
+//!    the answer.
 //! 4. The field is a plain element with the role of a text input and the
 //!    name "Search". It never has a value: the dots are drawn as text that
 //!    assistive technology does not read, and nothing typed reaches a node,
@@ -82,6 +84,9 @@ pub(super) struct Locked {
     kind: Option<Kind>,
     /// The generation of the panel's own unlock attempt, while one runs.
     attempt: Option<u64>,
+    /// The panel's own Touch ID prompt is up: from the start of the attempt
+    /// until macOS answers. Losing key status then is the dialog taking it.
+    prompt_up: bool,
     dots: usize,
     /// macOS refused secure event input for a buffer: this window takes no
     /// keys and sends you to the main window.
@@ -349,9 +354,10 @@ impl PanelView {
     }
 
     /// The window's activation changed. Key: the buffer takes secure input
-    /// back, or a buffer begins. Not key while an unlock is under way: the
-    /// Touch ID dialog has the keyboard, so secure input goes and the panel
-    /// stays. Not key otherwise: the panel closes and the buffer is wiped.
+    /// back, or a buffer begins. Not key while the panel's own prompt is up:
+    /// the Touch ID dialog has the keyboard, so secure input goes and the
+    /// panel stays. Not key otherwise, a click into another app: the panel
+    /// closes and the buffer is wiped.
     pub(super) fn on_activation(
         &mut self,
         active: bool,
@@ -363,13 +369,10 @@ impl PanelView {
             self.ensure_buffer(window, cx);
             return;
         }
-        if self.is_locked(cx) {
-            let allow = allow_device_passcode(cx);
-            if locked_panel::kind(self.state.read(cx), allow) == Kind::Unlocking {
-                self.locked.release();
-                cx.notify();
-                return;
-            }
+        if self.is_locked(cx) && self.locked.prompt_up {
+            self.locked.release();
+            cx.notify();
+            return;
         }
         self.close(window, cx);
     }
@@ -481,6 +484,7 @@ impl PanelView {
         let allow = allow_device_passcode(cx);
         self.locked.attempt =
             touch_id::unlock_from_panel(token, self.state.clone(), allow, on_answered, on_done, cx);
+        self.locked.prompt_up = self.locked.attempt.is_some();
         window.focus(&self.focus, cx);
         self.read_kind(cx);
         cx.notify();
@@ -493,6 +497,7 @@ impl PanelView {
     /// cannot take it again is wiped, and the next one begins as soon as the
     /// panel is key, while the vault still opens.
     fn on_answered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.locked.prompt_up = false;
         take_key(window);
         window.focus(&self.focus, cx);
         self.locked.rearm(cx);
@@ -508,6 +513,7 @@ impl PanelView {
     /// changes nothing.
     fn on_done(&mut self, answer: Answer, window: &mut Window, cx: &mut Context<Self>) {
         self.locked.attempt = None;
+        self.locked.prompt_up = false;
         match answer {
             Answer::Opened(_) => self.hand_over(window, cx),
             Answer::NotOpened | Answer::Failed(_) | Answer::Interrupted => {

@@ -1136,6 +1136,11 @@ fn return_waits_while_an_unlock_is_under_way(cx: &mut TestAppContext) {
     let attempt = view(cx).read_with(cx, |view, _| view.locked.attempt_for_test());
     assert!(attempt.is_some(), "the attempt did not start");
     press_return(cx, panel);
+    assert_eq!(
+        view(cx).read_with(cx, |view, _| view.locked.attempt_for_test()),
+        attempt,
+        "a second Return went for another attempt"
+    );
     click_unlock(cx, panel);
     assert_eq!(
         app.retrieves(),
@@ -1156,6 +1161,84 @@ fn return_waits_while_an_unlock_is_under_way(cx: &mut TestAppContext) {
     let vm = cx.update(|cx| panel::for_test(cx).1).expect("the model");
     let note = vm.read_with(cx, |vm, _| vm.footer().note);
     assert_eq!(note, Some(tr!("quick.error.website_failed")));
+}
+
+/// Should the panel be key again while the prompt is still up, it takes
+/// secure input back at once, with the text as it was, and the answer
+/// takes it no second time.
+#[gpui::test]
+fn the_panel_key_again_during_the_prompt_takes_secure_input_back(cx: &mut TestAppContext) {
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "nhq");
+    app.store.fail_next_retrieve(BiometricError::UserCancelled);
+    return_with_the_dialog(cx, &app, panel);
+    assert!(!app.secure.held());
+
+    panel
+        .update(cx, |_, window, cx| {
+            let view = panel::view_for_test(cx).expect("the panel's view");
+            view.update(cx, |view, cx| view.on_activation(true, window, cx));
+        })
+        .expect("the panel");
+    assert!(app.secure.held(), "the key panel holds no secure input");
+    assert_eq!(app.enables(), 2);
+    cx.dispatch_keystroke(panel, Keystroke::parse("x").expect("a key"));
+    assert_eq!(dots(cx), 4, "a key did not go in under secure input");
+    cx.run_until_parked();
+    assert_eq!(
+        app.enables(),
+        2,
+        "the answer took secure input a second time"
+    );
+    assert!(app.secure.held());
+    assert_eq!(dots(cx), 4);
+}
+
+/// Once macOS has answered, the dialog is gone. Losing key status while
+/// the vault still opens is a click into another app: the panel closes and
+/// wipes what was typed, and the vault opens with nothing of it.
+#[gpui::test]
+fn a_click_outside_while_the_vault_opens_wipes_and_closes(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("a_click_outside_while_the_vault_opens_wipes_and_closes") {
+        return;
+    }
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, SENTINEL);
+    return_with_the_dialog(cx, &app, panel);
+    while key_taken() == 0 {
+        assert!(cx.executor().tick(), "macOS never answered");
+    }
+    let view = view(cx);
+    assert_eq!(
+        kind(cx),
+        Kind::Unlocking,
+        "the test needs the vault still opening"
+    );
+    panel
+        .update(cx, |_, window, cx| {
+            view.update(cx, |view, cx| view.on_activation(false, window, cx));
+        })
+        .expect("the panel");
+    cx.run_until_parked();
+    assert!(app.vault_is_open(cx), "the test needs the vault open");
+    assert!(!panel_is_open(cx), "a click outside left the panel open");
+    view.read_with(cx, |view, _| {
+        assert!(
+            !view.locked.has_buffer(),
+            "the text outlived the click outside"
+        );
+        assert_eq!(view.locked.dots_for_test(), 0);
+    });
+    assert!(!app.secure.held());
+    assert_eq!(
+        search(cx),
+        "",
+        "the text typed before the click became the search"
+    );
 }
 
 /// Nothing in the locked panel's file writes to a log, prints, or formats
