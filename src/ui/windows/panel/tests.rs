@@ -274,7 +274,15 @@ fn type_into(cx: &mut TestAppContext, panel: AnyWindowHandle, text: &str) {
     cx.run_until_parked();
 }
 
+/// Presses `keystrokes` in the panel. Return counts only once the results
+/// have been on screen for a moment, as for someone who reads them first,
+/// so before a Return the clock moves on by that moment.
 fn keys(cx: &mut TestAppContext, panel: AnyWindowHandle, keystrokes: &str) {
+    if keystrokes.split(' ').any(|keystroke| keystroke == "enter") {
+        cx.executor()
+            .advance_clock(crate::app::unlock::locked_panel::RETURN_SETTLE);
+        cx.run_until_parked();
+    }
     cx.simulate_keystrokes(panel, keystrokes);
     cx.run_until_parked();
 }
@@ -706,6 +714,93 @@ fn an_empty_search_never_lets_return_act_on_a_production_system(cx: &mut TestApp
     let nhp = app.id(cx, "NHP 100");
     keys(cx, panel, "enter");
     assert_eq!(launches(), [(nhp, true)]);
+}
+
+/// Return in the open panel counts only for results that were on screen:
+/// none before they are drawn, none within 300 ms of that, and none while a
+/// vault is still being unlocked. One exact match in a vault that was open
+/// before the search takes Return at once, unless it is a production
+/// system.
+#[gpui::test]
+fn return_in_the_open_panel_goes_through_the_gate(cx: &mut TestAppContext) {
+    let app = open_app(cx, &sample());
+    let panel = app.open_panel(cx);
+    let vm = app.vm(cx);
+    // Return as the keyboard sends it, without the moment `keys` waits.
+    let enter = |cx: &mut TestAppContext, panel: AnyWindowHandle| {
+        cx.simulate_keystrokes(panel, "enter");
+        cx.run_until_parked();
+    };
+    let redraw = |cx: &mut TestAppContext| {
+        vm.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+    };
+
+    type_into(cx, panel, "webm");
+    vm.read_with(cx, |vm, _| vm.drawn().clear());
+    enter(cx, panel);
+    assert_eq!(
+        cx.opened_url(),
+        None,
+        "Return before the results were drawn"
+    );
+    redraw(cx);
+    assert!(vm.read_with(cx, |vm, _| vm.drawn().at().is_some()));
+    cx.executor().advance_clock(Duration::from_millis(299));
+    enter(cx, panel);
+    assert_eq!(cx.opened_url(), None, "Return 299 ms after drawing");
+    cx.executor().advance_clock(Duration::from_millis(1));
+    enter(cx, panel);
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://mail.example.com/login"),
+        "Return 300 ms after drawing"
+    );
+
+    // An unlock under way holds Return back, however long the results show.
+    // Each part starts from an empty search, not the one kept from before.
+    vm.update(cx, |vm, _| vm.forget());
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "webm");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    let now = cx.executor().now();
+    let (held, free) = vm.read_with(cx, |vm, _| {
+        (
+            crate::app::unlock::locked_panel::return_accepted(&vm.return_gate(true), now),
+            crate::app::unlock::locked_panel::return_accepted(&vm.return_gate(false), now),
+        )
+    });
+    assert!(!held, "Return while a vault is being unlocked");
+    assert!(free);
+    cx.update(close);
+    cx.run_until_parked();
+
+    // One exact match: the whole title takes Return at once.
+    vm.update(cx, |vm, _| vm.forget());
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "salesforce");
+    enter(cx, panel);
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://login.salesforce.com"),
+        "one exact match waited"
+    );
+
+    // A production system named exactly waits like any other row.
+    vm.update(cx, |vm, _| vm.forget());
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "nhp 100");
+    assert!(vm.read_with(cx, |vm, _| {
+        vm.selected().is_some_and(|hit| hit.exact && hit.production)
+    }));
+    enter(cx, panel);
+    assert!(
+        launches().is_empty(),
+        "Return signed in to a production system at once"
+    );
+    cx.executor().advance_clock(Duration::from_millis(300));
+    enter(cx, panel);
+    assert_eq!(launches().len(), 1, "Return 300 ms later signs in");
 }
 
 #[gpui::test]
@@ -1615,21 +1710,41 @@ fn only_http_and_https_open(cx: &mut TestAppContext) {
     );
 }
 
+/// The panel never activates the app. It makes its own window key in one
+/// place, after the Touch ID dialog took that from it (`take_key` in
+/// `locked.rs`); that brings the panel forward, not the app.
 #[test]
 fn the_panel_never_activates_the_app() {
     let mut found = Vec::new();
     let mut shown = 0;
+    let mut key_again = 0;
     for (file, code) in panel_sources() {
+        let answered = code.find("fn take_key(").map(|start| {
+            let body = probe::braced(&code[start..]);
+            let at = body.as_ptr() as usize - code.as_ptr() as usize;
+            at..at + body.len()
+        });
+        let mut offset = 0;
         for (at, line) in code.lines().enumerate() {
+            let range = offset..offset + line.len();
+            offset += line.len() + 1;
             for forbidden in [
                 "activate(",
                 "activate_window(",
                 "request_window_close",
                 "cx.hide(",
             ] {
-                if line.contains(forbidden) {
-                    found.push(format!("{file}:{}: {}", at + 1, line.trim()));
+                if !line.contains(forbidden) {
+                    continue;
                 }
+                let in_answered = answered
+                    .as_ref()
+                    .is_some_and(|body| body.start <= range.start && range.end <= body.end);
+                if forbidden == "activate_window(" && in_answered && file.ends_with("locked.rs") {
+                    key_again += line.matches(forbidden).count();
+                    continue;
+                }
+                found.push(format!("{file}:{}: {}", at + 1, line.trim()));
             }
         }
         let calls = code.matches("show_main_window").count();
@@ -1648,4 +1763,8 @@ fn the_panel_never_activates_the_app() {
     }
     assert!(found.is_empty(), "the panel activates the app: {found:#?}");
     assert_eq!(shown, 1, "Cmd+O is the one way to the main window");
+    assert_eq!(
+        key_again, 1,
+        "the panel takes key status back once, after Touch ID"
+    );
 }

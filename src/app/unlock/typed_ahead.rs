@@ -282,7 +282,7 @@ impl fmt::Debug for TypedAhead {
 /// More than one word, and nothing matched. A search is usually one or two
 /// words that find something; a passphrase typed into the wrong window is
 /// several words that find nothing.
-fn is_password_like(query: &str, hits: usize) -> bool {
+pub(crate) fn is_password_like(query: &str, hits: usize) -> bool {
     hits == 0 && query.split_whitespace().nth(1).is_some()
 }
 

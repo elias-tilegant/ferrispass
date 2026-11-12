@@ -194,6 +194,104 @@ mod tests {
         assert!(!rank_for_panel(&snapshot, "nh", &last_used).is_empty());
     }
 
+    /// The quick access panel works out on its own which rows the query
+    /// names exactly (`ui::vm::panel::names_exactly`): it gets the rows
+    /// without their tiers, and this module is out of its reach. For
+    /// titles, SAP systems named in the title or in the fields, a system
+    /// named in a protected field, and queries in other case and spacing, it
+    /// agrees with the tier the search gives every row it lists.
+    #[test]
+    fn names_exactly_as_the_search_does() {
+        use crate::domain::CustomField;
+        let field = |key: &str, value: &str, protected: bool| CustomField {
+            key: key.to_string(),
+            value: value.to_string(),
+            protected,
+        };
+        let with_fields = |id: &str, title: &str, fields: Vec<CustomField>| VaultEntry {
+            custom_fields: fields,
+            ..entry(id, title)
+        };
+        let entries = vec![
+            entry("nhp", "NHP 100"),
+            entry("nhp-prd", "NHP 100 PRD"),
+            entry("nhp-old", "NHP 100 Nordhafen alt"),
+            entry("nhp-prod", "NHP 100 PROD"),
+            entry("sales", "Salesforce"),
+            entry("sales-sandbox", "Salesforce Sandbox"),
+            with_fields(
+                "fields",
+                "Nordhafen ERP",
+                vec![
+                    field("SAP_SID", "NHQ", false),
+                    field("SAP_CLIENT", "200", false),
+                ],
+            ),
+            with_fields(
+                "protected",
+                "Brenner ERP",
+                vec![
+                    field("SAP_SID", "BRQ", true),
+                    field("SAP_CLIENT", "300", false),
+                ],
+            ),
+            with_fields(
+                "renamed",
+                "NHX 100 Nordhafen",
+                vec![
+                    field("SAP_SID", "NHX", false),
+                    field("SAP_CLIENT", "100", false),
+                ],
+            ),
+        ];
+        let snapshot = vault(entries, Vec::new());
+        let none = HashMap::new();
+        let queries = [
+            "nhp 100",
+            "NHP  100",
+            "nhp 100 prd",
+            "nhp 100 nordhafen alt",
+            "salesforce",
+            "SALESFORCE sandbox",
+            "nhq 200",
+            "nordhafen erp",
+            "brq 300",
+            "nhx 100",
+            "sales",
+            "100",
+        ];
+        let mut differ = Vec::new();
+        let (mut compared, mut found_exact) = (0, 0);
+        for query in queries {
+            let tiers: Vec<(String, bool)> = rank(RankInput::new(&snapshot, query, &none))
+                .iter()
+                .map(|ranked| {
+                    (
+                        ranked.entry.id.clone(),
+                        ranked.tier == Tier::ExactIdentifier,
+                    )
+                })
+                .collect();
+            for (id, exact) in tiers {
+                compared += 1;
+                found_exact += usize::from(exact);
+                let entry = snapshot.find_entry(&id).expect("a listed entry");
+                if crate::ui::vm::panel::names_exactly(entry, query) != exact {
+                    differ.push(format!("{query:?} and {id}: the search says {exact}"));
+                }
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "the panel and the search disagree:\n{}",
+            differ.join("\n")
+        );
+        assert!(
+            compared >= 15 && found_exact >= 5,
+            "{compared} rows, {found_exact} exact"
+        );
+    }
+
     #[test]
     fn an_empty_vault_lists_nothing() {
         let snapshot = vault(Vec::new(), vec![entry("deleted", "Deleted")]);

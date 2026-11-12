@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, AppContext as _, Entity, Role, TestAppContext};
+use gpui::{AnyWindowHandle, AppContext as _, Entity, Keystroke, Role, TestAppContext};
 use keepass::config::{DatabaseConfig, KdfConfig};
 use keepass::db::fields;
 use keepass::{Database, DatabaseKey};
@@ -19,7 +19,7 @@ use crate::app::actions;
 use crate::app::services::clipboard::ClipboardService;
 use crate::biometric::memory::InMemoryBiometricStore;
 use crate::biometric::registry::{BiometricEnrollment, BiometricRegistry};
-use crate::biometric::{BiometricStore, EnrollmentId};
+use crate::biometric::{BiometricError, BiometricStore, EnrollmentId};
 use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
 use crate::platform::secure_input::fake::{self as secure, Fake, FakeApi};
 use crate::platform::secure_input::{HoldError, OsStatus};
@@ -35,6 +35,17 @@ const SENTINEL: &str = "sp-typed-7Qx";
 thread_local! {
     /// How far the tests moved the wall clock forward, on this thread.
     static AHEAD: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    /// How often the panel took key status back, on this thread.
+    static KEY_TAKEN: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Called where the panel makes itself the key window again.
+pub(super) fn note_key_taken() {
+    KEY_TAKEN.with(|taken| taken.set(taken.get() + 1));
+}
+
+fn key_taken() -> usize {
+    KEY_TAKEN.with(Cell::get)
 }
 
 /// How far the tests moved the panel's wall clock forward.
@@ -104,6 +115,7 @@ fn locked_app(cx: &mut TestAppContext, setup: Setup) -> Locked {
 /// holding `titles`.
 fn locked_app_with(cx: &mut TestAppContext, setup: Setup, api: FakeApi, titles: &[&str]) -> Locked {
     AHEAD.with(|ahead| ahead.set(Duration::ZERO));
+    KEY_TAKEN.with(|taken| taken.set(0));
     crate::autotype::hotkey::fake::reset();
     let secure = cx.update(|cx| {
         gpui_component::init(cx);
@@ -170,6 +182,117 @@ impl Locked {
     fn disables(&self) -> usize {
         self.secure.api.disables()
     }
+
+    /// How often the Touch ID prompt was shown.
+    fn retrieves(&self) -> usize {
+        self.store.retrieve_calls().len()
+    }
+
+    /// The store gives `password` for the vault from now on.
+    fn enrolled_password(&self, cx: &mut TestAppContext, password: &str) {
+        let id = self.state.read_with(cx, |state, _| {
+            state
+                .biometric_registry()
+                .get(&self.path)
+                .expect("the vault is enrolled")
+                .id
+                .clone()
+        });
+        self.store.enroll(&id, password).expect("enrol");
+    }
+
+    /// The vault's state on the unlock screen, as the panel reads it.
+    fn vault_is_open(&self, cx: &mut TestAppContext) -> bool {
+        self.state.read_with(cx, |state, _| {
+            matches!(state.vault_status(), VaultStatus::Open { .. })
+        })
+    }
+}
+
+/// Return, as the keyboard sends it, without running what it starts: the
+/// prompt is up until the test lets the executor run.
+fn press_return(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    cx.dispatch_keystroke(window, Keystroke::parse("enter").expect("a keystroke"));
+}
+
+fn is_key(cx: &mut TestAppContext, window: AnyWindowHandle) -> bool {
+    window
+        .update(cx, |_, window, _| window.is_window_active())
+        .expect("the window")
+}
+
+/// Return in the panel, and the Touch ID dialog taking key status from the
+/// panel right after it, as on a Mac. The window of the other app stands
+/// for the dialog: it becomes the key window once Return's handler is done,
+/// and the panel's activation observer hears of it before macOS answers.
+/// Returns while the prompt is up.
+fn return_with_the_dialog(cx: &mut TestAppContext, app: &Locked, panel: AnyWindowHandle) {
+    app.other
+        .update(cx, |_, window, _| window.activate_window())
+        .expect("the window for the dialog");
+    press_return(cx, panel);
+    while is_key(cx, panel) {
+        assert!(cx.executor().tick(), "the dialog never took key status");
+    }
+    assert_eq!(key_taken(), 0, "macOS answered before the dialog was up");
+}
+
+/// A click on the unlock button, as its handler gets it.
+fn click_unlock(cx: &mut TestAppContext, panel: AnyWindowHandle) {
+    panel
+        .update(cx, |_, window, cx| {
+            let view = panel::view_for_test(cx).expect("the panel's view");
+            view.update(cx, |view, cx| view.on_unlock_click(window, cx));
+        })
+        .expect("the panel");
+    cx.run_until_parked();
+}
+
+/// What the panel searches for now.
+fn search(cx: &mut TestAppContext) -> String {
+    let vm = cx.update(|cx| panel::for_test(cx).1).expect("the model");
+    vm.read_with(cx, |vm, _| vm.query().to_string())
+}
+
+/// What the panel's search field holds.
+fn search_field(cx: &mut TestAppContext) -> String {
+    view(cx).read_with(cx, |view, cx| view.search.read(cx).value().to_string())
+}
+
+/// Runs the calling test again in a child process of this test binary
+/// whose home and temporary folder are a new, empty directory, and returns
+/// `false` once that run has passed. In the child it returns `true`, and
+/// the test goes on there. Opening a vault writes the list of recent vaults
+/// under the home folder, so every test that opens one runs in a child.
+fn in_a_home_of_its_own(test: &str) -> bool {
+    const OWN_HOME: &str = "FERRISPASS_TEST_OWN_HOME";
+    if let Some(home) = std::env::var_os(OWN_HOME) {
+        assert_eq!(
+            std::env::var_os("HOME"),
+            Some(home),
+            "a child run has to have the home it was given"
+        );
+        return true;
+    }
+    let home = tempfile::tempdir().expect("a temporary home");
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, rest)| rest);
+    let name = format!("{module}::{test}");
+    let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([name.as_str(), "--exact", "--test-threads=1"])
+        .env(OWN_HOME, home.path())
+        .env("HOME", home.path())
+        .env("TMPDIR", home.path())
+        .output()
+        .expect("run the test binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{name} failed in a home of its own:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
 }
 
 fn view(cx: &mut TestAppContext) -> Entity<PanelView> {
@@ -361,6 +484,9 @@ fn activation_takes_secure_input_once_before_the_first_key(cx: &mut TestAppConte
 /// new one begins.
 #[gpui::test]
 fn a_wiped_buffer_is_replaced_while_the_panel_is_key_and_locked(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("a_wiped_buffer_is_replaced_while_the_panel_is_key_and_locked") {
+        return;
+    }
     let app = locked_app(cx, Setup::TouchId);
     let panel = app.open_panel(cx);
     activate(cx, panel);
@@ -395,6 +521,48 @@ fn a_wiped_buffer_is_replaced_while_the_panel_is_key_and_locked(cx: &mut TestApp
         (4, 4),
         "losing the keyboard to another app began a new buffer"
     );
+
+    // macOS refuses secure input when the panel takes it back after Touch
+    // ID: the text is wiped, and as soon as the panel is key again a new
+    // buffer begins under secure input, which macOS gives again, while the
+    // vault still opens. The store's password does not open the vault, so
+    // the panel stays locked afterwards.
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "nhq");
+    app.enrolled_password(cx, "not the password");
+    return_with_the_dialog(cx, &app, panel);
+    let refusing =
+        cx.update(|cx| secure::install(cx, FakeApi::refusing(HoldError::Os(OsStatus(-50)))));
+    while key_taken() == 0 {
+        assert!(cx.executor().tick(), "macOS never answered");
+    }
+    assert_eq!(
+        dots(cx),
+        0,
+        "the text stayed although secure input was refused"
+    );
+    assert!(!has_buffer(cx));
+    assert!(!refusing.held());
+    let again = cx.update(|cx| secure::install(cx, FakeApi::new()));
+    while !has_buffer(cx) {
+        assert!(
+            cx.executor().tick(),
+            "no new buffer after the refused rearm"
+        );
+    }
+    let under_way = view(cx).read_with(cx, |view, _| view.locked.attempt_for_test().is_some());
+    assert!(under_way, "the new buffer waited for the attempt to end");
+    assert_eq!(again.api.enables(), 1);
+    assert!(again.held());
+    assert_eq!(dots(cx), 0);
+    cx.run_until_parked();
+    assert!(
+        !app.vault_is_open(cx),
+        "the test needs the vault to stay locked"
+    );
+    assert!(has_buffer(cx));
+    assert_eq!(again.api.enables(), 1, "a second buffer after the attempt");
 }
 
 /// macOS refuses secure input: there is no buffer, nothing typed goes in,
@@ -700,4 +868,328 @@ fn the_file_name_in_file_missing_is_a_basename_through_display_untrusted(cx: &mu
     let shown = file_name(Path::new(&long));
     assert_eq!(shown.chars().count(), NAME_MAX + 1);
     assert!(shown.ends_with('\u{2026}'));
+}
+
+// --------------------------------------------------------- Touch ID --
+
+/// Touch ID starts from the panel on Return and on a click of the unlock
+/// button, and on nothing else: not when the panel opens, nor for keys, nor
+/// when it becomes key again, nor for a tick, nor when the buffer expires,
+/// nor after macOS withdrew the prompt.
+#[gpui::test]
+fn return_and_the_button_are_the_only_ways_to_touch_id(cx: &mut TestAppContext) {
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "nhq");
+    panel
+        .update(cx, |_, window, cx| {
+            let view = panel::view_for_test(cx).expect("the panel's view");
+            view.update(cx, |view, cx| view.on_activation(true, window, cx));
+        })
+        .expect("the panel");
+    tick(cx);
+    move_wall_clock(Duration::from_secs(31));
+    tick(cx);
+    reset_wall_clock();
+    assert_eq!(app.retrieves(), 0, "Touch ID without Return or a click");
+
+    app.store.fail_next_retrieve(BiometricError::Interrupted);
+    keys(cx, panel, "enter");
+    assert_eq!(app.retrieves(), 1, "Return");
+    tick(cx);
+    activate(cx, app.other);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    tick(cx);
+    assert_eq!(app.retrieves(), 1, "a withdrawn prompt was asked again");
+
+    app.store.fail_next_retrieve(BiometricError::UserCancelled);
+    click_unlock(cx, panel);
+    assert_eq!(app.retrieves(), 2, "the unlock button");
+}
+
+/// After Touch ID answers, the panel takes the keyboard back before Return
+/// counts again: a Return while the prompt is up starts nothing, the panel
+/// is made key and its field focused once macOS has answered, and the next
+/// Return starts the next attempt.
+#[gpui::test]
+fn the_panel_regains_key_and_focus_before_it_takes_return(cx: &mut TestAppContext) {
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "nhq");
+    app.store.fail_next_retrieve(BiometricError::UserCancelled);
+    return_with_the_dialog(cx, &app, panel);
+    press_return(cx, panel);
+    panel
+        .update(cx, |_, window, cx| window.blur(cx))
+        .expect("the panel");
+    cx.run_until_parked();
+
+    assert_eq!(
+        app.retrieves(),
+        1,
+        "a Return while the prompt was up started one"
+    );
+    assert_eq!(key_taken(), 1, "the panel did not take key status back");
+    assert!(is_key(cx, panel), "the panel is not the key window again");
+    assert!(!is_key(cx, app.other));
+    let focused = panel.update(cx, |_, window, cx| {
+        let view = panel::view_for_test(cx).expect("the panel's view");
+        view.read(cx).focus.is_focused(window)
+    });
+    assert_eq!(
+        focused.ok(),
+        Some(true),
+        "the field did not get the keyboard back"
+    );
+    assert_eq!(dots(cx), 3);
+
+    app.store.fail_next_retrieve(BiometricError::UserCancelled);
+    keys(cx, panel, "enter");
+    assert_eq!(
+        app.retrieves(),
+        2,
+        "Return after the answer started nothing"
+    );
+}
+
+/// While the Touch ID dialog has key status, secure input is off and keys
+/// go nowhere; the panel stays open. Once macOS has answered, secure input
+/// is on again, with the text and its clock as they were.
+#[gpui::test]
+fn secure_input_is_released_while_the_dialog_is_key_and_taken_again_after(cx: &mut TestAppContext) {
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "nhq");
+    assert_eq!((app.enables(), app.disables()), (1, 0));
+
+    app.store.fail_next_retrieve(BiometricError::UserCancelled);
+    return_with_the_dialog(cx, &app, panel);
+    assert_eq!(app.disables(), 1, "secure input stayed on under the dialog");
+    assert!(!app.secure.held());
+    assert!(panel_is_open(cx), "the dialog closed the panel");
+    cx.dispatch_keystroke(panel, Keystroke::parse("x").expect("a key"));
+    assert_eq!(dots(cx), 3, "a key went in without secure input");
+    move_wall_clock(Duration::from_secs(20));
+    cx.run_until_parked();
+
+    assert_eq!(
+        app.enables(),
+        2,
+        "secure input not taken again after the dialog"
+    );
+    assert!(app.secure.held());
+    assert_eq!(dots(cx), 3, "the text changed through the dialog");
+    // The clock ran on through the dialog: ten more seconds make thirty.
+    move_wall_clock(Duration::from_secs(10));
+    tick(cx);
+    assert_eq!(dots(cx), 0, "the 30 seconds started again after the dialog");
+}
+
+/// macOS withdrew the prompt: nothing else is asked, the buffer stays, and
+/// only Return or the button asks again.
+#[gpui::test]
+fn an_interrupted_prompt_is_not_asked_again_from_the_panel(cx: &mut TestAppContext) {
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "nhq");
+    app.store.fail_next_retrieve(BiometricError::Interrupted);
+    keys(cx, panel, "enter");
+    for _ in 0..3 {
+        tick(cx);
+    }
+    activate(cx, panel);
+    assert_eq!(app.retrieves(), 1, "the panel asked again on its own");
+    assert_eq!(
+        kind(cx),
+        Kind::TouchId {
+            device_password: false
+        }
+    );
+    assert_eq!(dots(cx), 3, "the buffer went with the withdrawn prompt");
+    assert_eq!(search(cx), "");
+}
+
+/// What was typed becomes the search only once the panel's own unlock
+/// opened the vault. A cancelled prompt, a withdrawn one, a password that
+/// does not open the vault and an answer that came after the user moved on
+/// leave the buffer and give no search. Opened, the buffer is used up and
+/// its text is the search, in the model and in the field.
+#[gpui::test]
+fn the_typed_text_becomes_the_search_only_after_opened(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("the_typed_text_becomes_the_search_only_after_opened") {
+        return;
+    }
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "nhq");
+    let other = app.path.with_file_name("elbe.kdbx");
+
+    for answer in ["cancelled", "withdrawn", "not opened", "stale"] {
+        match answer {
+            "cancelled" => app.store.fail_next_retrieve(BiometricError::UserCancelled),
+            "withdrawn" => app.store.fail_next_retrieve(BiometricError::Interrupted),
+            "not opened" => app.enrolled_password(cx, "not the password"),
+            _ => app.enrolled_password(cx, PASSWORD),
+        }
+        press_return(cx, panel);
+        if answer == "stale" {
+            // Another vault is asked for while the prompt is up.
+            app.state
+                .update(cx, |state, cx| state.request_password(other.clone(), cx));
+        }
+        cx.run_until_parked();
+        assert!(app.retrieves() > 0, "{answer}: no prompt");
+        assert!(!app.vault_is_open(cx), "{answer}: the vault opened");
+        assert_eq!(search(cx), "", "{answer}: the typed text became the search");
+        assert_eq!(dots(cx), 3, "{answer}: the buffer went");
+        if answer == "stale" {
+            app.state
+                .update(cx, |state, cx| state.request_password(app.path.clone(), cx));
+            cx.run_until_parked();
+        }
+    }
+
+    app.enrolled_password(cx, PASSWORD);
+    keys(cx, panel, "enter");
+    assert!(app.vault_is_open(cx), "the test needs the vault open");
+    assert_eq!(search(cx), "nhq");
+    assert_eq!(search_field(cx), "nhq");
+    assert!(!has_buffer(cx), "the buffer outlived the handover");
+    assert!(
+        !app.secure.held(),
+        "secure input stayed with the handed-over text"
+    );
+}
+
+/// Several words without a single match look like a password typed into
+/// the wrong window: they are dropped and the search stays empty. One word
+/// with a match, and several words with a match, become the search.
+#[gpui::test]
+fn a_password_like_buffer_never_becomes_the_search(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("a_password_like_buffer_never_becomes_the_search") {
+        return;
+    }
+    let app = locked_app(cx, Setup::TouchId);
+    // Two words that match nothing in a vault with NHQ 100 and Salesforce,
+    // then one word and two words that find NHQ 100.
+    for (typed, searched) in [("zebra 747", ""), ("nhq", "nhq"), ("nhq 100", "nhq 100")] {
+        let panel = app.open_panel(cx);
+        activate(cx, panel);
+        type_into(cx, panel, typed);
+        keys(cx, panel, "enter");
+        assert!(
+            app.vault_is_open(cx),
+            "{typed}: the test needs the vault open"
+        );
+        assert_eq!(search(cx), searched, "{typed}");
+        assert_eq!(search_field(cx), searched, "{typed}");
+        assert!(!has_buffer(cx), "{typed}");
+        cx.update(panel::close);
+        app.state.update(cx, |state, cx| {
+            assert!(state.lock_vault(cx), "the lock waited for a save");
+        });
+        cx.run_until_parked();
+    }
+}
+
+/// The 30 seconds run out while the Touch ID dialog is up: the vault opens
+/// with an empty search, and nothing of the text is left.
+#[gpui::test]
+fn an_expired_buffer_opens_an_empty_search(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("an_expired_buffer_opens_an_empty_search") {
+        return;
+    }
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "nhq");
+    return_with_the_dialog(cx, &app, panel);
+    move_wall_clock(Duration::from_secs(31));
+    cx.executor().advance_clock(TICK);
+    cx.run_until_parked();
+    assert!(app.vault_is_open(cx), "the test needs the vault open");
+    assert_eq!(search(cx), "", "expired text became the search");
+    assert_eq!(search_field(cx), "");
+    assert!(!has_buffer(cx));
+}
+
+/// Return waits while an unlock is under way: a second Return starts no
+/// second prompt, and the vault opens from the first. Once it is open,
+/// Return acts on the results again.
+#[gpui::test]
+fn return_waits_while_an_unlock_is_under_way(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("return_waits_while_an_unlock_is_under_way") {
+        return;
+    }
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, "sales");
+    press_return(cx, panel);
+    assert_eq!(kind(cx), Kind::Unlocking);
+    let attempt = view(cx).read_with(cx, |view, _| view.locked.attempt_for_test());
+    assert!(attempt.is_some(), "the attempt did not start");
+    press_return(cx, panel);
+    click_unlock(cx, panel);
+    assert_eq!(
+        app.retrieves(),
+        1,
+        "a second prompt while one was under way"
+    );
+    assert!(
+        app.vault_is_open(cx),
+        "the first attempt did not open the vault"
+    );
+    assert_eq!(search(cx), "sales");
+
+    // Open, Return runs the main action of the entry it found: Salesforce
+    // has no address, so the footer says the website did not open.
+    cx.executor().advance_clock(locked_panel::RETURN_SETTLE);
+    cx.run_until_parked();
+    keys(cx, panel, "enter");
+    let vm = cx.update(|cx| panel::for_test(cx).1).expect("the model");
+    let note = vm.read_with(cx, |vm, _| vm.footer().note);
+    assert_eq!(note, Some(tr!("quick.error.website_failed")));
+}
+
+/// Nothing in the locked panel's file writes to a log, prints, or formats
+/// a text, so nothing typed can reach one that way.
+#[test]
+fn the_locked_panel_never_logs() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/windows/panel/locked.rs");
+    let code = probe::code_only(&std::fs::read_to_string(&path).expect("read locked.rs"));
+    let code = code
+        .split("#[cfg(test)]\npub(crate) mod tests;")
+        .next()
+        .unwrap_or_default();
+    let mut found = Vec::new();
+    for pattern in [
+        "log::",
+        "println!",
+        "eprintln!",
+        "print!(",
+        "eprint!(",
+        "dbg!",
+        "format!(",
+        "format_args!(",
+        "write!(",
+        "writeln!(",
+        "panic!(",
+        "{:?}",
+    ] {
+        if code.contains(pattern) {
+            found.push(pattern);
+        }
+    }
+    assert!(found.is_empty(), "locked.rs writes or formats: {found:?}");
+    assert!(
+        code.contains("fn on_locked_key_down("),
+        "the scan reads the panel"
+    );
 }

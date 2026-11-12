@@ -25,6 +25,11 @@
 //!   stand on the row's chip and never in its name.
 //! - The panel reads an entry without its notes and its protected custom
 //!   fields ([`shown_fields`]), so neither reaches a row or the footer.
+//! - Return counts only once the results have been drawn for 300 ms and no
+//!   unlock is under way ([`PanelVm::return_gate`]). One exact match, its
+//!   whole title or the SID and client of the system it names, in a vault
+//!   that was open before the search takes Return at once, unless it is a
+//!   production system.
 //! - Nothing here writes to a log, and no text here holds a password or a
 //!   one-time code.
 
@@ -32,10 +37,11 @@ use std::time::{Duration, Instant};
 
 use gpui::SharedString;
 
-use crate::app::kinds::{self, EntryKind, SapRole};
+use crate::app::kinds::{self, EntryKind, SapRole, Sid};
 use crate::app::registry::{
     self, CommandCtx, CommandId, Enablement, SelectedKind, Selection, UrlKind,
 };
+use crate::app::unlock::locked_panel::{ReturnGate, exact_hit_takes_return_at_once};
 use crate::app::{AppState, VaultStatus};
 use crate::domain::VaultEntry;
 use crate::ui::ds::components::{
@@ -69,10 +75,12 @@ pub struct Hit {
     /// How many listed rows stand for the same system as this one, this one
     /// included: 1 for a row without a twin.
     pub twins: usize,
+    /// The query names this entry exactly ([`names_exactly`]).
+    pub exact: bool,
 }
 
 impl Hit {
-    fn new(entry: &VaultEntry, twins: usize, vault: &SharedString) -> Self {
+    fn new(entry: &VaultEntry, twins: usize, exact: bool, vault: &SharedString) -> Self {
         let shown = shown_fields(entry);
         let kind = kinds::classify(&shown, None);
         let chip = match &kind {
@@ -98,6 +106,7 @@ impl Hit {
             has_username: !shown.username.trim().is_empty(),
             has_otp: shown.has_otp,
             twins,
+            exact,
             kind,
         }
     }
@@ -123,6 +132,7 @@ impl std::fmt::Debug for Hit {
             .field("has_username", &self.has_username)
             .field("has_otp", &self.has_otp)
             .field("twins", &self.twins)
+            .field("exact", &self.exact)
             .finish_non_exhaustive()
     }
 }
@@ -308,6 +318,9 @@ pub struct PanelVm {
     /// one only.
     parked_vaults: usize,
     footer_note: Option<FooterNote>,
+    /// The vault was unlocked from the panel for this query, which was typed
+    /// while it was locked: it was not open before the search.
+    unlocked_for_query: bool,
 }
 
 impl std::fmt::Debug for PanelVm {
@@ -322,6 +335,7 @@ impl std::fmt::Debug for PanelVm {
             .field("vault_open", &self.vault_name.is_some())
             .field("parked_vaults", &self.parked_vaults)
             .field("footer_note", &self.footer_note)
+            .field("unlocked_for_query", &self.unlocked_for_query)
             .finish_non_exhaustive()
     }
 }
@@ -338,6 +352,7 @@ impl Default for PanelVm {
             vault_name: None,
             parked_vaults: 0,
             footer_note: None,
+            unlocked_for_query: false,
         }
     }
 }
@@ -404,7 +419,10 @@ impl PanelVm {
         let hits = state
             .ranked_for_panel(&self.query, MAX_HITS)
             .iter()
-            .map(|(entry, twins)| Hit::new(entry, *twins, &name))
+            .map(|(entry, twins)| {
+                let exact = names_exactly(entry, &self.query);
+                Hit::new(entry, *twins, exact, &name)
+            })
             .collect();
         self.vault_name = Some(name);
         self.set_results(hits);
@@ -421,7 +439,29 @@ impl PanelVm {
         self.selection = ListSelection::first(0);
         self.explicit = false;
         self.footer_note = None;
+        self.unlocked_for_query = false;
         self.refresh(state);
+    }
+
+    /// The query was typed while the vault was locked, and the panel has
+    /// just unlocked it: the vault was not open before this search.
+    pub fn note_unlocked_for_query(&mut self) {
+        self.unlocked_for_query = true;
+    }
+
+    /// What Return has to pass for the results on screen. `unlock_under_way`
+    /// says whether a vault is still being unlocked. Only the selected row
+    /// can be the one exact match that takes Return at once.
+    pub fn return_gate(&self, unlock_under_way: bool) -> ReturnGate {
+        let exact = self.results.iter().filter(|hit| hit.exact).count();
+        ReturnGate {
+            results_drawn_at: self.drawn.at(),
+            all_vaults_done: !unlock_under_way,
+            single_exact_hit_in_open_vault_not_production: self.selected().is_some_and(|hit| {
+                hit.exact
+                    && exact_hit_takes_return_at_once(exact, !self.unlocked_for_query, &hit.kind)
+            }),
+        }
     }
 
     fn set_results(&mut self, hits: Vec<Hit>) {
@@ -607,6 +647,87 @@ fn main_words(hit: &Hit) -> SharedString {
         EntryKind::Web(_) => tr!("quick.footer.open_website"),
         EntryKind::Remote(_) => tr!("quick.footer.copy_password"),
     }
+}
+
+/// Whether `query` names `entry` exactly, the way the search puts such an
+/// entry first: its whole title, or the SID and client of the SAP system it
+/// names, read without its notes and its protected fields. Neither case nor
+/// runs of whitespace count. When the SID and the client come from the
+/// title, the title has to be them and nothing else, or them and one role
+/// word: "NHP 100" and "NHP 100 PRD" name NHP 100, "NHP 100 Nordhafen alt"
+/// does not, unless its fields name it.
+///
+/// The search keeps this rule to itself, in a module the panel cannot reach,
+/// and lists the panel's rows without their tiers.
+/// `names_exactly_as_the_search_does` in `app::search::panel` holds the two
+/// together.
+pub fn names_exactly(entry: &VaultEntry, query: &str) -> bool {
+    let query = normalize(query);
+    if query.is_empty() {
+        return false;
+    }
+    if normalize(&entry.title) == query {
+        return true;
+    }
+    if !query.contains(' ') {
+        return false;
+    }
+    system_named(&shown_fields(entry)).is_some_and(|system| system == query)
+}
+
+/// "nhp 100" for the SAP system `entry` names, read from its fields, or
+/// from its title when the title names only the system.
+fn system_named(entry: &VaultEntry) -> Option<String> {
+    let identifier = sid_and_client(&kinds::classify(entry, None))?;
+    let Some((sid, client)) = kinds::title_pattern(&entry.title) else {
+        return Some(identifier);
+    };
+    if identifier == identifier_of(&sid, &client)
+        && names_only_the_system(&entry.title, &sid, &client)
+    {
+        return Some(identifier);
+    }
+    let fields_only = VaultEntry {
+        title: String::new(),
+        ..entry.clone()
+    };
+    sid_and_client(&kinds::classify(&fields_only, None))
+}
+
+/// Whether `title` is `sid` and `client` and nothing else, or followed by
+/// one role word.
+fn names_only_the_system(title: &str, sid: &Sid, client: &str) -> bool {
+    let mut words = title.split_whitespace();
+    words.next() == Some(sid.as_str())
+        && words.next() == Some(client)
+        && words
+            .next()
+            .is_none_or(|role| SapRole::parse(role).is_some())
+        && words.next().is_none()
+}
+
+fn sid_and_client(kind: &EntryKind) -> Option<String> {
+    let EntryKind::Sap(kinds::SapSystem {
+        sid: Some(sid),
+        client: Some(client),
+        ..
+    }) = kind
+    else {
+        return None;
+    };
+    Some(identifier_of(sid, client))
+}
+
+fn identifier_of(sid: &Sid, client: &str) -> String {
+    normalize(&format!("{} {client}", sid.as_str()))
+}
+
+/// Lowercase words joined by single spaces.
+fn normalize(text: &str) -> String {
+    text.split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The address the panel may open for an entry: http and https only, and

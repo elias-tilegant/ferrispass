@@ -30,6 +30,7 @@ use crate::app::kinds::EntryKind;
 use crate::app::registry::CommandId;
 use crate::app::services::activity::{self, ActivitySource};
 use crate::app::services::clipboard::ClipboardService;
+use crate::app::unlock::{locked_panel, touch_id};
 use crate::app::{AppState, LibrarySelection};
 use crate::launch;
 use crate::tr;
@@ -237,11 +238,21 @@ impl PanelView {
     }
 
     /// Return: the main action of the selected entry, when Return may run
-    /// one. A copy keeps the panel open; signing in and opening a website
-    /// hand over to another app and close it.
+    /// one, and in the locked panel Touch ID. A copy keeps the panel open;
+    /// signing in and opening a website hand over to another app and close
+    /// it.
     fn on_primary(&mut self, _: &PanelPrimary, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_locked(cx) {
             self.on_return(window, cx);
+            return;
+        }
+        // Return acts on what was on screen: not before the results are
+        // drawn, not within 300 ms of that, and not while a vault is still
+        // being unlocked, unless the one exact match may take it at once.
+        let now = cx.background_executor().now();
+        let under_way = touch_id::unlock_under_way(self.state.read(cx));
+        let gate = self.vm.read(cx).return_gate(under_way);
+        if !locked_panel::return_accepted(&gate, now) {
             return;
         }
         let vm = self.vm.read(cx);

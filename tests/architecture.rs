@@ -1541,6 +1541,20 @@ const TOUCH_ID_CALL_SITES: &[(&str, &str, &str)] = &[
     // The command line, with --touch-id, or at a terminal for an enrolled
     // vault.
     ("src/cli.rs", "unlock_password", "retrieve"),
+    // The locked quick access panel: Return, and a click on its unlock
+    // button. Each asks for a token in its own handler...
+    ("src/ui/windows/panel/locked.rs", "on_return", "confirm"),
+    (
+        "src/ui/windows/panel/locked.rs",
+        "on_unlock_click",
+        "confirm",
+    ),
+    // ...and hands it to the panel's way into the flow.
+    (
+        "src/ui/windows/panel/locked.rs",
+        "start_unlock",
+        "unlock_from_panel",
+    ),
 ];
 
 /// The names whose calls [`TOUCH_ID_CALL_SITES`] lists.

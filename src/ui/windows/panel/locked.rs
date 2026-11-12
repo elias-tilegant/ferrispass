@@ -28,6 +28,24 @@
 //!    recently used entry, no row and no title. A missing vault file is
 //!    named by its file name, cleaned up for display. Every text comes from
 //!    `quick.locked.*`.
+//! 6. Touch ID starts from the panel only in [`PanelView::on_return`] and
+//!    in the unlock button's handler, each through `touch_id::confirm` and
+//!    `touch_id::unlock_from_panel`. Opening, typing, becoming key again, a
+//!    tick, an expired buffer and a prompt macOS withdrew start nothing, and
+//!    neither does Return or the button while an unlock is under way.
+//!    `TOUCH_ID_CALL_SITES` in `tests/architecture.rs` lists the calls.
+//! 7. As soon as macOS has answered, the panel makes itself the key window
+//!    again, focuses its field and takes secure input back, before the
+//!    vault is opened and before any Return counts. Should the panel be key
+//!    again before that, it takes secure input back then. The 30 seconds
+//!    run on through the dialog.
+//! 8. What was typed becomes the search only after the panel's own unlock
+//!    opened the vault, and only through `take_query`: text that expired
+//!    meanwhile gives an empty search, and several words without a single
+//!    match are dropped, since they look like a password typed into the
+//!    wrong window. The buffer is searched only there, so the rule runs
+//!    there, on the text `take_query` gave. A vault opened any other way
+//!    gets nothing of what was typed.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -40,7 +58,8 @@ use gpui::{
 
 use super::view::PanelView;
 use crate::app::unlock::locked_panel::{self, Kind};
-use crate::app::unlock::typed_ahead::TypedAhead;
+use crate::app::unlock::touch_id::{self, Answer, Confirmed, OnAnswered, OnDone, PanelTrigger};
+use crate::app::unlock::typed_ahead::{self, TypedAhead};
 use crate::app::{AppState, VaultStatus};
 use crate::tr;
 use crate::ui::ds::ActiveTokens as _;
@@ -61,6 +80,8 @@ const NAME_MAX: usize = 60;
 pub(super) struct Locked {
     buffer: Option<TypedAhead>,
     kind: Option<Kind>,
+    /// The generation of the panel's own unlock attempt, while one runs.
+    attempt: Option<u64>,
     dots: usize,
     /// macOS refused secure event input for a buffer: this window takes no
     /// keys and sends you to the main window.
@@ -115,6 +136,17 @@ impl Locked {
             buffer.release_secure_input();
         }
     }
+
+    /// The panel is key again: a buffer that let go of secure input takes it
+    /// back, with its text and its clock; one that holds it is left as it
+    /// is. If macOS refuses, the text is wiped.
+    fn rearm(&mut self, cx: &App) {
+        if let Some(buffer) = &mut self.buffer
+            && buffer.rearm_secure_input(cx).is_err()
+        {
+            self.wipe();
+        }
+    }
 }
 
 /// The wall clock the 30 seconds run on, as the buffer's own clock does.
@@ -128,6 +160,15 @@ fn now() -> SystemTime {
     {
         SystemTime::now()
     }
+}
+
+/// Makes the panel the key window again, after the Touch ID dialog took
+/// that from it. It brings the panel forward, not the app: the panel is a
+/// non-activating window. The one place the panel asks for key status.
+fn take_key(window: &Window) {
+    #[cfg(test)]
+    tests::note_key_taken();
+    window.activate_window();
 }
 
 /// Whether the settings let macOS ask for the Mac password when no Touch ID
@@ -307,10 +348,10 @@ impl PanelView {
         self.locked.read_kind(self.state.read(cx), allow);
     }
 
-    /// The window's activation changed. Key: a buffer begins. Not key while
-    /// an unlock is under way: the Touch ID dialog has the keyboard, so
-    /// secure input goes and the panel stays. Not key otherwise: the panel
-    /// closes and the buffer is wiped.
+    /// The window's activation changed. Key: the buffer takes secure input
+    /// back, or a buffer begins. Not key while an unlock is under way: the
+    /// Touch ID dialog has the keyboard, so secure input goes and the panel
+    /// stays. Not key otherwise: the panel closes and the buffer is wiped.
     pub(super) fn on_activation(
         &mut self,
         active: bool,
@@ -318,6 +359,7 @@ impl PanelView {
         cx: &mut Context<Self>,
     ) {
         if active {
+            self.locked.rearm(cx);
             self.ensure_buffer(window, cx);
             return;
         }
@@ -333,15 +375,21 @@ impl PanelView {
     }
 
     /// Begins a buffer when the panel is the key window, locked, offers
-    /// Touch ID and has none. Secure input is on from here, before any key.
-    /// If macOS refuses it, there is no buffer and the panel sends you to
-    /// the main window.
+    /// Touch ID or is unlocking, and has none. Secure input is on from here,
+    /// before any key. Unlocking counts, so that keys typed while the vault
+    /// opens after Touch ID are shielded too, also when the buffer before
+    /// was wiped meanwhile. If macOS refuses secure input, there is no
+    /// buffer and the panel sends you to the main window.
     pub(super) fn ensure_buffer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !window.is_window_active() || !self.is_locked(cx) {
+        if !window.is_window_active() || !self.is_locked(cx) || self.locked.refused {
             return;
         }
         self.read_kind(cx);
-        if self.locked.buffer.is_some() || !matches!(self.locked.kind, Some(Kind::TouchId { .. })) {
+        let collects = matches!(
+            self.locked.kind,
+            Some(Kind::TouchId { .. } | Kind::Unlocking)
+        );
+        if self.locked.buffer.is_some() || !collects {
             return;
         }
         match TypedAhead::begin(cx) {
@@ -385,11 +433,119 @@ impl PanelView {
         cx.notify();
     }
 
-    /// Return in the locked panel.
-    pub(super) fn on_return(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    /// Whether Return and the unlock button may start Touch ID now: the
+    /// panel offers it and no unlock is under way.
+    fn offers_touch_id(&mut self, cx: &mut Context<Self>) -> bool {
+        self.read_kind(cx);
+        matches!(self.locked.kind, Some(Kind::TouchId { .. }))
+    }
 
-    /// A click on the unlock button.
-    fn on_unlock_click(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    /// Return in the locked panel: one of the two ways to Touch ID.
+    pub(super) fn on_return(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.offers_touch_id(cx) {
+            return;
+        }
+        if let Some(token) = touch_id::confirm(PanelTrigger::ReturnKey) {
+            self.start_unlock(token, window, cx);
+        }
+    }
+
+    /// A click on the unlock button: the other way to Touch ID.
+    fn on_unlock_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.offers_touch_id(cx) {
+            return;
+        }
+        if let Some(token) = touch_id::confirm(PanelTrigger::UnlockButtonClick) {
+            self.start_unlock(token, window, cx);
+        }
+    }
+
+    /// Hands the confirmation to the shared Touch ID flow. When it starts
+    /// nothing (a cost question, the header not read, an unlock under way),
+    /// the case says why. The field keeps the keyboard, so a click on the
+    /// button leaves the next key in the buffer.
+    fn start_unlock(&mut self, token: Confirmed, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        let answered = cx.entity().downgrade();
+        let done = answered.clone();
+        let on_answered: OnAnswered = Box::new(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = answered.update(cx, |view, cx| view.on_answered(window, cx));
+            });
+        });
+        let on_done: OnDone = Box::new(move |answer, cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = done.update(cx, |view, cx| view.on_done(answer, window, cx));
+            });
+        });
+        let allow = allow_device_passcode(cx);
+        self.locked.attempt =
+            touch_id::unlock_from_panel(token, self.state.clone(), allow, on_answered, on_done, cx);
+        window.focus(&self.focus, cx);
+        self.read_kind(cx);
+        cx.notify();
+    }
+
+    /// macOS has answered, and the vault is not opened yet. The Touch ID
+    /// dialog took key status and macOS does not give it back: the panel
+    /// takes it, focuses its field and takes secure input again, so keys
+    /// typed while the vault opens stay here and shielded. A buffer that
+    /// cannot take it again is wiped, and the next one begins as soon as the
+    /// panel is key, while the vault still opens.
+    fn on_answered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        take_key(window);
+        window.focus(&self.focus, cx);
+        self.locked.rearm(cx);
+        self.ensure_buffer(window, cx);
+        cx.notify();
+    }
+
+    /// The answer is applied. With the vault open, what was typed becomes
+    /// the search, unless it expired or looks like a password. After a
+    /// failed or withdrawn prompt, or a vault that did not open, the buffer
+    /// stays with its clock and the panel offers what the state allows; the
+    /// next attempt needs Return or the button again. A stale answer
+    /// changes nothing.
+    fn on_done(&mut self, answer: Answer, window: &mut Window, cx: &mut Context<Self>) {
+        self.locked.attempt = None;
+        match answer {
+            Answer::Opened(_) => self.hand_over(window, cx),
+            Answer::NotOpened | Answer::Failed(_) | Answer::Interrupted => {
+                self.read_kind(cx);
+                self.ensure_buffer(window, cx);
+            }
+            Answer::Stale => {}
+        }
+        cx.notify();
+    }
+
+    /// The vault is open: the buffer gives its text, and with it goes secure
+    /// input. Several words without a single match are dropped there and
+    /// then; anything else becomes the panel's search.
+    fn hand_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(buffer) = self.locked.buffer.take() else {
+            return;
+        };
+        self.locked.dots = 0;
+        let query = buffer.take_query(now());
+        let hits = self
+            .state
+            .read(cx)
+            .ranked_for_panel(&query, crate::ui::vm::panel::MAX_HITS)
+            .len();
+        if typed_ahead::is_password_like(&query, hits) {
+            drop(query);
+            return;
+        }
+        let state = self.state.clone();
+        self.search
+            .update(cx, |input, cx| input.set_value(query.as_str(), window, cx));
+        self.vm.update(cx, |vm, cx| {
+            vm.set_query(query.as_str(), state.read(cx));
+            vm.note_unlocked_for_query();
+            cx.notify();
+        });
+    }
 
     /// Escape in the locked panel: what was typed is wiped first, and the
     /// next buffer begins at once; with nothing typed, the panel closes.
@@ -501,6 +657,10 @@ impl Locked {
 
     pub(super) fn kind_for_test(&self) -> Kind {
         self.kind()
+    }
+
+    pub(super) fn attempt_for_test(&self) -> Option<u64> {
+        self.attempt
     }
 }
 
