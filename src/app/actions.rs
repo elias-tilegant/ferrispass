@@ -7,11 +7,12 @@ pub const APP_CONTEXT: &str = "FerrisPass";
 /// The key context of the quick access panel's root.
 pub const PANEL_CONTEXT: &str = "Panel";
 
-/// The panel's search field. The GPUI Kit input binds ↑, ↓ and Cmd+C in its
-/// own context and does not pass them on, so the panel binds them one level
-/// further in; a binding on the panel's root never sees them while the field
-/// has focus, and the field always has it. Cmd+W goes here too, see
-/// `bind_panel_keys`.
+/// The panel's search field. The GPUI Kit input binds Cmd+C in its own
+/// context and does not pass it on, so the panel binds it one level further
+/// in; a binding on the panel's root never sees it while the field has
+/// focus, and the field always has it while a vault is open. ↑ and ↓, which
+/// a single-line Kit input has no handler for, are bound here too and would
+/// reach the panel either way. Cmd+W goes here too, see `bind_panel_keys`.
 const PANEL_FIELD_CONTEXT: &str = "Panel > Input";
 
 actions!(
@@ -386,9 +387,15 @@ pub(crate) fn minimize_main_window(cx: &mut App) {
 pub fn init(cx: &mut App) {
     // App-global Quit handler. Wired here (not on AppShell) so the action fires
     // independently of whatever view currently holds focus.
-    cx.on_action(|_: &Quit, cx: &mut App| quit_from_anywhere(cx));
-    cx.on_action(|_: &CloseWindow, cx: &mut App| close_main_window(cx));
-    cx.on_action(|_: &MinimizeWindow, cx: &mut App| minimize_main_window(cx));
+    //
+    // These three act on the main window, and their keys and menu items
+    // usually come from inside it. GPUI runs an app-level handler while the
+    // window the action came from is busy dispatching it, and updating that
+    // window from the handler finds no window. Deferred, they run once the
+    // dispatch is over.
+    cx.on_action(|_: &Quit, cx: &mut App| cx.defer(quit_from_anywhere));
+    cx.on_action(|_: &CloseWindow, cx: &mut App| cx.defer(close_main_window));
+    cx.on_action(|_: &MinimizeWindow, cx: &mut App| cx.defer(minimize_main_window));
 
     cx.on_action(|_: &ShowWindow, cx: &mut App| {
         super::show_main_window(cx);

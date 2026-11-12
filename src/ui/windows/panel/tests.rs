@@ -1025,6 +1025,63 @@ fn quit_and_notifications_from_the_panel_go_to_the_main_window(cx: &mut TestAppC
     assert!(!panel_is_open(cx));
 }
 
+/// Cmd+W and Cmd+Q pressed in the main window reach the main window. GPUI
+/// runs the app's handlers while the window the keys came from is busy
+/// dispatching them. An unsaved entry holds both back with a notice, so the
+/// app is neither hidden nor quit.
+#[gpui::test]
+fn close_window_and_quit_reach_the_main_window_from_inside_it(cx: &mut TestAppContext) {
+    let app = open_app(cx, &sample());
+    let notices = |cx: &mut TestAppContext| {
+        app.main
+            .update(cx, |_, window, cx| window.notifications(cx).len())
+            .expect("the main window")
+    };
+    cx.dispatch_action(app.main, NewEntry);
+    cx.run_until_parked();
+    cx.simulate_input(app.main, "Bank");
+    cx.run_until_parked();
+    activate(cx, app.main);
+    let before = notices(cx);
+    actions::stored_geometry::take();
+
+    cx.simulate_keystrokes(app.main, "cmd-w");
+    cx.run_until_parked();
+    assert_eq!(
+        notices(cx),
+        before + 1,
+        "Cmd+W in the main window did not reach it"
+    );
+    assert!(app.vault_is_open(cx));
+
+    // Typing asks again before the next close.
+    cx.simulate_input(app.main, "s");
+    cx.run_until_parked();
+    cx.simulate_keystrokes(app.main, "cmd-q");
+    cx.run_until_parked();
+    assert_eq!(
+        actions::stored_geometry::take(),
+        [app.main],
+        "Cmd+Q in the main window did not store its geometry"
+    );
+    assert_eq!(
+        notices(cx),
+        before + 2,
+        "Cmd+Q in the main window did not reach it"
+    );
+}
+
+/// Cmd+M pressed in the main window reaches the main window: it asks the
+/// platform to minimize it, which the test platform has not implemented.
+#[gpui::test]
+#[should_panic(expected = "not implemented")]
+fn minimize_reaches_the_main_window_from_inside_it(cx: &mut TestAppContext) {
+    let app = open_app(cx, &sample());
+    activate(cx, app.main);
+    cx.simulate_keystrokes(app.main, "cmd-m");
+    cx.run_until_parked();
+}
+
 #[test]
 fn no_handler_reads_the_active_window() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
