@@ -1340,15 +1340,17 @@ mod tests {
             "a signal before the pid was known reached the process group"
         );
 
+        // `ended` comes before any assertion, so a program that never gets
+        // the signal is killed at the time limit rather than left running.
         let program = ready("trap 'exit 3' WINCH; echo ready; while :; do sleep 0.1; done");
         guard.child_started(pid(&program));
-        assert_eq!(PENDING.load(Ordering::SeqCst), 0, "taken");
         let status = ended(program);
         assert_eq!(
             status.code(),
             Some(3),
             "the program got the signal that came before its pid: {status:?}"
         );
+        assert_eq!(PENDING.load(Ordering::SeqCst), 0, "taken");
         drop(guard);
 
         // Nothing pending: `child_started` sends nothing.
