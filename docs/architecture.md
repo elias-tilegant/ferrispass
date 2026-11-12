@@ -183,7 +183,10 @@ GPUI application or expose a local service.
 Human output is intended for terminals. `--format json` wraps every result in
 the versioned `ferrispass-cli/v1` envelope for scripts and agents. Entry output
 never contains passwords, TOTP seeds or protected custom values. An explicit
-entry UUID, field name and `--reveal` are required to read one secret.
+entry UUID, field name and `--reveal` are required to read one secret, and only
+on a terminal; scripts and agents get secrets through `run --secret-fd`, which
+hands them to the program it starts on file descriptors
+(`src/platform/secret_fd.rs`).
 
 CLI mutations are applied in memory first and only reach disk with `--commit`.
 Sync adds another guard, for either provider: a read-only plan binds the local
