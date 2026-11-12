@@ -1013,6 +1013,20 @@ fn run_with_only_env_passes_sigterm_on() {
     assert_eq!(cli.ended(), Some(7), "stderr: {}", cli.stderr());
 }
 
+/// The same for SIGINT.
+#[test]
+fn run_with_only_env_passes_sigint_on() {
+    let fixture = Fixture::new(PASSWORD);
+    let mut cli = start_run_with(
+        &fixture,
+        &[],
+        &["FP_SECRET=password"],
+        &waiting("trap 'exit 8' INT;"),
+    );
+    cli.signal("INT");
+    assert_eq!(cli.ended(), Some(8), "stderr: {}", cli.stderr());
+}
+
 #[test]
 fn run_passes_sigint_on() {
     let fixture = Fixture::new(PASSWORD);
