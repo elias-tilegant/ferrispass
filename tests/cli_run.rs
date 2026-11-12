@@ -409,25 +409,31 @@ fn run_never_puts_the_secret_in_argv_or_env() {
     assert_eq!(on_the_descriptor, PASSWORD);
 }
 
-/// The program reads its secret on 3, asks whether `master_fd`, the
+/// The part of a program's script that asks whether `master_fd`, the
 /// descriptor the CLI read the master password from, is open, and has `zsh`
-/// seek that descriptor back to the start and read it. It gets its
-/// `--secret-fd` descriptors and nothing on that number.
+/// seek that descriptor back to the start and read it. It prints
+/// `|<n> is closed|end` when the program has nothing on that number.
 ///
 /// The check runs `/usr/bin/true` with the redirection rather than the
 /// builtin: for a builtin or a group, `sh` parks the descriptors it
 /// redirects on 10 and above while the command runs, so `11` would find one
 /// of those.
-fn keeps_the_master_password_descriptor(master_fd: u32) {
-    let fixture = Fixture::new(PASSWORD);
-    let script = format!(
-        "cat <&3; \
-         if /usr/bin/true 2>/dev/null <&{master_fd}; \
+fn master_password_descriptor_check(master_fd: u32) -> String {
+    format!(
+        "if /usr/bin/true 2>/dev/null <&{master_fd}; \
          then printf '|{master_fd} is open'; else printf '|{master_fd} is closed'; fi; \
          /bin/zsh -c 'zmodload zsh/system && sysseek -u {master_fd} 0 && cat <&{master_fd}' \
          2>/dev/null; \
          printf '|end'"
-    );
+    )
+}
+
+/// The program reads its secret on 3 and runs
+/// [`master_password_descriptor_check`]. It gets its `--secret-fd`
+/// descriptors and nothing on that number.
+fn keeps_the_master_password_descriptor(master_fd: u32) {
+    let fixture = Fixture::new(PASSWORD);
+    let script = format!("cat <&3; {}", master_password_descriptor_check(master_fd));
     let line = fixture.command_line(
         "json",
         master_fd,
@@ -473,6 +479,29 @@ fn run_keeps_the_master_password_descriptor_from_the_program() {
 #[test]
 fn run_keeps_the_master_password_descriptor_whatever_its_number() {
     keeps_the_master_password_descriptor(11);
+}
+
+/// With `--env` alone `run` has nothing to put on a descriptor, and the
+/// program still finds 9 closed: it prints its variable, then what it finds
+/// on 9.
+#[test]
+fn run_with_only_env_keeps_the_master_password_descriptor_from_the_program() {
+    let fixture = Fixture::new(PASSWORD);
+    let script = format!(
+        "printf '%s' \"$FP_SECRET\"; {}",
+        master_password_descriptor_check(9)
+    );
+    let outcome = fixture.cli(
+        "json",
+        &fixture.run_args(&[], &["FP_SECRET=password"], &script, &[]),
+    );
+    assert_ok(&outcome);
+    assert!(
+        !outcome.stdout.contains(MASTER_PASSWORD),
+        "the program read the master password: {outcome:?}"
+    );
+    assert_eq!(outcome.stdout, format!("{PASSWORD}|9 is closed|end"));
+    assert_eq!(outcome.stderr.trim_end(), env_warning("FP_SECRET"));
 }
 
 /// The child closes the master password's descriptor, which is safe only
