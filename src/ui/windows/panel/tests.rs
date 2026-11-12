@@ -74,7 +74,7 @@ impl Fixture {
         Self { url, ..self }
     }
 
-    fn starred(self) -> Self {
+    pub(crate) fn starred(self) -> Self {
         Self {
             starred: true,
             ..self
@@ -150,7 +150,7 @@ pub(crate) fn open_app(cx: &mut TestAppContext, entries: &[Fixture]) -> Harness 
 
 impl Harness {
     /// The id of the entry titled `title`.
-    fn id(&self, cx: &mut TestAppContext, title: &str) -> String {
+    pub(crate) fn id(&self, cx: &mut TestAppContext, title: &str) -> String {
         self.state.read_with(cx, |state, _| {
             state
                 .vault_browser()
@@ -1051,7 +1051,8 @@ fn nothing_in_the_panel_logs_a_title() {
 
 // ------------------------------------------------------- Return and copies --
 
-/// The panel's own files, without this one, which names what it looks for.
+/// The panel's own files, without the tests, which name what they look
+/// for.
 fn panel_sources() -> Vec<(String, String)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
@@ -1060,7 +1061,7 @@ fn panel_sources() -> Vec<(String, String)> {
     }
     let sources: Vec<(String, String)> = files
         .into_iter()
-        .filter(|file| !file.ends_with("panel/tests.rs"))
+        .filter(|file| !file.ends_with("tests.rs"))
         .map(|file| {
             let code = probe::code_only(&std::fs::read_to_string(&file).expect("read source"));
             (file.display().to_string(), code)

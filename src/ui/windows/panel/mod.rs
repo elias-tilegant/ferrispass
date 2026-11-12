@@ -31,10 +31,15 @@
 //! 9. While the panel is open, the Auto-Type shortcut types nothing
 //!    (`services::hotkeys`): the panel has the keyboard, so the user name
 //!    and the password would land in its search field.
+//! 10. While no vault is open, the panel is the locked panel of `locked.rs`:
+//!     what is typed waits under secure event input for Touch ID, and
+//!     nothing from a vault is shown. When no vault waits on the unlock
+//!     screen, opening the panel puts the most recent one there, so that
+//!     its header is read and Touch ID can unlock it.
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, Global, Pixels, Subscription, Task,
-    Window, WindowBounds, WindowKind, WindowOptions, point, px, size,
+    WeakEntity, Window, WindowBounds, WindowKind, WindowOptions, point, px, size,
 };
 use gpui_component::Root;
 
@@ -42,6 +47,7 @@ use crate::app::{AppState, VaultStatus};
 use crate::launch::{LaunchContext, LaunchError, LaunchHandle, LaunchTarget};
 use crate::ui::vm::panel::PanelVm;
 
+pub mod locked;
 pub mod view;
 
 use view::PanelView;
@@ -55,6 +61,8 @@ pub const HEIGHT: f32 = 460.0;
 /// The panel's window while it is open, and what outlives it.
 struct PanelWindow {
     handle: Option<AnyWindowHandle>,
+    /// The open window's view, which holds what was typed while locked.
+    view: Option<WeakEntity<PanelView>>,
     vm: Entity<PanelVm>,
     state: Entity<AppState>,
     /// Launch files handed to SAP GUI, each removed after the cleanup time
@@ -77,6 +85,7 @@ fn panel(cx: &mut App) -> Option<(Entity<PanelVm>, Entity<AppState>)> {
     let subscription = cx.observe(&state, move |state, cx| state_changed(&watched, &state, cx));
     cx.set_global(PanelWindow {
         handle: None,
+        view: None,
         vm: vm.clone(),
         state: state.clone(),
         launches: Vec::new(),
@@ -132,6 +141,7 @@ pub fn open(cx: &mut App) {
     let Some((vm, state)) = panel(cx) else {
         return;
     };
+    put_recent_vault_on_the_unlock_screen(&state, cx);
     let now = cx.background_executor().now();
     vm.update(cx, |vm, cx| {
         vm.forget_if_stale(now);
@@ -139,6 +149,7 @@ pub fn open(cx: &mut App) {
     });
     let opened = cx.open_window(window_options(cx), |window, cx| {
         let view = cx.new(|cx| PanelView::new(vm, state, window, cx));
+        cx.global_mut::<PanelWindow>().view = Some(view.downgrade());
         cx.new(|cx| Root::new(view, window, cx))
     });
     if let Ok(handle) = opened {
@@ -146,9 +157,33 @@ pub fn open(cx: &mut App) {
     }
 }
 
-/// Closes the panel from outside its window: the shortcut, a lock. Removes
-/// the window and activates nothing.
+/// With the app locked on the welcome screen, the most recent vault goes on
+/// the unlock screen, so the shell reads its header and the locked panel can
+/// offer Touch ID for it. Nothing changes while a vault is open, waits on
+/// the unlock screen, or is being opened or saved.
+fn put_recent_vault_on_the_unlock_screen(state: &Entity<AppState>, cx: &mut App) {
+    let recent = {
+        let state = state.read(cx);
+        if !matches!(state.vault_status(), VaultStatus::Empty) {
+            return;
+        }
+        state.recents().first().map(|recent| recent.path.clone())
+    };
+    if let Some(path) = recent {
+        state.update(cx, |state, cx| state.request_password(path, cx));
+    }
+}
+
+/// Closes the panel from outside its window: the shortcut, a lock. What was
+/// typed while locked is wiped. Removes the window and activates nothing.
 pub fn close(cx: &mut App) {
+    let view = cx
+        .try_global::<PanelWindow>()
+        .and_then(|panel| panel.view.as_ref())
+        .and_then(WeakEntity::upgrade);
+    if let Some(view) = view {
+        view.update(cx, |view, _| view.locked.wipe());
+    }
     if let Some(handle) = forget_window(cx) {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
@@ -156,7 +191,8 @@ pub fn close(cx: &mut App) {
 
 /// Closes the panel from inside its window, whose handle cannot be updated
 /// from there: Escape, Cmd+W, an action that hands over to another app, and
-/// the panel losing the keyboard.
+/// the panel losing the keyboard. `PanelView::close` wipes what was typed
+/// while locked first.
 fn close_from(window: &mut Window, cx: &mut App) {
     forget_window(cx);
     window.remove_window();
@@ -169,6 +205,7 @@ fn forget_window(cx: &mut App) -> Option<AnyWindowHandle> {
         return None;
     }
     let panel = cx.global_mut::<PanelWindow>();
+    panel.view = None;
     let handle = panel.handle.take()?;
     let vm = panel.vm.clone();
     let now = cx.background_executor().now();
@@ -258,6 +295,14 @@ fn start(target: LaunchTarget, context: LaunchContext<'_>) -> Result<LaunchHandl
 pub(crate) fn for_test(cx: &App) -> (Option<AnyWindowHandle>, Option<Entity<PanelVm>>) {
     cx.try_global::<PanelWindow>()
         .map_or((None, None), |panel| (panel.handle, Some(panel.vm.clone())))
+}
+
+/// The open panel's view, for the tests.
+#[cfg(test)]
+pub(crate) fn view_for_test(cx: &App) -> Option<Entity<PanelView>> {
+    cx.try_global::<PanelWindow>()
+        .and_then(|panel| panel.view.as_ref())
+        .and_then(WeakEntity::upgrade)
 }
 
 #[cfg(test)]

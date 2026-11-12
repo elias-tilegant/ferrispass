@@ -1,20 +1,22 @@
 //! The panel's root view: the search field over the results, and the footer
-//! that says what Return does. While no vault is open it says that the panel
-//! needs the main window, and ⌘O opens it.
+//! that says what Return does. While no vault is open it is the locked panel
+//! of `locked.rs`.
 //!
-//! The keyboard stays in the search field. The keys the GPUI Kit input keeps
-//! to itself, ↑, ↓ and Cmd+C, reach the panel through bindings in the
-//! context `Panel > Input`, and so do Cmd+1 to Cmd+9 and Cmd+W; the others
-//! through `Panel` (`app::actions::bind_panel_keys` says why). The field's
-//! own Copy and Cut, which the menus send, are caught at the root before
-//! the field sees them, so the field never writes to the pasteboard. Every
-//! key and click in the window counts as activity for the auto-lock, in
-//! `PanelView::new` and `input_activity`, and nowhere else.
+//! The keyboard stays in the search field. Cmd+C, which the GPUI Kit input
+//! binds to its own Copy, and Cmd+1 to Cmd+9 and Cmd+W, which an app-wide
+//! binding would take, are bound in the context `Panel > Input`; so are ↑
+//! and ↓, which reach the panel either way, because the Kit's single-line
+//! input has no handler for them. The others go through `Panel`
+//! (`app::actions::bind_panel_keys` says why). The field's own Copy and Cut,
+//! which the menus send, are caught at the root before the field sees them,
+//! so the field never writes to the pasteboard. Every key and click in the
+//! window counts as activity for the auto-lock, in `PanelView::new` and
+//! `input_activity`, and nowhere else.
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::IconName;
 use gpui_component::input::{Copy as FieldCopy, Cut as FieldCut, InputEvent, InputState};
@@ -37,20 +39,26 @@ use crate::ui::ds::components::{
     TextField, Tile,
 };
 use crate::ui::ds::tokens::dimension;
-use crate::ui::ds::typography::{TextStyle, TextStyled as _, u};
+use crate::ui::ds::typography::u;
 use crate::ui::vm::panel::{FooterModel, FooterNote, Hit, PanelVm, web_url};
+
+use super::locked::Locked;
 
 /// From this many rows on, the list uses the one-line rows.
 const COMPACT_FROM: usize = 7;
 
 /// The panel's root view.
 pub struct PanelView {
-    vm: Entity<PanelVm>,
-    state: Entity<AppState>,
-    search: Entity<InputState>,
-    /// The panel's root. It has the keyboard while no vault is open and the
-    /// search field is not shown, so the panel's keys still reach it.
-    focus: FocusHandle,
+    pub(super) vm: Entity<PanelVm>,
+    pub(super) state: Entity<AppState>,
+    pub(super) search: Entity<InputState>,
+    /// The locked panel's field. It has the keyboard while no vault is open
+    /// and the search field is not shown.
+    pub(super) focus: FocusHandle,
+    /// What the locked panel holds; empty once a vault is open.
+    pub(super) locked: Locked,
+    /// The locked panel's clock, while it is locked.
+    _tick: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -84,12 +92,14 @@ impl PanelView {
                 view.keep_focus(window, cx);
                 cx.notify();
             }),
-            // A click into another app takes the keyboard away: the panel
-            // closes, as it does on Escape.
-            cx.observe_window_activation(window, |_, window, cx| {
-                if !window.is_window_active() {
-                    super::close_from(window, cx);
-                }
+            cx.observe_in(&state, window, |view, _, window, cx| {
+                view.locked_state_changed(window, cx);
+            }),
+            // Taking the keyboard begins the locked panel's buffer. A click
+            // into another app takes it away: the panel closes, as it does
+            // on Escape, unless the Touch ID dialog took it (`locked.rs`).
+            cx.observe_window_activation(window, |view, window, cx| {
+                view.on_activation(window.is_window_active(), window, cx);
             }),
             // Every key press in this window, typed text and shortcuts alike,
             // before key bindings and the text field see it.
@@ -99,19 +109,25 @@ impl PanelView {
                 }
             }),
         ];
-        let view = Self {
+        let mut view = Self {
             vm,
             state,
             search,
             focus,
+            locked: Locked::default(),
+            _tick: None,
             _subscriptions: subscriptions,
         };
+        if view.is_locked(cx) {
+            view.read_kind(cx);
+            view._tick = Some(Self::start_tick(window, cx));
+        }
         view.keep_focus(window, cx);
         view
     }
 
-    /// The keyboard goes to the search field, or to the panel's root while
-    /// no vault is open and the field is not shown.
+    /// The keyboard goes to the search field, or to the locked panel's field
+    /// while no vault is open.
     fn keep_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.vm.read(cx).vault_name().is_some() {
             if !self.search.read(cx).focus_handle(cx).is_focused(window) {
@@ -150,6 +166,13 @@ impl PanelView {
     /// Escape clears a search that holds text; Cmd+W and Escape on an empty
     /// search close the panel, and nothing else.
     fn on_close(&mut self, action: &ClosePanel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_locked(cx) {
+            if action.clear_search_first && self.escape_locked(window, cx) {
+                return;
+            }
+            self.close(window, cx);
+            return;
+        }
         if action.clear_search_first && !self.vm.read(cx).query().is_empty() {
             self.search
                 .update(cx, |input, cx| input.set_value("", window, cx));
@@ -160,6 +183,13 @@ impl PanelView {
             });
             return;
         }
+        self.close(window, cx);
+    }
+
+    /// Closes the panel from inside its window. What was typed while locked
+    /// is wiped first.
+    pub(super) fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.locked.wipe();
         super::close_from(window, cx);
     }
 
@@ -210,6 +240,10 @@ impl PanelView {
     /// one. A copy keeps the panel open; signing in and opening a website
     /// hand over to another app and close it.
     fn on_primary(&mut self, _: &PanelPrimary, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_locked(cx) {
+            self.on_return(window, cx);
+            return;
+        }
         let vm = self.vm.read(cx);
         let (Some(command), Some(hit)) = (vm.footer().primary, vm.selected()) else {
             return;
@@ -289,7 +323,7 @@ impl PanelView {
         if super::sign_in(target, context, cx).is_ok() {
             self.state
                 .update(cx, |state, _| state.mark_entry_used(entry_id));
-            super::close_from(window, cx);
+            self.close(window, cx);
         }
     }
 
@@ -305,15 +339,15 @@ impl PanelView {
         cx.open_url(&url);
         self.state
             .update(cx, |state, _| state.mark_entry_used(entry_id));
-        super::close_from(window, cx);
+        self.close(window, cx);
     }
 
     /// ⌘O: closes the panel and shows the selected entry in the main window,
     /// or just the main window when no vault is open. The one action of the
     /// panel that brings FerrisPass to the front, because the user asked.
-    fn show_in_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show_in_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entry_id = self.vm.read(cx).selected().map(|hit| hit.entry_id.clone());
-        super::close_from(window, cx);
+        self.close(window, cx);
         if let Some(entry_id) = entry_id {
             self.state.update(cx, |state, cx| {
                 let listed = state
@@ -470,24 +504,22 @@ pub(super) fn search_group(
 impl Render for PanelView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let background = cx.ds().colors.bg_elevated.hsla;
-        let text = cx.ds().colors.text_primary.hsla;
-        let vm = self.vm.read(cx);
-        let model = vm.footer();
-        let body: AnyElement = match vm.vault_name() {
-            Some(vault) => search_group(vm, &self.search, vault).into_any_element(),
-            None => div()
-                .flex_1()
-                .text_style(TextStyle::Headline)
-                .text_color(text)
-                .child(tr!("quick.locked.needs_main_window"))
-                .into_any_element(),
+        let open = self.vm.read(cx).vault_name().cloned();
+        let (body, footer): (AnyElement, PanelFooter) = match open {
+            Some(vault) => {
+                let vm = self.vm.read(cx);
+                (
+                    search_group(vm, &self.search, &vault).into_any_element(),
+                    footer(&vm.footer()),
+                )
+            }
+            None => self.render_locked(cx),
         };
         div()
             .id("panel")
             .role(Role::Dialog)
             .aria_label(tr!("a11y.quick_access"))
             .key_context(PANEL_CONTEXT)
-            .track_focus(&self.focus)
             .capture_action(cx.listener(Self::on_field_copy))
             .capture_action(cx.listener(Self::on_field_cut))
             .on_action(cx.listener(Self::on_close))
@@ -509,7 +541,7 @@ impl Render for PanelView {
             .bg(background)
             .child(input_activity())
             .child(div().flex_1().min_h(px(0.)).flex().flex_col().child(body))
-            .child(footer(&model))
+            .child(footer)
     }
 }
 
