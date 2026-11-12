@@ -133,11 +133,13 @@ nucleo-matcher = "0.3"
 # is macOS-only; non-Apple targets fall back to the noop store in
 # `src/biometric/noop.rs`, so cargo check still passes on Linux/Windows.
 zeroize = { version = "1", features = ["derive"] }
+# Raw descriptor calls. Every Unix needs them for `ferrispass-cli run`
+# (src/platform/secret_fd.rs), not only macOS.
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 async-channel = "2"
 flate2 = "1"
-libc = "0.2"
 tar = "0.4"
 tempfile = "3"
 security-framework = "3"
