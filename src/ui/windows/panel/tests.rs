@@ -1398,7 +1398,11 @@ fn rows_for_the_same_system_are_counted_in_the_footer(cx: &mut TestAppContext) {
     keys(cx, panel, "cmd-1");
     assert_eq!(tone(cx), two, "the picked row has a twin");
     let model = vm.read_with(cx, |vm, _| vm.footer());
-    assert_eq!(model.primary, Some(CommandId::ENTRY_SAP_LOGIN), "Return signs in");
+    assert_eq!(
+        model.primary,
+        Some(CommandId::ENTRY_SAP_LOGIN),
+        "Return signs in"
+    );
 
     // Typed, both NHP 100 rows come first; each has the other as its twin.
     type_into(cx, panel, "nhp 100");

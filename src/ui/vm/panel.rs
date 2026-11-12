@@ -38,11 +38,11 @@ use crate::app::registry::{
 };
 use crate::app::{AppState, VaultStatus};
 use crate::domain::VaultEntry;
-use crate::{tp, tr};
 use crate::ui::ds::components::{
     ChipTone, FooterTone, ListSelection, ResultsDrawn, RowParts, VaultBadge, move_selection,
     select_by_number,
 };
+use crate::{tp, tr};
 
 /// The most rows the panel lists, one for each of ⌘1 to ⌘9.
 pub const MAX_HITS: usize = 9;
