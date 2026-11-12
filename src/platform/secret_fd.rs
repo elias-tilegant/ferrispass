@@ -1,5 +1,6 @@
 //! Hands secrets to a child process on file descriptors, for
-//! `ferrispass-cli run --secret-fd`.
+//! `ferrispass-cli run --secret-fd`, and passes SIGINT and SIGTERM on to it
+//! while it runs.
 //!
 //! A secret in a program's arguments can be read by every process on the Mac
 //! that lists processes, one in its environment by the program and by
@@ -53,12 +54,47 @@
 //! 6. Right after the spawn, whether it worked or not, every copy from step 3
 //!    and everything held in step 4 is closed. Without that, a writer would
 //!    never get `EPIPE` when the program exits without reading, and waiting
-//!    for it would hang.
+//!    for it would hang. Only one thing comes before it: with a
+//!    [`SignalGuard`], the guard learns the program's pid.
 //! 7. One thread per pipe writes the secret into the write end and then
 //!    closes it, so the program reads to end of file. Writing starts after the
 //!    spawn, each pipe on its own thread, so a secret larger than the pipe
 //!    buffer (64 KiB on macOS) does not block before the program reads.
-//! 8. [`RunningChild::wait`] waits for the program, then for the writers.
+//! 8. [`RunningChild::wait`] waits for the program, drops the
+//!    [`SignalGuard`] as soon as the program has been reaped, then waits for
+//!    the writers.
+//!
+//! While the program runs, `run` passes SIGINT and SIGTERM on to it and keeps
+//! waiting, so the program decides how it ends and `run` returns its exit
+//! code. [`forward_signals`] sets this up before the spawn and returns a
+//! [`SignalGuard`], which [`spawn_with_secret_fds`] takes; that a guard is
+//! an argument of the spawn means it exists before the program does.
+//!
+//! - `forward_signals` installs `on_signal` for SIGINT and SIGTERM with
+//!   `sigaction` and keeps the actions it replaces, whatever they were. The
+//!   program therefore starts with the default action for both, even when
+//!   this process had one of them ignored.
+//! - `on_signal` calls `forward`, which stores the signal number in
+//!   `PENDING`, then loads `CHILD_PID`, and calls `kill` with the two when
+//!   the pid is above 0. That is all: two atomics and `kill`, which is
+//!   async-signal-safe; no allocation, no lock, no exit, no other state.
+//! - Right after the spawn, `SignalGuard::child_started` stores the pid in
+//!   `CHILD_PID`, then takes what is in `PENDING` and sends it to the
+//!   program. So a signal that came before the pid was known still reaches
+//!   it. Both sides store first and load second, all `SeqCst`, so at least
+//!   one of them sees the other's store: such a signal arrives once or
+//!   twice, never not at all. Of two different signals in that moment, the
+//!   program gets the later one.
+//! - Between fork and exec the child runs `on_signal` too, with its own
+//!   `CHILD_PID` still 0, so there it only sets `PENDING`, in its own
+//!   memory. Exec puts the default action back for the program.
+//! - Dropping the guard sets `CHILD_PID` to 0 first, so no signal goes to a
+//!   pid that another process may get once the program is reaped, then puts
+//!   the old actions back and clears `PENDING`. The guard is dropped on
+//!   every path: after the wait, and on a failed spawn or a failed wait. A
+//!   signal that comes after `CHILD_PID` is 0 and before the old action is
+//!   back is dropped; one after that meets the old action, which can end
+//!   this process before it returns the program's exit code.
 //!
 //! The numbers the program must not get are descriptors this process
 //! inherited without close-on-exec, which the program would otherwise inherit
@@ -76,17 +112,20 @@
 //! error here carries a buffer, the message of an `io::Error` or a path: only
 //! numbers, and the kind and OS error code of what the system refused.
 //!
-//! There are exactly two `unsafe` blocks in this file, and the `libc` calls in
-//! them are `fcntl`, `dup2` and `close`:
+//! There are exactly four `unsafe` blocks in this file, and the `libc` calls
+//! in them are `fcntl`, `dup2`, `close`, `sigaction` and `kill`:
 //!
 //! - in `copy_above`, `fcntl(F_DUPFD_CLOEXEC)` on a read end this module
 //!   holds, and `OwnedFd::from_raw_fd` on the new descriptor, which nothing
 //!   else owns;
-//! - in `spawn`, `CommandExt::pre_exec` with the closure from step 5.
+//! - in `spawn`, `CommandExt::pre_exec` with the closure from step 5;
+//! - in `action`, `sigaction`, which sets the action for a signal and hands
+//!   back the one it replaces, for `forward_signals` and the guard's drop;
+//! - in `kill`, `kill`, which sends a signal to the program.
 //!
-//! `pre_exec_only_duplicates_and_closes` and
-//! `secret_fd_has_exactly_the_declared_unsafe_sites` read this file and hold
-//! it to that.
+//! `pre_exec_only_duplicates_and_closes`, `the_signal_handler_only_forwards`
+//! and `secret_fd_has_exactly_the_declared_unsafe_sites` read this file and
+//! hold it to that.
 
 #![cfg(unix)]
 #![allow(unsafe_code)]
@@ -97,6 +136,7 @@ use std::io::{self, PipeReader, PipeWriter, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};
 
 use libc::c_int;
@@ -172,10 +212,12 @@ pub struct Finished {
     pub undelivered: Vec<SecretFdError>,
 }
 
-/// The program, and one writer per descriptor.
+/// The program, one writer per descriptor, and the [`SignalGuard`] when
+/// signals are passed on to the program.
 pub struct RunningChild {
     child: Child,
     deliveries: Vec<Delivery>,
+    signals: Option<SignalGuard>,
 }
 
 enum Delivery {
@@ -196,11 +238,14 @@ impl RunningChild {
     /// Waits for the program to exit, then for every writer. A writer is done
     /// by then or about to be: the program's ends of the pipes closed when it
     /// exited, and this process holds none.
+    ///
+    /// The [`SignalGuard`] goes as soon as the program has been reaped,
+    /// before the writers are joined and also when the wait fails: from then
+    /// on there is no program to pass a signal to, and its pid is free.
     pub fn wait(mut self) -> Result<Finished, SecretFdError> {
-        let status = self
-            .child
-            .wait()
-            .map_err(|error| SecretFdError::Wait(Cause::of(&error)))?;
+        let status = self.child.wait();
+        drop(self.signals.take());
+        let status = status.map_err(|error| SecretFdError::Wait(Cause::of(&error)))?;
         let mut undelivered = Vec::new();
         for delivery in self.deliveries {
             let outcome = match delivery {
@@ -251,7 +296,8 @@ pub fn check_open(numbers: impl IntoIterator<Item = u32>) -> Result<(), SecretFd
 
 /// Starts `cmd` with each secret on a pipe whose read end the program has as
 /// the given descriptor number, and without the descriptors numbered in
-/// `close_in_child`. The steps are in the module header.
+/// `close_in_child`. The steps are in the module header. With `signals`,
+/// SIGINT and SIGTERM go on to the program until it has been reaped.
 ///
 /// `close_in_child` is for descriptors this process inherited without
 /// close-on-exec and must not pass on, such as the one the master password
@@ -264,6 +310,7 @@ pub fn spawn_with_secret_fds(
     cmd: Command,
     secrets: Vec<(u32, Zeroizing<Vec<u8>>)>,
     close_in_child: &[u32],
+    signals: Option<SignalGuard>,
 ) -> Result<RunningChild, SecretFdError> {
     check_targets(secrets.iter().map(|(target, _)| *target))?;
     closable(close_in_child)?;
@@ -284,7 +331,7 @@ pub fn spawn_with_secret_fds(
             secret,
         });
     }
-    spawn(cmd, pipes, close_in_child)
+    spawn(cmd, pipes, close_in_child, signals)
 }
 
 struct Pipe {
@@ -354,6 +401,7 @@ fn spawn(
     mut cmd: Command,
     pipes: Vec<Pipe>,
     close_in_child: &[u32],
+    signals: Option<SignalGuard>,
 ) -> Result<RunningChild, SecretFdError> {
     let bounds = bounds(pipes.iter().map(|pipe| pipe.target))?;
     let close_in_child = closable(close_in_child)?;
@@ -420,6 +468,11 @@ fn spawn(
         });
     }
     let spawned = cmd.spawn();
+    // A signal that came during the spawn waits in `PENDING` until the guard
+    // knows the pid. On a failed spawn the guard is dropped on return.
+    if let (Ok(child), Some(signals)) = (&spawned, &signals) {
+        signals.child_started(pid_of(child));
+    }
 
     // Step 6, before anything can fail or wait.
     drop(copies);
@@ -431,7 +484,18 @@ fn spawn(
         .into_iter()
         .map(|(target, writer, secret)| deliver(target, writer, secret))
         .collect();
-    Ok(RunningChild { child, deliveries })
+    Ok(RunningChild {
+        child,
+        deliveries,
+        signals,
+    })
+}
+
+/// The pid of `child` as the `pid_t` it is. `Child::id` gives it as a `u32`;
+/// one that does not fit, which no system hands out, becomes 0, and
+/// `child_started` sends nothing to 0.
+fn pid_of(child: &Child) -> c_int {
+    c_int::try_from(child.id()).unwrap_or(0)
 }
 
 /// Step 3: a copy of `fd` at `lowest` or above, close-on-exec.
@@ -516,13 +580,146 @@ fn write_secret(mut writer: impl Write, secret: &[u8], target: u32) -> Result<()
     Ok(())
 }
 
+/// The signals `run` passes on to the program.
+const FORWARDED: [c_int; 2] = [libc::SIGINT, libc::SIGTERM];
+
+/// The program's pid once the spawn has returned, 0 before and after. Only
+/// `child_started` and the guard's drop write it; `forward` reads it.
+static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+
+/// The last signal `forward` was called with, 0 for none. `forward` writes
+/// it; `child_started` takes it.
+static PENDING: AtomicI32 = AtomicI32::new(0);
+
+/// Installs the handler that passes SIGINT and SIGTERM on to the program, as
+/// the module header says. Call it before the spawn and hand the guard to
+/// [`spawn_with_secret_fds`]. If installing the second handler fails, the
+/// first is put back before this returns.
+pub fn forward_signals() -> Result<SignalGuard, SecretFdError> {
+    let mut guard = SignalGuard {
+        replaced: Vec::with_capacity(FORWARDED.len()),
+    };
+    for signo in FORWARDED {
+        let replaced = action(signo, NewAction::Forward)
+            .map_err(|error| SecretFdError::Setup(Cause::of(&error)))?;
+        guard.replaced.push((signo, replaced));
+    }
+    Ok(guard)
+}
+
+/// While it lives, SIGINT and SIGTERM go on to the program; dropping it
+/// puts the old actions back. See the module header.
+pub struct SignalGuard {
+    /// Each signal this guard set `on_signal` for, with the action it
+    /// replaced.
+    replaced: Vec<(c_int, libc::sigaction)>,
+}
+
+impl SignalGuard {
+    /// Right after the spawn: from now on `forward` sends to `pid`, and a
+    /// signal that came before is sent now. Store first, then take, both
+    /// `SeqCst`, against `forward`'s store, then load. A pid of 0 or below
+    /// would name a process group, so nothing is stored or sent for it.
+    fn child_started(&self, pid: c_int) {
+        if pid <= 0 {
+            return;
+        }
+        CHILD_PID.store(pid, Ordering::SeqCst);
+        let signo = PENDING.swap(0, Ordering::SeqCst);
+        if signo != 0 {
+            kill(pid, signo);
+        }
+    }
+}
+
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        CHILD_PID.store(0, Ordering::SeqCst);
+        for (signo, replaced) in self.replaced.drain(..).rev() {
+            // Nothing to do on a failure here, and `sigaction` fails only on
+            // a bad signal number or a bad pointer, neither of which this
+            // passes.
+            let _ = action(signo, NewAction::Restore(replaced));
+        }
+        PENDING.store(0, Ordering::SeqCst);
+    }
+}
+
+/// The handler `forward_signals` installs.
+extern "C" fn on_signal(signo: c_int) {
+    forward(signo);
+}
+
+/// What the handler does, as a function a test can call: remember the
+/// signal, then pass it on if the program's pid is known. Only
+/// async-signal-safe steps: two atomics, a comparison and `kill`.
+fn forward(signo: c_int) {
+    PENDING.store(signo, Ordering::SeqCst);
+    let pid = CHILD_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        kill(pid, signo);
+    }
+}
+
+/// Sends `signo` to `pid`. `forward` and `child_started` call it only with a
+/// pid above 0.
+fn kill(pid: c_int, signo: c_int) {
+    // SAFETY: `kill` takes two integers and no pointer, and is
+    // async-signal-safe, so the handler may call it. `pid` comes from
+    // `CHILD_PID`, which only `child_started` sets, to a pid above 0 of a
+    // program this process started; `signo` is the number the handler was
+    // called with. The result is not used: with the program already gone
+    // there is nobody to tell. A failed call can change `errno` under code
+    // the signal interrupted; it fails only once the program has been
+    // reaped, and the reap clears `CHILD_PID` right after.
+    unsafe {
+        libc::kill(pid, signo);
+    }
+}
+
+/// What [`action`] sets.
+enum NewAction {
+    /// `on_signal`, with `SA_RESTART` and no extra signals blocked.
+    Forward,
+    /// An action `action` returned before.
+    Restore(libc::sigaction),
+}
+
+/// Sets the action for `signo` as `new` says and returns the one it had.
+fn action(signo: c_int, new: NewAction) -> io::Result<libc::sigaction> {
+    // SAFETY: `sigaction` reads `set` and writes `old`, both valid
+    // `libc::sigaction` values on this stack for the whole call. `zeroed()`
+    // is a valid `sigaction`: every field is an integer, a zeroed `sigset_t`
+    // is the empty set on macOS and Linux, and a zeroed `sa_restorer` on
+    // Linux is none. For `Forward` the handler is `on_signal`, an
+    // `extern "C" fn(c_int)` that lives as long as the process; for
+    // `Restore` it is exactly what `sigaction` handed out before. The
+    // return value is checked.
+    unsafe {
+        let set = match new {
+            NewAction::Forward => {
+                let mut set: libc::sigaction = std::mem::zeroed();
+                set.sa_sigaction = on_signal as extern "C" fn(c_int) as libc::sighandler_t;
+                set.sa_flags = libc::SA_RESTART;
+                set
+            }
+            NewAction::Restore(replaced) => replaced,
+        };
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(signo, &set, &mut old) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(old)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::io::{Read, Seek};
+    use std::io::{BufRead, BufReader, Read, Seek};
     use std::process::Stdio;
-    use std::sync::mpsc;
+    use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
     use std::time::Duration;
 
     /// This file, for the tests that read it.
@@ -606,7 +803,7 @@ mod tests {
     /// writers are done.
     fn run(script: &str, secrets: Vec<(u32, Zeroizing<Vec<u8>>)>) -> (Finished, String) {
         let (cmd, out) = sh(script);
-        let running = spawn_with_secret_fds(cmd, secrets, &[]).expect("start the program");
+        let running = spawn_with_secret_fds(cmd, secrets, &[], None).expect("start the program");
         let finished = finish(running);
         (finished, read_back(out))
     }
@@ -661,7 +858,7 @@ mod tests {
     fn descriptors_below_three_are_refused() {
         for target in [0, 1, 2] {
             let (cmd, out) = sh("echo started");
-            let refused = spawn_with_secret_fds(cmd, vec![(target, secret("x"))], &[]).err();
+            let refused = spawn_with_secret_fds(cmd, vec![(target, secret("x"))], &[], None).err();
             assert_eq!(refused, Some(SecretFdError::BelowThree(target)));
             assert_eq!(read_back(out), "", "the program must not start");
             assert_eq!(
@@ -675,7 +872,7 @@ mod tests {
     fn duplicate_target_descriptor_is_refused() {
         let (cmd, out) = sh("echo started");
         let refused =
-            spawn_with_secret_fds(cmd, vec![(3, secret("a")), (3, secret("b"))], &[]).err();
+            spawn_with_secret_fds(cmd, vec![(3, secret("a")), (3, secret("b"))], &[], None).err();
         assert_eq!(refused, Some(SecretFdError::Duplicate(3)));
         assert_eq!(read_back(out), "", "the program must not start");
     }
@@ -709,7 +906,7 @@ mod tests {
     fn target_fd_3_works_when_the_pipe_got_fd_3() {
         let (pipe, number) = own_pipe("on its own number");
         let (cmd, out) = sh(&format!("cat <&{number}"));
-        let running = spawn(cmd, vec![pipe], &[]).expect("start the program");
+        let running = spawn(cmd, vec![pipe], &[], None).expect("start the program");
         let finished = finish(running);
         assert!(finished.status.success(), "{finished:?}");
         assert_eq!(read_back(out), "on its own number");
@@ -733,7 +930,7 @@ mod tests {
         let (cmd, out) = sh(&format!(
             "cat <&{second_number}; printf '|'; cat <&{first_number}"
         ));
-        let running = spawn(cmd, vec![first, second], &[]).expect("start the program");
+        let running = spawn(cmd, vec![first, second], &[], None).expect("start the program");
         let finished = finish(running);
         assert!(finished.status.success(), "{finished:?}");
         assert_eq!(read_back(out), "first|second");
@@ -797,7 +994,13 @@ mod tests {
         first.target = 40;
         second.target = 41;
 
-        let refused = spawn(Command::new(MISSING_PROGRAM), vec![first, second], &[]).err();
+        let refused = spawn(
+            Command::new(MISSING_PROGRAM),
+            vec![first, second],
+            &[],
+            None,
+        )
+        .err();
         assert!(
             matches!(
                 refused,
@@ -841,6 +1044,7 @@ mod tests {
                 Command::new(MISSING_PROGRAM),
                 vec![(target, secret("x"))],
                 &[],
+                None,
             ) {
                 Err(SecretFdError::Spawn(cause)) => {
                     assert_eq!(cause.kind, io::ErrorKind::NotFound, "target {target}")
@@ -858,8 +1062,9 @@ mod tests {
     fn secret_is_not_in_argv_or_environment() {
         let (mut cmd, out) = sh("env; echo \"$0\" \"$@\"");
         cmd.arg("program-name").arg("first-argument");
-        let running = spawn_with_secret_fds(cmd, vec![(3, secret("only-on-the-descriptor"))], &[])
-            .expect("start the program");
+        let running =
+            spawn_with_secret_fds(cmd, vec![(3, secret("only-on-the-descriptor"))], &[], None)
+                .expect("start the program");
         let finished = finish(running);
         assert!(finished.status.success(), "{finished:?}");
         let out = read_back(out);
@@ -882,9 +1087,13 @@ mod tests {
     #[test]
     fn a_number_to_close_that_is_a_target_keeps_its_secret() {
         let (cmd, out) = sh("cat <&3; printf '|'; cat <&4");
-        let running =
-            spawn_with_secret_fds(cmd, vec![(3, secret("three")), (4, secret("four"))], &[4])
-                .expect("start the program");
+        let running = spawn_with_secret_fds(
+            cmd,
+            vec![(3, secret("three")), (4, secret("four"))],
+            &[4],
+            None,
+        )
+        .expect("start the program");
         let finished = finish(running);
         assert!(finished.status.success(), "{finished:?}");
         assert_eq!(read_back(out), "three|four");
@@ -894,13 +1103,13 @@ mod tests {
     fn numbers_to_close_below_three_or_past_any_descriptor_are_refused() {
         for number in [0, 1, 2] {
             let (cmd, out) = sh("echo started");
-            let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[number]).err();
+            let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[number], None).err();
             assert_eq!(refused, Some(SecretFdError::BelowThree(number)));
             assert_eq!(read_back(out), "", "the program must not start");
         }
         for number in [1 << 31, u32::MAX] {
             let (cmd, out) = sh("echo started");
-            let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[number]).err();
+            let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[number], None).err();
             assert!(
                 matches!(
                     refused,
@@ -925,7 +1134,7 @@ mod tests {
         assert_eq!(check_open([CLOSED]), Err(SecretFdError::NotOpen(CLOSED)));
 
         let (cmd, out) = sh("echo started");
-        let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[CLOSED]).err();
+        let refused = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[CLOSED], None).err();
         assert_eq!(refused, Some(SecretFdError::NotOpen(CLOSED)));
         assert_eq!(read_back(out), "", "the program must not start");
 
@@ -936,7 +1145,7 @@ mod tests {
         let number = u32::try_from(held.as_raw_fd()).expect("a descriptor number");
         assert_eq!(check_open([number]), Ok(()));
         let (cmd, out) = sh("cat <&3");
-        let running = spawn_with_secret_fds(cmd, vec![(3, secret("on 3"))], &[number, 3])
+        let running = spawn_with_secret_fds(cmd, vec![(3, secret("on 3"))], &[number, 3], None)
             .expect("start the program");
         let finished = finish(running);
         assert!(finished.status.success(), "{finished:?}");
@@ -1036,6 +1245,190 @@ mod tests {
         for text in [shown, format!("{error:?}")] {
             assert_eq!(holds_part_of_sentinel(&text), None, "{text}");
         }
+    }
+
+    /// The actions for SIGINT and SIGTERM, `CHILD_PID` and `PENDING` are
+    /// the whole process's. The tests that install the handler or read the
+    /// two atomics take this first, so they do not run into each other.
+    static SIGNAL_TESTS: Mutex<()> = Mutex::new(());
+
+    fn one_signal_test_at_a_time() -> MutexGuard<'static, ()> {
+        SIGNAL_TESTS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `/bin/sh -c <script>`, once it has printed `ready`. A script that
+    /// sets a trap prints that after the trap, so a signal sent afterwards
+    /// meets it.
+    fn ready(script: &str) -> Child {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start the shell");
+        let out = child.stdout.take().expect("the shell's output");
+        let pid = child.id();
+        let (done, line) = mpsc::channel();
+        thread::spawn(move || {
+            let mut text = String::new();
+            let _ = BufReader::new(out).read_line(&mut text);
+            let _ = done.send(text);
+        });
+        match line.recv_timeout(TIME_LIMIT) {
+            Ok(text) if text == "ready\n" => child,
+            outcome => {
+                let _ = Command::new("/bin/kill")
+                    .arg("-9")
+                    .arg(pid.to_string())
+                    .status();
+                panic!("the shell did not get ready: {outcome:?}");
+            }
+        }
+    }
+
+    /// How `child` ended, within the time limit; on a timeout it is killed
+    /// first.
+    fn ended(child: Child) -> ExitStatus {
+        let pid = child.id();
+        let (done, outcome) = mpsc::channel();
+        thread::spawn(move || {
+            let mut child = child;
+            let _ = done.send(child.wait());
+        });
+        match outcome.recv_timeout(TIME_LIMIT) {
+            Ok(status) => status.expect("wait for the child"),
+            Err(_) => {
+                let _ = Command::new("/bin/kill")
+                    .arg("-9")
+                    .arg(pid.to_string())
+                    .status();
+                panic!("the child did not end within {TIME_LIMIT:?}");
+            }
+        }
+    }
+
+    /// The pid of `child`, for `child_started`.
+    fn pid(child: &Child) -> c_int {
+        c_int::try_from(child.id()).expect("a pid")
+    }
+
+    /// A signal that comes after the handler is in place and before the pid
+    /// is known waits in `PENDING`, and `child_started` sends it to the
+    /// program. Before the pid is known, the handler sends nothing at all.
+    ///
+    /// The test uses SIGWINCH, whose default action is to ignore it. A
+    /// handler that sent before the pid was known would call `kill` with pid
+    /// 0, which reaches every process in this process group, cargo and the
+    /// shell that started it included; with SIGWINCH none of them ends, and
+    /// the witness, a shell in the same group that traps it, shows it.
+    #[test]
+    fn a_signal_before_the_pid_is_known_reaches_the_child_after_the_spawn() {
+        let _one = one_signal_test_at_a_time();
+        let guard = forward_signals().expect("install the handler");
+        assert_eq!(CHILD_PID.load(Ordering::SeqCst), 0);
+
+        let mut witness = ready("trap 'exit 5' WINCH; echo ready; while :; do sleep 0.1; done");
+        forward(libc::SIGWINCH);
+        assert_eq!(PENDING.load(Ordering::SeqCst), libc::SIGWINCH);
+        thread::sleep(Duration::from_millis(500));
+        let reached = witness.try_wait().expect("ask about the witness");
+        let _ = witness.kill();
+        let _ = witness.wait();
+        assert_eq!(
+            reached, None,
+            "a signal before the pid was known reached the process group"
+        );
+
+        let program = ready("trap 'exit 3' WINCH; echo ready; while :; do sleep 0.1; done");
+        guard.child_started(pid(&program));
+        assert_eq!(PENDING.load(Ordering::SeqCst), 0, "taken");
+        let status = ended(program);
+        assert_eq!(
+            status.code(),
+            Some(3),
+            "the program got the signal that came before its pid: {status:?}"
+        );
+        drop(guard);
+
+        // Nothing pending: `child_started` sends nothing.
+        let guard = forward_signals().expect("install the handler");
+        let mut sleeper = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("start sleep");
+        guard.child_started(pid(&sleeper));
+        thread::sleep(Duration::from_millis(500));
+        let ended_early = sleeper.try_wait().expect("ask about sleep");
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        assert_eq!(ended_early, None, "child_started sent a signal");
+        drop(guard);
+    }
+
+    /// The handler and its flags for SIGINT and SIGTERM, as they are now.
+    /// `action` reads one only while it sets another, so this sets the
+    /// forwarding handler and at once puts back what it replaced; the tests
+    /// that call it hold `SIGNAL_TESTS`, and nothing sends this process a
+    /// signal in that moment.
+    fn actions() -> Vec<(libc::sighandler_t, c_int)> {
+        FORWARDED
+            .iter()
+            .map(|&signo| {
+                let current = action(signo, NewAction::Forward).expect("read the action");
+                action(signo, NewAction::Restore(current)).expect("put the action back");
+                (current.sa_sigaction, current.sa_flags)
+            })
+            .collect()
+    }
+
+    /// After the program has ended, and after a spawn that failed, the old
+    /// actions are back and the two atomics are 0, so no handler outlives
+    /// the program.
+    #[test]
+    fn signals_are_restored_after_the_program_ends() {
+        let _one = one_signal_test_at_a_time();
+        let before = actions();
+        let forwarding = on_signal as extern "C" fn(c_int) as libc::sighandler_t;
+        let installed = |when: &str| {
+            for (signo, (handler, _)) in FORWARDED.iter().zip(actions()) {
+                assert_eq!(handler, forwarding, "{when}: signal {signo}");
+            }
+        };
+        let restored = |when: &str| {
+            assert_eq!(actions(), before, "{when}: the old actions are back");
+            assert_eq!(CHILD_PID.load(Ordering::SeqCst), 0, "{when}");
+            assert_eq!(PENDING.load(Ordering::SeqCst), 0, "{when}");
+        };
+        assert!(
+            before.iter().all(|(handler, _)| *handler != forwarding),
+            "the handler is in place before the test installs it: {before:?}"
+        );
+
+        let guard = forward_signals().expect("install the handler");
+        installed("before the spawn");
+        let (cmd, out) = sh("cat <&3");
+        let running = spawn_with_secret_fds(cmd, vec![(3, secret("x"))], &[], Some(guard))
+            .expect("start the program");
+        installed("while the program runs");
+        let finished = finish(running);
+        assert!(finished.status.success(), "{finished:?}");
+        assert_eq!(read_back(out), "x");
+        restored("after the wait");
+
+        let guard = forward_signals().expect("install the handler");
+        let refused = spawn_with_secret_fds(
+            Command::new(MISSING_PROGRAM),
+            vec![(3, secret("x"))],
+            &[],
+            Some(guard),
+        )
+        .err();
+        assert!(
+            matches!(refused, Some(SecretFdError::Spawn(_))),
+            "{refused:?}"
+        );
+        restored("after a failed spawn");
     }
 
     /// The code of this file without its tests.
@@ -1221,6 +1614,166 @@ mod tests {
                 "the header names libc::{name}, which the scan does not see: {libc_calls:?}"
             );
         }
+    }
+
+    /// The tokens of the body of `fn name` in `tokens`.
+    fn body<'t, 's>(tokens: &'t [Tok<'s>], name: &str) -> &'t [Tok<'s>] {
+        let starts: Vec<usize> = (0..tokens.len().saturating_sub(1))
+            .filter(|&i| tokens[i..i + 2] == [Tok::Ident("fn"), Tok::Ident(name)])
+            .collect();
+        let [start] = starts.as_slice() else {
+            panic!("one fn {name}, found {}", starts.len());
+        };
+        let open = start
+            + tokens[*start..]
+                .iter()
+                .position(|token| *token == Tok::Punct('{'))
+                .expect("a body");
+        &tokens[open + 1..closing(tokens, open)]
+    }
+
+    /// Where `wanted` starts in `tokens`.
+    fn find(tokens: &[Tok<'_>], wanted: &[Tok<'_>]) -> Option<usize> {
+        tokens
+            .windows(wanted.len())
+            .position(|window| window == wanted)
+    }
+
+    /// The handler runs whenever SIGINT or SIGTERM arrives, in the middle of
+    /// anything this process does, where only async-signal-safe calls are
+    /// allowed. `on_signal` only calls `forward`. `forward` stores the signal
+    /// in `PENDING`, then loads `CHILD_PID`, compares the pid with 0 and
+    /// calls `kill`, in that order, all `SeqCst`; nothing else, no macro,
+    /// no allocation, no exit, no other state. `kill` makes the one `libc`
+    /// call. `child_started` stores, then takes, then sends. The file has
+    /// two statics, those two, and one `extern "C" fn`, the handler.
+    #[test]
+    fn the_signal_handler_only_forwards() {
+        let tokens = code_tokens(production());
+
+        checked_body(&tokens, "on_signal", &["forward"]);
+
+        let forward = checked_body(&tokens, "forward", &["store", "load", "kill"]);
+        let store = find(
+            forward,
+            &[Tok::Ident("PENDING"), Tok::Punct('.'), Tok::Ident("store")],
+        );
+        let load = find(
+            forward,
+            &[Tok::Ident("CHILD_PID"), Tok::Punct('.'), Tok::Ident("load")],
+        );
+        let compare = find(
+            forward,
+            &[Tok::Ident("pid"), Tok::Punct('>'), Tok::Other("0")],
+        );
+        let kill = find(forward, &[Tok::Ident("kill"), Tok::Punct('(')]);
+        assert!(
+            store.is_some() && load.is_some() && compare.is_some() && kill.is_some(),
+            "forward stores PENDING, loads CHILD_PID, compares pid > 0 and calls kill: \
+             {store:?} {load:?} {compare:?} {kill:?}"
+        );
+        assert!(
+            store < load && load < compare && compare < kill,
+            "forward stores, then loads, then compares, then calls kill: \
+             {store:?} {load:?} {compare:?} {kill:?}"
+        );
+        let screaming: Vec<&str> = forward
+            .iter()
+            .filter_map(|token| match token {
+                Tok::Ident(name)
+                    if name.len() > 1
+                        && name.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') =>
+                {
+                    Some(*name)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            screaming,
+            ["PENDING", "CHILD_PID"],
+            "the state forward touches"
+        );
+
+        let started = checked_body(&tokens, "child_started", &["store", "swap", "kill"]);
+        let store = find(
+            started,
+            &[
+                Tok::Ident("CHILD_PID"),
+                Tok::Punct('.'),
+                Tok::Ident("store"),
+            ],
+        );
+        let swap = find(
+            started,
+            &[Tok::Ident("PENDING"), Tok::Punct('.'), Tok::Ident("swap")],
+        );
+        assert!(
+            store.is_some() && store < swap,
+            "child_started stores CHILD_PID, then takes PENDING: {store:?} {swap:?}"
+        );
+
+        let kill = checked_body(&tokens, "kill", &["kill"]);
+        assert!(
+            find(
+                kill,
+                &[
+                    Tok::Ident("libc"),
+                    Tok::Punct(':'),
+                    Tok::Punct(':'),
+                    Tok::Ident("kill")
+                ]
+            )
+            .is_some(),
+            "fn kill calls libc::kill"
+        );
+
+        let statics: Vec<&str> = tokens
+            .windows(2)
+            .filter_map(|pair| match pair {
+                [Tok::Ident("static"), Tok::Ident(name)] => Some(*name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statics,
+            ["CHILD_PID", "PENDING"],
+            "the statics in this file"
+        );
+        let handlers: Vec<&str> = tokens
+            .windows(4)
+            .filter_map(|window| match window {
+                [
+                    Tok::Ident("extern"),
+                    Tok::Str("C"),
+                    Tok::Ident("fn"),
+                    Tok::Ident(name),
+                ] => Some(*name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(handlers, ["on_signal"], "the extern \"C\" fns in this file");
+    }
+
+    /// The body of `fn name`, after it has been held to `wanted_calls` in
+    /// that order and found free of macros and of anything that allocates,
+    /// locks, panics, exits or orders atomics other than `SeqCst`.
+    fn checked_body<'t, 's>(
+        tokens: &'t [Tok<'s>],
+        name: &str,
+        wanted_calls: &[&str],
+    ) -> &'t [Tok<'s>] {
+        let body = body(tokens, name);
+        assert_eq!(calls(body), wanted_calls, "the calls in fn {name}");
+        let invoked: Vec<&str> = macros(body).into_iter().map(|(name, _)| name).collect();
+        assert!(invoked.is_empty(), "macros in fn {name}: {invoked:?}");
+        for word in [
+            "exit", "abort", "panic", "unwrap", "expect", "format", "String", "Vec", "Box",
+            "Mutex", "lock", "println", "eprintln", "Relaxed", "Acquire", "Release", "AcqRel",
+        ] {
+            assert!(!body.contains(&Tok::Ident(word)), "`{word}` in fn {name}");
+        }
+        body
     }
 
     /// No line of this module's code logs or prints, and no macro gets a

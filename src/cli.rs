@@ -548,10 +548,17 @@ fn run_program(
             spec.name
         );
     }
+    // From here until the program has been reaped, SIGINT and SIGTERM go on
+    // to the program and this process keeps waiting, so a signal to the CLI
+    // ends the program the way the program chooses and `run` still returns
+    // its exit code. This replaces the Ctrl+C cleanup `launch` needs, which
+    // has nothing to do here, and puts it back afterwards.
+    let signals = crate::platform::secret_fd::forward_signals().map_err(run_error)?;
     let running = crate::platform::secret_fd::spawn_with_secret_fds(
         command,
         on_descriptors,
         cli.master_password_fd.as_slice(),
+        Some(signals),
     )
     .map_err(run_error)?;
     let finished = running.wait().map_err(run_error)?;
@@ -854,6 +861,9 @@ fn execute_launch(command: &LaunchCommand, document: &VaultDocument) -> Result<V
 /// `ctrlc` runs the closure on a thread of its own rather than inside the
 /// signal context, so unlinking a file there is allowed. It can be installed
 /// once per process, which suits a binary that stages one payload per run.
+/// `run` stages nothing; while it waits for its program, the handler from
+/// `secret_fd::forward_signals` takes SIGINT instead, and this one is put
+/// back once the program has ended.
 ///
 /// Returns whether cleanup is armed. A failure is not fatal, but it is not
 /// silent either: the sixty-second sweep at the next start becomes the only

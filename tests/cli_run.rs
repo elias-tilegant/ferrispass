@@ -11,8 +11,12 @@
 //! descriptor in the CLI's process needs `pre_exec`, and tests may not use
 //! `unsafe`.
 
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use keepass::{Database, DatabaseKey, db::fields};
 
@@ -26,6 +30,11 @@ const OTP: &str = "otpauth://totp/FerrisPass:test?secret=JBSWY3DPEHPK3PXP&issuer
 /// What the leak test looks for, in full and in every part of four
 /// characters.
 const SENTINEL: &str = "sfd-sentinel-9Qz!2026";
+
+/// The tests that would hang on a broken rule give up after this long. The
+/// programs they start end within a few seconds; the rest is room for a busy
+/// machine.
+const TIME_LIMIT: Duration = Duration::from_secs(30);
 
 fn cli() -> &'static str {
     env!("CARGO_BIN_EXE_ferrispass-cli")
@@ -58,6 +67,9 @@ impl Fixture {
             entry.set_protected("otp", OTP);
             entry.set_protected("API_KEY", API_KEY);
             entry.set_unprotected("NOTE", "not a secret");
+            // For `launch sap`, which needs a host and an instance.
+            entry.set_unprotected("SAP_HOST", "127.0.0.1");
+            entry.set_unprotected("SAP_INSTANCE", "00");
             entry.id().to_string()
         };
         let mut file = std::fs::File::create(&vault).expect("create vault");
@@ -154,6 +166,95 @@ impl Fixture {
         all.extend(["--", "/bin/sh", "-c", script]);
         all.extend(args);
         all
+    }
+
+    /// Starts `line` in the background, with stdout read line by line and
+    /// stderr going to a file.
+    fn start(&self, line: &str) -> Started {
+        let stderr = self.dir.path().join("stderr.txt");
+        let file = std::fs::File::create(&stderr).expect("a file for stderr");
+        let mut child = self
+            .shell(line)
+            .stdout(Stdio::piped())
+            .stderr(file)
+            .spawn()
+            .expect("start the cli");
+        let out = child.stdout.take().expect("the cli's stdout");
+        let (send, lines) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Started {
+            child,
+            lines,
+            stderr,
+        }
+    }
+}
+
+/// A CLI running in the background. The shell line `exec`s the CLI, so the
+/// shell's pid is the CLI's.
+struct Started {
+    child: Child,
+    lines: mpsc::Receiver<String>,
+    stderr: PathBuf,
+}
+
+impl Started {
+    /// Waits until stdout says `wanted` on a line of its own.
+    fn wait_for(&mut self, wanted: &str) {
+        let deadline = Instant::now() + TIME_LIMIT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line == wanted => return,
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = self.child.kill();
+                    panic!(
+                        "no {wanted:?} on stdout ({error}); stderr: {}",
+                        self.stderr()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Sends `signal` to the CLI, as `kill -<signal> <pid>` would.
+    fn signal(&self, signal: &str) {
+        let status = Command::new("/bin/kill")
+            .arg(format!("-{signal}"))
+            .arg(self.child.id().to_string())
+            .status()
+            .expect("run kill");
+        assert!(status.success(), "kill -{signal} failed");
+    }
+
+    /// The CLI's exit code once it has ended, within the time limit.
+    fn ended(&mut self) -> Option<i32> {
+        let deadline = Instant::now() + TIME_LIMIT;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("ask about the cli") {
+                return status.code();
+            }
+            if Instant::now() > deadline {
+                let _ = self.child.kill();
+                panic!(
+                    "the cli did not end within {TIME_LIMIT:?}; stderr: {}",
+                    self.stderr()
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.stderr).unwrap_or_default()
     }
 }
 
@@ -766,4 +867,146 @@ fn reveal_error_points_to_run() {
         outcome.stderr.contains("run --secret-fd"),
         "the error says what to use instead: {outcome:?}"
     );
+}
+
+/// A program that says `ready` once its trap is set and then waits; it gives
+/// up on its own after about a minute, so a failed test leaves nothing
+/// running for long.
+fn waiting(trap: &str) -> String {
+    format!(
+        "{trap} echo ready; \
+         n=0; while [ $n -lt 600 ]; do sleep 0.1; n=$((n + 1)); done; exit 99"
+    )
+}
+
+/// Starts `run` with `script` as the program and waits until it is ready.
+fn start_run(fixture: &Fixture, script: &str) -> Started {
+    let line = fixture.command_line(
+        "json",
+        9,
+        true,
+        &fixture.run_args(&["3:password"], &[], script, &[]),
+    );
+    let mut cli = fixture.start(&line);
+    cli.wait_for("ready");
+    cli
+}
+
+/// `kill -TERM` to the CLI reaches the program, and the CLI ends with the
+/// program's exit code, not by the signal.
+#[test]
+fn run_passes_sigterm_on_and_returns_the_programs_exit_code() {
+    let fixture = Fixture::new(PASSWORD);
+    let mut cli = start_run(&fixture, &waiting("trap 'exit 7' TERM;"));
+    cli.signal("TERM");
+    assert_eq!(cli.ended(), Some(7), "stderr: {}", cli.stderr());
+}
+
+#[test]
+fn run_passes_sigint_on() {
+    let fixture = Fixture::new(PASSWORD);
+    let mut cli = start_run(&fixture, &waiting("trap 'exit 8' INT;"));
+    cli.signal("INT");
+    assert_eq!(cli.ended(), Some(8), "stderr: {}", cli.stderr());
+}
+
+/// The program takes a second to end after the signal. The CLI waits for it:
+/// when the CLI has ended, the file the program writes last is there.
+#[test]
+fn run_waits_for_the_program_after_a_signal() {
+    let fixture = Fixture::new(PASSWORD);
+    let marker = fixture.path("ended");
+    let trap = format!(
+        "trap 'sleep 1; echo done > {}; exit 9' TERM;",
+        shell_quote(&marker)
+    );
+    let mut cli = start_run(&fixture, &waiting(&trap));
+    let signalled = Instant::now();
+    cli.signal("TERM");
+    let code = cli.ended();
+    let waited = signalled.elapsed();
+    assert!(
+        std::path::Path::new(&marker).exists(),
+        "the cli ended before the program, after {waited:?}, with {code:?}; stderr: {}",
+        cli.stderr()
+    );
+    assert_eq!(code, Some(9), "stderr: {}", cli.stderr());
+}
+
+/// A program the forwarded signal kills: the CLI reports it as a shell
+/// does, 128 plus the signal.
+#[test]
+fn a_program_killed_by_a_signal_gives_128_plus_the_signal() {
+    let fixture = Fixture::new(PASSWORD);
+    let mut cli = start_run(&fixture, "echo ready; exec sleep 60");
+    cli.signal("TERM");
+    assert_eq!(cli.ended(), Some(128 + 15), "stderr: {}", cli.stderr());
+}
+
+/// `launch sap` stages a file holding the password and keeps it for ten
+/// seconds while SAP GUI reads it. SIGINT to the CLI in that time runs the
+/// interrupt cleanup: the file is gone and the CLI exits with 130.
+///
+/// The CLI runs in a sandbox that refuses every Mach lookup, so the `open`
+/// it starts cannot reach Launch Services and no SAP GUI on the Mac running
+/// the tests opens; the file is staged all the same. Its temporary folder is
+/// the fixture's.
+#[cfg(target_os = "macos")]
+#[test]
+fn launch_cleans_up_when_sigint_hits_the_process() {
+    let fixture = Fixture::new(PASSWORD);
+    let tmp = fixture.dir.path().join("tmp");
+    std::fs::create_dir(&tmp).expect("create the temporary folder");
+    let line = fixture.command_line("json", 9, true, &["launch", "sap", "--id", &fixture.id]);
+    let cli_line = line.strip_prefix("exec ").expect("an exec line");
+    let line = format!(
+        "export TMPDIR={}; exec /usr/bin/sandbox-exec -p {} {cli_line}",
+        shell_quote(&tmp.to_string_lossy()),
+        shell_quote("(version 1)(allow default)(deny mach-lookup)"),
+    );
+    let mut cli = fixture.start(&line);
+
+    let staged = |tmp: &std::path::Path| -> Vec<PathBuf> {
+        let Ok(dirs) = std::fs::read_dir(tmp) else {
+            return Vec::new();
+        };
+        dirs.flatten()
+            .filter(|dir| {
+                dir.file_name()
+                    .to_string_lossy()
+                    .starts_with("ferrispass-launch-")
+            })
+            .flat_map(|dir| {
+                std::fs::read_dir(dir.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+            })
+            .map(|file| file.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "sapc"))
+            .collect()
+    };
+    let deadline = Instant::now() + TIME_LIMIT;
+    let file = loop {
+        if let [file] = staged(&tmp).as_slice() {
+            break file.clone();
+        }
+        if let Some(status) = cli.child.try_wait().expect("ask about the cli") {
+            panic!(
+                "the cli ended with {status} before it staged a file; stderr: {}",
+                cli.stderr()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no staged file within {TIME_LIMIT:?}; stderr: {}",
+            cli.stderr()
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    cli.signal("INT");
+    assert_eq!(cli.ended(), Some(130), "stderr: {}", cli.stderr());
+    assert!(!file.exists(), "the staged file is still there: {file:?}");
+    assert_eq!(staged(&tmp), Vec::<PathBuf>::new());
 }
