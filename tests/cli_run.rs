@@ -12,6 +12,9 @@
 //! `unsafe`.
 
 use std::io::{BufRead, BufReader};
+use std::net::Shutdown;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -628,8 +631,9 @@ fn the_env_fallback_leaks_the_secret_nowhere_else() {
     }
 }
 
-/// One warning line per variable, on stderr, before the program starts; with
-/// `--format json` too, since stderr is not the JSON envelope.
+/// One warning line per variable, on stderr; with `--format json` too, since
+/// stderr is not the JSON envelope. That it comes before the program starts
+/// is `the_env_warning_comes_before_the_program_starts`.
 #[test]
 fn env_fallback_prints_the_warning_once() {
     let fixture = Fixture::new(PASSWORD);
@@ -642,7 +646,7 @@ fn env_fallback_prints_the_warning_once() {
         assert_eq!(
             outcome.stderr,
             format!("{}\nstarted", env_warning("FP_SECRET")),
-            "{format}: the warning comes once and before the program"
+            "{format}: the warning once, then what the program writes to stderr"
         );
 
         let outcome = fixture.cli(
@@ -659,6 +663,52 @@ fn env_fallback_prints_the_warning_once() {
             outcome.stderr,
             format!("{}\n{}\n", env_warning("FP_SECRET"), env_warning("FP_CODE")),
             "{format}: one line per variable, none for the descriptor"
+        );
+    }
+}
+
+/// The warning is on stderr before the program starts. Here the CLI's stderr
+/// is a socket already shut down for writing, so writing the warning fails
+/// and the CLI goes no further. Had it started the program first, the
+/// program's line would be on stdout. With a stderr that takes the warning,
+/// the same command line starts the program.
+///
+/// A socket rather than a pipe without a reader: a copy of the reading end
+/// that another test's program inherits in the moment before close-on-exec
+/// is set would let the write through, while a shutdown holds for every copy.
+#[test]
+fn the_env_warning_comes_before_the_program_starts() {
+    let fixture = Fixture::new(PASSWORD);
+    for format in ["json", "human"] {
+        let line = fixture.command_line(
+            format,
+            9,
+            true,
+            &fixture.run_args(&[], &["FP_SECRET=password"], "echo started", &[]),
+        );
+        let outcome = fixture.output(&line);
+        assert_ok(&outcome);
+        assert_eq!(outcome.stdout, "started\n", "{format}: {outcome:?}");
+
+        let (stderr, _peer) = UnixStream::pair().expect("a socket for stderr");
+        stderr
+            .shutdown(Shutdown::Write)
+            .expect("shut the socket down for writing");
+        let output = fixture
+            .shell(&line)
+            .stderr(OwnedFd::from(stderr))
+            .output()
+            .expect("run the cli");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "",
+            "{format}: the program started although its warning could not be written"
+        );
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "{format}: {:?}",
+            output.status
         );
     }
 }
