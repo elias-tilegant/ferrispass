@@ -160,6 +160,7 @@ Not run yet; it comes with the preview build and the design gallery.
 - `no_animation_outside_the_design_system` does not look inside `src/ui/ds/`. A component there that animates with a fixed time, or after a key press, passes it.
 - The Kit's animations do not go through `duration`. Those that read the Kit theme's motion values follow the same steps, but none of them knows the input kind, so the rule that a key press gets 0 ms does not reach them. Dialogs, sheets, popovers and tooltips keep the Kit's own fixed times.
 - `no_fixed_text_size_outside_tokens` looks for 13 and 15 pixels only. A size in rems, or a pixel size computed from a number elsewhere, would pass it. The old screens are not scanned; much of their layout is in pixels and does not follow the text size.
+- The Text size row is built from the same segments as the other rows of the old Settings screen, and those only take a click. Tab does not reach Standard or Large, no key switches them, and VoiceOver hears neither a group of choices nor which one is selected. The theme can still be changed with Cmd+Shift+D; the text size has no shortcut. The old screen is left as it is here, and its rows get keyboard and VoiceOver access when Settings is rebuilt.
 - A trip back to 0.9.2 loses the setting the first time 0.9.2 writes `settings.json`, as with every new field. The size is standard again afterwards.
 
 ## Not done
@@ -167,4 +168,4 @@ Not run yet; it comes with the preview build and the design gallery.
 - Six glyphs the spec lists have no drawing anywhere in it: `archive`, `history`, `message`, `pin`, `way` and `import`. They are not in `FpIcon`. A screen that needs one uses a Kit icon until they are drawn.
 - `Moment` and the springs have no callers yet. Ferris's moments and the first moving parts come with later packages.
 
-The agents spent about 1 hour on this, including review and fixes.
+The agents spent about 2 hours on this, including review and fixes.
