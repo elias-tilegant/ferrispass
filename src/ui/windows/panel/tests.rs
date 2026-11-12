@@ -23,7 +23,7 @@ use crate::keepass::repository::snapshot_from_database;
 use crate::keepass::{FAVORITE_TAG, VaultDocument};
 use crate::tr;
 use crate::ui::ds::components::{FooterTone, SearchGroup, probe};
-use crate::ui::vm::panel::{MEMORY, PanelVm};
+use crate::ui::vm::panel::PanelVm;
 
 /// The vault the tests open. Its folder does not exist, so nothing is ever
 /// written there.
@@ -738,14 +738,15 @@ fn search_and_selection_are_forgotten_after_two_minutes(cx: &mut TestAppContext)
     cx.update(close);
     cx.run_until_parked();
 
-    cx.executor().advance_clock(MEMORY - Duration::from_secs(1));
+    // Two minutes, written out: the rule, not whatever the constant says.
+    cx.executor().advance_clock(Duration::from_secs(119));
     let _panel = app.open_panel(cx);
     assert_eq!(app.query(cx), "nh", "kept for two minutes");
     assert_eq!(app.selected_title(cx), picked);
     cx.update(close);
     cx.run_until_parked();
 
-    cx.executor().advance_clock(MEMORY);
+    cx.executor().advance_clock(Duration::from_secs(120));
     let _panel = app.open_panel(cx);
     assert_eq!(app.query(cx), "", "forgotten after two minutes");
     assert!(!app.vm(cx).read_with(cx, |vm, _| vm.is_explicit()));

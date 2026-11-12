@@ -655,10 +655,11 @@ mod tests {
             ..PanelVm::default()
         };
         vm.remember(start);
-        vm.forget_if_stale(start + MEMORY - Duration::from_secs(1));
+        // Two minutes, written out: the rule, not whatever the constant says.
+        vm.forget_if_stale(start + Duration::from_secs(119));
         assert_eq!(vm.query(), "nh");
         assert!(vm.is_explicit());
-        vm.forget_if_stale(start + MEMORY);
+        vm.forget_if_stale(start + Duration::from_secs(120));
         assert_eq!(vm.query(), "");
         assert!(!vm.is_explicit());
         // Never remembered, never forgotten for being old.
@@ -666,7 +667,7 @@ mod tests {
             query: "x".to_string(),
             ..PanelVm::default()
         };
-        fresh.forget_if_stale(start + MEMORY * 10);
+        fresh.forget_if_stale(start + Duration::from_secs(1200));
         assert_eq!(fresh.query(), "x");
     }
 }
