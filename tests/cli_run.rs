@@ -908,13 +908,19 @@ fn waiting(trap: &str) -> String {
     )
 }
 
-/// Starts `run` with `script` as the program and waits until it is ready.
+/// Starts `run` with the password on 3 and `script` as the program, and waits
+/// until it is ready.
 fn start_run(fixture: &Fixture, script: &str) -> Started {
+    start_run_with(fixture, &["3:password"], &[], script)
+}
+
+/// [`start_run`] with the given `--secret-fd` and `--env` options.
+fn start_run_with(fixture: &Fixture, secret_fds: &[&str], env: &[&str], script: &str) -> Started {
     let line = fixture.command_line(
         "json",
         9,
         true,
-        &fixture.run_args(&["3:password"], &[], script, &[]),
+        &fixture.run_args(secret_fds, env, script, &[]),
     );
     let mut cli = fixture.start(&line);
     cli.wait_for("ready");
@@ -927,6 +933,21 @@ fn start_run(fixture: &Fixture, script: &str) -> Started {
 fn run_passes_sigterm_on_and_returns_the_programs_exit_code() {
     let fixture = Fixture::new(PASSWORD);
     let mut cli = start_run(&fixture, &waiting("trap 'exit 7' TERM;"));
+    cli.signal("TERM");
+    assert_eq!(cli.ended(), Some(7), "stderr: {}", cli.stderr());
+}
+
+/// The same with `--env` alone, where `run` has nothing to put on a
+/// descriptor.
+#[test]
+fn run_with_only_env_passes_sigterm_on() {
+    let fixture = Fixture::new(PASSWORD);
+    let mut cli = start_run_with(
+        &fixture,
+        &[],
+        &["FP_SECRET=password"],
+        &waiting("trap 'exit 7' TERM;"),
+    );
     cli.signal("TERM");
     assert_eq!(cli.ended(), Some(7), "stderr: {}", cli.stderr());
 }
