@@ -457,21 +457,25 @@ mod tests {
         assert_eq!(cx.update(|cx| error(Shortcut::AutoType, cx)), None);
     }
 
+    /// A press of ⌃⌥⌘P counts as activity and opens the panel; the next
+    /// closes it. Being registered, a release or another id counts for
+    /// nothing.
     #[gpui::test]
     fn the_quick_access_hotkey_counts_as_activity(cx: &mut TestAppContext) {
-        fake::reset();
+        use crate::ui::windows::panel;
+
+        let _app = panel::tests::open_app(cx, &[panel::tests::entry("Salesforce")]);
         cx.update(|cx| reconcile(&settings(true, true), cx));
         let quick = id_of(QUICK_ACCESS_HOTKEY);
         let ten_minutes = Duration::from_secs(600);
 
-        // Registered, released, or somebody else's: not activity.
         activity::reset(SystemTime::now() - ten_minutes);
         poll(cx);
         fake::send(released(quick));
         fake::send(pressed(quick ^ 1));
         poll(cx);
         assert!(activity::idle_for(SystemTime::now()) >= ten_minutes);
-        assert_eq!(cx.update(|cx| crate::ui::windows::panel::toggles(cx)), 0);
+        assert!(!cx.update(|cx| panel::is_open(cx)));
 
         fake::send(pressed(quick));
         poll(cx);
@@ -480,6 +484,16 @@ mod tests {
             idle < Duration::from_secs(1),
             "the quick access shortcut left the clock idle for {idle:?}"
         );
-        assert_eq!(cx.update(|cx| crate::ui::windows::panel::toggles(cx)), 1);
+        assert!(
+            cx.update(|cx| panel::is_open(cx)),
+            "the press opened the panel"
+        );
+
+        fake::send(pressed(quick));
+        poll(cx);
+        assert!(
+            !cx.update(|cx| panel::is_open(cx)),
+            "the next press closed it"
+        );
     }
 }

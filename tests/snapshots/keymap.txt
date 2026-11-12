@@ -156,3 +156,21 @@ cmd-shift-t	FerrisPass	ferrispass::PerformAutoTypeForSelected
 cmd-m	-	ferrispass::MinimizeWindow
 cmd-q	-	ferrispass::Quit
 cmd-w	-	ferrispass::CloseWindow
+escape	Panel	ferrispass::ClosePanel
+cmd-w	Panel > Input	ferrispass::ClosePanel
+enter	Panel	ferrispass::PanelPrimary
+cmd-shift-c	Panel	ferrispass::PanelCopyUsername
+alt-cmd-c	Panel	ferrispass::PanelCopyCode
+cmd-o	Panel	ferrispass::PanelShowInApp
+up	Panel > Input	ferrispass::PanelMoveUp
+down	Panel > Input	ferrispass::PanelMoveDown
+cmd-c	Panel > Input	ferrispass::PanelCopyPassword
+cmd-1	Panel > Input	ferrispass::PanelSelect
+cmd-2	Panel > Input	ferrispass::PanelSelect
+cmd-3	Panel > Input	ferrispass::PanelSelect
+cmd-4	Panel > Input	ferrispass::PanelSelect
+cmd-5	Panel > Input	ferrispass::PanelSelect
+cmd-6	Panel > Input	ferrispass::PanelSelect
+cmd-7	Panel > Input	ferrispass::PanelSelect
+cmd-8	Panel > Input	ferrispass::PanelSelect
+cmd-9	Panel > Input	ferrispass::PanelSelect

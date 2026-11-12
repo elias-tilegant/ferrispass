@@ -39,9 +39,6 @@ msg.window_closed_locked             closing the main window
 msg.delete_permanently               the trash
 msg.security_model                   security settings and help
 
-glossary.type.sap_system             entry kinds in lists, labels and accessible names
-glossary.type.remote_access          entry kinds in lists, labels and accessible names
-glossary.type.web_login              entry kinds in lists, labels and accessible names
 glossary.type.server                 entry kinds in lists, labels and accessible names
 glossary.type.secure_note            entry kinds in lists, labels and accessible names
 glossary.vault.personal              vault kinds in the sidebar and in labels
@@ -53,20 +50,10 @@ glossary.password.saved_team         unlocking a team vault
 glossary.favorite                    entry lists and quick access
 glossary.pinned_for_everyone         entry lists and quick access
 glossary.one_time_code               entry details and quick access
-glossary.sap_client                  SAP entry details
 glossary.system_number               SAP entry details
 glossary.earlier_versions            entry history
 glossary.trash                       the trash
 
-quick.search.placeholder             the quick access panel
-quick.footer.sap_login               the quick access panel
-quick.footer.open_website            the quick access panel
-quick.footer.copy_password           the quick access panel
-quick.footer.prd_select_first        the quick access panel
-quick.footer.copied.password         the quick access panel
-quick.footer.copied.user             the quick access panel
-quick.footer.copied.one_time_code    the quick access panel
-quick.footer.other_vaults            the quick access panel
 quick.results.same_matches           the quick access panel
 quick.preview.user                   the quick access panel
 quick.preview.password               the quick access panel
@@ -77,13 +64,10 @@ quick.locked.search_pending          the quick access panel, locked
 quick.locked.typed_ahead             the quick access panel, locked
 quick.locked.unlock_touch_id         the quick access panel, locked
 quick.locked.still_unlocking         the quick access panel, locked
-quick.locked.needs_main_window       the quick access panel, locked
 quick.locked.unlock_mac_password     the quick access panel, locked
 quick.locked.not_set_up              the quick access panel, locked
 quick.locked.set_up                  the quick access panel, locked
 quick.locked.file_missing            the quick access panel, locked
-quick.error.website_failed           the quick access panel
-quick.error.copy_failed              the quick access panel
 
 menubar.notch.hidden                 the menu bar item, when the notch hides it
 menubar.notch.practice               the menu bar item, when the notch hides it

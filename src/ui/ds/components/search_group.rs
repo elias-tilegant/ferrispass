@@ -99,7 +99,7 @@ impl SearchGroup {
     /// masks it. `make` builds the group once for its node and once for the
     /// elements inside.
     #[cfg(test)]
-    pub(super) fn parts(
+    pub(crate) fn parts(
         make: impl Fn() -> Self,
         window: &mut Window,
         cx: &mut App,

@@ -9,6 +9,7 @@ pub mod palette;
 #[cfg(test)]
 #[allow(deprecated)]
 mod palette_tests;
+pub mod vm;
 #[allow(deprecated)]
 pub mod widgets;
 pub mod windows;

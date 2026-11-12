@@ -1484,6 +1484,8 @@ const ACTIVITY_CALL_SITES: &[(&str, &str)] = &[
     // A press of the quick access shortcut, when the one loop for the global
     // shortcuts hands it on.
     ("src/app/services/hotkeys.rs", "Hotkey"),
+    // Keys and clicks in the quick access panel.
+    ("src/ui/windows/panel/view.rs", "Panel"),
     // The test of the clock as the app builds it. Its second thread stands in
     // for the one that will listen for the global shortcuts; it is not input.
     ("tests/idle_clock.rs", "Hotkey"),

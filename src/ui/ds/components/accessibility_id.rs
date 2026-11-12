@@ -5,12 +5,12 @@
 //! as a tuple and has to go through a constructor here, which today is
 //! [`AccessibilityId::new`] alone.
 //!
-//! This is also the one file in `ui::ds` that hands a text to GPUI's
+//! This is also the one file in the app that hands a text to GPUI's
 //! `accessibility_id`, through [`AccessibilityId::apply`] and
 //! [`AccessibilityId::apply_to_input`]. GPUI's method takes any text, an
-//! entry title too, so a component that calls it directly would be past the
-//! type; `raw_accessibility_ids_are_applied_in_one_file` keeps such calls
-//! out of the rest of the design system.
+//! entry title too, so a component or a window that calls it directly would
+//! be past the type; `raw_accessibility_ids_are_applied_in_one_file` keeps
+//! such calls out of the rest of `src`.
 
 use gpui::{SharedString, StatefulInteractiveElement};
 use gpui_component::input::Input;
@@ -24,42 +24,40 @@ use gpui_component::input::Input;
 ///
 /// - The compiler. The field is private to this file, so a tuple
 ///   construction anywhere else does not compile and `new` is the only
-///   constructor. `new` is visible in `ui::ds` only, so a call from anywhere
-///   else, `src/app` or `examples/` for instance, does not compile either.
-///   It takes `&'static str` for the names, which keeps a borrowed title out
-///   but not a leaked one.
+///   constructor. `new` is visible in this crate only, for the components
+///   and the windows built from them, so a call from `examples/` or another
+///   crate does not compile. It takes `&'static str` for the names, which
+///   keeps a borrowed title out but not a leaked one.
 /// - `an_accessibility_id_takes_literal_names_only`. It checks that `new` is
-///   still visible in `ui::ds` only and takes `&'static str`, and that every
-///   call written `AccessibilityId::new` in a file under `src/ui/ds` passes
+///   still visible in this crate only and takes `&'static str`, and that
+///   every call written `AccessibilityId::new` in a file under `src` passes
 ///   string literals for the window and the component. It leaves out
 ///   comments and inline `#[cfg(test)] mod tests { }` blocks, and reads the
 ///   rest of the file, after a `//` inside a string or a `mod tests;` too.
 /// - `raw_accessibility_ids_are_applied_in_one_file`. GPUI's
 ///   `accessibility_id` and the GPUI Kit input's take any text, so a
-///   component calling them directly could hand them a title. The test finds
-///   every call to a method of that name, and to `set_author_id`, in the
-///   files under `src/ui/ds` and allows them in this file only, where
-///   [`AccessibilityId::apply`] and [`AccessibilityId::apply_to_input`] hand
-///   them the id. It reads the files the same way.
+///   component or a window calling them directly could hand them a title.
+///   The test finds every call to a method of that name, and to
+///   `set_author_id`, in the files under `src/ui/ds` and allows them in this
+///   file only, where [`AccessibilityId::apply`] and
+///   [`AccessibilityId::apply_to_input`] hand them the id. In the rest of
+///   `src`, such as the windows that hand the components their ids, a call
+///   is allowed only with `AccessibilityId::new(` as its argument, so the id
+///   is built right there from the names the other test checks. It reads the
+///   files the same way.
 ///
 /// None of them catches a second constructor added in this file, a call to
 /// `new` written another way (through a renamed import or a type alias,
 /// `Self::new`, spaces in the path, or a macro), a call to GPUI's method
-/// whose name a macro puts together, or a file outside `src/ui/ds` that
-/// becomes part of `ui::ds` through `#[path]` or `include!`.
+/// whose name a macro puts together, or a file outside `src` that becomes
+/// part of the crate through `#[path]` or `include!`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccessibilityId(SharedString);
 
 impl AccessibilityId {
-    /// `window` and `component` are names such as `quick` and `copy`,
+    /// `window` and `component` are names such as `panel` and `row`,
     /// `index` tells controls of the same kind in one window apart.
-    // Only the tests build an id so far.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(in crate::ui::ds) fn new(
-        window: &'static str,
-        component: &'static str,
-        index: usize,
-    ) -> Self {
+    pub(crate) fn new(window: &'static str, component: &'static str, index: usize) -> Self {
         Self(format!("fp.{window}.{component}.{index}").into())
     }
 
@@ -105,6 +103,28 @@ mod tests {
         );
         let shared: SharedString = AccessibilityId::new("main", "lock", 0).into();
         assert_eq!(shared.as_ref(), "fp.main.lock.0");
+    }
+
+    /// Every `.rs` file under `src`: the design system, the windows built
+    /// from it, and the rest of the app, which has no business with ids.
+    fn scanned_files() -> Vec<std::path::PathBuf> {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        probe::rust_files(&src, &mut files);
+        for folder in ["src/ui/ds", "src/ui/windows"] {
+            let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join(folder);
+            assert!(
+                files.iter().any(|file| file.starts_with(&folder)),
+                "the scan reads {}",
+                folder.display()
+            );
+        }
+        assert!(
+            files.len() > 100,
+            "the scan found only {} files",
+            files.len()
+        );
+        files
     }
 
     /// The declaration of `AccessibilityId::new` in this file, on one line,
@@ -174,40 +194,33 @@ mod tests {
     /// An accessibility id is built from names written in the code, so an
     /// entry title or a user name cannot end up in it. Outside this file
     /// the compiler leaves only the constructors declared here, and `new`
-    /// is the only one; outside `ui::ds` a call to it does not compile. The
-    /// `&'static str` it takes keeps a borrowed title out, but not a leaked
-    /// one: `Box::leak` turns any text into a `&'static str`. So the test
-    /// reads the source: `new` is still visible in `ui::ds` only and takes
-    /// `&'static str` for the window and the component, and every call
-    /// written `AccessibilityId::new` in a file under `src/ui/ds` passes
-    /// string literals for both. Comments and inline test modules
+    /// is the only one; outside this crate a call to it does not compile.
+    /// The `&'static str` it takes keeps a borrowed title out, but not a
+    /// leaked one: `Box::leak` turns any text into a `&'static str`. So the
+    /// test reads the source: `new` is still visible in this crate only and
+    /// takes `&'static str` for the window and the component, and every call
+    /// written `AccessibilityId::new` in a file under `src` passes string
+    /// literals for both. Comments and inline test modules
     /// (`#[cfg(test)] mod tests { }`) are left out.
     ///
     /// It reads text, not types: a second constructor added in this file, a
     /// call to `new` written another way (through a renamed import or a type
     /// alias, `Self::new`, spaces in the path, or a macro), or a file outside
-    /// `src/ui/ds` that becomes part of `ui::ds` through `#[path]` or
-    /// `include!`, is past it.
+    /// `src` that becomes part of the crate through `#[path]` or `include!`,
+    /// is past it.
     #[test]
     fn an_accessibility_id_takes_literal_names_only() {
         let constructor = constructor();
         assert!(
-            constructor.starts_with("pub(in crate::ui::ds) fn new("),
-            "AccessibilityId::new is visible in ui::ds only, where the scan below reads every call: {constructor}"
+            constructor.starts_with("pub(crate) fn new("),
+            "AccessibilityId::new is visible in this crate only, where the scan below reads every call: {constructor}"
         );
         assert_eq!(
             parameter_types(&constructor),
             ["&'static str", "&'static str", "usize"],
             "AccessibilityId::new takes names fixed in the code"
         );
-        let ds = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds");
-        let mut files = Vec::new();
-        probe::rust_files(&ds, &mut files);
-        assert!(
-            files.len() > 10,
-            "the scan found only {} files",
-            files.len()
-        );
+        let files = scanned_files();
         let mut problems = Vec::new();
         for file in &files {
             let source = std::fs::read_to_string(file).expect("read source");
@@ -232,6 +245,29 @@ mod tests {
     /// name and a longer name that contains it are no such place. Comments
     /// and inline test modules are left out.
     fn raw_ids(source: &str) -> Vec<(usize, String)> {
+        raw_id_calls(source)
+            .into_iter()
+            .map(|(line, text, _)| (line, text))
+            .collect()
+    }
+
+    /// The places [`raw_ids`] finds, less the calls whose argument is an id
+    /// built in place, `AccessibilityId::new(`: what the windows outside the
+    /// design system may not do. Handing a component the id it shows, as in
+    /// `row.accessibility_id(AccessibilityId::new("panel", "row", 0))`, is
+    /// how a window names its controls, and the names in such a call are
+    /// checked by `an_accessibility_id_takes_literal_names_only`.
+    fn raw_ids_not_built_in_place(source: &str) -> Vec<(usize, String)> {
+        raw_id_calls(source)
+            .into_iter()
+            .filter(|(_, _, built_in_place)| !built_in_place)
+            .map(|(line, text, _)| (line, text))
+            .collect()
+    }
+
+    /// The places [`raw_ids`] describes, each with whether it is a call
+    /// whose argument starts with `AccessibilityId::new(`.
+    fn raw_id_calls(source: &str) -> Vec<(usize, String, bool)> {
         let code = probe::code_only(source);
         let joins = |c: char| c.is_alphanumeric() || c == '_';
         let mut found = Vec::new();
@@ -253,7 +289,11 @@ mod tests {
                 if !declared && (called || named) {
                     let line = before.matches('\n').count() + 1;
                     let text = code.lines().nth(line - 1).unwrap_or_default().trim();
-                    found.push((line, text.to_string()));
+                    let built_in_place = called
+                        && after.trim_start()[1..]
+                            .trim_start()
+                            .starts_with("AccessibilityId::new(");
+                    found.push((line, text.to_string(), built_in_place));
                 }
             }
         }
@@ -261,31 +301,35 @@ mod tests {
         found
     }
 
-    /// GPUI's `accessibility_id` takes any text, so a component could hand
-    /// it an entry title past the type. In `ui::ds` only this file calls
-    /// it, through `apply` and `apply_to_input`, which hand it an
+    /// GPUI's `accessibility_id` takes any text, so a component or a window
+    /// could hand it an entry title past the type. In `src` only this file
+    /// calls it, through `apply` and `apply_to_input`, which hand it an
     /// `AccessibilityId`; the components keep the id as that type until
-    /// they apply it. The test reads every file under `src/ui/ds` other
-    /// than this one and fails for any call to a method named
-    /// `accessibility_id` or `set_author_id`, whatever its receiver, so
-    /// inside the design system a component's own builder of that name is
-    /// not called either. Comments and inline test modules are left out.
+    /// they apply it, and the windows hand it to the components' builders.
+    /// The test reads every file under `src/ui/ds` other than this one and
+    /// fails for any call to a method named `accessibility_id` or
+    /// `set_author_id`, whatever its receiver, so inside the design system a
+    /// component's own builder of that name is not called either. In the
+    /// rest of `src`, such as the quick access panel in `src/ui/windows`,
+    /// such a call fails unless its argument is `AccessibilityId::new(`, an
+    /// id built from literal names right where the window hands it to a
+    /// component. Comments and inline test modules are left out.
     #[test]
     fn raw_accessibility_ids_are_applied_in_one_file() {
+        let this_file =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds/components/accessibility_id.rs");
         let ds = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/ds");
-        let this_file = ds.join("components/accessibility_id.rs");
-        let mut files = Vec::new();
-        probe::rust_files(&ds, &mut files);
-        assert!(
-            files.len() > 10,
-            "the scan found only {} files",
-            files.len()
-        );
+        let files = scanned_files();
         assert!(files.contains(&this_file), "the scan reads this folder");
         let mut problems = Vec::new();
         for file in files.iter().filter(|file| **file != this_file) {
             let source = std::fs::read_to_string(file).expect("read source");
-            for (line, call) in raw_ids(&source) {
+            let calls = if file.starts_with(&ds) {
+                raw_ids(&source)
+            } else {
+                raw_ids_not_built_in_place(&source)
+            };
+            for (line, call) in calls {
                 problems.push(format!("{}:{line}: {call}", file.display()));
             }
         }
@@ -350,6 +394,38 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn outside_the_design_system_only_an_id_built_in_place_is_allowed() {
+        let source = r#"
+            Row::new(id, 0, 1, parts, tile, badge)
+                .accessibility_id(AccessibilityId::new("panel", "row", index));
+            field.accessibility_id( AccessibilityId::new("panel", "search", 0));
+            div().id("row").accessibility_id(parts.title.clone());
+            row.accessibility_id(id);
+            div().accessibility_id(format!("fp.panel.{title}"));
+            StatefulInteractiveElement::accessibility_id(div(), user);
+        "#;
+        assert_eq!(
+            raw_ids_not_built_in_place(source),
+            [
+                (
+                    5,
+                    "div().id(\"row\").accessibility_id(parts.title.clone());".to_string()
+                ),
+                (6, "row.accessibility_id(id);".to_string()),
+                (
+                    7,
+                    "div().accessibility_id(format!(\"fp.panel.{title}\"));".to_string()
+                ),
+                (
+                    8,
+                    "StatefulInteractiveElement::accessibility_id(div(), user);".to_string()
+                ),
+            ]
+        );
+        assert_eq!(raw_ids(source).len(), 6, "inside ui::ds every call counts");
     }
 
     /// `apply` and `apply_to_input` put the id where assistive technology

@@ -210,7 +210,7 @@ pub mod copper {
 /// Helpers for the component tests: a window to draw components in, and a
 /// way to read what an element tells assistive technology.
 #[cfg(test)]
-pub(in crate::ui::ds) mod probe {
+pub(crate) mod probe {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::ops::Range;

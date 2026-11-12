@@ -349,7 +349,7 @@ impl SecretField {
     /// read off the element `render` returns, so whatever is set on it on
     /// the way counts too.
     #[cfg(test)]
-    pub(super) fn parts(
+    pub(crate) fn parts(
         &self,
         window: &mut Window,
         cx: &mut App,

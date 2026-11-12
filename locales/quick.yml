@@ -104,3 +104,8 @@ quick:
     copy_failed:
       en: The password couldn't be copied.
       de: Das Passwort ließ sich nicht kopieren.
+  # Above the search field: the vault the panel searches.
+  header:
+    searching_vault:
+      en: Searching %{vault}
+      de: "%{vault} wird durchsucht"
