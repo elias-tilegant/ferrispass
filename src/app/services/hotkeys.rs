@@ -16,6 +16,10 @@
 //!   (`activity::touch(Hotkey)`) when it is handed on. Being registered
 //!   does not count, and nothing else that happens in another app reaches
 //!   the idle clock from here.
+//! - While the quick access panel is open, a press of the Auto-Type
+//!   shortcut runs nothing. The panel has the keyboard while the app behind
+//!   it stays in front, so Auto-Type would find that app's entry and type
+//!   the user name and the password into the panel's search field.
 //! - [`reconcile`] registers and unregisters to match the settings. The
 //!   manager is made the first time a shortcut is wanted and kept for the
 //!   life of the process; switching both shortcuts off unregisters them and
@@ -238,7 +242,8 @@ pub fn error(shortcut: Shortcut, cx: &App) -> Option<String> {
 
 /// Hands each press in `events` on: the quick access shortcut opens or
 /// closes the panel and counts as activity, the Auto-Type shortcut goes to
-/// the main window, the way it did when the loop ran on the window.
+/// the main window, the way it did when the loop ran on the window, unless
+/// the panel is open.
 fn handle(events: Vec<GlobalHotKeyEvent>, cx: &mut App) {
     let ids = registered(cx);
     for shortcut in drain_pressed(events.into_iter(), &ids) {
@@ -248,6 +253,10 @@ fn handle(events: Vec<GlobalHotKeyEvent>, cx: &mut App) {
                 crate::ui::windows::panel::toggle(cx);
             }
             Shortcut::AutoType => {
+                // The typing would go to the panel, which has the keyboard.
+                if crate::ui::windows::panel::is_open(cx) {
+                    continue;
+                }
                 if let Some(shell) = crate::app::with_shared_shell(cx, |_, cx| cx.entity()) {
                     AppShell::dispatch_global_auto_type(shell, cx);
                 }

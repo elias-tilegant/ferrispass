@@ -338,10 +338,14 @@ mod tests {
         let auto_type = registered.auto_type.expect("Auto-Type registered");
         let quick_access = registered.quick_access.expect("quick access registered");
 
-        fake::send(pressed(quick_access));
-        cx.executor().advance_clock(Duration::from_millis(100));
-        cx.run_until_parked();
+        // Two presses: the first opens the panel, the second closes it.
+        for _ in 0..2 {
+            fake::send(pressed(quick_access));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+        }
         assert!(runs().is_empty(), "the quick access shortcut ran Auto-Type");
+        assert!(!cx.update(|cx| crate::ui::windows::panel::is_open(cx)));
 
         fake::send(pressed(auto_type));
         cx.executor().advance_clock(Duration::from_millis(100));
@@ -350,6 +354,60 @@ mod tests {
             runs(),
             vec![main_window],
             "one press, one Auto-Type run, in the main window"
+        );
+    }
+
+    /// The quick access panel takes the keyboard while the app behind it
+    /// stays in front. Auto-Type reads that app, so a run would find its
+    /// entry and type the user name and the password into the panel's
+    /// search field. While the panel is open the shortcut runs nothing; once
+    /// it is closed, a press runs Auto-Type as before.
+    #[gpui::test]
+    fn the_auto_type_hotkey_types_nothing_while_the_panel_is_open(cx: &mut TestAppContext) {
+        use crate::ui::windows::panel;
+
+        // No address and no window pattern: no app in front matches it.
+        let app = panel::tests::open_app(cx, &[panel::tests::entry("Zq panel fixture")]);
+        RUNS.with(|runs| runs.borrow_mut().clear());
+        let shell = cx
+            .update(|cx| crate::app::with_shared_shell(cx, |_, cx| cx.entity()))
+            .expect("the main window's shell");
+        let main_window = shell.read_with(cx, |shell, _| shell.window_handle);
+        shell.update(cx, |shell, cx| {
+            shell.settings.quick_access_hotkey_enabled = true;
+            shell.settings.auto_type_enabled = true;
+            shell.sync_auto_type_listener(cx);
+        });
+        let auto_type = cx
+            .update(|cx| hotkeys::registered(cx))
+            .auto_type
+            .expect("Auto-Type registered");
+        let press = |cx: &mut TestAppContext| {
+            fake::send(pressed(auto_type));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+        };
+
+        let panel_window = app.open_panel(cx);
+        panel_window
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("the panel");
+        cx.run_until_parked();
+        assert!(cx.update(|cx| panel::is_open(cx)));
+        press(cx);
+        assert!(
+            runs().is_empty(),
+            "Auto-Type ran while the panel had the keyboard"
+        );
+        assert!(cx.update(|cx| panel::is_open(cx)), "the panel stays open");
+
+        cx.update(panel::close);
+        cx.run_until_parked();
+        press(cx);
+        assert_eq!(
+            runs(),
+            vec![main_window],
+            "with the panel closed, a press runs Auto-Type in the main window"
         );
     }
 }

@@ -28,6 +28,9 @@
 //! 8. No notification, no live region, and no title, user name or host in a
 //!    log line, an accessibility id or an error text. Ids are
 //!    `fp.panel.<component>.<index>`.
+//! 9. While the panel is open, the Auto-Type shortcut types nothing
+//!    (`services::hotkeys`): the panel has the keyboard, so the user name
+//!    and the password would land in its search field.
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, Global, Pixels, Subscription, Task,
