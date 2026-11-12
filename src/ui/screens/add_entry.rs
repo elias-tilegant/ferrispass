@@ -104,9 +104,27 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .read(cx)
         .vault_browser()
         .and_then(|b| b.snapshot.recycle_bin_id.clone());
-    let picker_open = shell.new_entry_picker_open() && !is_edit;
+    let picker_open = shell.new_entry_picker_open();
+    // For edits the picker starts on the entry's current group; a pick
+    // replaces it and the entry moves there on save.
+    let target_group_id = if is_edit {
+        shell
+            .new_entry_target_group_id()
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                editing_id.as_ref().and_then(|id| {
+                    shell
+                        .state()
+                        .read(cx)
+                        .vault_browser()
+                        .and_then(|b| b.snapshot.find_entry_group_id(id))
+                })
+            })
+    } else {
+        target_group_id
+    };
 
-    let target_group_label = if is_edit {
+    let target_group_label = if is_edit && shell.new_entry_target_group_id().is_none() {
         // For edits, show the entry's current parent group instead of where a
         // new entry would land.
         editing_id
@@ -240,16 +258,12 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child(if is_edit { "Edit entry" } else { "New entry" }),
                         )
-                        .child(target_group_chip(
-                            &target_group_label,
-                            picker_open,
-                            is_edit,
-                            cx,
-                        )),
+                        .child(target_group_chip(&target_group_label, picker_open, cx)),
                 ),
         )
         .when(picker_open, |this| {
             this.child(group_picker_panel(
+                shell,
                 root_group.as_ref(),
                 recycle_bin_id.as_deref(),
                 target_group_id.as_deref(),
@@ -663,23 +677,10 @@ fn generate_button_visual() -> AnyElement {
         .into_any_element()
 }
 
-/// "in {Group} ▾" chip below the header. Clickable in Add mode (toggles
-/// the inline group picker); rendered as plain muted text in Edit mode
-/// because the entry's parent group can't be moved from this modal.
-fn target_group_chip(
-    label: &str,
-    picker_open: bool,
-    is_edit: bool,
-    cx: &mut Context<AppShell>,
-) -> AnyElement {
+/// "in {Group} ▾" chip below the header. Toggles the inline group picker,
+/// in Add mode to choose where the entry lands and in Edit mode to move it.
+fn target_group_chip(label: &str, picker_open: bool, cx: &mut Context<AppShell>) -> AnyElement {
     let text: SharedString = format!("in {label}").into();
-    if is_edit {
-        return div()
-            .text_xs()
-            .text_color(palette::text_muted())
-            .child(text)
-            .into_any_element();
-    }
     h_flex()
         .id("add-entry-group-chip")
         .gap_1()
@@ -690,9 +691,11 @@ fn target_group_chip(
         .text_color(palette::text_muted())
         .hover(|s| s.bg(palette::sidebar()).text_color(palette::text()))
         .pressable()
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            shell.toggle_new_entry_picker(cx);
-        }))
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.toggle_new_entry_picker(window, cx);
+            }),
+        )
         .child(text)
         .child(
             gpui_component::Icon::from(if picker_open {
@@ -705,58 +708,159 @@ fn target_group_chip(
         .into_any_element()
 }
 
+/// One selectable group in the picker.
+pub(crate) struct GroupPickerRow<'a> {
+    pub id: String,
+    pub group: &'a VaultGroup,
+    /// Nesting below the root, for the indented tree view.
+    pub depth: usize,
+    /// Names of the groups above this one, root excluded. Shown next to a
+    /// search hit so two groups with the same name are told apart.
+    pub parents: Vec<&'a str>,
+}
+
+/// Every group except the Recycle Bin (filing an entry there would be a
+/// delete in disguise), in sidebar preorder. The picker always shows the
+/// *whole* tree regardless of the sidebar's collapse state - the user has
+/// to be able to pick any group, even one they happen to have folded shut.
+fn group_picker_rows<'a>(
+    root: &'a VaultGroup,
+    recycle_bin_id: Option<&str>,
+) -> Vec<GroupPickerRow<'a>> {
+    fn collect<'a>(
+        group: &'a VaultGroup,
+        depth: usize,
+        parents: &mut Vec<&'a str>,
+        recycle_bin_id: Option<&str>,
+        out: &mut Vec<GroupPickerRow<'a>>,
+    ) {
+        if recycle_bin_id == Some(group.id.as_str()) {
+            return;
+        }
+        out.push(GroupPickerRow {
+            id: group.id.clone(),
+            group,
+            depth,
+            parents: parents.clone(),
+        });
+        if depth > 0 {
+            parents.push(group.name.as_str());
+        }
+        for child in &group.groups {
+            collect(child, depth + 1, parents, recycle_bin_id, out);
+        }
+        if depth > 0 {
+            parents.pop();
+        }
+    }
+    let mut out = Vec::new();
+    collect(root, 0, &mut Vec::new(), recycle_bin_id, &mut out);
+    out
+}
+
+/// Groups matching a search, best first. Every whitespace-separated word
+/// has to appear (case-insensitively) in the group's name or in the names
+/// of the groups above it, so "kunde sap" finds "Kunden / Acme / SAP".
+/// Groups whose own name holds the whole query come first, then those whose
+/// name starts with it; ties keep the tree order. An empty query returns
+/// the full tree.
+pub(crate) fn group_picker_matches<'a>(
+    root: &'a VaultGroup,
+    recycle_bin_id: Option<&str>,
+    query: &str,
+) -> Vec<GroupPickerRow<'a>> {
+    let rows = group_picker_rows(root, recycle_bin_id);
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return rows;
+    }
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let mut ranked: Vec<(u8, usize, GroupPickerRow<'a>)> = rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(order, row)| {
+            let name = row.group.name.to_lowercase();
+            let path = row
+                .parents
+                .iter()
+                .map(|parent| parent.to_lowercase())
+                .chain(std::iter::once(name.clone()))
+                .collect::<Vec<_>>()
+                .join(" / ");
+            if !words.iter().all(|word| path.contains(word)) {
+                return None;
+            }
+            let rank = if name.starts_with(&query) {
+                0
+            } else if name.contains(&query) {
+                1
+            } else {
+                2
+            };
+            Some((rank, order, row))
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, order, _)| (*rank, *order));
+    ranked.into_iter().map(|(_, _, row)| row).collect()
+}
+
 /// Inline group-picker panel rendered below the header when expanded.
-/// Lists every group in the vault as an indented preorder tree (same
-/// shape as the sidebar walk in `screens::vault::groups_section`); the
-/// recycle bin is filtered out because creating a new entry there would
-/// be confusing. Click a row → it becomes the new target.
+/// A search field on top filters the groups by name or path; without a
+/// query the panel lists every group as an indented preorder tree (same
+/// shape as the sidebar walk in `screens::vault::groups_section`). Click a
+/// row, or press Enter for the first hit, and it becomes the target.
 fn group_picker_panel(
+    shell: &AppShell,
     root: Option<&VaultGroup>,
     recycle_bin_id: Option<&str>,
     selected_id: Option<&str>,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
-    let mut flat: Vec<(usize, &VaultGroup)> = Vec::new();
-    fn collect<'a>(
-        group: &'a VaultGroup,
-        depth: usize,
-        recycle_bin_id: Option<&str>,
-        out: &mut Vec<(usize, &'a VaultGroup)>,
-    ) {
-        if recycle_bin_id == Some(group.id.as_str()) {
-            return;
-        }
-        out.push((depth, group));
-        // Picker always shows the *whole* tree regardless of the
-        // sidebar's collapse state - the user has to be able to pick
-        // any group, even one they happen to have folded shut.
-        for child in &group.groups {
-            collect(child, depth + 1, recycle_bin_id, out);
-        }
-    }
-    if let Some(root) = root {
-        collect(root, 0, recycle_bin_id, &mut flat);
-    }
+    let filter_input = shell.new_entry_group_filter_input().clone();
+    let query = filter_input.read(cx).value().to_string();
+    let searching = !query.trim().is_empty();
+    let rows = root
+        .map(|root| group_picker_matches(root, recycle_bin_id, &query))
+        .unwrap_or_default();
 
     let selected_owned = selected_id.map(ToOwned::to_owned);
     let mut col = v_flex();
-    for (idx, (depth, group)) in flat.iter().enumerate() {
-        let depth = *depth;
-        let group_id = group.id.clone();
+    if rows.is_empty() {
+        col = col.child(
+            div()
+                .px(px(8.))
+                .py(px(6.))
+                .text_sm()
+                .text_color(palette::text_muted())
+                .child("No group matches."),
+        );
+    }
+    for (idx, row) in rows.iter().enumerate() {
+        let group = row.group;
+        // While searching the list is flat: indentation would suggest a
+        // nesting the filtered rows no longer have. The path says it instead.
+        let indent = if searching { 0 } else { row.depth };
+        let group_id = row.id.clone();
         let is_selected = selected_owned.as_deref() == Some(group.id.as_str());
+        // Enter takes the first hit; mark it so the key has a visible target.
+        let is_enter_target = searching && idx == 0;
         let row_id: SharedString = format!("add-entry-group-row-{idx}").into();
         let name: SharedString = group.name.clone().into();
+        let path: Option<SharedString> =
+            (searching && !row.parents.is_empty()).then(|| row.parents.join(" / ").into());
         col = col.child(
             h_flex()
                 .id(row_id)
                 .h(px(26.))
-                .pl(px(8. + depth as f32 * 14.))
+                .pl(px(8. + indent as f32 * 14.))
                 .pr(px(10.))
                 .items_center()
                 .gap_2()
                 .rounded(px(4.))
                 .bg(if is_selected {
                     palette::blue_soft()
+                } else if is_enter_target {
+                    palette::panel()
                 } else {
                     gpui::transparent_black()
                 })
@@ -766,30 +870,58 @@ fn group_picker_panel(
                     palette::text()
                 })
                 .text_sm()
-                .when(!is_selected, |this| {
-                    this.hover(|s| s.bg(palette::sidebar()))
-                })
+                .when(!is_selected, |this| this.hover(|s| s.bg(palette::panel())))
                 .pressable()
                 .on_click(
-                    cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                        shell.set_new_entry_target_group(group_id.clone(), cx);
+                    cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                        shell.set_new_entry_target_group(group_id.clone(), window, cx);
                     }),
                 )
                 .child(picker_row_icon(group, is_selected))
-                .child(div().flex_1().min_w_0().truncate().child(name)),
+                .child(div().flex_shrink_0().max_w(px(240.)).truncate().child(name))
+                .when_some(path, |this, path| {
+                    this.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(palette::text_muted())
+                            .child(path),
+                    )
+                })
+                .when(is_enter_target, |this| {
+                    this.child(
+                        div()
+                            .ml_auto()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(palette::text_faint())
+                            .child("↩"),
+                    )
+                }),
         );
     }
 
-    div()
-        .id("add-entry-group-picker")
-        .max_h(px(200.))
-        .overflow_y_scroll()
-        .px_3()
-        .py_2()
+    v_flex()
         .border_b_1()
         .border_color(palette::border())
         .bg(palette::sidebar())
-        .child(col)
+        .child(
+            div()
+                .px_3()
+                .pt_2()
+                .child(Input::new(&filter_input).small().cleanable(true)),
+        )
+        .child(
+            div()
+                .id("add-entry-group-picker")
+                .max_h(px(240.))
+                .overflow_y_scroll()
+                .px_3()
+                .py_2()
+                .child(col),
+        )
         .into_any_element()
 }
 
@@ -827,4 +959,99 @@ fn picker_row_icon(group: &VaultGroup, is_selected: bool) -> AnyElement {
         .with_size(gpui_component::Size::Size(px(12.)))
         .text_color(glyph_color)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(id: &str, name: &str, groups: Vec<VaultGroup>) -> VaultGroup {
+        VaultGroup {
+            id: id.into(),
+            name: name.into(),
+            groups,
+            ..VaultGroup::default()
+        }
+    }
+
+    fn vault() -> VaultGroup {
+        group(
+            "root",
+            "Root",
+            vec![
+                group(
+                    "kunden",
+                    "Kunden",
+                    vec![
+                        group("acme", "Acme", vec![group("acme-sap", "SAP", vec![])]),
+                        group("globex", "Globex", vec![group("globex-sap", "SAP", vec![])]),
+                    ],
+                ),
+                group(
+                    "intern",
+                    "Intern",
+                    vec![group("sap-basis", "SAP Basis", vec![])],
+                ),
+                group(
+                    "bin",
+                    "Recycle Bin",
+                    vec![group("old-sap", "SAP alt", vec![])],
+                ),
+            ],
+        )
+    }
+
+    fn ids(rows: &[GroupPickerRow<'_>]) -> Vec<String> {
+        rows.iter().map(|row| row.id.clone()).collect()
+    }
+
+    #[test]
+    fn an_empty_query_lists_the_whole_tree_without_the_recycle_bin() {
+        let root = vault();
+        let rows = group_picker_matches(&root, Some("bin"), "  ");
+        assert_eq!(
+            ids(&rows),
+            [
+                "root",
+                "kunden",
+                "acme",
+                "acme-sap",
+                "globex",
+                "globex-sap",
+                "intern",
+                "sap-basis"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_query_matches_names_case_insensitively_best_first() {
+        let root = vault();
+        let rows = group_picker_matches(&root, Some("bin"), "sap");
+        // Own name starts with the query first, in tree order; the bin's
+        // "SAP alt" stays out.
+        assert_eq!(ids(&rows), ["acme-sap", "globex-sap", "sap-basis"]);
+        let acme = &rows[0];
+        assert_eq!(
+            acme.parents,
+            ["Kunden", "Acme"],
+            "path tells the twins apart"
+        );
+    }
+
+    #[test]
+    fn every_word_has_to_match_somewhere_in_the_path() {
+        let root = vault();
+        let rows = group_picker_matches(&root, Some("bin"), "globex sap");
+        assert_eq!(ids(&rows), ["globex-sap"]);
+        assert!(group_picker_matches(&root, Some("bin"), "nirgends").is_empty());
+    }
+
+    #[test]
+    fn a_name_hit_outranks_a_path_hit() {
+        let root = vault();
+        // "Acme" itself and its child "SAP" (via the path) both match.
+        let rows = group_picker_matches(&root, Some("bin"), "acme");
+        assert_eq!(ids(&rows), ["acme", "acme-sap"]);
+    }
 }

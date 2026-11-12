@@ -12,8 +12,8 @@ use crate::app::{
     AppState, CopyValueKind, SaveStatus, SyncTone, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{
         CopyPassword, CopyUrl, CopyUsername, DeleteEntry, DeleteGroup, DuplicateEntry, EditEntry,
-        LockVault, NewEntry, NewGroup, NewSubgroup, OpenAddVault, OpenSettings, OpenSyncSettings,
-        OpenVault, OpenVaultSwitcher, RenameGroupOp, SaveVault, SyncNow,
+        LockVault, MoveEntryToGroup, NewEntry, NewGroup, NewSubgroup, OpenAddVault, OpenSettings,
+        OpenSyncSettings, OpenVault, OpenVaultSwitcher, RenameGroupOp, SaveVault, SyncNow,
     },
 };
 use crate::domain::{FaviconImage, VaultEntry, VaultGroup, VaultSnapshot};
@@ -1842,6 +1842,7 @@ fn entry_row(
     row.context_menu(|menu, _, _| {
         menu.menu("Edit…", Box::new(EditEntry))
             .menu("Duplicate", Box::new(DuplicateEntry))
+            .menu("Move to Group…", Box::new(MoveEntryToGroup))
             .separator()
             .menu("Copy Username", Box::new(CopyUsername))
             .menu("Copy Password", Box::new(CopyPassword))

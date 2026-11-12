@@ -6,10 +6,11 @@ use crate::{
         actions::{
             APP_CONTEXT, AddSharePointVault, CancelUnlock, CopyPassword, CopyUrl, CopyUsername,
             CreateVault, DeleteEntry, DeleteGroup, DownloadFavicons, DuplicateEntry, EditEntry,
-            FocusSearch, InstallUpdate, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAbout,
-            OpenAddVault, OpenConnect, OpenReconnect, OpenSettings, OpenSyncSettings, OpenVault,
-            OpenVaultSwitcher, OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected,
-            RenameGroupOp, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
+            FocusSearch, InstallUpdate, LockVault, MoveEntryToGroup, NewEntry, NewGroup,
+            NewSubgroup, OpenAbout, OpenAddVault, OpenConnect, OpenReconnect, OpenSettings,
+            OpenSyncSettings, OpenVault, OpenVaultSwitcher, OpenWhatsNew, PerformAutoType,
+            PerformAutoTypeForSelected, RenameGroupOp, SaveVault, SubmitPassword, SyncNow,
+            ToggleTheme,
         },
     },
     autotype,
@@ -106,6 +107,10 @@ pub struct AppShell {
     /// subscribe to `Change` events and forward the value to AppState
     /// (which keeps the filtered list in `connect_flow.Picking.query`).
     picker_query_input: Entity<InputState>,
+    /// Search field at the top of the entry editor's group picker. Cleared
+    /// and focused whenever the picker opens; Enter files the entry into
+    /// the first matching group.
+    new_entry_group_filter_input: Entity<InputState>,
     /// Filter input for the vault-switcher overlay (`Overlay::VaultSwitcher`).
     /// Cleared on every overlay-open so the picker always starts empty;
     /// Enter on the input opens whichever recent currently floats to the top.
@@ -370,6 +375,8 @@ impl AppShell {
             cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let picker_query_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name or folder…"));
+        let new_entry_group_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search groups…"));
         let vault_switcher_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Switch vault - type to filter…"));
         // Seed the sequence input with whatever's currently persisted -
@@ -496,6 +503,11 @@ impl AppShell {
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
             cx.subscribe_in(&picker_query_input, window, Self::on_picker_query_event),
             cx.subscribe_in(
+                &new_entry_group_filter_input,
+                window,
+                Self::on_group_filter_event,
+            ),
+            cx.subscribe_in(
                 &auto_type_sequence_input,
                 window,
                 Self::on_auto_type_sequence_input_event,
@@ -589,6 +601,7 @@ impl AppShell {
             new_entry_otp_input,
             new_group_name_input,
             picker_query_input,
+            new_entry_group_filter_input,
             vault_switcher_input,
             vault_switcher,
             auto_type_sequence_input,
@@ -1150,6 +1163,10 @@ impl AppShell {
         &self.picker_query_input
     }
 
+    pub fn new_entry_group_filter_input(&self) -> &Entity<InputState> {
+        &self.new_entry_group_filter_input
+    }
+
     pub fn vault_switcher_input(&self) -> &Entity<InputState> {
         &self.vault_switcher_input
     }
@@ -1336,8 +1353,22 @@ impl AppShell {
         });
 
         let state = self.state.clone();
+        // An explicit pick in Edit mode files the entry into that group; with
+        // no pick the entry stays where it is.
+        let move_to = self.new_entry_target_group_id.clone();
         let result = match editing_id.as_ref() {
-            Some(entry_id) => state.update(cx, |state, cx| state.update_entry(entry_id, draft, cx)),
+            Some(entry_id) => state.update(cx, |state, cx| {
+                state.update_entry(entry_id, draft, cx)?;
+                let current_group = state
+                    .vault_browser()
+                    .and_then(|browser| browser.snapshot.find_entry_group_id(entry_id));
+                match move_to {
+                    Some(target) if current_group.as_deref() != Some(target.as_str()) => {
+                        state.move_entry(entry_id, &target, cx)
+                    }
+                    _ => Ok(()),
+                }
+            }),
             None => {
                 let Some(group_id) = target_group_id else {
                     self.entry_form_error = Some("Pick a group to save this entry in.".into());
@@ -1422,6 +1453,12 @@ impl AppShell {
             hasher.update([0]);
             hasher.update(field.value.as_bytes());
             hasher.update([u8::from(field.protected)]);
+        }
+        // Picking another group is an edit too: leaving without saving
+        // would drop it as silently as a typed change.
+        if let Some(group_id) = &self.new_entry_target_group_id {
+            hasher.update([1]);
+            hasher.update(group_id.as_bytes());
         }
         hasher.finalize().into()
     }
@@ -1612,6 +1649,8 @@ impl AppShell {
         // from the current sidebar selection, and snap the picker shut.
         self.new_entry_target_group_id = None;
         self.new_entry_picker_open = false;
+        self.new_entry_group_filter_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
         // Drop all custom-field rows. Their `Entity<InputState>`s are
         // released on Vec drop; gpui will GC them once no view still
         // references them. Don't reset `next_custom_field_id` - keeping
@@ -1627,13 +1666,18 @@ impl AppShell {
         self.new_entry_target_group_id.as_deref()
     }
 
+    /// File the entry being edited (or created) into `group_id`. Closes the
+    /// picker and hands focus back to the form, so Enter saves right away.
     pub fn set_new_entry_target_group(
         &mut self,
         group_id: impl Into<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.new_entry_target_group_id = Some(group_id.into());
         self.new_entry_picker_open = false;
+        self.new_entry_title_input
+            .update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
@@ -1641,8 +1685,28 @@ impl AppShell {
         self.new_entry_picker_open
     }
 
-    pub fn toggle_new_entry_picker(&mut self, cx: &mut Context<Self>) {
-        self.new_entry_picker_open = !self.new_entry_picker_open;
+    pub fn toggle_new_entry_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_entry_picker_open {
+            self.close_new_entry_picker(window, cx);
+        } else {
+            self.open_new_entry_picker(window, cx);
+        }
+    }
+
+    /// Expand the group picker with an empty, focused search field.
+    pub fn open_new_entry_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_entry_picker_open = true;
+        self.new_entry_group_filter_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn close_new_entry_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_entry_picker_open = false;
+        self.new_entry_title_input
+            .update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
@@ -1831,6 +1895,15 @@ impl AppShell {
         }
         if self.disconnect_armed {
             self.cancel_disconnect(cx);
+            return;
+        }
+        if self.new_entry_picker_open
+            && matches!(
+                self.state.read(cx).overlay(),
+                Overlay::AddEntry | Overlay::EditEntry { .. }
+            )
+        {
+            self.close_new_entry_picker(window, cx);
             return;
         }
         // A half-written entry, and its freshly generated password, used to
@@ -2398,6 +2471,31 @@ impl AppShell {
         self.duplicate_selected_entry(window, cx);
     }
 
+    fn on_action_move_entry_to_group(
+        &mut self,
+        _: &MoveEntryToGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
+        let in_trash = self
+            .state
+            .read(cx)
+            .vault_browser()
+            .and_then(|browser| browser.selected_entry)
+            .is_some_and(|entry| entry.in_recycle_bin);
+        if in_trash {
+            window.push_notification("Restore the entry before moving it.", cx);
+            return;
+        }
+        self.begin_edit_selected_entry(window, cx);
+        if matches!(self.state.read(cx).overlay(), Overlay::EditEntry { .. }) {
+            self.open_new_entry_picker(window, cx);
+        }
+    }
+
     fn on_action_new_group(&mut self, _: &NewGroup, window: &mut Window, cx: &mut Context<Self>) {
         // Every overlay replaces the entry editor, so a draft in it has to
         // be settled first.
@@ -2806,6 +2904,41 @@ impl AppShell {
             };
             self.state
                 .update(cx, |state, cx| state.set_unlock_keyfile(keyfile, cx));
+        }
+    }
+
+    /// Typing re-filters the group picker; Enter files the entry into the
+    /// best match, so "type part of the name, press Enter" is the whole
+    /// gesture.
+    fn on_group_filter_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => cx.notify(),
+            InputEvent::PressEnter { .. } => {
+                let query = input.read(cx).value().to_string();
+                let first = {
+                    let state = self.state.read(cx);
+                    state.vault_browser().and_then(|browser| {
+                        crate::ui::screens::add_entry::group_picker_matches(
+                            &browser.snapshot.root,
+                            browser.snapshot.recycle_bin_id.as_deref(),
+                            &query,
+                        )
+                        .into_iter()
+                        .next()
+                        .map(|row| row.id)
+                    })
+                };
+                if let Some(group_id) = first {
+                    self.set_new_entry_target_group(group_id, window, cx);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4005,6 +4138,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_edit_entry))
             .on_action(cx.listener(Self::on_action_delete_entry))
             .on_action(cx.listener(Self::on_action_duplicate_entry))
+            .on_action(cx.listener(Self::on_action_move_entry_to_group))
             .on_action(cx.listener(Self::on_action_new_group))
             .on_action(cx.listener(Self::on_action_new_subgroup))
             .on_action(cx.listener(Self::on_action_rename_group_op))
