@@ -1100,6 +1100,50 @@ fn the_typed_text_becomes_the_search_only_after_opened(cx: &mut TestAppContext) 
     );
 }
 
+/// The vault opens some other way while the locked panel is open, here with
+/// the master password in the main window: what was typed is wiped as it
+/// opens and secure input goes with it, although the panel stays open, and
+/// none of it becomes the search.
+#[gpui::test]
+fn a_vault_opened_another_way_gets_nothing_of_what_was_typed(cx: &mut TestAppContext) {
+    if !in_a_home_of_its_own("a_vault_opened_another_way_gets_nothing_of_what_was_typed") {
+        return;
+    }
+    let app = locked_app(cx, Setup::TouchId);
+    let panel = app.open_panel(cx);
+    activate(cx, panel);
+    type_into(cx, panel, SENTINEL);
+    let view = view(cx);
+    assert!(app.secure.held());
+
+    let document = crate::keepass::KeePassRepository::open(&app.path, PASSWORD, None)
+        .expect("open the vault file");
+    app.state.update(cx, |state, cx| {
+        state.begin_open(app.path.clone(), cx);
+        assert!(
+            state.finish_open_attempt(app.path.clone(), Ok(document), cx),
+            "the vault did not open"
+        );
+    });
+    cx.run_until_parked();
+    assert!(app.vault_is_open(cx), "the test needs the vault open");
+    assert!(panel_is_open(cx), "the test needs the panel open");
+    assert!(
+        !app.secure.held(),
+        "secure input stayed on after the vault opened another way"
+    );
+    view.read_with(cx, |view, _| {
+        assert!(
+            !view.locked.has_buffer(),
+            "the text outlived the vault opening"
+        );
+        assert_eq!(view.locked.dots_for_test(), 0);
+    });
+    assert_eq!(app.retrieves(), 0, "the test needs no Touch ID");
+    assert_eq!(search(cx), "", "the typed text became the search");
+    assert_eq!(search_field(cx), "");
+}
+
 /// Several words without a single match look like a password typed into
 /// the wrong window: they are dropped and the search stays empty. One word
 /// with a match, and several words with a match, become the search.

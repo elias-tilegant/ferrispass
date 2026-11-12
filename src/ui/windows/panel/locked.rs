@@ -47,7 +47,8 @@
 //!    match are dropped, since they look like a password typed into the
 //!    wrong window. The buffer is searched only there, so the rule runs
 //!    there, on the text `take_query` gave. A vault opened any other way
-//!    gets nothing of what was typed.
+//!    gets nothing of what was typed: the buffer is wiped as it opens, and
+//!    secure input goes with it.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -567,7 +568,8 @@ impl PanelView {
     }
 
     /// The state changed while the panel is open. A vault opened some other
-    /// way than the panel's own unlock takes nothing of what was typed.
+    /// way than the panel's own unlock takes nothing of what was typed: the
+    /// buffer is wiped, and secure input goes with it.
     pub(super) fn locked_state_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_locked(cx) {
             self.locked.wipe();
