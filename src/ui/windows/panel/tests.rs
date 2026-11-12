@@ -1,6 +1,7 @@
 //! The panel as the app opens it: the main window over a test vault, then the
 //! panel as a second window, driven by its keys and actions.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -27,6 +28,20 @@ use crate::ui::vm::panel::{MEMORY, PanelVm};
 /// The vault the tests open. Its folder does not exist, so nothing is ever
 /// written there.
 const VAULT: &str = "/nonexistent/ferrispass-panel-tests/team-beratung.kdbx";
+
+thread_local! {
+    static LAUNCHES: RefCell<Vec<(String, bool)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Called instead of starting SAP GUI, with the entry and whether a password
+/// came along.
+pub(super) fn note_launch(entry_id: String, with_password: bool) {
+    LAUNCHES.with(|launches| launches.borrow_mut().push((entry_id, with_password)));
+}
+
+fn launches() -> Vec<(String, bool)> {
+    LAUNCHES.with(|launches| launches.borrow().clone())
+}
 
 /// An entry of the test vault.
 #[derive(Clone, Default)]
@@ -109,6 +124,7 @@ pub(crate) struct Harness {
 
 pub(crate) fn open_app(cx: &mut TestAppContext, entries: &[Fixture]) -> Harness {
     crate::autotype::hotkey::fake::reset();
+    LAUNCHES.with(|launches| launches.borrow_mut().clear());
     let pasteboard = FakePasteboard::new(AccessBehavior::Default);
     cx.update(|cx| {
         gpui_component::init(cx);
@@ -659,14 +675,20 @@ fn an_empty_search_never_lets_return_act_on_a_production_system(cx: &mut TestApp
         Some(tr!("quick.footer.prd_select_first"))
     );
     keys(cx, panel, "enter");
+    assert!(
+        launches().is_empty(),
+        "Return signed in to a production system"
+    );
     assert!(panel_is_open(cx));
-    assert_eq!(app.copied().0, 0);
 
-    // Picking it with Cmd+1 lets Return sign in.
+    // Picking it with Cmd+1 makes Return sign in.
     keys(cx, panel, "cmd-1");
     let model = vm.read_with(cx, |vm, _| vm.footer());
     assert_eq!(model.tone, FooterTone::Normal);
     assert_eq!(model.primary, Some(CommandId::ENTRY_SAP_LOGIN));
+    let nhp = app.id(cx, "NHP 100");
+    keys(cx, panel, "enter");
+    assert_eq!(launches(), [(nhp, true)]);
 }
 
 #[gpui::test]
@@ -779,23 +801,39 @@ fn cmd_w_and_escape_close_only_the_panel(cx: &mut TestAppContext) {
     assert!(app.vault_is_open(cx));
 
     // Cmd+M with the panel in front minimizes nothing; minimizing panics on
-    // the test platform. The window menu's Close Window and Minimize do
-    // nothing either while the panel is the key window.
+    // the test platform. Minimize from the Window menu does nothing either.
     let panel = app.open_panel(cx);
     activate(cx, panel);
     keys(cx, panel, "cmd-m");
     cx.dispatch_action(panel, MinimizeWindow);
     cx.run_until_parked();
-    cx.update(|cx| {
-        actions::close_main_window(cx);
-        actions::minimize_main_window(cx);
-    });
+    cx.update(actions::minimize_main_window);
     cx.run_until_parked();
     assert!(panel_is_open(cx));
+    assert!(app.vault_is_open(cx));
+
+    // Close Window, from the menu or from Cmd+W while the field has no
+    // focus, closes the panel in front and leaves the main window alone.
+    cx.update(actions::close_main_window);
+    cx.run_until_parked();
+    assert!(!panel_is_open(cx));
     assert!(
         app.vault_is_open(cx),
         "Close Window from the panel locked the vault"
     );
+
+    // The locked panel shows no search field; Cmd+W and Escape close it
+    // all the same.
+    app.state.update(cx, |state, cx| {
+        let _ = state.lock_vault(cx);
+    });
+    cx.run_until_parked();
+    for keystroke in ["cmd-w", "escape"] {
+        let panel = app.open_panel(cx);
+        activate(cx, panel);
+        keys(cx, panel, keystroke);
+        assert!(!panel_is_open(cx), "{keystroke} left the locked panel open");
+    }
 }
 
 #[gpui::test]
@@ -861,16 +899,17 @@ fn quit_and_notifications_from_the_panel_go_to_the_main_window(cx: &mut TestAppC
     );
     assert_eq!(notices(cx, panel), 0, "no notice in the panel");
 
-    // Without a main window nothing happens, and nothing panics.
+    // Without a main window nothing happens to it, and nothing panics.
     cx.update(|cx| cx.remove_global::<actions::MainWindow>());
-    cx.update(|cx| {
-        actions::close_main_window(cx);
-        actions::minimize_main_window(cx);
-    });
+    cx.update(actions::minimize_main_window);
     cx.update(actions::quit_from_anywhere);
     cx.run_until_parked();
     assert!(actions::stored_geometry::take().is_empty());
     assert_eq!(notices(cx, panel), 0);
+    // Close Window still closes the panel in front.
+    cx.update(actions::close_main_window);
+    cx.run_until_parked();
+    assert!(!panel_is_open(cx));
 }
 
 #[test]
@@ -1007,4 +1046,233 @@ fn nothing_in_the_panel_logs_a_title() {
         }
     }
     assert!(found.is_empty(), "the panel writes to a log: {found:?}");
+}
+
+// ------------------------------------------------------- Return and copies --
+
+/// The panel's own files, without this one, which names what it looks for.
+fn panel_sources() -> Vec<(String, String)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    for dir in ["src/ui/windows", "src/ui/vm"] {
+        probe::rust_files(&root.join(dir), &mut files);
+    }
+    let sources: Vec<(String, String)> = files
+        .into_iter()
+        .filter(|file| !file.ends_with("panel/tests.rs"))
+        .map(|file| {
+            let code = probe::code_only(&std::fs::read_to_string(&file).expect("read source"));
+            (file.display().to_string(), code)
+        })
+        .collect();
+    assert!(
+        sources
+            .iter()
+            .any(|(file, _)| file.ends_with("panel/view.rs")),
+        "the scan reads the panel's view"
+    );
+    sources
+}
+
+#[gpui::test]
+fn return_runs_the_main_action_of_the_kind(cx: &mut TestAppContext) {
+    let app = open_app(cx, &sample());
+
+    // An SAP system: SAP GUI signs in with the entry the panel selected, and
+    // the panel closes.
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "nhq");
+    keys(cx, panel, "enter");
+    assert_eq!(launches(), [(app.id(cx, "NHQ 100"), true)]);
+    assert!(!panel_is_open(cx), "the panel closes after signing in");
+    assert_eq!(app.recently_used(cx), ["NHQ 100"]);
+    assert_eq!(app.copied().0, 0, "signing in copies nothing");
+
+    // A web login: its website opens, an address without a scheme as https,
+    // and the panel closes.
+    let panel = app.open_panel(cx);
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "webmail");
+    keys(cx, panel, "enter");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://mail.example.com/login")
+    );
+    assert!(
+        !panel_is_open(cx),
+        "the panel closes after opening the website"
+    );
+
+    // Remote access: Return copies the password, and the panel stays open.
+    let panel = app.open_panel(cx);
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "vpn");
+    keys(cx, panel, "enter");
+    assert_eq!(app.copied(), (1, Some("sp-vpn".to_string())));
+    assert!(panel_is_open(cx));
+    assert_eq!(launches().len(), 1, "nothing else was started");
+}
+
+#[gpui::test]
+fn copies_go_through_the_clipboard_service_and_keep_the_panel_open(cx: &mut TestAppContext) {
+    let mut entries = sample();
+    entries.push(
+        entry("Two factor")
+            .password("sp-2fa")
+            .field("otp", "otpauth://totp/X?secret=JBSWY3DPEHPK3PXP"),
+    );
+    let app = open_app(cx, &entries);
+    let panel = app.open_panel(cx);
+    let note = |cx: &mut TestAppContext| app.vm(cx).read_with(cx, |vm, _| vm.footer().note);
+
+    type_into(cx, panel, "salesforce");
+    keys(cx, panel, "cmd-c");
+    assert_eq!(app.copied(), (1, Some("sp-sales".to_string())));
+    assert!(
+        cx.update(|cx| ClipboardService::handle(cx).read(cx).has_pending()),
+        "the copy has a clear timer"
+    );
+    assert!(panel_is_open(cx), "a copy keeps the panel open");
+    assert_eq!(note(cx), Some(tr!("quick.footer.copied.password")));
+
+    keys(cx, panel, "cmd-shift-c");
+    assert_eq!(app.copied(), (2, Some("nora@example.com".to_string())));
+    assert_eq!(note(cx), Some(tr!("quick.footer.copied.user")));
+
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "two factor");
+    keys(cx, panel, "alt-cmd-c");
+    let (writes, code) = app.copied();
+    assert_eq!(writes, 3);
+    let code = code.expect("a code");
+    assert!(
+        code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()),
+        "the code, without the space the display puts in: {code:?}"
+    );
+    assert_eq!(note(cx), Some(tr!("quick.footer.copied.one_time_code")));
+    assert!(panel_is_open(cx));
+
+    // Moving the selection takes the note away.
+    keys(cx, panel, "escape");
+    keys(cx, panel, "down");
+    assert_eq!(note(cx), None);
+}
+
+#[gpui::test]
+fn a_copy_marks_the_entry_as_recently_used(cx: &mut TestAppContext) {
+    let app = open_app(cx, &sample());
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "webmail");
+    keys(cx, panel, "cmd-c");
+    assert_eq!(app.recently_used(cx), ["Webmail"]);
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "vpn");
+    keys(cx, panel, "cmd-shift-c");
+    assert_eq!(app.recently_used(cx), ["Nordhafen VPN", "Webmail"]);
+}
+
+#[test]
+fn the_panel_never_touches_the_pasteboard() {
+    let import = "use crate::app::services::clipboard::ClipboardService;";
+    let mut found = Vec::new();
+    let mut secret_writes = 0;
+    for (file, code) in panel_sources() {
+        for (at, line) in code.lines().enumerate() {
+            let line = line.trim();
+            for forbidden in [
+                "write_to_clipboard",
+                "read_from_clipboard",
+                "ClipboardItem",
+                "Pasteboard",
+                "write_text",
+                "set_clipboard",
+            ] {
+                if line.contains(forbidden) {
+                    found.push(format!("{file}:{}: {line}", at + 1));
+                }
+            }
+            // The one way in is the clipboard service's import. The setting
+            // for the clear timer is the only other name with the word.
+            let rest = line.replace("clipboard_clear_secs", "");
+            if rest.contains("clipboard") && line != import {
+                found.push(format!("{file}:{}: {line}", at + 1));
+            }
+            secret_writes += line.matches("write_secret(").count();
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "the panel reaches the pasteboard: {found:#?}"
+    );
+    assert_eq!(secret_writes, 1, "every copy goes through one write_secret");
+}
+
+#[gpui::test]
+fn only_http_and_https_open(cx: &mut TestAppContext) {
+    let app = open_app(
+        cx,
+        &[
+            entry("Script portal").url("javascript:alert(1)"),
+            entry("Local file").url("file:///etc/passwd"),
+            entry("Plain portal").url("https://portal.example/login"),
+        ],
+    );
+    for title in ["Script portal", "Local file"] {
+        let panel = app.open_panel(cx);
+        if !app.query(cx).is_empty() {
+            keys(cx, panel, "escape");
+        }
+        type_into(cx, panel, title);
+        assert_eq!(app.selected_title(cx).as_deref(), Some(title));
+        keys(cx, panel, "enter");
+        assert_eq!(cx.opened_url(), None, "{title} opened");
+        assert!(panel_is_open(cx), "{title}: the panel stays open");
+        let note = app.vm(cx).read_with(cx, |vm, _| vm.footer().note);
+        assert_eq!(note, Some(tr!("quick.error.website_failed")));
+        cx.update(close);
+        cx.run_until_parked();
+    }
+    let panel = app.open_panel(cx);
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "plain portal");
+    keys(cx, panel, "enter");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://portal.example/login")
+    );
+}
+
+#[test]
+fn the_panel_never_activates_the_app() {
+    let mut found = Vec::new();
+    let mut shown = 0;
+    for (file, code) in panel_sources() {
+        for (at, line) in code.lines().enumerate() {
+            for forbidden in [
+                "activate(",
+                "activate_window(",
+                "request_window_close",
+                "cx.hide(",
+            ] {
+                if line.contains(forbidden) {
+                    found.push(format!("{file}:{}: {}", at + 1, line.trim()));
+                }
+            }
+        }
+        let calls = code.matches("show_main_window").count();
+        if calls > 0 {
+            let start = code
+                .find("fn show_in_app(")
+                .unwrap_or_else(|| panic!("{file} shows the main window outside show_in_app"));
+            let body = probe::braced(&code[start..]);
+            assert_eq!(
+                body.matches("show_main_window").count(),
+                calls,
+                "{file} shows the main window outside show_in_app"
+            );
+            shown += calls;
+        }
+    }
+    assert!(found.is_empty(), "the panel activates the app: {found:#?}");
+    assert_eq!(shown, 1, "Cmd+O is the one way to the main window");
 }

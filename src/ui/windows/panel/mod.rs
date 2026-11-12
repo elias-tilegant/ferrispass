@@ -11,7 +11,8 @@
 //!    `show_in_app` in `view.rs` (⌘O), on the user's word.
 //! 2. Every copy goes through `ClipboardService::write_secret`, with the
 //!    clear timer from the settings. The panel knows no other way to the
-//!    pasteboard. A copy keeps the panel open.
+//!    pasteboard. A copy keeps the panel open; an action that hands over to
+//!    another app, signing in or opening a website, closes it.
 //! 3. Every action acts on the entry the panel selected, by its id, never on
 //!    the main window's selection.
 //! 4. Every key and click in the panel counts as activity for the auto-lock
@@ -29,12 +30,13 @@
 //!    `fp.panel.<component>.<index>`.
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Entity, Global, Pixels, Subscription, Window,
-    WindowBounds, WindowKind, WindowOptions, point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Entity, Global, Pixels, Subscription, Task,
+    Window, WindowBounds, WindowKind, WindowOptions, point, px, size,
 };
 use gpui_component::Root;
 
 use crate::app::{AppState, VaultStatus};
+use crate::launch::{LaunchContext, LaunchError, LaunchHandle, LaunchTarget};
 use crate::ui::vm::panel::PanelVm;
 
 pub mod view;
@@ -52,6 +54,9 @@ struct PanelWindow {
     handle: Option<AnyWindowHandle>,
     vm: Entity<PanelVm>,
     state: Entity<AppState>,
+    /// Launch files handed to SAP GUI, each removed after the cleanup time
+    /// from the settings, or when the vault is locked. Drop = remove.
+    launches: Vec<Task<()>>,
     _state_changes: Subscription,
 }
 
@@ -71,6 +76,7 @@ fn panel(cx: &mut App) -> Option<(Entity<PanelVm>, Entity<AppState>)> {
         handle: None,
         vm: vm.clone(),
         state: state.clone(),
+        launches: Vec::new(),
         _state_changes: subscription,
     });
     Some((vm, state))
@@ -83,6 +89,7 @@ fn state_changed(vm: &Entity<PanelVm>, state: &Entity<AppState>, cx: &mut App) {
     let was_open = vm.read(cx).vault_name().is_some();
     if was_open && !open {
         close(cx);
+        cx.global_mut::<PanelWindow>().launches.clear();
         vm.update(cx, |vm, cx| {
             vm.forget();
             cx.notify();
@@ -201,6 +208,46 @@ pub fn panel_bounds(display: Bounds<Pixels>) -> Bounds<Pixels> {
         origin: point(px(x), px(y)),
         size: size(px(width), px(height)),
     }
+}
+
+/// Hands the entry to SAP GUI and keeps the launch file until the cleanup
+/// time from the settings has passed or the vault is locked.
+fn sign_in(
+    target: LaunchTarget,
+    context: LaunchContext<'_>,
+    cx: &mut App,
+) -> Result<(), LaunchError> {
+    let handle = start(target, context)?;
+    let cleanup = crate::app::with_shared_shell(cx, |shell, _| {
+        shell.settings().launch_cleanup_secs_clamped()
+    })
+    .unwrap_or(crate::app::settings::DEFAULT_LAUNCH_CLEANUP_SECS);
+    let wait = cx
+        .background_executor()
+        .timer(std::time::Duration::from_secs(u64::from(cleanup)));
+    let task = cx.spawn(async move |_| {
+        wait.await;
+        drop(handle);
+    });
+    if cx.has_global::<PanelWindow>() {
+        cx.global_mut::<PanelWindow>().launches.push(task);
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn start(target: LaunchTarget, context: LaunchContext<'_>) -> Result<LaunchHandle, LaunchError> {
+    crate::launch::launch(target, context)
+}
+
+/// Unit tests never start SAP GUI: the launch is noted instead.
+#[cfg(test)]
+fn start(target: LaunchTarget, context: LaunchContext<'_>) -> Result<LaunchHandle, LaunchError> {
+    tests::note_launch(context.entry.id.clone(), context.password.is_some());
+    Ok(LaunchHandle {
+        temp_file: None,
+        launcher_id: target.id(),
+    })
 }
 
 /// The open panel's window and the panel's model, for the tests.

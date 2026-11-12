@@ -592,3 +592,81 @@ fn main_words(hit: &Hit) -> SharedString {
         EntryKind::Remote(_) => tr!("quick.footer.copy_password"),
     }
 }
+
+/// The address the panel may open for an entry: http and https only, and
+/// an address without a scheme as https, the way the main window opens it.
+/// Anything else, `javascript:` and `file:` among them, is `None`.
+pub fn web_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    match UrlKind::of(url) {
+        UrlKind::Web => {
+            let lower = url.to_ascii_lowercase();
+            if lower.starts_with("http://") || lower.starts_with("https://") {
+                Some(url.to_string())
+            } else {
+                Some(format!("https://{url}"))
+            }
+        }
+        UrlKind::Empty | UrlKind::Other => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_http_and_https_addresses_open() {
+        assert_eq!(
+            web_url("https://login.example.com").as_deref(),
+            Some("https://login.example.com")
+        );
+        assert_eq!(
+            web_url(" HTTP://intranet.example/start ").as_deref(),
+            Some("HTTP://intranet.example/start")
+        );
+        assert_eq!(
+            web_url("mail.example.com/login").as_deref(),
+            Some("https://mail.example.com/login"),
+            "an address without a scheme opens as https"
+        );
+        for refused in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "file:///etc/passwd",
+            "ftp://files.example",
+            "data:text/html,hello",
+            "vbscript:run",
+            "localhost:8080",
+            "https://",
+            "",
+            "   ",
+        ] {
+            assert_eq!(web_url(refused), None, "{refused:?} would open");
+        }
+    }
+
+    #[test]
+    fn a_search_is_kept_for_two_minutes_after_the_panel_closes() {
+        let start = Instant::now();
+        let mut vm = PanelVm {
+            query: "nh".to_string(),
+            explicit: true,
+            ..PanelVm::default()
+        };
+        vm.remember(start);
+        vm.forget_if_stale(start + MEMORY - Duration::from_secs(1));
+        assert_eq!(vm.query(), "nh");
+        assert!(vm.is_explicit());
+        vm.forget_if_stale(start + MEMORY);
+        assert_eq!(vm.query(), "");
+        assert!(!vm.is_explicit());
+        // Never remembered, never forgotten for being old.
+        let mut fresh = PanelVm {
+            query: "x".to_string(),
+            ..PanelVm::default()
+        };
+        fresh.forget_if_stale(start + MEMORY * 10);
+        assert_eq!(fresh.query(), "x");
+    }
+}

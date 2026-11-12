@@ -4,14 +4,15 @@
 //!
 //! The keyboard stays in the search field. The keys the GPUI Kit input keeps
 //! to itself, ↑, ↓ and Cmd+C, reach the panel through bindings in the
-//! context `Panel > Input`; the others through `Panel` (`app::actions`).
-//! Every key and click in the window counts as activity for the auto-lock,
-//! in [`PanelView::new`] and [`input_activity`], and nowhere else.
+//! context `Panel > Input`, and so do Cmd+1 to Cmd+9 and Cmd+W; the others
+//! through `Panel` (`app::actions::bind_panel_keys` says why). Every key and
+//! click in the window counts as activity for the auto-lock, in
+//! `PanelView::new` and `input_activity`, and nowhere else.
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Role, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::IconName;
 use gpui_component::input::{InputEvent, InputState};
@@ -26,6 +27,7 @@ use crate::app::registry::CommandId;
 use crate::app::services::activity::{self, ActivitySource};
 use crate::app::services::clipboard::ClipboardService;
 use crate::app::{AppState, LibrarySelection};
+use crate::launch;
 use crate::tr;
 use crate::ui::ds::ActiveTokens as _;
 use crate::ui::ds::components::{
@@ -34,7 +36,7 @@ use crate::ui::ds::components::{
 };
 use crate::ui::ds::tokens::dimension;
 use crate::ui::ds::typography::{TextStyle, TextStyled as _, u};
-use crate::ui::vm::panel::{FooterModel, Hit, PanelVm};
+use crate::ui::vm::panel::{FooterModel, FooterNote, Hit, PanelVm, web_url};
 
 /// From this many rows on, the list uses the one-line rows.
 const COMPACT_FROM: usize = 7;
@@ -44,6 +46,9 @@ pub struct PanelView {
     vm: Entity<PanelVm>,
     state: Entity<AppState>,
     search: Entity<InputState>,
+    /// The panel's root. It has the keyboard while no vault is open and the
+    /// search field is not shown, so the panel's keys still reach it.
+    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -69,11 +74,14 @@ impl PanelView {
             input.set_value(query, window, cx);
             input
         });
-        search.update(cx, |input, cx| input.focus(window, cx));
+        let focus = cx.focus_handle();
         let this_window = window.window_handle();
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
-            cx.observe(&vm, |_, _, cx| cx.notify()),
+            cx.observe_in(&vm, window, |view, _, window, cx| {
+                view.keep_focus(window, cx);
+                cx.notify();
+            }),
             // A click into another app takes the keyboard away: the panel
             // closes, as it does on Escape.
             cx.observe_window_activation(window, |_, window, cx| {
@@ -89,11 +97,26 @@ impl PanelView {
                 }
             }),
         ];
-        Self {
+        let view = Self {
             vm,
             state,
             search,
+            focus,
             _subscriptions: subscriptions,
+        };
+        view.keep_focus(window, cx);
+        view
+    }
+
+    /// The keyboard goes to the search field, or to the panel's root while
+    /// no vault is open and the field is not shown.
+    fn keep_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vm.read(cx).vault_name().is_some() {
+            if !self.search.read(cx).focus_handle(cx).is_focused(window) {
+                self.search.update(cx, |input, cx| input.focus(window, cx));
+            }
+        } else if !self.focus.is_focused(window) {
+            window.focus(&self.focus, cx);
         }
     }
 
@@ -168,17 +191,27 @@ impl PanelView {
     }
 
     /// Return: the main action of the selected entry, when Return may run
-    /// one. A remote access entry's is copying its password; signing in and
-    /// opening a website follow.
-    fn on_primary(&mut self, _: &PanelPrimary, _: &mut Window, cx: &mut Context<Self>) {
-        if self.vm.read(cx).footer().primary == Some(CommandId::ENTRY_COPY_PASSWORD) {
+    /// one. A copy keeps the panel open; signing in and opening a website
+    /// hand over to another app and close it.
+    fn on_primary(&mut self, _: &PanelPrimary, window: &mut Window, cx: &mut Context<Self>) {
+        let vm = self.vm.read(cx);
+        let (Some(command), Some(hit)) = (vm.footer().primary, vm.selected()) else {
+            return;
+        };
+        let entry_id = hit.entry_id.clone();
+        if command == CommandId::ENTRY_COPY_PASSWORD {
             self.copy(Value::Password, cx);
+        } else if command == CommandId::ENTRY_SAP_LOGIN {
+            self.sign_in(&entry_id, window, cx);
+        } else if command == CommandId::ENTRY_OPEN_WEBSITE {
+            self.open_website(&entry_id, window, cx);
         }
     }
 
     /// Copies a value of the selected entry through the clipboard service,
-    /// which clears it after the time the settings give. The panel stays
-    /// open. A password or a user name copied counts as using the entry.
+    /// which clears it after the time the settings give, and says so in the
+    /// footer. The panel stays open. A password or a user name copied counts
+    /// as using the entry.
     fn copy(&mut self, what: Value, cx: &mut Context<Self>) {
         let Some(entry_id) = self.vm.read(cx).selected().map(|hit| hit.entry_id.clone()) else {
             return;
@@ -197,6 +230,9 @@ impl PanelView {
             }
         };
         let Some(value) = value else {
+            if matches!(what, Value::Password) {
+                self.update_vm(cx, |vm| vm.note(FooterNote::CopyFailed));
+            }
             return;
         };
         let clear_after =
@@ -206,10 +242,54 @@ impl PanelView {
         let written = ClipboardService::handle(cx).update(cx, |service, cx| {
             service.write_secret(value, clear_after, cx)
         });
-        if written.is_ok() && matches!(what, Value::Password | Value::User) {
+        let note = match (written, what) {
+            (Ok(()), Value::Password) => FooterNote::CopiedPassword,
+            (Ok(()), Value::User) => FooterNote::CopiedUser,
+            (Ok(()), Value::Code) => FooterNote::CopiedCode,
+            (Err(_), _) => FooterNote::CopyFailed,
+        };
+        if matches!(note, FooterNote::CopiedPassword | FooterNote::CopiedUser) {
             self.state
                 .update(cx, |state, _| state.mark_entry_used(&entry_id));
         }
+        self.update_vm(cx, |vm| vm.note(note));
+    }
+
+    /// Signs in to the selected SAP system through SAP GUI, with the entry
+    /// the panel selected, then closes the panel.
+    fn sign_in(&mut self, entry_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = entry_of(self.state.read(cx), entry_id) else {
+            return;
+        };
+        let Some(target) = launch::primary_launcher_for(&entry) else {
+            return;
+        };
+        let password = self.state.read(cx).password_for_entry(entry_id);
+        let context = launch::LaunchContext {
+            entry: &entry,
+            password: password.as_deref().map(String::as_str),
+            custom_fields: &entry.custom_fields,
+        };
+        if super::sign_in(target, context, cx).is_ok() {
+            self.state
+                .update(cx, |state, _| state.mark_entry_used(entry_id));
+            super::close_from(window, cx);
+        }
+    }
+
+    /// Opens the selected web login's website, if its address is http or
+    /// https, then closes the panel. Any other address is refused, and the
+    /// footer says that the website did not open.
+    fn open_website(&mut self, entry_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let url = entry_of(self.state.read(cx), entry_id).and_then(|entry| web_url(&entry.url));
+        let Some(url) = url else {
+            self.update_vm(cx, |vm| vm.note(FooterNote::WebsiteFailed));
+            return;
+        };
+        cx.open_url(&url);
+        self.state
+            .update(cx, |state, _| state.mark_entry_used(entry_id));
+        super::close_from(window, cx);
     }
 
     /// ⌘O: closes the panel and shows the selected entry in the main window,
@@ -391,6 +471,7 @@ impl Render for PanelView {
             .role(Role::Dialog)
             .aria_label(tr!("a11y.quick_access"))
             .key_context(PANEL_CONTEXT)
+            .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_close))
             .on_action(cx.listener(Self::on_move_up))
             .on_action(cx.listener(Self::on_move_down))

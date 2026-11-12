@@ -348,17 +348,26 @@ pub(crate) fn quit_from_anywhere(cx: &mut App) {
     request_quit(cx);
 }
 
-/// The Close Window menu item and Cmd+W outside the panel: lock and hide,
-/// for the main window and only while it is the key window. With the quick
-/// access panel in front, Cmd+W is the panel's (`ClosePanel`), and this does
-/// nothing.
+/// The Close Window menu item and Cmd+W outside the panel's search field:
+/// lock and hide the main window while it is the key window. Otherwise, with
+/// the quick access panel open, close the panel and nothing else; it is the
+/// window in front. The panel may be the window this runs in, so it closes
+/// right after.
 pub(crate) fn close_main_window(cx: &mut App) {
     if let Some(main) = main_window(cx) {
-        let _ = main.update(cx, |_root, window, cx| {
-            if window.is_window_active() {
+        let closed = main.update(cx, |_root, window, cx| {
+            let key = window.is_window_active();
+            if key {
                 request_window_close(window, cx);
             }
+            key
         });
+        if closed.unwrap_or(false) {
+            return;
+        }
+    }
+    if crate::ui::windows::panel::is_open(cx) {
+        cx.defer(crate::ui::windows::panel::close);
     }
 }
 
