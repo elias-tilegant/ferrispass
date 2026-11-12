@@ -164,7 +164,7 @@ mod tests {
 
     use gpui::{
         AnyElement, AssetSource as _, Hsla, InteractiveElement as _, IntoElement as _,
-        ParentElement as _, Styled as _, TestAppContext, px,
+        ParentElement as _, TestAppContext, px,
     };
     use gpui_component::IconName;
 
@@ -614,7 +614,12 @@ mod tests {
                 .render_single_frame(&bytes, 1.0)
                 .unwrap_or_else(|error| panic!("{icon:?} does not render: {error}"));
             let pixels = image.as_bytes(0).expect("one frame");
-            let alpha: Vec<u8> = pixels.chunks_exact(4).map(|pixel| pixel[3]).collect();
+            let alpha: Vec<u8> = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[3])
+                .collect();
             let covered = alpha.iter().filter(|&&a| a > 0).count();
             assert!(covered > 0, "{icon:?} draws nothing");
             assert!(covered < alpha.len(), "{icon:?} covers its whole square");

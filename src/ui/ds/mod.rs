@@ -209,20 +209,17 @@ pub(crate) mod tests {
 
     /// The fixed text sizes the scan looks for, built from pieces so that
     /// this file does not hold them.
-    fn fixed_sizes() -> [String; 2] {
-        ["13", "15"].map(|points| format!("{}({points}", "px"))
-    }
+    const FIXED_SIZES: [&str; 2] = [concat!("px(", "13"), concat!("px(", "15")];
 
-    /// Each line of `code` that sets one of [`fixed_sizes`] in pixels, as
+    /// Each line of `code` that sets one of [`FIXED_SIZES`] in pixels, as
     /// `file:line: text`. A size only counts where no digit follows, so
     /// 130 or 150 pixels are left alone.
     fn fixed_sizes_in(file: &str, code: &str) -> Vec<String> {
-        let sizes = fixed_sizes();
         code.lines()
             .enumerate()
             .filter(|(_, line)| {
-                sizes.iter().any(|size| {
-                    line.match_indices(size.as_str()).any(|(at, _)| {
+                FIXED_SIZES.iter().any(|size| {
+                    line.match_indices(size).any(|(at, _)| {
                         !line[at + size.len()..].starts_with(|c: char| c.is_ascii_digit())
                     })
                 })
@@ -262,7 +259,7 @@ pub(crate) mod tests {
             found.join("\n")
         );
         // The scan does see a fixed size, and leaves a larger number alone.
-        let [standard, large] = fixed_sizes();
+        let [standard, large] = FIXED_SIZES;
         let sample = format!("div().text_size({large}.)).w({standard}0.))");
         assert_eq!(fixed_sizes_in("sample.rs", &sample).len(), 1);
         assert!(fixed_sizes_in("sample.rs", &format!("w({standard}0.))")).is_empty());
