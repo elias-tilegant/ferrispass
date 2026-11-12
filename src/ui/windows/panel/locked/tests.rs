@@ -5,6 +5,7 @@
 //! front.
 
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -353,12 +354,14 @@ fn parts_of(cx: &mut TestAppContext, look: Look) -> Vec<probe::ComponentPart> {
         // tests read instead. The footer is read below, part by part.
         let Built {
             field,
+            dots,
             sentence,
             button: _,
             footer: _,
         } = build(&look, &focus);
         let mut parts = vec![
             probe::part("field", field),
+            probe::part("dots", dots),
             probe::part("sentence", sentence),
         ];
         parts.extend(crate::ui::ds::components::PanelFooter::parts(
@@ -373,14 +376,15 @@ fn parts_of(cx: &mut TestAppContext, look: Look) -> Vec<probe::ComponentPart> {
 /// The parts of the open locked panel as its window draws them: what
 /// `locked_parts` builds for the panel's own view as it is now, handlers
 /// and text style included, read one by one as assistive technology gets
-/// them.
+/// them. The button is not among them: only the design system turns it
+/// into a node, so the tests read it by `button_name`.
 fn drawn_parts(cx: &mut TestAppContext) -> Vec<probe::ComponentPart> {
     let view = view(cx);
     probe::in_frame(cx, move |window, cx| {
-        // Every element by name, as in `parts_of`; the button is read by
-        // `button_name` there.
+        // Every element by name, as in `parts_of`.
         let Built {
             field,
+            dots,
             sentence,
             button: _,
             footer,
@@ -391,6 +395,7 @@ fn drawn_parts(cx: &mut TestAppContext) -> Vec<probe::ComponentPart> {
         let footers = RefCell::new(vec![again, footer]);
         let mut parts = vec![
             probe::part("field", field),
+            probe::part("dots", dots),
             probe::part("sentence", sentence),
         ];
         parts.extend(crate::ui::ds::components::PanelFooter::parts(
@@ -738,10 +743,12 @@ fn escape_wipes_and_closes(cx: &mut TestAppContext) {
 // --------------------------------------------------- what it shows --
 
 /// The field shows a dot for each key and never the keys: its node is a
-/// text input named "Search" without a value, and no node of the locked
-/// panel holds the typed text, nor two of its characters side by side more
-/// often than with nothing typed. The parts are read as the panel's window
-/// draws them, from its own view, before and after typing.
+/// text input named "Search" without a value, the dots are a text without
+/// an id and a role, so GPUI writes no node for them, and no part holds the
+/// typed text, nor two of its characters side by side more often than with
+/// nothing typed. The parts are read as the panel's window draws them, from
+/// its own view, before and after typing. The button, which `drawn_parts`
+/// does not read, is left to `only_the_dots_show_how_much_was_typed`.
 #[gpui::test]
 fn typed_keys_show_as_dots_and_never_as_a_value(cx: &mut TestAppContext) {
     let app = locked_app(cx, Setup::TouchId);
@@ -767,6 +774,19 @@ fn typed_keys_show_as_dots_and_never_as_a_value(cx: &mut TestAppContext) {
     assert_eq!(field.role, Some(Role::TextInput));
     assert_eq!(field.node.label(), Some(tr!("a11y.search").as_ref()));
     assert_eq!(field.node.value(), None, "the field has a value");
+    let dots = parts
+        .iter()
+        .find(|part| part.name == "dots")
+        .expect("the dots");
+    assert_eq!(dots.role, None, "the dots have a node");
+    assert_eq!(dots.id, None, "the dots have a node");
+    // What the dots draw, which GPUI writes into no node for a text without
+    // an id.
+    assert_eq!(
+        dots.node.value(),
+        Some("\u{2022}".repeat(SENTINEL.chars().count()).as_str()),
+        "a dot per key"
+    );
     let found = leaks(&parts, &quiet, SENTINEL);
     assert!(
         found.is_empty(),
@@ -860,8 +880,10 @@ fn every_locked_case_renders_its_sentence(cx: &mut TestAppContext) {
 
 /// While locked, the panel shows nothing from a vault: a vault with a
 /// favorite and an entry used recently was open, the panel listed both,
-/// then the vault was locked. The panel lists no row, and no node it draws
-/// names an entry.
+/// then the vault was locked. The panel lists no row, and no part
+/// `drawn_parts` reads names an entry in its node. The button it does not
+/// read is the one `button` makes from the locked case, which
+/// `only_the_dots_show_how_much_was_typed` holds.
 #[gpui::test]
 fn the_locked_panel_shows_nothing_from_a_vault(cx: &mut TestAppContext) {
     let app = panel::tests::open_app(
@@ -1388,35 +1410,46 @@ fn the_locked_panel_never_logs() {
     );
 }
 
+/// The code of `locked.rs` without its comments and its tests, line for
+/// line as in the file.
+fn locked_code() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/windows/panel/locked.rs");
+    let code = probe::code_only(&std::fs::read_to_string(&path).expect("read locked.rs"));
+    code.split("#[cfg(test)]\npub(crate) mod tests;")
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Where the body of `function` is in `code`, braces included.
+fn body_of(code: &str, function: &str) -> Range<usize> {
+    let start = code
+        .find(function)
+        .unwrap_or_else(|| panic!("{function} in locked.rs"));
+    let open = start + code[start..].find('{').expect("a body");
+    open..open + probe::braced(&code[open..]).len()
+}
+
 /// Only `build` and `button` give an element of the locked panel an id, a
 /// role, a name, a value or a text of its own. The rest of `locked.rs`,
 /// `locked_parts` with the handlers and `assemble` with the layout among
-/// it, gives none, so the parts `drawn_parts` reads are everything the
-/// locked panel hands to assistive technology. Read through `code_only`,
-/// so comments and the tests do not count; a call made through a macro or
-/// a function in another file is past it.
+/// it, gives none, so what the locked panel hands to assistive technology
+/// is what those two make: the parts `drawn_parts` reads, and the button,
+/// which the tests read by its name. Read through `code_only`, so comments
+/// and the tests do not count; a call made through a macro or a function
+/// in another file is past it.
 #[test]
 fn only_build_names_what_the_locked_panel_draws() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/windows/panel/locked.rs");
-    let code = probe::code_only(&std::fs::read_to_string(&path).expect("read locked.rs"));
-    let mut code = code
-        .split("#[cfg(test)]\npub(crate) mod tests;")
-        .next()
-        .unwrap_or_default()
-        .to_string();
+    let mut code = locked_code();
     for function in ["fn build(", "fn button("] {
-        let start = code
-            .find(function)
-            .unwrap_or_else(|| panic!("{function} in locked.rs"));
-        let open = start + code[start..].find('{').expect("a body");
-        let end = open + probe::braced(&code[open..]).len();
+        let body = body_of(&code, function);
         // Blanked rather than cut, so a line found below is the line in
         // the file.
-        let blank: String = code[open..end]
+        let blank: String = code[body.clone()]
             .chars()
             .map(|c| if c == '\n' { '\n' } else { ' ' })
             .collect();
-        code.replace_range(open..end, &blank);
+        code.replace_range(body, &blank);
     }
     for function in ["fn locked_parts(", "fn assemble(", "fn render_locked("] {
         assert!(code.contains(function), "the scan reads {function}");
@@ -1449,5 +1482,54 @@ fn only_build_names_what_the_locked_panel_draws() {
         found.is_empty(),
         "an element of the locked panel gets a node or a text outside build:\n{}",
         found.join("\n")
+    );
+}
+
+/// How many characters were typed reaches no node through `build`: it
+/// reads the number once, for the dots, a text without an id. `build` and
+/// `button` put nothing inside an element, so nothing inside the field
+/// comes from them but the dots, which `assemble` puts there. And `build`
+/// hands the button on as `button` makes it from the locked case, so the
+/// button, whose node only the design system writes, gets nothing of what
+/// was typed. `footer_model`, which `build` calls, reads only whether
+/// anything was typed, and `drawn_parts` reads the footer's parts. Read
+/// through `code_only`; the number read under another name is past it.
+#[test]
+fn only_the_dots_show_how_much_was_typed() {
+    let code = locked_code();
+    let build = body_of(&code, "fn build(");
+    let bodies = [build.clone(), body_of(&code, "fn button(")];
+    let mut reads = Vec::new();
+    let mut inside = Vec::new();
+    let mut start = 0;
+    for (number, line) in code.split('\n').enumerate() {
+        let end = start + line.len();
+        if bodies
+            .iter()
+            .any(|body| start < body.end && body.start < end)
+        {
+            let at = format!("locked.rs:{}: {}", number + 1, line.trim());
+            for _ in line.matches(".dots") {
+                reads.push(at.clone());
+            }
+            if line.contains(".child(") || line.contains(".children(") {
+                inside.push(at);
+            }
+        }
+        start = end + 1;
+    }
+    assert!(
+        reads.len() == 1 && reads[0].ends_with("dots: Text::new_inaccessible(dots(look.dots)),"),
+        "build reads how much was typed for more than the dots, or draws the dots with a node:\n{}",
+        reads.join("\n")
+    );
+    assert!(
+        inside.is_empty(),
+        "build puts an element inside another:\n{}",
+        inside.join("\n")
+    );
+    assert!(
+        code[build].contains("button: button(&look.kind),"),
+        "build changes the button that `button` makes"
     );
 }

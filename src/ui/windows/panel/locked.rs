@@ -23,12 +23,16 @@
 //!    the panel and wipes the buffer, also while the vault still opens after
 //!    the answer.
 //! 4. The field is a plain element with the role of a text input and the
-//!    name "Search". It never has a value: the dots are drawn as text that
-//!    assistive technology does not read, and nothing typed reaches a node,
-//!    a log line or a `Debug` output. Every element the window draws comes
-//!    from [`PanelView::locked_parts`], which the tests read; only `build`
-//!    and `button` give one an id, a role, a name or a text, and `assemble`
-//!    only puts them in place.
+//!    name "Search". It never has a value: the dots are a text without an
+//!    id, which assistive technology does not read, and `build` reads how
+//!    many characters were typed only for them; the footer only says
+//!    whether there are any. Nothing typed reaches a node, a log line or a
+//!    `Debug` output. Every element the window draws comes from
+//!    [`PanelView::locked_parts`]; only `build` and `button` give one an
+//!    id, a role, a name or a text, and `assemble` only puts them in place.
+//!    The tests read the node of each part but the button, which only the
+//!    design system turns into a node; the button they read by its name,
+//!    and in the source, where `build` hands it on as `button` makes it.
 //! 5. While locked, the panel shows nothing from a vault: no favorite, no
 //!    recently used entry, no row and no title. A missing vault file is
 //!    named by its file name, cleaned up for display. Every text comes from
@@ -240,10 +244,13 @@ pub(super) struct Look {
 }
 
 /// Every element the locked panel draws, as [`PanelView::locked_parts`]
-/// hands them to `assemble`. The tests read these, so what the window shows
-/// of the locked panel is what they read.
+/// hands them to `assemble`. The tests read the node of each of them but
+/// the button, which only the design system turns into a node; the button
+/// they read by its name, [`button_name`].
 pub(super) struct Built {
     pub(super) field: Stateful<gpui::Div>,
+    /// One dot per character typed, which `assemble` puts into the field.
+    pub(super) dots: Text,
     pub(super) sentence: Text,
     pub(super) button: Option<Button>,
     pub(super) footer: PanelFooter,
@@ -308,17 +315,18 @@ fn dots(count: usize) -> SharedString {
 }
 
 /// Builds every element of the locked panel for `look`, with every id,
-/// role, name and text they carry. The field tracks `focus`;
+/// role, name and text they carry, each on its own: `assemble` puts the
+/// dots into the field. The field tracks `focus`;
 /// [`PanelView::locked_parts`] adds the handlers and the text style.
 pub(super) fn build(look: &Look, focus: &FocusHandle) -> Built {
     let field = div()
         .id("panel-locked-field")
         .track_focus(focus)
         .role(Role::TextInput)
-        .aria_label(tr!("a11y.search"))
-        .child(Text::new_inaccessible(dots(look.dots)));
+        .aria_label(tr!("a11y.search"));
     Built {
         field,
+        dots: Text::new_inaccessible(dots(look.dots)),
         sentence: Text::new(
             ElementId::Name("panel-locked-sentence".into()),
             sentence(&look.kind, &look.vault),
@@ -328,12 +336,13 @@ pub(super) fn build(look: &Look, focus: &FocusHandle) -> Built {
     }
 }
 
-/// Puts the parts of the locked panel in place: the field over the sentence
-/// and the button, the footer apart. It adds nothing to them that assistive
-/// technology reads.
+/// Puts the parts of the locked panel in place: the dots in the field, the
+/// field over the sentence and the button, the footer apart. It adds
+/// nothing to them that assistive technology reads.
 fn assemble(built: Built, secondary: Hsla) -> (AnyElement, PanelFooter) {
     let Built {
         field,
+        dots,
         sentence,
         button,
         footer,
@@ -343,7 +352,7 @@ fn assemble(built: Built, secondary: Hsla) -> (AnyElement, PanelFooter) {
         .flex()
         .flex_col()
         .gap(u(dimension::SPACE_8))
-        .child(field)
+        .child(field.child(dots))
         .child(
             div()
                 .text_style(TextStyle::Body)
@@ -643,13 +652,14 @@ impl PanelView {
 
     /// Every element of the locked panel as the window draws it: the parts
     /// `build` makes for what the panel shows now, with the field's key
-    /// handler and text style and the button's click handler. Nothing is
-    /// added to them on the way to the window.
+    /// handler and text style and the button's click handler. On the way to
+    /// the window they are only put in place.
     pub(super) fn locked_parts(&self, cx: &mut Context<Self>) -> Built {
         let look = self.look(cx);
         let text = cx.ds().colors.text_primary.hsla;
         let Built {
             field,
+            dots,
             sentence,
             button,
             footer,
@@ -669,6 +679,7 @@ impl PanelView {
         });
         Built {
             field,
+            dots,
             sentence,
             button,
             footer,
