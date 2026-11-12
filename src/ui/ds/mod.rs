@@ -9,6 +9,7 @@ pub mod a11y_prefs;
 pub mod components;
 pub mod icons;
 pub mod kit_theme;
+pub mod motion;
 pub mod tokens;
 pub mod typography;
 

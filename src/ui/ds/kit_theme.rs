@@ -8,10 +8,11 @@
 use std::rc::Rc;
 
 use gpui::{App, Global, Window, px};
-use gpui_component::{Theme, ThemeConfig, ThemeMode, ThemeSet};
+use gpui_component::{MotionTokens, Theme, ThemeConfig, ThemeMode, ThemeSet};
 
+use super::motion::{self, Token};
 use super::tokens::Mode;
-use super::typography;
+use super::typography::{self, u};
 use crate::app::settings::ThemeChoice;
 
 /// The theme set as the golden test wrote it.
@@ -94,8 +95,24 @@ pub(super) fn switch(
         theme.font_size = px(text_size);
         theme.focus_ring = true;
         theme.mono_font_family = mono_family.into();
+        follow_the_motion_tokens(&mut theme.motion);
     });
     Mode::new(Theme::global(cx).mode.is_dark(), increased_contrast)
+}
+
+/// The Kit's motion on the design system's steps: 0, 120, 180 and 240 ms
+/// instead of the Kit's 0, 120, 180 and 280, the firm spring for controls,
+/// the soft one for moves, and 8 points as the medium distance. The Kit's
+/// easing curves stay. The move spring keeps the Kit's settling tolerance,
+/// which is set for pixels rather than for values from 0 to 1.
+fn follow_the_motion_tokens(kit: &mut MotionTokens) {
+    kit.duration_instant = Token::Instant.base();
+    kit.duration_fast = Token::Micro.base();
+    kit.duration_normal = Token::Short.base();
+    kit.duration_slow = Token::Medium.base();
+    kit.spring_control = motion::spring_firm();
+    kit.spring_move = motion::spring_soft().with_epsilon(kit.spring_move.epsilon());
+    kit.distance_medium = u(8.0);
 }
 
 #[cfg(test)]
@@ -232,6 +249,48 @@ mod tests {
             );
             assert!(mode.increased_contrast());
             assert_kit_shows(mode, cx);
+        });
+    }
+
+    /// After a switch the Kit moves on the design system's steps, with its
+    /// springs and its medium distance, whatever it held before. `Spring`
+    /// has no accessors for its period and damping, so the springs are
+    /// compared through their debug output.
+    #[gpui::test]
+    fn the_kit_theme_takes_the_motion_values(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let pixel_tolerance = Theme::global(cx).motion.spring_move.epsilon();
+            for (choice, increased_contrast) in [
+                (ThemeChoice::Light, false),
+                (ThemeChoice::Dark, true),
+                (ThemeChoice::System, false),
+            ] {
+                Theme::update(cx, |theme| theme.motion = MotionTokens::default());
+                switch(choice, increased_contrast, 13., None, cx);
+                let kit = &Theme::global(cx).motion;
+                let steps: Vec<u128> = [
+                    kit.duration_instant,
+                    kit.duration_fast,
+                    kit.duration_normal,
+                    kit.duration_slow,
+                ]
+                .iter()
+                .map(|step| step.as_millis())
+                .collect();
+                assert_eq!(steps, [0, 120, 180, 240], "{choice:?}");
+                assert_eq!(
+                    format!("{:?}", kit.spring_control),
+                    format!("{:?}", motion::spring_firm()),
+                    "{choice:?}"
+                );
+                assert_eq!(
+                    format!("{:?}", kit.spring_move),
+                    format!("{:?}", motion::spring_soft().with_epsilon(pixel_tolerance)),
+                    "{choice:?}"
+                );
+                assert_eq!(kit.distance_medium, u(8.0), "{choice:?}");
+            }
         });
     }
 
