@@ -54,7 +54,6 @@ glossary.system_number               SAP entry details
 glossary.earlier_versions            entry history
 glossary.trash                       the trash
 
-quick.results.same_matches           the quick access panel
 quick.preview.user                   the quick access panel
 quick.preview.password               the quick access panel
 quick.no_match.text                  the quick access panel

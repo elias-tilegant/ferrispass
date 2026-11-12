@@ -10,13 +10,17 @@
 //! The groups carry the tiers [`rank`] uses for them, `Favorite`,
 //! `RecentlyUsed` and `Text`, so the panel can tell them apart; the list
 //! shows no headings for them yet.
+//!
+//! Two rows can stand for the same system, the same SID and client at two
+//! customers, say. [`twins`] counts them for every row, so the footer can
+//! say so for whichever row is selected.
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Local};
 
 use super::by_title;
-use super::rank::{RankInput, Ranked, Tier, rank};
+use super::rank::{RankInput, Ranked, Tier, rank, tie_count};
 use crate::domain::{VaultEntry, VaultSnapshot};
 
 /// The panel's list for `query`: [`rank`]'s order for a query with words,
@@ -69,6 +73,20 @@ pub fn rank_for_panel<'a>(
                 .map(|entry| ranked(entry, Tier::RecentlyUsed)),
         )
         .chain(rest.into_iter().map(|entry| ranked(entry, Tier::Text)))
+        .collect()
+}
+
+/// For each of `rows`, how many of them stand for the same system as that
+/// row, the row itself included: the same SID and client, or the same title,
+/// as [`tie_count`] compares them. 1 for a row without a twin.
+pub fn twins(rows: &[Ranked<'_>]) -> Vec<usize> {
+    (0..rows.len())
+        .map(|index| {
+            // `tie_count` compares every row with the first one.
+            let mut from_this_row = rows.to_vec();
+            from_this_row.swap(0, index);
+            tie_count(&from_this_row)
+        })
         .collect()
 }
 

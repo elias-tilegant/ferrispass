@@ -374,7 +374,7 @@ fn typing_ranks_the_open_vault(cx: &mut TestAppContext) {
         state
             .ranked_for_panel("nh", 9)
             .into_iter()
-            .map(|entry| entry.title)
+            .map(|(entry, _)| entry.title)
             .collect()
     });
     assert_eq!(titles, expected, "the order of the search everywhere else");
@@ -1157,6 +1157,70 @@ fn copies_go_through_the_clipboard_service_and_keep_the_panel_open(cx: &mut Test
     keys(cx, panel, "escape");
     keys(cx, panel, "down");
     assert_eq!(note(cx), None);
+}
+
+/// Two rows can stand for the same system, the same SID and client at two
+/// customers. While such a row is selected, the footer says how many rows
+/// do; while Return waits for a production system to be picked, the footer
+/// says that instead. A row without a twin gets no such sentence.
+#[gpui::test]
+fn rows_for_the_same_system_are_counted_in_the_footer(cx: &mut TestAppContext) {
+    let app = open_app(
+        cx,
+        &[
+            entry("NHP 100")
+                .user("N.WEISS")
+                .password("sp-nhp-north")
+                .field("SAP_HOST", "nhp-north.example")
+                .field("SAP_INSTANCE", "00")
+                .starred(),
+            entry("NHP 100")
+                .user("K.BRAUN")
+                .password("sp-nhp-south")
+                .field("SAP_HOST", "nhp-south.example")
+                .field("SAP_INSTANCE", "00")
+                .starred(),
+            entry("NHQ 100")
+                .user("N.WEISS")
+                .password("sp-nhq")
+                .field("SAP_HOST", "nhq.example")
+                .field("SAP_INSTANCE", "00"),
+        ],
+    );
+    let panel = app.open_panel(cx);
+    let vm = app.vm(cx);
+    let tone = |cx: &mut TestAppContext| vm.read_with(cx, |vm, _| vm.footer().tone);
+    let two = FooterTone::Tie(crate::tp!("quick.results.same_matches", 2));
+
+    // The empty search starts on a production system: Return waits, and the
+    // footer says so rather than counting.
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHP 100"));
+    assert_eq!(tone(cx), FooterTone::ProductionSelectFirst);
+    keys(cx, panel, "cmd-1");
+    assert_eq!(tone(cx), two, "the picked row has a twin");
+    let model = vm.read_with(cx, |vm, _| vm.footer());
+    assert_eq!(model.primary, Some(CommandId::ENTRY_SAP_LOGIN), "Return signs in");
+
+    // Typed, both NHP 100 rows come first; each has the other as its twin.
+    type_into(cx, panel, "nhp 100");
+    assert_eq!(tone(cx), two);
+    let text = cx.update(|cx| footer(&vm.read(cx).footer()).description_text());
+    let words = crate::tp!("quick.results.same_matches", 2);
+    assert!(
+        text.contains(words.as_ref()),
+        "the selected row's description says it: {text}"
+    );
+    keys(cx, panel, "down");
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHP 100"));
+    assert_eq!(tone(cx), two, "the second NHP 100");
+
+    // NHQ 100 has no twin, also in a list whose first row has one.
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "100");
+    assert_eq!(tone(cx), two);
+    keys(cx, panel, "cmd-3");
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHQ 100"));
+    assert_eq!(tone(cx), FooterTone::Normal);
 }
 
 /// The search field's own Copy and Cut, from a key, the Edit menu or the

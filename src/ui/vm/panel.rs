@@ -16,6 +16,10 @@
 //!   has not picked with ↓ or ⌘1 to ⌘9. The footer says so instead of naming
 //!   an action, and [`FooterModel::primary`] is `None`. The rule itself is
 //!   the registry's, the availability of `entry.primary`; this model asks it.
+//! - When the selected row stands for the same system as other rows, the
+//!   same SID and client at two customers, say, the footer counts them
+//!   ("2 identical matches"). While Return waits for a production system to
+//!   be picked, the footer says that instead.
 //! - A row is named after its entry: kind and title, the role in words, the
 //!   client, the user and the vault. The letters of a role, such as PRD,
 //!   stand on the row's chip and never in its name.
@@ -34,7 +38,7 @@ use crate::app::registry::{
 };
 use crate::app::{AppState, VaultStatus};
 use crate::domain::VaultEntry;
-use crate::tr;
+use crate::{tp, tr};
 use crate::ui::ds::components::{
     ChipTone, FooterTone, ListSelection, ResultsDrawn, RowParts, VaultBadge, move_selection,
     select_by_number,
@@ -62,10 +66,13 @@ pub struct Hit {
     pub url: UrlKind,
     pub has_username: bool,
     pub has_otp: bool,
+    /// How many listed rows stand for the same system as this one, this one
+    /// included: 1 for a row without a twin.
+    pub twins: usize,
 }
 
 impl Hit {
-    fn new(entry: &VaultEntry, vault: &SharedString) -> Self {
+    fn new(entry: &VaultEntry, twins: usize, vault: &SharedString) -> Self {
         let shown = shown_fields(entry);
         let kind = kinds::classify(&shown, None);
         let chip = match &kind {
@@ -90,6 +97,7 @@ impl Hit {
             url: UrlKind::of(&shown.url),
             has_username: !shown.username.trim().is_empty(),
             has_otp: shown.has_otp,
+            twins,
             kind,
         }
     }
@@ -114,6 +122,7 @@ impl std::fmt::Debug for Hit {
             .field("production", &self.production)
             .field("has_username", &self.has_username)
             .field("has_otp", &self.has_otp)
+            .field("twins", &self.twins)
             .finish_non_exhaustive()
     }
 }
@@ -395,7 +404,7 @@ impl PanelVm {
         let hits = state
             .ranked_for_panel(&self.query, MAX_HITS)
             .iter()
-            .map(|entry| Hit::new(entry, &name))
+            .map(|(entry, twins)| Hit::new(entry, *twins, &name))
             .collect();
         self.vault_name = Some(name);
         self.set_results(hits);
@@ -544,6 +553,13 @@ impl PanelVm {
                 FooterTone::ProductionSelectFirst,
             ),
             Enablement::Hidden => (None, None, FooterTone::Normal),
+        };
+        // A twin of the selected row is counted, unless the footer says
+        // that Return waits for a production system to be picked.
+        let tone = if tone == FooterTone::Normal && hit.twins > 1 {
+            FooterTone::Tie(tp!("quick.results.same_matches", hit.twins))
+        } else {
+            tone
         };
         let mut more = Vec::new();
         if main_action == CommandId::ENTRY_COPY_PASSWORD {
