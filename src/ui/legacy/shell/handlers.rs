@@ -434,7 +434,7 @@ impl AppShell {
         // Rotates System, Light, Dark and remembers the choice. It used to
         // flip the live theme and forget it on quit.
         let next = self.settings.theme.next();
-        crate::ui::ds::apply_choice(next, Some(window), cx);
+        crate::ui::ds::apply_choice(next, self.settings.text_size, Some(window), cx);
         let mut settings = self.settings.clone();
         settings.theme = next;
         self.update_settings(settings, cx);

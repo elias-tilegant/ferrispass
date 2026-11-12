@@ -102,7 +102,7 @@ pub fn run() {
         // first paint has to be in the right appearance and the right place.
         let startup_settings = settings::load();
         crate::keepass::limits::set_confirmed_kdf_costs(&startup_settings.confirmed_kdf_costs);
-        crate::ui::ds::init(startup_settings.theme, cx);
+        crate::ui::ds::init(startup_settings.theme, startup_settings.text_size, cx);
 
         let app_state = cx.new(|cx| {
             let mut state = AppState::with_resume();

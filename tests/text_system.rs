@@ -29,7 +29,7 @@ mod macos {
     use std::sync::Arc;
 
     use ferrispass::app::assets::font_bytes;
-    use ferrispass::app::settings::ThemeChoice;
+    use ferrispass::app::settings::{TextSize, ThemeChoice};
     use ferrispass::ui::ds;
     use ferrispass::ui::ds::typography::{
         self, Family, MEDIUM, MONO_FALLBACK, MONO_FAMILY, MONO_MEDIUM, TextStyle, UI_FAMILY,
@@ -160,7 +160,7 @@ mod macos {
                     .add_fonts(font_bytes())
                     .expect("add the bundled fonts");
                 gpui_component::init(cx);
-                ds::init(ThemeChoice::Light, cx);
+                ds::init(ThemeChoice::Light, TextSize::Standard, cx);
             });
             for check in to_run {
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -359,7 +359,7 @@ mod macos {
                 "{MONO_FAMILY} is installed on this Mac, so it cannot go missing"
             );
             gpui_component::init(cx);
-            ds::init(ThemeChoice::Light, cx);
+            ds::init(ThemeChoice::Light, TextSize::Standard, cx);
             assert_eq!(
                 typography::mono_family(cx),
                 MONO_FALLBACK,
@@ -367,7 +367,7 @@ mod macos {
             );
             assert_eq!(TextStyle::Secret.family().name(), MONO_FALLBACK);
             for choice in [ThemeChoice::Light, ThemeChoice::Dark] {
-                ds::apply_choice(choice, None, cx);
+                ds::apply_choice(choice, TextSize::Standard, None, cx);
                 assert_eq!(
                     Theme::global(cx).mono_font_family.as_ref(),
                     MONO_FALLBACK,

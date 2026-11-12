@@ -18,7 +18,7 @@ use gpui::{App, Window};
 pub use a11y_prefs::A11yPrefs;
 pub use tokens::{ActiveTokens, Color, ColorSet, DsTokens, Mode};
 
-use crate::app::settings::ThemeChoice;
+use crate::app::settings::{TextSize, ThemeChoice};
 
 /// Everything the look of the app depends on.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,31 +27,40 @@ pub struct Appearance {
     pub choice: ThemeChoice,
     /// What macOS says about contrast, motion and VoiceOver.
     pub prefs: A11yPrefs,
-    /// Base text size in points. There is no setting for it yet, so it is
-    /// always [`tokens::TEXT_SIZE_STANDARD`].
+    /// Base text size in points, from the text size setting through
+    /// [`text_size_points`].
     pub text_size: f32,
 }
 
 impl Appearance {
-    /// `choice` with the accessibility settings macOS reports right now.
-    pub fn current(choice: ThemeChoice) -> Self {
+    /// `choice` at `text_size`, with the accessibility settings macOS reports
+    /// right now.
+    pub fn current(choice: ThemeChoice, text_size: TextSize) -> Self {
         Self {
             choice,
             prefs: a11y_prefs::read(),
-            text_size: tokens::TEXT_SIZE_STANDARD,
+            text_size: text_size_points(text_size),
         }
+    }
+}
+
+/// The base text size in points for the setting: the two text size tokens.
+pub fn text_size_points(text_size: TextSize) -> f32 {
+    match text_size {
+        TextSize::Standard => tokens::TEXT_SIZE_STANDARD,
+        TextSize::Large => tokens::TEXT_SIZE_LARGE,
     }
 }
 
 /// Startup: after the fonts are added and `gpui_component::init` ran, before
 /// the first window opens, so the first frame is already right.
-pub fn init(choice: ThemeChoice, cx: &mut App) {
+pub fn init(choice: ThemeChoice, text_size: TextSize, cx: &mut App) {
     // The bundled fonts are in by now, so this is where the mono family is
     // decided: Atkinson Hyperlegible Mono if the text system has it, else
     // the fallback.
     typography::mono_family(cx);
     kit_theme::install(cx);
-    apply(cx, Appearance::current(choice));
+    apply(cx, Appearance::current(choice, text_size));
 }
 
 /// Puts `appearance` into effect: the Kit theme, the tokens behind `cx.ds()`,
@@ -60,11 +69,17 @@ pub fn apply(cx: &mut App, appearance: Appearance) {
     apply_in(appearance, None, cx);
 }
 
-/// Switches to `choice` with the current accessibility settings. `System`
-/// reads the appearance again, so this also handles a change in macOS while
-/// the app runs.
-pub fn apply_choice(choice: ThemeChoice, window: Option<&mut Window>, cx: &mut App) {
-    apply_in(Appearance::current(choice), window, cx);
+/// Switches to `choice` at `text_size` with the current accessibility
+/// settings. `System` reads the appearance again, so this also handles a
+/// change in macOS while the app runs. A new text size takes effect at once:
+/// the Kit sets the rem size from it on the next frame.
+pub fn apply_choice(
+    choice: ThemeChoice,
+    text_size: TextSize,
+    window: Option<&mut Window>,
+    cx: &mut App,
+) {
+    apply_in(Appearance::current(choice, text_size), window, cx);
 }
 
 fn apply_in(appearance: Appearance, window: Option<&mut Window>, cx: &mut App) {
@@ -86,11 +101,13 @@ fn apply_in(appearance: Appearance, window: Option<&mut Window>, cx: &mut App) {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::path::Path;
     use std::sync::{Mutex, MutexGuard};
 
-    use gpui::TestAppContext;
+    use gpui::{IntoElement as _, TestAppContext};
     use gpui_component::Theme;
 
+    use super::components::probe;
     use super::*;
 
     /// `apply` also sets the mode of the old screens' colors, which is one
@@ -146,5 +163,108 @@ pub(crate) mod tests {
                 );
             }
         });
+    }
+
+    /// Large text is 15 points, in the Kit theme and in the tokens alike,
+    /// from the setting alone: every theme choice takes it along.
+    #[gpui::test]
+    fn large_text_sets_fifteen_points_in_the_kit_theme_and_the_tokens(cx: &mut TestAppContext) {
+        let _lock = lock_mode();
+        assert_eq!(text_size_points(TextSize::Standard), 13.0);
+        assert_eq!(text_size_points(TextSize::Large), 15.0);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            for choice in [ThemeChoice::Light, ThemeChoice::Dark, ThemeChoice::System] {
+                assert_eq!(Appearance::current(choice, TextSize::Large).text_size, 15.0);
+                apply_choice(choice, TextSize::Large, None, cx);
+                assert_eq!(f32::from(Theme::global(cx).font_size), 15.0, "{choice:?}");
+                assert_eq!(cx.ds().text_size, 15.0, "{choice:?}");
+                apply_choice(choice, TextSize::Standard, None, cx);
+                assert_eq!(f32::from(Theme::global(cx).font_size), 13.0, "{choice:?}");
+                assert_eq!(cx.ds().text_size, 13.0, "{choice:?}");
+            }
+        });
+    }
+
+    /// A new text size reaches an open window on its next frame: the Kit
+    /// sets the window's rem size from it, and everything laid out in
+    /// rems follows. Back and forth, without opening the window again.
+    #[gpui::test]
+    fn switching_the_text_size_applies_without_a_restart(cx: &mut TestAppContext) {
+        let _lock = lock_mode();
+        let cx = probe::window(cx, |_, _| gpui::div().into_any_element());
+        for (size, points) in [
+            (TextSize::Large, 15.0),
+            (TextSize::Standard, 13.0),
+            (TextSize::Large, 15.0),
+        ] {
+            cx.update(|window, cx| apply_choice(ThemeChoice::Light, size, Some(window), cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let rem = cx.update(|window, _| f32::from(window.rem_size()));
+            assert_eq!(rem, points, "{size:?}");
+            assert_eq!(cx.update(|_, cx| cx.ds().text_size), points, "{size:?}");
+        }
+    }
+
+    /// The fixed text sizes the scan looks for, built from pieces so that
+    /// this file does not hold them.
+    fn fixed_sizes() -> [String; 2] {
+        ["13", "15"].map(|points| format!("{}({points}", "px"))
+    }
+
+    /// Each line of `code` that sets one of [`fixed_sizes`] in pixels, as
+    /// `file:line: text`. A size only counts where no digit follows, so
+    /// 130 or 150 pixels are left alone.
+    fn fixed_sizes_in(file: &str, code: &str) -> Vec<String> {
+        let sizes = fixed_sizes();
+        code.lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                sizes.iter().any(|size| {
+                    line.match_indices(size.as_str()).any(|(at, _)| {
+                        !line[at + size.len()..].starts_with(|c: char| c.is_ascii_digit())
+                    })
+                })
+            })
+            .map(|(at, line)| format!("{file}:{}: {}", at + 1, line.trim()))
+            .collect()
+    }
+
+    /// The text size is a number in the tokens and the setting only. No
+    /// component and no window of the new screens sets 13 or 15 pixels: a
+    /// fixed size would stay put when the text size changes. Comments and
+    /// inline test modules do not count; the old screens are left out.
+    #[test]
+    fn no_fixed_text_size_outside_tokens() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for dir in ["src/ui/ds", "src/ui/windows"] {
+            probe::rust_files(&root.join(dir), &mut files);
+        }
+        files.sort();
+        assert!(files.len() > 10, "the scan found {} files", files.len());
+        let found: Vec<String> = files
+            .iter()
+            .flat_map(|file| {
+                let source = std::fs::read_to_string(file).expect("read source");
+                let name = file
+                    .strip_prefix(root)
+                    .unwrap_or(file)
+                    .display()
+                    .to_string();
+                fixed_sizes_in(&name, &probe::code_only(&source))
+            })
+            .collect();
+        assert!(
+            found.is_empty(),
+            "take the size from the tokens or the text styles:\n{}",
+            found.join("\n")
+        );
+        // The scan does see a fixed size, and leaves a larger number alone.
+        let [standard, large] = fixed_sizes();
+        let sample = format!("div().text_size({large}.)).w({standard}0.))");
+        assert_eq!(fixed_sizes_in("sample.rs", &sample).len(), 1);
+        assert!(fixed_sizes_in("sample.rs", &format!("w({standard}0.))")).is_empty());
     }
 }
