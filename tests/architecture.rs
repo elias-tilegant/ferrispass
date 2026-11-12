@@ -1481,6 +1481,9 @@ fn content_reads_are_found_outside_tests_only() {
 /// line here and stands out in review.
 const ACTIVITY_CALL_SITES: &[(&str, &str)] = &[
     ("src/ui/legacy/shell/render.rs", "WindowInput"),
+    // A press of the quick access shortcut, when the one loop for the global
+    // shortcuts hands it on.
+    ("src/app/services/hotkeys.rs", "Hotkey"),
     // The test of the clock as the app builds it. Its second thread stands in
     // for the one that will listen for the global shortcuts; it is not input.
     ("tests/idle_clock.rs", "Hotkey"),

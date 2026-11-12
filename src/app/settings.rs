@@ -68,6 +68,14 @@ pub struct AppSettings {
     /// a bad combo leaves the feature off with a Settings-tab error.
     #[serde(default = "default_auto_type_hotkey")]
     pub auto_type_hotkey: String,
+    /// Whether ⌃⌥⌘P opens the quick access panel from any app. On by
+    /// default: the panel is the quick way to a password, and the shortcut
+    /// does nothing until it is pressed.
+    ///
+    /// `#[serde(default = "default_true")]` so a settings.json written
+    /// before the switch existed reads it as on. Older builds ignore it.
+    #[serde(default = "default_true")]
+    pub quick_access_hotkey_enabled: bool,
     /// Auto-type sequence template (KeePass placeholder grammar). The
     /// default mirrors `{USERNAME}{TAB}{PASSWORD}{ENTER}` - the
     /// canonical login-form sequence used by ~every browser-form on
@@ -314,6 +322,7 @@ impl Default for AppSettings {
             launch_cleanup_secs: DEFAULT_LAUNCH_CLEANUP_SECS,
             auto_type_enabled: false,
             auto_type_hotkey: default_auto_type_hotkey(),
+            quick_access_hotkey_enabled: true,
             auto_type_sequence: default_auto_type_sequence(),
             biometric_allow_passcode_fallback: true,
             auto_sync_secs: default_auto_sync_secs(),

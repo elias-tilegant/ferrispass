@@ -763,7 +763,8 @@ const AUTO_TYPE_SEQUENCE_PRESETS: &[(&str, &str)] = &[
 fn auto_type_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoElement {
     let settings = shell.settings().clone();
     let trusted = shell.auto_type_is_trusted();
-    let hotkey_err = shell.auto_type_hotkey_error().map(String::from);
+    let hotkey_err =
+        crate::app::services::hotkeys::error(crate::app::services::hotkeys::Shortcut::AutoType, cx);
     let sequence_err = shell
         .auto_type_sequence_error()
         .map(|e| format!("Sequence invalid: {e}"));

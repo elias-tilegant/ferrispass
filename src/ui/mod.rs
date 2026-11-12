@@ -11,6 +11,7 @@ pub mod palette;
 mod palette_tests;
 #[allow(deprecated)]
 pub mod widgets;
+pub mod windows;
 
 pub use legacy::screens;
 pub use legacy::shell::AppShell;

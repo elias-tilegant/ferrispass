@@ -73,6 +73,22 @@ impl AppShell {
         .detach();
     }
 
+    /// The way in for the global Auto-Type shortcut, from the app-level loop
+    /// in `services::hotkeys`. The run needs this window (its notifications
+    /// land there), so it goes through the window handle rather than
+    /// `App::dispatch_action`, which routes through `active_window()`: that
+    /// is `None` while another app holds the focus, which is exactly when
+    /// the shortcut is pressed. A window that is gone ends it quietly.
+    pub(crate) fn dispatch_global_auto_type(shell: Entity<AppShell>, cx: &mut gpui::App) {
+        let window_handle = shell.read(cx).window_handle;
+        let _ = window_handle.update(cx, |_root, window, app| {
+            shell.update(app, |shell, cx| {
+                let cancellation = shell.state.read(cx).auto_type_cancellation();
+                shell.perform_auto_type(None, cancellation, window, cx);
+            });
+        });
+    }
+
     /// Shared implementation between the global-hotkey and in-app
     /// routes. `force_entry_id` = `Some(id)` skips the URL-matching
     /// step and types the given entry's credentials regardless of
@@ -93,6 +109,8 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(test)]
+        tests::note_run(window.window_handle());
         // Stale countdowns and queued hotkey work are deliberately silent.
         if cancellation.is_cancelled() {
             return;
@@ -252,5 +270,86 @@ impl AppShell {
                 window.push_notification(message, cx);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::app::services::hotkeys;
+    use crate::autotype::hotkey::fake;
+    use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
+
+    thread_local! {
+        static RUNS: RefCell<Vec<AnyWindowHandle>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Called at the top of `perform_auto_type` in test builds, with the
+    /// window it runs in.
+    pub(super) fn note_run(window: AnyWindowHandle) {
+        RUNS.with(|runs| runs.borrow_mut().push(window));
+    }
+
+    fn runs() -> Vec<AnyWindowHandle> {
+        RUNS.with(|runs| runs.borrow().clone())
+    }
+
+    fn pressed(id: u32) -> GlobalHotKeyEvent {
+        GlobalHotKeyEvent {
+            id,
+            state: HotKeyState::Pressed,
+        }
+    }
+
+    /// The Auto-Type shortcut used to have a loop of its own on the main
+    /// window. It now shares the app-level loop with the quick access
+    /// shortcut, and a press still runs Auto-Type once, in the main window.
+    /// A press of the quick access shortcut does not.
+    #[gpui::test]
+    fn the_auto_type_hotkey_still_reaches_the_shell(cx: &mut TestAppContext) {
+        fake::reset();
+        RUNS.with(|runs| runs.borrow_mut().clear());
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::app::actions::init(cx);
+            ClipboardService::install_for_test(
+                cx,
+                Box::new(FakePasteboard::new(AccessBehavior::Default)),
+            );
+        });
+        let state = cx.new(|_| AppState::default());
+        cx.update(|cx| crate::app::open_main_window_for_test(cx, state));
+        cx.run_until_parked();
+        let shell = cx
+            .update(|cx| crate::app::with_shared_shell(cx, |_, cx| cx.entity()))
+            .expect("the main window's shell");
+        let main_window = shell.read_with(cx, |shell, _| shell.window_handle);
+        shell.update(cx, |shell, cx| {
+            shell.settings.quick_access_hotkey_enabled = true;
+            shell.settings.auto_type_enabled = true;
+            shell.sync_auto_type_listener(cx);
+        });
+        let registered = cx.update(|cx| hotkeys::registered(cx));
+        let auto_type = registered.auto_type.expect("Auto-Type registered");
+        let quick_access = registered.quick_access.expect("quick access registered");
+
+        fake::send(pressed(quick_access));
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(runs().is_empty(), "the quick access shortcut ran Auto-Type");
+
+        fake::send(pressed(auto_type));
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_eq!(
+            runs(),
+            vec![main_window],
+            "one press, one Auto-Type run, in the main window"
+        );
     }
 }

@@ -185,3 +185,11 @@ fn open_main_window(
     })
     .detach();
 }
+
+/// What `run` does to bring up the main window, for tests: share `state` the
+/// way `run` does and open the main window on it.
+#[cfg(test)]
+pub(crate) fn open_main_window_for_test(cx: &mut App, state: Entity<AppState>) {
+    cx.set_global(SharedAppState(state.clone()));
+    open_main_window(cx, state, None);
+}

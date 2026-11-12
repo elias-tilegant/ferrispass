@@ -221,10 +221,10 @@ fn remember_window_geometry(window: &Window) {
 /// every other Mac password manager behaves: the Dock icon stays and clicking
 /// it brings the window back at the unlock screen. Quitting is Cmd+Q.
 ///
-/// The window is hidden, not destroyed. The Auto-Type hotkey listener and the
-/// auto-sync timer live on the window's view; tearing it down would silently
-/// switch off a feature the user configured, and a global hotkey that stops
-/// working after Cmd+W is worse than no Cmd+W behaviour at all.
+/// The window is hidden, not destroyed. The auto-sync timer lives on the
+/// window's view; tearing it down would silently switch off a feature the
+/// user configured. The global shortcuts run at app level
+/// (`services::hotkeys`), so they keep working behind the hidden window.
 ///
 /// Native window-close callbacks run while that window is already on GPUI's
 /// update stack, so notify it directly instead of resolving `active_window`.
