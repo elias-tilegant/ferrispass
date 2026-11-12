@@ -357,6 +357,65 @@ mod tests {
         );
     }
 
+    /// A shortcut switched off reacts to nothing: an event with the id it
+    /// had while it was registered neither opens the panel nor moves the
+    /// idle clock, and neither runs Auto-Type. The other shortcut keeps the
+    /// loop running meanwhile, and once both are on again, each press does
+    /// its work.
+    #[gpui::test]
+    fn a_switched_off_shortcut_does_nothing_with_its_old_id(cx: &mut TestAppContext) {
+        use crate::app::services::activity;
+        use crate::ui::windows::panel;
+        use std::time::SystemTime;
+
+        let _app = panel::tests::open_app(cx, &[panel::tests::entry("Zq panel fixture")]);
+        RUNS.with(|runs| runs.borrow_mut().clear());
+        let shell = cx
+            .update(|cx| crate::app::with_shared_shell(cx, |_, cx| cx.entity()))
+            .expect("the main window's shell");
+        let switch = |cx: &mut TestAppContext, quick_access: bool, auto_type: bool| {
+            shell.update(cx, |shell, cx| {
+                shell.settings.quick_access_hotkey_enabled = quick_access;
+                shell.settings.auto_type_enabled = auto_type;
+                shell.sync_auto_type_listener(cx);
+            });
+        };
+        let press = |cx: &mut TestAppContext, id: u32| {
+            fake::send(pressed(id));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+        };
+        switch(cx, true, true);
+        let registered = cx.update(|cx| hotkeys::registered(cx));
+        let quick_access = registered.quick_access.expect("quick access registered");
+        let auto_type = registered.auto_type.expect("Auto-Type registered");
+        let ten_minutes = Duration::from_secs(600);
+
+        switch(cx, false, true);
+        assert_eq!(cx.update(|cx| hotkeys::registered(cx)).quick_access, None);
+        activity::reset(SystemTime::now() - ten_minutes);
+        press(cx, quick_access);
+        assert!(
+            !cx.update(|cx| panel::is_open(cx)),
+            "the switched-off shortcut opened the panel"
+        );
+        assert!(
+            activity::idle_for(SystemTime::now()) >= ten_minutes,
+            "the switched-off shortcut counted as activity"
+        );
+
+        switch(cx, true, false);
+        assert_eq!(cx.update(|cx| hotkeys::registered(cx)).auto_type, None);
+        press(cx, auto_type);
+        assert!(runs().is_empty(), "the switched-off shortcut ran Auto-Type");
+
+        switch(cx, true, true);
+        press(cx, auto_type);
+        assert_eq!(runs().len(), 1, "Auto-Type on again, a press runs it");
+        press(cx, quick_access);
+        assert!(cx.update(|cx| panel::is_open(cx)), "quick access on again");
+    }
+
     /// The quick access panel takes the keyboard while the app behind it
     /// stays in front. Auto-Type reads that app, so a run would find its
     /// entry and type the user name and the password into the panel's
