@@ -1,8 +1,8 @@
 //! Motion: how long a change takes on screen, and whether anything moves.
 //!
-//! Every animation takes its time from [`duration`], with one of five
-//! [`Token`]s and the kind of [`Input`] that caused it. Two rules sit on top
-//! of the tokens:
+//! The app's own animations take their time from [`duration`], with one of
+//! five [`Token`]s and the kind of [`Input`] that caused it. Two rules sit on
+//! top of the tokens:
 //!
 //! - After a key press every duration is zero. Someone at the keyboard
 //!   waits for nothing.
@@ -17,9 +17,16 @@
 //! [`A11yPrefs`](super::A11yPrefs) every time it runs, since gpui-base reads
 //! the macOS setting only once, at startup.
 //!
-//! `with_animation` and `with_spring` appear only under `src/ui/ds/`, so
-//! every motion in the app passes through here; a test holds the rest of
-//! `src/` to that.
+//! Outside `src/ui/ds/` no code calls `with_animation` or `with_spring`, so
+//! the app's own animations there come through here; a test holds the rest
+//! of `src/` to that. The test does not look inside `src/ui/ds/`: a component
+//! there could animate with a fixed time and pass it.
+//!
+//! The Kit's components animate on their own and never ask [`duration`].
+//! Those that read the theme's motion values follow the same steps, since
+//! `kit_theme` puts the values there; dialogs, sheets, popovers and tooltips
+//! keep fixed times of their own. The keyboard rule reaches none of them: a
+//! Kit control animates after a key press too.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -391,10 +398,11 @@ mod tests {
             .collect()
     }
 
-    /// Every motion goes through this module: outside `src/ui/ds/`, no code
-    /// in `src/` animates. Comments and inline test modules do not count,
-    /// and neither do the files that only hold tests. A test that animates
-    /// something outside the design system still goes through here.
+    /// Outside `src/ui/ds/`, no code in `src/` calls `with_animation` or
+    /// `with_spring`; `src/ui/ds/` itself is not scanned. Comments and inline
+    /// test modules do not count, and neither do the files that only hold
+    /// tests. A test that animates something outside the design system still
+    /// goes through here.
     #[test]
     fn no_animation_outside_the_design_system() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));

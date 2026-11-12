@@ -53,7 +53,7 @@ Each is Lucide's own shape moved onto the 16 grid, 2 to 22 on the 24 grid onto t
 
 ## Motion
 
-`ui::ds::motion::duration(token, input, cx)` is where an animation takes its time. The tokens and what they are for:
+`ui::ds::motion::duration(token, input, cx)` is where the app's own animations take their time. The tokens and what they are for:
 
 | Token | Time | For |
 |---|---|---|
@@ -76,9 +76,9 @@ The kind of the last input comes from the old main window's root handlers in `sr
 
 `Moment` is the gate for Ferris's moments. `may_run(occasion, input, cx)` answers once per occasion: the first start and the first success once at all, waking up once per unlock, after `begin_unlock`. The caller passes the input that finished the step: a Touch ID success is `Input::System` even when Return opened the prompt, so Ferris wakes up; Return in the password field is `Input::Keyboard`, so he does not, and shows himself awake at once. Asking uses the occasion up whether the moment runs or not. Nothing calls `Moment` yet; it comes in with Ferris.
 
-The Kit's components animate with their own motion values. After every theme switch, `kit_theme::switch` puts them on the same steps: 0, 120, 180 and 240 ms instead of the Kit's 0, 120, 180 and 280, the firm spring for controls and the soft one for moves (keeping the Kit's settling tolerance for pixels), and 8 points as the medium distance, in rems. The Kit's easing curves stay.
+The Kit's components animate on their own and never ask `duration`. Some of them, such as the switch, the checkbox and the border of an input group, read the motion values in the Kit theme, and after every theme switch `kit_theme::switch` puts those on the same steps: 0, 120, 180 and 240 ms instead of the Kit's 0, 120, 180 and 280, the firm spring for controls and the soft one for moves (keeping the Kit's settling tolerance for pixels), and 8 points as the medium distance, in rems. The Kit's easing curves stay. Others, among them dialogs, sheets, popovers and tooltips, keep fixed times of their own. The keyboard rule reaches no Kit animation: a Kit control animates after a key press as well.
 
-No code outside `src/ui/ds/` may call `with_animation` or `with_spring`, so every motion goes through this module. Today no code outside it calls either, the old screens included, so the scan has no exceptions.
+No code outside `src/ui/ds/` may call `with_animation` or `with_spring`, so the app's own animations outside the design system go through this module. Today no code outside it calls either, the old screens included, so the scan has no exceptions. The scan does not look inside `src/ui/ds/`.
 
 ## The text size setting
 
@@ -157,6 +157,8 @@ Not run yet; it comes with the preview build and the design gallery.
 - `duration` gives a time, not the kind of change. That a transition with Reduce Motion only fades, and that a caller asks `springs_allowed` before it moves anything, rests on the callers, and there are none yet.
 - Only the old main window notes the input kind. A window that does not go through its root handlers, such as the quick access panel, has to call `note_input` itself.
 - `no_animation_outside_the_design_system` reads source text. A call through a macro, a re-export under another name, or gpui-base's lower level `transition` and `spring` functions would pass it.
+- `no_animation_outside_the_design_system` does not look inside `src/ui/ds/`. A component there that animates with a fixed time, or after a key press, passes it.
+- The Kit's animations do not go through `duration`. Those that read the Kit theme's motion values follow the same steps, but none of them knows the input kind, so the rule that a key press gets 0 ms does not reach them. Dialogs, sheets, popovers and tooltips keep the Kit's own fixed times.
 - `no_fixed_text_size_outside_tokens` looks for 13 and 15 pixels only. A size in rems, or a pixel size computed from a number elsewhere, would pass it. The old screens are not scanned; much of their layout is in pixels and does not follow the text size.
 - A trip back to 0.9.2 loses the setting the first time 0.9.2 writes `settings.json`, as with every new field. The size is standard again afterwards.
 
