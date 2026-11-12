@@ -11,6 +11,13 @@
 //! [`glyph`] draws one with `gpui::svg()`, which paints the drawing as a mask
 //! in the text color. The caller picks the color from a token with
 //! `text_color`; without a text color GPUI paints nothing.
+//!
+//! Kit components draw Lucide glyphs on a 24 grid with a stroke of 2, which is
+//! 1.33 at 16 points. `AppAssets` asks the app's files before the Kit's, so
+//! the twelve Lucide glyphs the Kit's components use lie redrawn under
+//! `assets/icons/` with the names the Kit loads, at the same weight as these.
+//! They are Lucide's shapes moved onto the 16 grid, derived works under the
+//! licence in `assets/licenses/ISC-Lucide.txt`.
 
 use gpui::{SharedString, Styled as _, Svg, svg};
 use gpui_component::IconNamed;
@@ -159,6 +166,7 @@ mod tests {
         AnyElement, AssetSource as _, Hsla, InteractiveElement as _, IntoElement as _,
         ParentElement as _, Styled as _, TestAppContext, px,
     };
+    use gpui_component::IconName;
 
     use super::super::components::probe;
     use super::super::components::{IconButton, Tile};
@@ -171,6 +179,25 @@ mod tests {
 
     /// The largest file a glyph may be.
     const MAX_BYTES: usize = 2048;
+
+    /// The Lucide glyphs Kit components draw, which the app draws again at
+    /// its own weight.
+    fn kit_glyphs() -> [IconName; 12] {
+        [
+            IconName::Eye,
+            IconName::EyeOff,
+            IconName::Close,
+            IconName::ChevronDown,
+            IconName::ChevronRight,
+            IconName::Check,
+            IconName::Inbox,
+            IconName::Loader,
+            IconName::Search,
+            IconName::ExternalLink,
+            IconName::Minus,
+            IconName::Plus,
+        ]
+    }
 
     fn icons_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons")
@@ -516,6 +543,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The files directly under `assets/icons/` are exactly the Kit glyphs
+    /// listed above, at the paths the Kit loads them from. The Kit ships each
+    /// in the bundle the app falls back to, and the app's own file wins.
+    #[test]
+    fn kit_overrides_match_the_kit_names() {
+        let files = svg_files(&icons_dir());
+        let on_disk: BTreeSet<String> = files
+            .keys()
+            .map(|name| format!("icons/{name}.svg"))
+            .collect();
+        let kit: BTreeSet<String> = kit_glyphs()
+            .into_iter()
+            .map(|name| name.path().to_string())
+            .collect();
+        assert_eq!(
+            on_disk, kit,
+            "files under assets/icons/ and the Kit's names"
+        );
+        let app = AppAssets::new();
+        for path in &kit {
+            let shipped = gpui_kit_assets::Assets
+                .load(path)
+                .expect("the Kit's assets load")
+                .unwrap_or_else(|| panic!("the Kit does not ship {path}"));
+            let drawn = app
+                .load(path)
+                .expect("the app's assets load")
+                .expect("the app has the file");
+            let name = path.trim_start_matches("icons/");
+            let file = std::fs::read(icons_dir().join(name)).expect("read the file");
+            assert_eq!(
+                drawn.as_ref(),
+                file.as_slice(),
+                "{path} is not the app's file"
+            );
+            assert_ne!(drawn.as_ref(), shipped.as_ref(), "{path} is the Kit's own");
+        }
+    }
+
+    /// The redrawn Kit glyphs keep to the same grid as the app's own.
+    #[test]
+    fn kit_overrides_are_on_the_sixteen_grid() {
+        let files = svg_files(&icons_dir());
+        assert_eq!(files.len(), kit_glyphs().len());
+        let problems: Vec<String> = files
+            .values()
+            .flat_map(|path| grid_problems(path))
+            .collect();
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 
     /// Every glyph turns into a mask through GPUI's own SVG renderer: some
