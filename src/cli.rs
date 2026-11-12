@@ -2435,6 +2435,17 @@ mod tests {
                     "{options:?}"
                 );
             }
+
+            // No field shows twice: a command line that names one twice
+            // never reaches the prompt.
+            for options in [
+                &["--secret-fd 3:password", "--env PW=password"][..],
+                &["--env A=totp", "--env B=totp"][..],
+            ] {
+                if let Ok(reason) = reason_for("team.kdbx", &with_options(options)) {
+                    panic!("{options:?} reached Touch ID with {reason:?}");
+                }
+            }
         }
 
         #[test]
