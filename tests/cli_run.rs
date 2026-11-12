@@ -308,32 +308,70 @@ fn run_never_puts_the_secret_in_argv_or_env() {
     assert_eq!(on_the_descriptor, PASSWORD);
 }
 
-/// The CLI reads the master password from descriptor 9, which the shell
-/// opened on a file. A program that had that descriptor could seek it back to
-/// the start and read the master password, as the `zsh` line does when it
-/// can. The program gets only its `--secret-fd` descriptors, and one on the
-/// same number as the master password still gets its secret.
-#[test]
-fn run_keeps_the_master_password_descriptor_from_the_program() {
+/// The program reads its secret on 3, asks whether `master_fd`, the
+/// descriptor the CLI read the master password from, is open, and has `zsh`
+/// seek that descriptor back to the start and read it. It gets its
+/// `--secret-fd` descriptors and nothing on that number.
+///
+/// The check runs `/usr/bin/true` with the redirection rather than the
+/// builtin: for a builtin or a group, `sh` parks the descriptors it
+/// redirects on 10 and above while the command runs, so `11` would find one
+/// of those.
+fn keeps_the_master_password_descriptor(master_fd: u32) {
     let fixture = Fixture::new(PASSWORD);
-    let outcome = fixture.run(
-        &["3:password"],
+    let script = format!(
         "cat <&3; \
-         if { true <&9; } 2>/dev/null; then printf '|9 is open'; else printf '|9 is closed'; fi; \
-         /bin/zsh -c 'zmodload zsh/system && sysseek -u 9 0 && cat <&9' 2>/dev/null; \
-         printf '|end'",
-        &[],
+         if /usr/bin/true 2>/dev/null <&{master_fd}; \
+         then printf '|{master_fd} is open'; else printf '|{master_fd} is closed'; fi; \
+         /bin/zsh -c 'zmodload zsh/system && sysseek -u {master_fd} 0 && cat <&{master_fd}' \
+         2>/dev/null; \
+         printf '|end'"
     );
+    let line = fixture.command_line(
+        "json",
+        master_fd,
+        true,
+        &fixture.run_args(&["3:password"], &[], &script, &[]),
+    );
+    let outcome = fixture.output(&line);
     assert_ok(&outcome);
     assert!(
         !outcome.stdout.contains(MASTER_PASSWORD),
         "the program read the master password: {outcome:?}"
     );
-    assert_eq!(outcome.stdout, format!("{PASSWORD}|9 is closed|end"));
+    assert_eq!(
+        outcome.stdout,
+        format!("{PASSWORD}|{master_fd} is closed|end")
+    );
 
-    let outcome = fixture.run(&["9:password"], "cat <&9", &[]);
+    let target = format!("{master_fd}:password");
+    let read = format!("cat <&{master_fd}");
+    let line = fixture.command_line(
+        "json",
+        master_fd,
+        true,
+        &fixture.run_args(&[&target], &[], &read, &[]),
+    );
+    let outcome = fixture.output(&line);
     assert_ok(&outcome);
     assert_eq!(outcome.stdout, PASSWORD);
+}
+
+/// The CLI reads the master password from descriptor 9, which the shell
+/// opened on a file. A program that had that descriptor could seek it back to
+/// the start and read the master password, as the `zsh` line does when it
+/// can. The program finds 9 closed, and a zsh that seeks it reads nothing; a
+/// `--secret-fd` target on the same number still gets its secret there.
+#[test]
+fn run_keeps_the_master_password_descriptor_from_the_program() {
+    keeps_the_master_password_descriptor(9);
+}
+
+/// The same on 11, a number no `--secret-fd` in these tests uses and above
+/// the single digits a POSIX shell must support.
+#[test]
+fn run_keeps_the_master_password_descriptor_whatever_its_number() {
+    keeps_the_master_password_descriptor(11);
 }
 
 /// The child closes the master password's descriptor, which is safe only
