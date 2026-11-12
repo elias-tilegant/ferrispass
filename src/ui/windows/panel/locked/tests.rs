@@ -798,8 +798,9 @@ fn every_locked_case_renders_its_sentence(cx: &mut TestAppContext) {
 }
 
 /// While locked, the panel shows nothing from a vault: a vault with a
-/// favorite and an entry used recently was open, then locked. The panel
-/// lists no row, and no node it draws names an entry.
+/// favorite and an entry used recently was open, the panel listed both,
+/// then the vault was locked. The panel lists no row, and no node it draws
+/// names an entry.
 #[gpui::test]
 fn the_locked_panel_shows_nothing_from_a_vault(cx: &mut TestAppContext) {
     let app = panel::tests::open_app(
@@ -811,6 +812,12 @@ fn the_locked_panel_shows_nothing_from_a_vault(cx: &mut TestAppContext) {
     );
     let id = app.id(cx, "Nordhafen VPN");
     app.state.update(cx, |state, _| state.mark_entry_used(&id));
+    app.open_panel(cx);
+    let listed = cx
+        .update(|cx| panel::for_test(cx).1)
+        .expect("the model")
+        .read_with(cx, |vm, _| vm.results().len());
+    assert_eq!(listed, 2, "the test needs both entries listed while open");
     app.state.update(cx, |state, cx| {
         assert!(state.lock_vault(cx), "the lock waited for a save");
     });
