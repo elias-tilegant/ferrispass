@@ -358,6 +358,82 @@ impl VaultDocument {
         Ok(id)
     }
 
+    /// Copy an entry into the same group and return the copy's id.
+    ///
+    /// The copy carries every string field (custom fields and their
+    /// protection flag included), tags, attachments, the icon, colours,
+    /// Auto-Type settings and plugin data, the way KeePassXC's "Clone entry"
+    /// does. It gets a fresh UUID, fresh timestamps and an empty history:
+    /// the source's history describes the source, not the copy. The title
+    /// gains `title_suffix` so the two are told apart in the list.
+    ///
+    /// Entries in the Recycle Bin are not duplicated; a copy landing in the
+    /// bin would be deleted on arrival.
+    pub fn duplicate_entry(
+        &mut self,
+        entry_id_str: &str,
+        title_suffix: &str,
+    ) -> Result<String, MutationError> {
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
+        let source = self
+            .database
+            .entry(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        let parent_id = source.parent().id();
+        if let Some(recycle_bin_id) = self.database.recycle_bin().map(|group| group.id())
+            && group_is_within(&self.database, parent_id, recycle_bin_id)
+        {
+            return Err(MutationError::EntryNotFound);
+        }
+        let template: keepass::db::Entry = (*source).clone();
+        let icon = source.icon().cloned();
+        let attachments: Vec<(String, keepass::db::Value<Vec<u8>>)> = source
+            .named_attachments()
+            .map(|(name, attachment)| (name.to_string(), attachment.data.clone()))
+            .collect();
+
+        let mut group = self
+            .database
+            .group_mut(parent_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        let mut copy = group.add_entry();
+        copy.fields = template.fields.clone();
+        let title = template.get_title().unwrap_or_default();
+        copy.set_unprotected("Title", format!("{title}{title_suffix}"));
+        copy.autotype = template.autotype.clone();
+        copy.tags = template.tags.clone();
+        // Keys KeePassXC regenerates on every save describe the source
+        // object, not data the user put there.
+        copy.custom_data = template
+            .custom_data
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "KPXC_RANDOM_SLUG" | "_LAST_MODIFIED"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        copy.foreground_color = template.foreground_color.clone();
+        copy.background_color = template.background_color.clone();
+        copy.override_url = template.override_url.clone();
+        copy.quality_check = template.quality_check;
+        copy.times.expires = template.times.expires;
+        copy.times.expiry = template.times.expiry;
+        match icon {
+            Some(keepass::db::Icon::BuiltIn(id)) => copy.set_icon_builtin(id),
+            Some(keepass::db::Icon::Custom(id)) => {
+                // Shares the source's image rather than storing it twice.
+                copy.set_icon_custom(id)
+                    .map_err(|_| MutationError::EntryNotFound)?;
+            }
+            None => {}
+        }
+        for (name, data) in attachments {
+            copy.add_attachment(name, data);
+        }
+        let id = copy.id().to_string();
+        self.refresh_snapshot();
+        Ok(id)
+    }
+
     /// Add or remove the favorite-marker tag on an entry. The convention
     /// is a single tag named `Favorite` (case-insensitive on read), which
     /// KeePassXC users already commonly use to flag favourites - this
@@ -3465,6 +3541,137 @@ mod tests {
             doc.snapshot().root.entries.iter().any(|e| e.id == entry_id),
             "entry now at root"
         );
+    }
+
+    #[test]
+    fn duplicate_entry_copies_everything_but_identity_and_history() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("duplicate.kdbx");
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let work_id = {
+            let mut root = doc.database.root_mut();
+            let mut group = root.add_group();
+            group.name = "Work".into();
+            group.id().to_string()
+        };
+        doc.refresh_snapshot();
+
+        let source_id = doc
+            .create_entry(
+                &work_id,
+                &EntryDraft {
+                    title: "SAP SH1".into(),
+                    username: "sebbe".into(),
+                    password: Zeroizing::new("S3cret!".into()),
+                    url: "sap.example.com".into(),
+                    notes: "Entwicklung".into(),
+                    tags: vec!["SAP".into()],
+                    otp: Zeroizing::new(String::new()),
+                    custom_fields: vec![
+                        CustomField {
+                            key: "SAP_CLIENT".into(),
+                            value: "100".into(),
+                            protected: false,
+                        },
+                        CustomField {
+                            key: "PIN".into(),
+                            value: "4711".into(),
+                            protected: true,
+                        },
+                    ],
+                },
+            )
+            .expect("create");
+        // Give the source a history and an attachment to copy (or not).
+        doc.toggle_starred(&source_id).expect("star");
+        {
+            let id = find_entry_id(&doc.database, &source_id).unwrap();
+            let mut entry = doc.database.entry_mut(id).unwrap();
+            entry.add_attachment("cert.pem", keepass::db::Value::Unprotected(b"PEM".to_vec()));
+        }
+        doc.refresh_snapshot();
+
+        let copy_id = doc
+            .duplicate_entry(&source_id, " - Copy")
+            .expect("duplicate");
+        assert_ne!(copy_id, source_id);
+
+        let work = doc.snapshot().find_group(&work_id).unwrap();
+        assert_eq!(work.entries.len(), 2, "copy lands next to its source");
+        let copy = work.entries.iter().find(|e| e.id == copy_id).unwrap();
+        assert_eq!(copy.title, "SAP SH1 - Copy");
+        assert_eq!(copy.username, "sebbe");
+        assert_eq!(copy.url, "sap.example.com");
+        assert_eq!(copy.notes, "Entwicklung");
+        assert!(copy.starred, "tags travel, the Favorite marker included");
+        assert!(copy.tags.iter().any(|tag| tag == "SAP"));
+        assert_eq!(
+            doc.custom_field_value(&copy_id, "SAP_CLIENT")
+                .as_deref()
+                .map(String::as_str),
+            Some("100")
+        );
+        let pin = copy.custom_fields.iter().find(|f| f.key == "PIN").unwrap();
+        assert!(pin.protected, "protection flag is kept");
+        assert_eq!(
+            doc.password_for_entry(&copy_id)
+                .as_deref()
+                .map(String::as_str),
+            Some("S3cret!")
+        );
+
+        let copy_ref = doc
+            .database
+            .entry(find_entry_id(&doc.database, &copy_id).unwrap())
+            .unwrap();
+        assert!(
+            copy_ref
+                .history
+                .as_ref()
+                .is_none_or(|h| h.get_entries().is_empty()),
+            "the source's history is not the copy's"
+        );
+        assert_eq!(
+            copy_ref
+                .attachment_by_name("cert.pem")
+                .map(|attachment| attachment.data.clone()),
+            Some(keepass::db::Value::Unprotected(b"PEM".to_vec()))
+        );
+
+        let source = doc.snapshot().find_entry(&source_id).unwrap();
+        assert_eq!(source.title, "SAP SH1", "the source is left alone");
+
+        // The copy survives a save and reopen like any other entry.
+        doc.save_payload().save_to(&path).expect("save");
+        let reopened = crate::keepass::KeePassRepository::open(&path, "pw", None).expect("reopen");
+        assert_eq!(
+            reopened
+                .password_for_entry(&copy_id)
+                .as_deref()
+                .map(String::as_str),
+            Some("S3cret!")
+        );
+    }
+
+    #[test]
+    fn duplicate_entry_refuses_entries_in_the_recycle_bin() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Gone".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+        doc.delete_entry(&id).expect("trash");
+        assert!(doc.duplicate_entry(&id, " - Copy").is_err());
     }
 
     #[test]
