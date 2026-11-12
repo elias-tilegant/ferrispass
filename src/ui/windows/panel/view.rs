@@ -5,8 +5,10 @@
 //! The keyboard stays in the search field. The keys the GPUI Kit input keeps
 //! to itself, ↑, ↓ and Cmd+C, reach the panel through bindings in the
 //! context `Panel > Input`, and so do Cmd+1 to Cmd+9 and Cmd+W; the others
-//! through `Panel` (`app::actions::bind_panel_keys` says why). Every key and
-//! click in the window counts as activity for the auto-lock, in
+//! through `Panel` (`app::actions::bind_panel_keys` says why). The field's
+//! own Copy and Cut, which the menus send, are caught at the root before
+//! the field sees them, so the field never writes to the pasteboard. Every
+//! key and click in the window counts as activity for the auto-lock, in
 //! `PanelView::new` and `input_activity`, and nowhere else.
 
 use gpui::{
@@ -15,7 +17,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::IconName;
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{Copy as FieldCopy, Cut as FieldCut, InputEvent, InputState};
 use zeroize::Zeroizing;
 
 use crate::app::actions::{
@@ -188,6 +190,20 @@ impl PanelView {
 
     fn on_show_in_app(&mut self, _: &PanelShowInApp, window: &mut Window, cx: &mut Context<Self>) {
         self.show_in_app(window, cx);
+    }
+
+    /// The search field's own Copy, from the Edit menu or the field's edit
+    /// menu, copies the password as Cmd+C does. Caught on the way down, so
+    /// the field never writes the search to the pasteboard itself.
+    fn on_field_copy(&mut self, _: &FieldCopy, _: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.copy(Value::Password, cx);
+    }
+
+    /// The search field's own Cut does nothing in the panel: it would write
+    /// the search to the pasteboard past the clipboard service.
+    fn on_field_cut(&mut self, _: &FieldCut, _: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
     }
 
     /// Return: the main action of the selected entry, when Return may run
@@ -472,6 +488,8 @@ impl Render for PanelView {
             .aria_label(tr!("a11y.quick_access"))
             .key_context(PANEL_CONTEXT)
             .track_focus(&self.focus)
+            .capture_action(cx.listener(Self::on_field_copy))
+            .capture_action(cx.listener(Self::on_field_cut))
             .on_action(cx.listener(Self::on_close))
             .on_action(cx.listener(Self::on_move_up))
             .on_action(cx.listener(Self::on_move_down))

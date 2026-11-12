@@ -1158,6 +1158,34 @@ fn copies_go_through_the_clipboard_service_and_keep_the_panel_open(cx: &mut Test
     assert_eq!(note(cx), None);
 }
 
+/// The search field's own Copy and Cut, from a key, the Edit menu or the
+/// field's edit menu, would write the search to the pasteboard past the
+/// clipboard service. In the panel, Copy copies the password as Cmd+C does,
+/// and Cut does nothing.
+#[gpui::test]
+fn the_search_field_never_writes_its_text_to_the_pasteboard(cx: &mut TestAppContext) {
+    let app = open_app(cx, &sample());
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "nhq");
+    keys(cx, panel, "cmd-a cmd-x");
+    assert_eq!(cx.read_from_clipboard(), None, "Cut wrote the search");
+    assert_eq!(app.query(cx), "nhq", "Cut took the search away");
+
+    // As the menus send them.
+    cx.dispatch_action(panel, gpui_component::input::Cut);
+    cx.run_until_parked();
+    assert_eq!(cx.read_from_clipboard(), None, "Cut wrote the search");
+    cx.dispatch_action(panel, gpui_component::input::Copy);
+    cx.run_until_parked();
+    assert_eq!(cx.read_from_clipboard(), None, "Copy wrote the search");
+    assert_eq!(
+        app.copied(),
+        (1, Some("sp-nhq".to_string())),
+        "Copy copies the password, through the clipboard service"
+    );
+    assert_eq!(app.query(cx), "nhq");
+}
+
 #[gpui::test]
 fn a_copy_marks_the_entry_as_recently_used(cx: &mut TestAppContext) {
     let app = open_app(cx, &sample());
