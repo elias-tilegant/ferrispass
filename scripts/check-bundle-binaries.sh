@@ -22,9 +22,15 @@
 # not have to rebuild is older than the build that finds it, but newer than
 # every file it was made from, so it passes. One left in a target folder that
 # cargo did not write to this time fails as soon as one of its files has
-# changed or been deleted since, one built from another checkout names none of
-# this one's files, and a copy taken from anywhere else fails the byte
-# comparison.
+# changed or been deleted since, a dep-info that names none of this
+# checkout's files fails as well, and a copy taken from anywhere else fails
+# the byte comparison.
+#
+# What the check cannot tell is whose build a binary is. With one target
+# folder shared by several checkouts, cargo can leave another checkout's
+# binary in the release folder and rewrite its dep-info to name this
+# checkout's files, when they are all older than that binary; the check then
+# passes it. Build a release in a target folder of its own.
 #
 # Exits 0 when both binaries pass, 1 when one does not, 2 on wrong usage.
 
