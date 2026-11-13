@@ -3813,6 +3813,49 @@ impl AppState {
         Ok(())
     }
 
+    /// File an entry into another group from the entry editor, applying the
+    /// editor's draft in the same step when it changed fields. One mutation
+    /// and one save; see `VaultDocument::update_and_move_entry` for why the
+    /// two are not run one after the other.
+    pub fn update_and_move_entry(
+        &mut self,
+        entry_id: &str,
+        draft: Option<EntryDraft>,
+        target_group_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                last_used,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            document.update_and_move_entry(entry_id, draft.as_ref(), target_group_id)?;
+
+            *visible_entries = Rc::new(entries_for_selection(
+                document.snapshot(),
+                selection,
+                search_query,
+                last_used,
+            ));
+            if selected_entry_id.as_deref() == Some(entry_id) {
+                *selected_strength = document.strength_for_entry(entry_id);
+            }
+        }
+        cx.notify();
+        self.save_async(cx);
+        Ok(())
+    }
+
     /// Move an entry to the recycle bin (creating one if necessary). Selection
     /// jumps to the next visible entry so the detail pane stays populated.
     pub fn delete_entry(

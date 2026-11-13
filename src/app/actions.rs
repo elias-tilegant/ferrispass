@@ -65,6 +65,10 @@ actions!(
         /// Copy the selected entry next to itself (title gains " - Copy")
         /// and select the copy. Bound to ⌘D, the macOS "Duplicate" gesture.
         DuplicateEntry,
+        /// Open the selected entry's editor with the group picker expanded
+        /// and its search field focused, so the entry can be filed into a
+        /// group by typing part of the group's name.
+        MoveEntryToGroup,
         /// Auto-type credentials into the foreground window. Dispatched
         /// by the global hotkey listener when the user presses the
         /// configured combo from any app. The handler matches the
@@ -364,6 +368,7 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::action("New Entry", NewEntry),
             MenuItem::action("Edit Entry", EditEntry),
             MenuItem::action("Duplicate Entry", DuplicateEntry),
+            MenuItem::action("Move Entry to Group…", MoveEntryToGroup),
             MenuItem::action("Delete Entry", DeleteEntry),
             MenuItem::separator(),
             MenuItem::action("Copy Username", CopyUsername),

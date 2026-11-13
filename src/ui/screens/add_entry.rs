@@ -12,6 +12,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::app::match_groups;
 use crate::domain::VaultGroup;
 use crate::ui::app_shell::AppShell;
 use crate::ui::icons::AppIcon;
@@ -72,23 +73,26 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
     };
     let is_edit = editing_id.is_some();
 
-    // Resolve the destination group (only relevant for Add). Priority:
+    // Resolve the group the picker shows as chosen. Priority:
     //   1. user's explicit pick from the inline group picker, if any
-    //   2. the sidebar's currently-selected group
-    //   3. vault root (when the user was viewing a tag / library filter
-    //      with no specific group context)
-    let target_group_id = {
-        let state = shell.state().read(cx);
-        shell
-            .new_entry_target_group_id()
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                state.vault_browser().map(|b| match b.selection {
+    //   2. Edit: the group the entry is in; a pick replaces it and the
+    //      entry moves there on save
+    //   3. Add: the sidebar's currently-selected group, or the vault root
+    //      when the user was viewing a tag / library filter with no
+    //      specific group context
+    let target_group_id = shell
+        .new_entry_target_group_id()
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let browser = shell.state().read(cx).vault_browser()?;
+            match &editing_id {
+                Some(id) => browser.snapshot.find_entry_group_id(id),
+                None => Some(match browser.selection {
                     crate::app::LibrarySelection::Group(id) => id,
-                    _ => b.snapshot.root.id.clone(),
-                })
-            })
-    };
+                    _ => browser.snapshot.root.id.clone(),
+                }),
+            }
+        });
     // Snapshot the root group so the inline picker can render the full
     // tree without re-borrowing AppState across the closure boundary
     // when each row's click listener fires. `None` while the vault is
@@ -104,9 +108,9 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
         .read(cx)
         .vault_browser()
         .and_then(|b| b.snapshot.recycle_bin_id.clone());
-    let picker_open = shell.new_entry_picker_open() && !is_edit;
+    let picker_open = shell.new_entry_picker_open();
 
-    let target_group_label = if is_edit {
+    let target_group_label = if is_edit && shell.new_entry_target_group_id().is_none() {
         // For edits, show the entry's current parent group instead of where a
         // new entry would land.
         editing_id
@@ -240,16 +244,12 @@ fn modal_card(shell: &AppShell, cx: &mut Context<AppShell>) -> AnyElement {
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child(if is_edit { "Edit entry" } else { "New entry" }),
                         )
-                        .child(target_group_chip(
-                            &target_group_label,
-                            picker_open,
-                            is_edit,
-                            cx,
-                        )),
+                        .child(target_group_chip(&target_group_label, picker_open, cx)),
                 ),
         )
         .when(picker_open, |this| {
             this.child(group_picker_panel(
+                shell,
                 root_group.as_ref(),
                 recycle_bin_id.as_deref(),
                 target_group_id.as_deref(),
@@ -663,23 +663,10 @@ fn generate_button_visual() -> AnyElement {
         .into_any_element()
 }
 
-/// "in {Group} ▾" chip below the header. Clickable in Add mode (toggles
-/// the inline group picker); rendered as plain muted text in Edit mode
-/// because the entry's parent group can't be moved from this modal.
-fn target_group_chip(
-    label: &str,
-    picker_open: bool,
-    is_edit: bool,
-    cx: &mut Context<AppShell>,
-) -> AnyElement {
+/// "in {Group} ▾" chip below the header. Toggles the inline group picker,
+/// in Add mode to choose where the entry lands and in Edit mode to move it.
+fn target_group_chip(label: &str, picker_open: bool, cx: &mut Context<AppShell>) -> AnyElement {
     let text: SharedString = format!("in {label}").into();
-    if is_edit {
-        return div()
-            .text_xs()
-            .text_color(palette::text_muted())
-            .child(text)
-            .into_any_element();
-    }
     h_flex()
         .id("add-entry-group-chip")
         .gap_1()
@@ -690,9 +677,11 @@ fn target_group_chip(
         .text_color(palette::text_muted())
         .hover(|s| s.bg(palette::sidebar()).text_color(palette::text()))
         .pressable()
-        .on_click(cx.listener(|shell: &mut AppShell, _: &ClickEvent, _, cx| {
-            shell.toggle_new_entry_picker(cx);
-        }))
+        .on_click(
+            cx.listener(|shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                shell.toggle_new_entry_picker(window, cx);
+            }),
+        )
         .child(text)
         .child(
             gpui_component::Icon::from(if picker_open {
@@ -706,57 +695,62 @@ fn target_group_chip(
 }
 
 /// Inline group-picker panel rendered below the header when expanded.
-/// Lists every group in the vault as an indented preorder tree (same
-/// shape as the sidebar walk in `screens::vault::groups_section`); the
-/// recycle bin is filtered out because creating a new entry there would
-/// be confusing. Click a row → it becomes the new target.
+/// A search field on top filters the groups by name or path; without a
+/// query the panel lists every group as an indented preorder tree (same
+/// shape as the sidebar walk in `screens::vault::groups_section`). Click a
+/// row, or press Enter for the first hit, and it becomes the target.
 fn group_picker_panel(
+    shell: &AppShell,
     root: Option<&VaultGroup>,
     recycle_bin_id: Option<&str>,
     selected_id: Option<&str>,
     cx: &mut Context<AppShell>,
 ) -> AnyElement {
-    let mut flat: Vec<(usize, &VaultGroup)> = Vec::new();
-    fn collect<'a>(
-        group: &'a VaultGroup,
-        depth: usize,
-        recycle_bin_id: Option<&str>,
-        out: &mut Vec<(usize, &'a VaultGroup)>,
-    ) {
-        if recycle_bin_id == Some(group.id.as_str()) {
-            return;
-        }
-        out.push((depth, group));
-        // Picker always shows the *whole* tree regardless of the
-        // sidebar's collapse state - the user has to be able to pick
-        // any group, even one they happen to have folded shut.
-        for child in &group.groups {
-            collect(child, depth + 1, recycle_bin_id, out);
-        }
-    }
-    if let Some(root) = root {
-        collect(root, 0, recycle_bin_id, &mut flat);
-    }
+    let filter_input = shell.new_entry_group_filter_input().clone();
+    let query = filter_input.read(cx).value().to_string();
+    let searching = !query.trim().is_empty();
+    let rows = root
+        .map(|root| match_groups(root, recycle_bin_id, &query))
+        .unwrap_or_default();
 
     let selected_owned = selected_id.map(ToOwned::to_owned);
     let mut col = v_flex();
-    for (idx, (depth, group)) in flat.iter().enumerate() {
-        let depth = *depth;
+    if rows.is_empty() {
+        col = col.child(
+            div()
+                .px(px(8.))
+                .py(px(6.))
+                .text_sm()
+                .text_color(palette::text_muted())
+                .child("No group matches."),
+        );
+    }
+    for (idx, row) in rows.iter().enumerate() {
+        let group = row.group;
+        // While searching the list is flat: indentation would suggest a
+        // nesting the filtered rows no longer have. The path says it instead.
+        let indent = if searching { 0 } else { row.depth };
         let group_id = group.id.clone();
         let is_selected = selected_owned.as_deref() == Some(group.id.as_str());
+        // Enter takes the first hit; mark it so the key has a visible target.
+        let is_enter_target = searching && idx == 0;
         let row_id: SharedString = format!("add-entry-group-row-{idx}").into();
         let name: SharedString = group.name.clone().into();
+        let path: Option<SharedString> =
+            (searching && !row.parents.is_empty()).then(|| row.parents.join(" / ").into());
         col = col.child(
             h_flex()
                 .id(row_id)
                 .h(px(26.))
-                .pl(px(8. + depth as f32 * 14.))
+                .pl(px(8. + indent as f32 * 14.))
                 .pr(px(10.))
                 .items_center()
                 .gap_2()
                 .rounded(px(4.))
                 .bg(if is_selected {
                     palette::blue_soft()
+                } else if is_enter_target {
+                    palette::panel()
                 } else {
                     gpui::transparent_black()
                 })
@@ -766,30 +760,58 @@ fn group_picker_panel(
                     palette::text()
                 })
                 .text_sm()
-                .when(!is_selected, |this| {
-                    this.hover(|s| s.bg(palette::sidebar()))
-                })
+                .when(!is_selected, |this| this.hover(|s| s.bg(palette::panel())))
                 .pressable()
                 .on_click(
-                    cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
-                        shell.set_new_entry_target_group(group_id.clone(), cx);
+                    cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                        shell.set_new_entry_target_group(group_id.clone(), window, cx);
                     }),
                 )
                 .child(picker_row_icon(group, is_selected))
-                .child(div().flex_1().min_w_0().truncate().child(name)),
+                .child(div().flex_shrink_0().max_w(px(240.)).truncate().child(name))
+                .when_some(path, |this, path| {
+                    this.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(palette::text_muted())
+                            .child(path),
+                    )
+                })
+                .when(is_enter_target, |this| {
+                    this.child(
+                        div()
+                            .ml_auto()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(palette::text_faint())
+                            .child("↩"),
+                    )
+                }),
         );
     }
 
-    div()
-        .id("add-entry-group-picker")
-        .max_h(px(200.))
-        .overflow_y_scroll()
-        .px_3()
-        .py_2()
+    v_flex()
         .border_b_1()
         .border_color(palette::border())
         .bg(palette::sidebar())
-        .child(col)
+        .child(
+            div()
+                .px_3()
+                .pt_2()
+                .child(Input::new(&filter_input).small().cleanable(true)),
+        )
+        .child(
+            div()
+                .id("add-entry-group-picker")
+                .max_h(px(240.))
+                .overflow_y_scroll()
+                .px_3()
+                .py_2()
+                .child(col),
+        )
         .into_any_element()
 }
 
