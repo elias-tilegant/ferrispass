@@ -1069,8 +1069,8 @@ fn meta_local_contributes(local: &Database, remote: &Database) -> bool {
 }
 
 /// Custom data keys KeePassXC writes on its own and treats as generated
-/// rather than user data.
-const GENERATED_CUSTOM_DATA: [&str; 2] = ["KPXC_RANDOM_SLUG", "_LAST_MODIFIED"];
+/// rather than user data. Duplicating an entry leaves them behind too.
+pub(crate) const GENERATED_CUSTOM_DATA: [&str; 2] = ["KPXC_RANDOM_SLUG", "_LAST_MODIFIED"];
 
 /// Whether a plugin data key is a marker: data a newer version of this app
 /// keeps on entries, groups and the database, such as what kind of entry
