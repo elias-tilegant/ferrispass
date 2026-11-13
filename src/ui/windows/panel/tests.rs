@@ -140,6 +140,11 @@ pub(crate) struct Harness {
 }
 
 pub(crate) fn open_app(cx: &mut TestAppContext, entries: &[Fixture]) -> Harness {
+    open_app_at(cx, VAULT, entries)
+}
+
+/// The same, with the vault at `path`, whose folder must not exist.
+fn open_app_at(cx: &mut TestAppContext, path: &str, entries: &[Fixture]) -> Harness {
     crate::autotype::hotkey::fake::reset();
     LAUNCHES.with(|launches| launches.borrow_mut().clear());
     let pasteboard = FakePasteboard::new(AccessBehavior::Default);
@@ -150,7 +155,7 @@ pub(crate) fn open_app(cx: &mut TestAppContext, entries: &[Fixture]) -> Harness 
     });
     let state = cx.new(|_| {
         let mut state = AppState::default();
-        state.open_for_test(PathBuf::from(VAULT), document(entries));
+        state.open_for_test(PathBuf::from(path), document(entries));
         state
     });
     cx.update(|cx| crate::app::open_main_window_for_test(cx, state.clone()));
@@ -287,21 +292,23 @@ fn keys(cx: &mut TestAppContext, panel: AnyWindowHandle, keystrokes: &str) {
     cx.run_until_parked();
 }
 
-/// A vault with two SAP systems, NHQ 100 and NHP 100, both signing in as
-/// N.WEISS through SAP GUI, a favorite web login, a remote access entry and
-/// a web login of their own.
+/// A vault with two SAP systems, NHQ 100 and NHP 100, both signing in to
+/// client 100 as N.WEISS through SAP GUI, a favorite web login, a remote
+/// access entry and a web login of their own.
 fn sample() -> Vec<Fixture> {
     vec![
         entry("NHQ 100")
             .user("N.WEISS")
             .password("sp-nhq")
             .field("SAP_HOST", "nhq.example")
-            .field("SAP_INSTANCE", "00"),
+            .field("SAP_INSTANCE", "00")
+            .field("SAP_CLIENT", "100"),
         entry("NHP 100")
             .user("N.WEISS")
             .password("sp-nhp")
             .field("SAP_HOST", "nhp.example")
-            .field("SAP_INSTANCE", "00"),
+            .field("SAP_INSTANCE", "00")
+            .field("SAP_CLIENT", "100"),
         entry("Salesforce")
             .user("nora@example.com")
             .password("sp-sales")
@@ -823,6 +830,231 @@ fn typing_lifts_the_production_rule(cx: &mut TestAppContext) {
     );
 }
 
+/// Whether a system is a production system is worked out from the whole
+/// entry, as the main window does. NHX 100 has a SID without a production
+/// letter and the role PRD in a protected field: in the panel it is a
+/// production system too. From an empty search Return signs in to nothing,
+/// and typed in full, the one exact match waits like any production system.
+#[gpui::test]
+fn a_production_role_in_a_protected_field_counts_in_the_panel(cx: &mut TestAppContext) {
+    let app = open_app(
+        cx,
+        &[entry("NHX 100")
+            .user("N.WEISS")
+            .password("sp-nhx")
+            .field("SAP_HOST", "nhx.example")
+            .field("SAP_INSTANCE", "00")
+            .field("SAP_CLIENT", "100")
+            .protected("SAP_ROLE", "PRD")
+            .starred()],
+    );
+    let panel = app.open_panel(cx);
+    let vm = app.vm(cx);
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHX 100"));
+    keys(cx, panel, "enter");
+    assert!(
+        launches().is_empty(),
+        "Return signed in to a production system from an empty search"
+    );
+    let model = vm.read_with(cx, |vm, _| vm.footer());
+    assert_eq!(model.tone, FooterTone::ProductionSelectFirst);
+    assert_eq!(model.primary, None, "Return runs nothing");
+
+    // Typed in full, the one exact match does not take Return at once.
+    type_into(cx, panel, "nhx 100");
+    assert!(vm.read_with(cx, |vm, _| vm.selected().is_some_and(|hit| hit.exact)));
+    cx.simulate_keystrokes(panel, "enter");
+    cx.run_until_parked();
+    assert!(
+        launches().is_empty(),
+        "Return signed in to a production system at once"
+    );
+    cx.executor()
+        .advance_clock(crate::app::unlock::locked_panel::RETURN_SETTLE);
+    cx.simulate_keystrokes(panel, "enter");
+    cx.run_until_parked();
+    assert_eq!(launches(), [(app.id(cx, "NHX 100"), true)]);
+
+    // The row says so as a production system's row does, and that is all
+    // it takes from the protected field.
+    let hit = vm.read_with(cx, |vm, _| vm.results()[0].clone());
+    assert!(hit.production);
+    let (tone, letters) = hit.chip.clone().expect("a chip");
+    assert_eq!(tone, crate::ui::ds::components::ChipTone::Production);
+    assert_eq!(letters.as_ref(), "PRD");
+    let name = hit.parts.accessible_name();
+    assert!(
+        name.contains(tr!("glossary.role.production_system").as_ref()),
+        "the role in words: {name}"
+    );
+}
+
+/// An entry whose SID is protected, under a title that names no system, is
+/// a web login in the panel and a production system in the main window.
+/// Return waits for it as for any production system: from an empty search
+/// it opens nothing, and typed in full, the one exact match does not take
+/// Return at once, only 300 ms after the results are drawn.
+#[gpui::test]
+fn a_production_system_the_panel_shows_as_a_web_login_waits_too(cx: &mut TestAppContext) {
+    let app = open_app(
+        cx,
+        &[entry("Nordhafen ERP")
+            .user("N.WEISS")
+            .password("sp-erp")
+            .url("https://erp.example.com")
+            .protected("SAP_SID", "NHP")
+            .starred()],
+    );
+    let panel = app.open_panel(cx);
+    let vm = app.vm(cx);
+    let hit = vm.read_with(cx, |vm, _| vm.results()[0].clone());
+    assert_eq!(
+        hit.selected_kind(),
+        crate::app::registry::SelectedKind::Web,
+        "the test needs a row the panel shows as a web login"
+    );
+    keys(cx, panel, "enter");
+    assert_eq!(
+        cx.opened_url(),
+        None,
+        "Return acted on a production system from an empty search"
+    );
+    let model = vm.read_with(cx, |vm, _| vm.footer());
+    assert_eq!(model.tone, FooterTone::ProductionSelectFirst);
+    assert_eq!(model.primary, None, "Return runs nothing");
+
+    type_into(cx, panel, "nordhafen erp");
+    assert!(vm.read_with(cx, |vm, _| vm.selected().is_some_and(|hit| hit.exact)));
+    cx.simulate_keystrokes(panel, "enter");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.opened_url(),
+        None,
+        "Return acted on a production system at once"
+    );
+    cx.executor()
+        .advance_clock(crate::app::unlock::locked_panel::RETURN_SETTLE);
+    cx.simulate_keystrokes(panel, "enter");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://erp.example.com"),
+        "Return 300 ms later opens the website"
+    );
+}
+
+/// The footer names the client and the user only when signing in puts
+/// exactly these into SAP GUI's launch file, which reads every field, the
+/// protected ones too. NHP 100 signs in to a protected client as a
+/// protected user, so the footer says only "Sign in", and no protected
+/// value reaches a row, the footer or a node. NHQ 100 signs in to the
+/// client and as the user its row shows, and the footer names them. NHD
+/// 100 has its client in the title only, which the launch file does not
+/// get, so the footer names neither.
+#[gpui::test]
+fn the_footer_names_client_and_user_only_as_signing_in_uses_them(cx: &mut TestAppContext) {
+    const HOST: &str = "sp-host-5Tz.example";
+    let app = open_app(
+        cx,
+        &[
+            entry("NHP 100")
+                .user("N.WEISS")
+                .password("sp-nhp")
+                .protected("SAP_HOST", HOST)
+                .protected("SAP_INSTANCE", "00")
+                .protected("SAP_USER", "ADMIN")
+                .protected("SAP_CLIENT", "000"),
+            entry("NHQ 100")
+                .user("N.WEISS")
+                .password("sp-nhq")
+                .field("SAP_HOST", "nhq.example")
+                .field("SAP_INSTANCE", "00")
+                .field("SAP_CLIENT", "100"),
+            entry("NHD 100")
+                .user("N.WEISS")
+                .password("sp-nhd")
+                .field("SAP_HOST", "nhd.example")
+                .field("SAP_INSTANCE", "00"),
+        ],
+    );
+    let panel = app.open_panel(cx);
+    let vm = app.vm(cx);
+    let words = |cx: &mut TestAppContext| {
+        vm.read_with(cx, |vm, _| vm.footer().main.map(|(_, words)| words))
+            .unwrap_or_default()
+    };
+    let sign_in = tr!("action.sap_login.label");
+
+    type_into(cx, panel, "nhp");
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHP 100"));
+    assert_eq!(
+        words(cx),
+        sign_in,
+        "the footer names a client and a user the launch file does not get"
+    );
+    let model = vm.read_with(cx, |vm, _| vm.clone());
+    let text = footer(&model.footer()).description_text().to_string();
+    for shown in ["N.WEISS", "100"] {
+        assert!(!text.contains(shown), "the footer names {shown}: {text}");
+    }
+    let mut seen = vec![text];
+    for hit in model.results() {
+        seen.push(hit.parts.accessible_name().to_string());
+    }
+    let nodes: Vec<String> = probe::in_frame(cx, move |window, cx| {
+        rows_of(&model)
+            .into_iter()
+            .map(|row| {
+                let (_, node) = probe::node(RenderOnce::render(row, window, cx));
+                format!(
+                    "{:?} {:?} {:?}",
+                    node.label(),
+                    node.description(),
+                    node.value()
+                )
+            })
+            .collect()
+    });
+    seen.extend(nodes);
+    for text in &seen {
+        for secret in ["ADMIN", "000", HOST] {
+            assert!(!text.contains(secret), "{secret} reached the panel: {text}");
+        }
+    }
+    let debug = vm.read_with(cx, |vm, _| format!("{vm:?}"));
+    for secret in ["ADMIN", HOST] {
+        assert!(!debug.contains(secret), "{secret} in {debug}");
+    }
+
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "nhq");
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHQ 100"));
+    assert_eq!(
+        words(cx),
+        tr!(
+            "quick.footer.sap_login",
+            sid = "NHQ",
+            client = "100",
+            user = "N.WEISS"
+        ),
+        "signing in uses what the row shows, and the footer names it"
+    );
+
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "nhd");
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHD 100"));
+    assert_eq!(
+        words(cx),
+        sign_in,
+        "the footer names a client the launch file does not get"
+    );
+}
+
+/// The search field's label is the header, "Searching team-beratung". The
+/// model has the vault's name, and in the source `render` hands that name
+/// to `search_group`, which labels the field with it: the test platform
+/// builds no accessibility tree, and the field's node is the Kit input's,
+/// which only the design system reads.
 #[gpui::test]
 fn the_header_names_the_vault_and_the_footer_mentions_parked_vaults(cx: &mut TestAppContext) {
     let app = open_app(cx, &sample());
@@ -834,10 +1066,91 @@ fn the_header_names_the_vault_and_the_footer_mentions_parked_vaults(cx: &mut Tes
     );
     let header = tr!("quick.header.searching_vault", vault = "team-beratung");
     assert!(header.contains("team-beratung"));
+    let view = squeezed(&source_of("src/ui/windows/panel/view.rs"));
+    let group = function(&view, "fnsearch_group(");
+    assert!(
+        group.contains(
+            r#"TextField::new("panel-search",search,tr!("quick.header.searching_vault",vault=vault),)"#
+        ),
+        "the search field is not labelled with the vault it searches: {group}"
+    );
+    let render = function(&view, "fnrender(");
+    assert!(
+        render.contains("letopen=self.vm.read(cx).vault_name().cloned();")
+            && render.contains("Some(vault)=>")
+            && render.contains("search_group(vm,&self.search,&vault)"),
+        "render hands search_group another name than the model's: {render}"
+    );
     let note = |cx: &mut TestAppContext| vm.read_with(cx, |vm, _| vm.footer().note);
     assert_eq!(note(cx), None, "no other vault, no note");
     vm.update(cx, |vm, _| vm.assume_parked_vaults(2));
     assert_eq!(note(cx), Some(tr!("quick.footer.other_vaults")));
+}
+
+/// The code of `file` without its comments.
+fn source_of(file: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+    probe::code_only(&std::fs::read_to_string(&path).expect("read the source"))
+}
+
+/// `code` without any whitespace, so a check does not depend on how the
+/// code is formatted.
+fn squeezed(code: &str) -> String {
+    code.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// The body of the function whose signature starts with `start` in
+/// `code`, braces included.
+fn function<'a>(code: &'a str, start: &str) -> &'a str {
+    let at = code
+        .find(start)
+        .unwrap_or_else(|| panic!("{start} in the source"));
+    let open = at + code[at..].find('{').expect("a body");
+    probe::braced(&code[open..])
+}
+
+/// The vault's name comes from its file name, which whatever put the file
+/// on the disk chose. The open panel shows it as the locked panel does:
+/// without control characters and the marks that turn the writing
+/// direction, cut after sixty characters. Read in the model and in every
+/// row's name, off the row's node.
+#[gpui::test]
+fn the_open_panel_cleans_the_vault_name_as_the_locked_panel_does(cx: &mut TestAppContext) {
+    let app = open_app_at(
+        cx,
+        "/nonexistent/ferrispass-panel-tests/team-\u{202E}beratung\u{0007}.kdbx",
+        &sample(),
+    );
+    let _panel = app.open_panel(cx);
+    let vm = app.vm(cx);
+    assert_eq!(
+        vm.read_with(cx, |vm, _| vm.vault_name().cloned()),
+        Some("team-beratung".into()),
+        "the model keeps the name as the file has it"
+    );
+    let model = vm.read_with(cx, |vm, _| vm.clone());
+    assert_eq!(model.results().len(), 5, "the test needs every row listed");
+    let labels: Vec<Option<String>> = probe::in_frame(cx, move |window, cx| {
+        rows_of(&model)
+            .into_iter()
+            .map(|row| {
+                let (_, node) = probe::node(RenderOnce::render(row, window, cx));
+                node.label().map(str::to_string)
+            })
+            .collect()
+    });
+    for label in &labels {
+        let label = label.as_deref().expect("every row has a name");
+        assert!(
+            label.ends_with(", team-beratung"),
+            "the row names the vault as the file has it: {label:?}"
+        );
+    }
+
+    let long = format!("/tmp/{}.kdbx", "a".repeat(80));
+    let shown = crate::ui::vm::panel::vault_name(Path::new(&long));
+    assert_eq!(shown.chars().count(), crate::ui::vm::panel::NAME_MAX + 1);
+    assert!(shown.ends_with('\u{2026}'));
 }
 
 #[gpui::test]
@@ -1179,13 +1492,18 @@ fn panel_ids_carry_no_title_user_or_host(cx: &mut TestAppContext) {
     }
 }
 
-/// The panel reads an entry without its notes and its protected custom
+/// The panel shows an entry without its notes and its protected custom
 /// fields. An SAP system with a note, a protected SAP user and a protected
 /// token of its own: neither the model, its `Debug` output included, nor a
-/// row's node nor the footer holds any of them, and the row and the footer
-/// name the user from the entry's user name field instead.
+/// row's node nor the footer holds any of them. The row names the user from
+/// the entry's user name field instead; the footer names no user, since
+/// signing in uses the protected one. What the panel takes from protected
+/// fields, whether the entry is a production system and whether signing in
+/// uses the login the row shows, is a yes or no each, held by
+/// `a_production_role_in_a_protected_field_counts_in_the_panel` and
+/// `the_footer_names_client_and_user_only_as_signing_in_uses_them`.
 #[gpui::test]
-fn the_panel_reads_no_notes_and_no_protected_fields(cx: &mut TestAppContext) {
+fn the_panel_shows_no_notes_and_no_protected_fields(cx: &mut TestAppContext) {
     const NOTE: &str = "sp-note-4Kd";
     const USER: &str = "SP-PROT-9WZ";
     const TOKEN: &str = "sp-token-2Hm";
@@ -1235,6 +1553,11 @@ fn the_panel_reads_no_notes_and_no_protected_fields(cx: &mut TestAppContext) {
     assert!(
         hit.parts.accessible_name().contains("N.WEISS"),
         "the row names the user from the user name field"
+    );
+    assert_eq!(
+        model.footer().main.map(|(_, words)| words),
+        Some(tr!("action.sap_login.label")),
+        "the footer names a user signing in does not use"
     );
 }
 

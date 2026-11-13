@@ -76,13 +76,10 @@ use crate::ui::ds::ActiveTokens as _;
 use crate::ui::ds::components::{Button, FooterTone, PanelFooter};
 use crate::ui::ds::tokens::dimension;
 use crate::ui::ds::typography::{TextStyle, TextStyled as _, u};
-use crate::ui::vm::panel::FooterModel;
+use crate::ui::vm::panel::{FooterModel, display_untrusted, vault_name};
 
 /// How often the locked panel looks at the clock.
 pub const TICK: Duration = Duration::from_secs(1);
-
-/// The most characters of a file name the panel shows.
-const NAME_MAX: usize = 60;
 
 /// What the locked panel holds. It lives with the window: the buffer is not
 /// `Send`, and closing the window wipes it.
@@ -193,42 +190,11 @@ fn allow_device_passcode(cx: &mut App) -> bool {
     .unwrap_or_else(|| crate::app::AppSettings::default().biometric_allow_passcode_fallback)
 }
 
-/// `text` as the panel may show a name it read from the disk: without
-/// control characters and the characters that turn the writing direction,
-/// and cut after [`NAME_MAX`] characters.
-pub(super) fn display_untrusted(text: &str) -> SharedString {
-    let mut shown: String = text
-        .chars()
-        .filter(|c| !c.is_control() && !turns_direction(*c))
-        .collect();
-    if shown.chars().count() > NAME_MAX {
-        shown = shown.chars().take(NAME_MAX).collect();
-        shown.push('\u{2026}');
-    }
-    shown.into()
-}
-
-/// The marks that turn the writing direction around, so that a name could
-/// read differently from what it is.
-fn turns_direction(c: char) -> bool {
-    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-}
-
 /// The vault file's name, as the panel shows it.
 pub(super) fn file_name(path: &Path) -> SharedString {
     display_untrusted(
         &path
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    )
-}
-
-/// The vault's name without `.kdbx`, as the panel shows it.
-fn vault_name(path: &Path) -> SharedString {
-    display_untrusted(
-        &path
-            .file_stem()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default(),
     )

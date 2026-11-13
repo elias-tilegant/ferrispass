@@ -25,6 +25,7 @@ use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
 use crate::platform::secure_input::fake::{self as secure, Fake, FakeApi};
 use crate::platform::secure_input::{HoldError, OsStatus};
 use crate::ui::ds::components::probe;
+use crate::ui::vm::panel::NAME_MAX;
 use crate::ui::windows::panel;
 
 /// The master password of every vault here.

@@ -23,8 +23,14 @@
 //! - A row is named after its entry: kind and title, the role in words, the
 //!   client, the user and the vault. The letters of a role, such as PRD,
 //!   stand on the row's chip and never in its name.
-//! - The panel reads an entry without its notes and its protected custom
-//!   fields ([`shown_fields`]), so neither reaches a row or the footer.
+//! - The panel shows an entry without its notes and its protected custom
+//!   fields ([`shown_fields`]): neither reaches a row or the footer. Two
+//!   answers come from the whole entry, each a yes or no: whether it is a
+//!   production system, worked out as the main window does, and whether
+//!   signing in uses the client and the user the row shows. The footer
+//!   names them only then.
+//! - The vault's name comes from its file and is shown through
+//!   [`display_untrusted`], as the locked panel shows a file name.
 //! - Return counts only once the results have been drawn for 300 ms and no
 //!   unlock is under way ([`PanelVm::return_gate`]). One exact match, its
 //!   whole title or the SID and client of the system it names, in a vault
@@ -33,17 +39,19 @@
 //! - Nothing here writes to a log, and no text here holds a password or a
 //!   one-time code.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use gpui::SharedString;
 
-use crate::app::kinds::{self, EntryKind, SapRole, Sid};
+use crate::app::kinds::{self, EntryKind, SapRole, SapSystem, Sid};
 use crate::app::registry::{
     self, CommandCtx, CommandId, Enablement, SelectedKind, Selection, UrlKind,
 };
 use crate::app::unlock::locked_panel::{ReturnGate, exact_hit_takes_return_at_once};
 use crate::app::{AppState, VaultStatus};
 use crate::domain::VaultEntry;
+use crate::launch::sap::{KEY_CLIENT, KEY_USER};
 use crate::ui::ds::components::{
     ChipTone, FooterTone, ListSelection, ResultsDrawn, RowParts, VaultBadge, move_selection,
     select_by_number,
@@ -68,6 +76,8 @@ pub struct Hit {
     /// The chip after the title: the letters of an SAP system's role.
     pub chip: Option<(ChipTone, SharedString)>,
     pub badge: VaultBadge,
+    /// The entry is a production system, worked out from the whole entry
+    /// (see `Hit::new`).
     pub production: bool,
     pub url: UrlKind,
     pub has_username: bool,
@@ -77,12 +87,40 @@ pub struct Hit {
     pub twins: usize,
     /// The query names this entry exactly ([`names_exactly`]).
     pub exact: bool,
+    /// Signing in puts exactly the client and the user this row shows into
+    /// SAP GUI's launch file, so the footer may name them.
+    login_as_shown: bool,
 }
 
 impl Hit {
+    /// The row for `entry`, read from [`shown_fields`]: its notes and its
+    /// protected custom fields reach neither the row nor the footer. Two
+    /// answers come from the whole entry, protected fields included, each a
+    /// yes or no that keeps no value of such a field:
+    ///
+    /// - Whether the entry is a production system, worked out as the main
+    ///   window does. A production role in a protected `SAP_ROLE` makes the
+    ///   row a production system's row, with its role and its chip, and
+    ///   Return waits for it as for any production system. The panel would
+    ///   otherwise treat as an ordinary system what the main window shows
+    ///   as production, and sign in to it from an empty search or at once.
+    /// - Whether signing in puts exactly the client and the user the row
+    ///   shows into SAP GUI's launch file, which reads protected fields too
+    ///   ([`signs_in_as`]). The footer names them only then, so it never
+    ///   names a login other than the one the launch uses.
     fn new(entry: &VaultEntry, twins: usize, exact: bool, vault: &SharedString) -> Self {
         let shown = shown_fields(entry);
-        let kind = kinds::classify(&shown, None);
+        let mut kind = kinds::classify(&shown, None);
+        let production = kind.is_production() || kinds::classify(entry, None).is_production();
+        if production && let EntryKind::Sap(sap) = &mut kind {
+            sap.role = Some(SapRole::Prd);
+        }
+        let login_as_shown = match &kind {
+            EntryKind::Sap(sap) => {
+                shown_login(sap).is_some_and(|(client, user)| signs_in_as(entry, client, user))
+            }
+            EntryKind::Remote(_) | EntryKind::Web(_) => false,
+        };
         let chip = match &kind {
             EntryKind::Sap(sap) => sap.role.map(|role| {
                 let tone = if role == SapRole::Prd {
@@ -97,7 +135,7 @@ impl Hit {
         Self {
             entry_id: entry.id.clone(),
             parts: row_parts(&shown, &kind, vault),
-            production: kind.is_production(),
+            production,
             chip,
             // Vaults carry no kind yet, so every row shows the badge of the
             // user's own vault; the row's name says which vault it is.
@@ -107,6 +145,7 @@ impl Hit {
             has_otp: shown.has_otp,
             twins,
             exact,
+            login_as_shown,
             kind,
         }
     }
@@ -121,6 +160,18 @@ impl Hit {
             EntryKind::Web(_) => SelectedKind::Web,
         }
     }
+
+    /// The kind the registry's rule for production systems is asked about.
+    /// An entry the panel shows as a web login or remote access, because
+    /// what makes it an SAP system is protected, is still a production
+    /// system when the whole entry is one, and Return waits for it too.
+    fn kind_for_the_production_rule(&self) -> SelectedKind {
+        if self.production {
+            SelectedKind::Sap { production: true }
+        } else {
+            self.selected_kind()
+        }
+    }
 }
 
 impl std::fmt::Debug for Hit {
@@ -133,8 +184,45 @@ impl std::fmt::Debug for Hit {
             .field("has_otp", &self.has_otp)
             .field("twins", &self.twins)
             .field("exact", &self.exact)
+            .field("login_as_shown", &self.login_as_shown)
             .finish_non_exhaustive()
     }
+}
+
+/// The client and the user a row shows for `sap`, when it shows both.
+fn shown_login(sap: &SapSystem) -> Option<(&str, &str)> {
+    let client = sap
+        .client
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())?;
+    let user = sap
+        .user
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())?;
+    Some((client, user))
+}
+
+/// Whether signing in to `entry` puts exactly `client` and `user` into SAP
+/// GUI's launch file. This is the rule `SapGuiMacLauncher::launch` in
+/// `src/launch/sap.rs` follows, read over every field, the protected ones
+/// too: the client from `SAP_CLIENT`, trimmed, or none at all; the user
+/// from `SAP_USER` unless it is empty, otherwise the entry's user name as
+/// it is. It only compares, so no value of a protected field leaves it.
+fn signs_in_as(entry: &VaultEntry, client: &str, user: &str) -> bool {
+    let field = |key: &str| {
+        entry
+            .custom_fields
+            .iter()
+            .find(|field| field.key == key)
+            .map(|field| field.value.as_str())
+    };
+    let launched_client = field(KEY_CLIENT).map_or("", str::trim);
+    let launched_user = field(KEY_USER)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(entry.username.as_str());
+    launched_client == client && launched_user == user
 }
 
 /// The letters of a role, as the chip shows them.
@@ -199,10 +287,11 @@ pub fn row_parts(entry: &VaultEntry, kind: &EntryKind, vault: &SharedString) -> 
     parts
 }
 
-/// What the panel reads of an entry: everything but its notes and its
+/// What the panel shows of an entry: everything but its notes and its
 /// protected custom fields. A protected `SAP_USER` or `SAP_SID` therefore
 /// counts as not set, as it does for the search, and never reaches a row's
-/// name or the footer.
+/// name or the footer. `Hit::new` reads the whole entry for two answers
+/// only, each a yes or no.
 ///
 /// Built field by field, so neither is copied, and so a field added to
 /// `VaultEntry` does not compile here until someone decides whether the
@@ -406,11 +495,7 @@ impl PanelVm {
             self.set_results(Vec::new());
             return;
         };
-        let name: SharedString = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default()
-            .into();
+        let name = vault_name(path);
         self.parked_vaults = state
             .unlocked_paths()
             .iter()
@@ -459,6 +544,7 @@ impl PanelVm {
             all_vaults_done: !unlock_under_way,
             single_exact_hit_in_open_vault_not_production: self.selected().is_some_and(|hit| {
                 hit.exact
+                    && !hit.production
                     && exact_hit_takes_return_at_once(exact, !self.unlocked_for_query, &hit.kind)
             }),
         }
@@ -571,7 +657,7 @@ impl PanelVm {
             locked: false,
             query_empty: self.query.trim().is_empty(),
             selection: Some(Selection {
-                kind,
+                kind: hit.kind_for_the_production_rule(),
                 explicit: self.explicit,
                 url: hit.url,
                 has_otp: hit.has_otp,
@@ -621,19 +707,15 @@ impl PanelVm {
 }
 
 /// What Return does for `hit`, in words: signing in names the system, the
-/// client and the user, when the entry has all three.
+/// client and the user, when the entry has all three and signing in uses
+/// exactly that client and user.
 fn main_words(hit: &Hit) -> SharedString {
     match &hit.kind {
         EntryKind::Sap(sap) => {
             let sid = sap.sid.as_ref().map(|sid| sid.as_str().to_string());
-            let client = sap
-                .client
-                .as_deref()
-                .map(str::trim)
-                .filter(|c| !c.is_empty());
-            let user = sap.user.as_deref().map(str::trim).filter(|u| !u.is_empty());
-            match (sid, client, user) {
-                (Some(sid), Some(client), Some(user)) => {
+            let login = shown_login(sap).filter(|_| hit.login_as_shown);
+            match (sid, login) {
+                (Some(sid), Some((client, user))) => {
                     tr!(
                         "quick.footer.sap_login",
                         sid = sid,
@@ -728,6 +810,41 @@ fn normalize(text: &str) -> String {
         .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The most characters of a name read from the disk the panel shows.
+pub const NAME_MAX: usize = 60;
+
+/// `text` as the panel may show a name it read from the disk, such as a
+/// vault's file name: without control characters and the characters that
+/// turn the writing direction, and cut after [`NAME_MAX`] characters. The
+/// open panel and the locked panel both show names through it.
+pub fn display_untrusted(text: &str) -> SharedString {
+    let mut shown: String = text
+        .chars()
+        .filter(|c| !c.is_control() && !turns_direction(*c))
+        .collect();
+    if shown.chars().count() > NAME_MAX {
+        shown = shown.chars().take(NAME_MAX).collect();
+        shown.push('\u{2026}');
+    }
+    shown.into()
+}
+
+/// The marks that turn the writing direction around, so that a name could
+/// read differently from what it is.
+fn turns_direction(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// The vault's name without `.kdbx`, as the panel shows it.
+pub fn vault_name(path: &Path) -> SharedString {
+    display_untrusted(
+        &path
+            .file_stem()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    )
 }
 
 /// The address the panel may open for an entry: http and https only, and
