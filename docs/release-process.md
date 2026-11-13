@@ -341,7 +341,7 @@ Stages, with rough timing:
 | # | Stage | Time | Failure modes |
 |---|---|---|---|
 | 1 | `cargo build --release --target aarch64-apple-darwin` | 3-7 min | code errors (caught by CI before tagging if you ran `cargo test` first) |
-| 2 | Generate `.icns` from `bundle/icon.png` | <5 s | icon missing → script exits early with clear error |
+| 2 | Compile `bundle/icon/AppIcon.icon` into `Assets.car` (actool) | <10 s | icon folder missing or actool older than 26 → script exits early; actool writes no `Assets.car`, or one with the icon in a single appearance → script stops before signing |
 | 3 | Assemble `.app` bundle, render `Info.plist` | <1 s | - |
 | 4 | Codesign with Developer ID + Hardened Runtime | <5 s | cert not in Keychain (CI: `APPLE_CERT_BASE64` invalid) |
 | 5 | Build DMG via `create-dmg` | 10-30 s | - |
