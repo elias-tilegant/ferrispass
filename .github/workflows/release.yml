@@ -35,13 +35,25 @@ env:
 jobs:
   build:
     name: Build & notarize DMG
-    runs-on: macos-latest
+    # actool compiles the app icon, and an icon compiled by a newer Xcode
+    # may not show on macOS 26, the oldest the app supports. The build
+    # therefore runs on the macOS 26 image with a fixed Xcode 26. Not
+    # macos-latest: it moves on to newer images, and each image carries
+    # one major version of Xcode.
+    runs-on: macos-26
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
+
+      # A version that is on the macos-26 image; scripts/build-mac.sh stops
+      # if the selected actool is older than 26.
+      - name: Select Xcode 26
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcodebuild -version
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -73,8 +85,8 @@ jobs:
 
       - name: Verify icon present
         run: |
-          if [ ! -f bundle/icon.png ]; then
-            echo "✗ bundle/icon.png missing - commit the icon before tagging a release" >&2
+          if [ ! -d bundle/icon/AppIcon.icon ]; then
+            echo "✗ bundle/icon/AppIcon.icon missing - commit the icon before tagging a release" >&2
             exit 1
           fi
 
