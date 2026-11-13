@@ -78,7 +78,10 @@ fn line_starting(lines: &[String], start: &str) -> usize {
     match found[..] {
         [at] => at,
         [] => panic!("{BUILD_SCRIPT} has no line starting `{start}`"),
-        _ => panic!("{BUILD_SCRIPT} has {} lines starting `{start}`", found.len()),
+        _ => panic!(
+            "{BUILD_SCRIPT} has {} lines starting `{start}`",
+            found.len()
+        ),
     }
 }
 
@@ -98,7 +101,10 @@ fn plist_string(plist: &str, key: &str) -> Option<String> {
     let mut lines = plist.lines().map(str::trim);
     let key = format!("<key>{key}</key>");
     lines.find(|line| *line == key)?;
-    let value = lines.next()?.strip_prefix("<string>")?.strip_suffix("</string>")?;
+    let value = lines
+        .next()?
+        .strip_prefix("<string>")?
+        .strip_suffix("</string>")?;
     Some(value.to_string())
 }
 
@@ -121,7 +127,9 @@ fn the_icon_source_is_the_composer_document() {
         .map(|group| {
             let layers = group["layers"].as_array().expect("a group has layers");
             assert_eq!(layers.len(), 1, "one layer per group: {group}");
-            layers[0]["image-name"].as_str().expect("a layer names its image")
+            layers[0]["image-name"]
+                .as_str()
+                .expect("a layer names its image")
         })
         .collect();
     assert_eq!(layers, ["key.svg", "face.svg", "body.svg"]);
@@ -193,16 +201,28 @@ fn the_build_script_guards_actool_and_the_car() {
     }
     let lines = code_lines(&text);
 
-    line_of(&lines, r#"ICON_SRC="${PROJECT_ROOT}/bundle/icon/AppIcon.icon""#);
-    exits(&lines, line_of(&lines, r#"if [ ! -d "${ICON_SRC}" ]; then"#));
+    line_of(
+        &lines,
+        r#"ICON_SRC="${PROJECT_ROOT}/bundle/icon/AppIcon.icon""#,
+    );
+    exits(
+        &lines,
+        line_of(&lines, r#"if [ ! -d "${ICON_SRC}" ]; then"#),
+    );
 
     // An actool whose version cannot be read counts as too old, and one
     // older than 26 stops the build before it compiles anything.
     let unreadable = line_of(&lines, r#"''|*[!0-9]*) ACTOOL_MAJOR=0 ;;"#);
     let guard = line_of(&lines, r#"if [ "${ACTOOL_MAJOR}" -lt 26 ]; then"#);
     exits(&lines, guard);
-    let compile = line_starting(&lines, r#"xcrun actool "${ICON_SRC}" --compile "${ICON_OUT}" "#);
-    assert!(unreadable < guard && guard < compile, "the version guard comes before actool");
+    let compile = line_starting(
+        &lines,
+        r#"xcrun actool "${ICON_SRC}" --compile "${ICON_OUT}" "#,
+    );
+    assert!(
+        unreadable < guard && guard < compile,
+        "the version guard comes before actool"
+    );
     for option in [
         "--app-icon AppIcon",
         "--include-all-app-icons",
@@ -258,8 +278,14 @@ fn the_build_script_calls_the_bundle_check() {
     line_of(&lines, r#"BIN_PATH="${DIST_DIR}/${BINARY_NAME}""#);
     line_of(&lines, r#"CLI_BIN_PATH="${DIST_DIR}/${CLI_BINARY_NAME}""#);
 
-    let build = line_of(&lines, "cargo build --release --target aarch64-apple-darwin");
-    let copy = line_of(&lines, r#"cp "${RELEASE_DIR}/${BINARY_NAME}" "${BIN_PATH}""#);
+    let build = line_of(
+        &lines,
+        "cargo build --release --target aarch64-apple-darwin",
+    );
+    let copy = line_of(
+        &lines,
+        r#"cp "${RELEASE_DIR}/${BINARY_NAME}" "${BIN_PATH}""#,
+    );
     assert!(build < copy);
     assert_eq!(
         lines[copy + 1],
@@ -450,16 +476,27 @@ impl Build {
 fn the_bundle_check_refuses_a_stale_or_foreign_binary() {
     let build = Build::new();
     let (code, output) = build.check();
-    assert_eq!(code, Some(0), "the copies are the binaries cargo built:\n{output}");
+    assert_eq!(
+        code,
+        Some(0),
+        "the copies are the binaries cargo built:\n{output}"
+    );
 
     // Other files may be newer: a change to the docs or the tests does not
     // go into the binaries.
     build.write("source/docs/notes.md", "notes", 400);
     build.write("source/tests/app.rs", "test", 400);
     let (code, output) = build.check();
-    assert_eq!(code, Some(0), "only sources of the binaries count:\n{output}");
+    assert_eq!(
+        code,
+        Some(0),
+        "only sources of the binaries count:\n{output}"
+    );
 
-    for (binary, other) in [("ferrispass", "ferrispass-cli"), ("ferrispass-cli", "ferrispass")] {
+    for (binary, other) in [
+        ("ferrispass", "ferrispass-cli"),
+        ("ferrispass-cli", "ferrispass"),
+    ] {
         // A source that changed after `binary` was built, though not after
         // the other one: cargo would have built `binary` again.
         for source in SOURCES {
