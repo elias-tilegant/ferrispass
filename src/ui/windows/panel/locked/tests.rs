@@ -749,7 +749,9 @@ fn escape_wipes_and_closes(cx: &mut TestAppContext) {
 /// typed text, nor two of its characters side by side more often than with
 /// nothing typed. The parts are read as the panel's window draws them, from
 /// its own view, before and after typing. The button, which `drawn_parts`
-/// does not read, is left to `only_the_dots_show_how_much_was_typed`.
+/// does not read, is left to the two scans of the source:
+/// `only_the_dots_show_how_much_was_typed` reads `build` and `button`, and
+/// `only_build_names_what_the_locked_panel_draws` the rest of `locked.rs`.
 #[gpui::test]
 fn typed_keys_show_as_dots_and_never_as_a_value(cx: &mut TestAppContext) {
     let app = locked_app(cx, Setup::TouchId);
@@ -883,8 +885,10 @@ fn every_locked_case_renders_its_sentence(cx: &mut TestAppContext) {
 /// favorite and an entry used recently was open, the panel listed both,
 /// then the vault was locked. The panel lists no row, and no part
 /// `drawn_parts` reads names an entry in its node. The button it does not
-/// read is the one `button` makes from the locked case, which
-/// `only_the_dots_show_how_much_was_typed` holds.
+/// read is the one `button` makes from the locked case, which the two scans
+/// of the source hold: `only_the_dots_show_how_much_was_typed` in `build`
+/// and `button`, `only_build_names_what_the_locked_panel_draws` in the rest
+/// of `locked.rs`.
 #[gpui::test]
 fn the_locked_panel_shows_nothing_from_a_vault(cx: &mut TestAppContext) {
     let app = panel::tests::open_app(
@@ -1432,13 +1436,17 @@ fn body_of(code: &str, function: &str) -> Range<usize> {
 }
 
 /// Only `build` and `button` give an element of the locked panel an id, a
-/// role, a name, a value or a text of its own. The rest of `locked.rs`,
-/// `locked_parts` with the handlers and `assemble` with the layout among
-/// it, gives none, so what the locked panel hands to assistive technology
-/// is what those two make: the parts `drawn_parts` reads, and the button,
-/// which the tests read by its name. Read through `code_only`, so comments
-/// and the tests do not count; a call made through a macro or a function
-/// in another file is past it.
+/// role, a name, a value, a shortcut or a text of its own. The rest of
+/// `locked.rs`, `locked_parts` with the handlers and `assemble` with the
+/// layout among it, gives none, so what the locked panel hands to assistive
+/// technology is what those two make: the parts `drawn_parts` reads, and
+/// the button, which the tests read by its name. The list names GPUI's
+/// calls that give an element a node, a role or a text, and every builder
+/// method of the design system that sets something assistive technology
+/// reads. Read through `code_only`, so comments and the tests do not count;
+/// a call made through a macro or a function in another file is past it.
+/// Where an element is put inside another it does not look:
+/// `only_the_dots_show_how_much_was_typed` does, in `build` and `button`.
 #[test]
 fn only_build_names_what_the_locked_panel_draws() {
     let mut code = locked_code();
@@ -1473,6 +1481,26 @@ fn only_build_names_what_the_locked_panel_draws() {
             "Label",
             "Button::",
             ".description(",
+            // The design system's builder methods: a shortcut, the parts
+            // of a row's name, a value, a sentence, the footer's texts.
+            ".shortcut(",
+            ".shortcut_index(",
+            ".role_word(",
+            ".customer(",
+            ".client(",
+            ".user(",
+            ".vault(",
+            ".verb(",
+            ".value(",
+            ".assistive(",
+            ".code(",
+            ".next_code(",
+            ".note(",
+            ".error(",
+            ".primary(",
+            ".more(",
+            ".connect_first(",
+            ".standalone(",
         ] {
             if line.contains(call) {
                 found.push(format!("locked.rs:{}: {}", number + 1, line.trim()));
@@ -1494,7 +1522,10 @@ fn only_build_names_what_the_locked_panel_draws() {
 /// button, whose node only the design system writes, gets nothing of what
 /// was typed. `footer_model`, which `build` calls, reads only whether
 /// anything was typed, and `drawn_parts` reads the footer's parts. Read
-/// through `code_only`; the number read under another name is past it.
+/// through `code_only`. It sees an element put inside another only as
+/// `.child(` or `.children(`: `.extend(`, `ParentElement::child(` and the
+/// number read under another name, as in `let Look { dots: n, .. } = look;`,
+/// are past it, and so is a function in another file.
 #[test]
 fn only_the_dots_show_how_much_was_typed() {
     let code = locked_code();
