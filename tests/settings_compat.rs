@@ -7,7 +7,7 @@
 //! choices. New fields are fine: 0.9.2 ignores what it does not know, which is
 //! why the copy below has no `deny_unknown_fields`.
 
-use ferrispass::app::settings::{AppSettings, ThemeChoice, WindowBoundsSetting};
+use ferrispass::app::settings::{AppSettings, TextSize, ThemeChoice, WindowBoundsSetting};
 use ferrispass::keepass::limits::{Argon2Variant, KdfCost};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -112,6 +112,7 @@ fn every_field_set(theme: ThemeChoice) -> AppSettings {
         biometric_allow_passcode_fallback: false,
         auto_sync_secs: Some(300),
         theme,
+        text_size: TextSize::Large,
         window: Some(WindowBoundsSetting {
             x: 40.0,
             y: 64.5,
@@ -182,6 +183,30 @@ fn a_settings_file_with_the_mac_idle_field_loads_into_092() {
         );
         assert_loads_into_092(&settings, &format!("Mac idle {mac_idle_lock_secs:?}"));
     }
+}
+
+/// A settings.json without the text size reads as standard text. That is
+/// every file an older build wrote, and every file 0.9.2 wrote back after
+/// reading one with the field: it keeps only the fields it knows.
+#[test]
+fn a_settings_file_without_the_text_size_reads_it_as_standard() {
+    let large = every_field_set(ThemeChoice::Dark);
+    assert_eq!(large.text_size, TextSize::Large);
+    let written = serde_json::to_string_pretty(&large).expect("settings serialize");
+    assert!(written.contains("\"text_size\": \"large\""), "{written}");
+
+    let kept: Settings092 = serde_json::from_str(&written).expect("0.9.2 reads the file");
+    let written_back = serde_json::to_string_pretty(&kept).expect("0.9.2 settings serialize");
+    assert!(!written_back.contains("text_size"), "{written_back}");
+
+    let read: AppSettings =
+        serde_json::from_str(&written_back).expect("this build reads what 0.9.2 wrote");
+    assert_eq!(read.text_size, TextSize::Standard);
+    assert_eq!(
+        read.theme,
+        ThemeChoice::Dark,
+        "the rest of the file as written"
+    );
 }
 
 /// The quick access shortcut is a field 0.9.2 does not know, and it is on

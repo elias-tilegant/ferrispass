@@ -132,6 +132,13 @@ pub struct AppSettings {
     /// meant "read it once at startup".
     #[serde(default)]
     pub theme: ThemeChoice,
+    /// The base text size: standard or large. The new screens are laid out
+    /// in units of it, so spacing and controls grow with the text.
+    ///
+    /// `#[serde(default)]` so a settings.json without the field reads it as
+    /// standard. Older builds ignore it.
+    #[serde(default)]
+    pub text_size: TextSize,
     /// Last window geometry, restored on the next launch. Every start used to
     /// centre a fixed 1120x760 window, which is a poor fit for anyone with a
     /// large display or a tiling habit.
@@ -173,6 +180,15 @@ impl ThemeChoice {
             ThemeChoice::Dark => "Dark",
         }
     }
+}
+
+/// The text size the app is set in. The points for each are design tokens.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TextSize {
+    #[default]
+    Standard,
+    Large,
 }
 
 /// Window geometry in logical pixels. Stored flat so a hand-edited or
@@ -327,6 +343,7 @@ impl Default for AppSettings {
             biometric_allow_passcode_fallback: true,
             auto_sync_secs: default_auto_sync_secs(),
             theme: ThemeChoice::System,
+            text_size: TextSize::Standard,
             window: None,
             confirmed_kdf_costs: Vec::new(),
         }

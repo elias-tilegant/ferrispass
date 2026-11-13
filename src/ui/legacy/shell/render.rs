@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::app::services::activity::{self, ActivitySource};
+use crate::ui::ds::motion;
 
 impl AppShell {
     fn render_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -156,8 +157,10 @@ impl Render for AppShell {
     }
 }
 
-/// Input in the window holds off the auto-lock. Nothing here calls
-/// `cx.notify`: only the auto-lock task reads the clock, on its own schedule.
+/// Input in the window holds off the auto-lock, and its kind decides whether
+/// what it starts moves: nothing does after a key press. Nothing here calls
+/// `cx.notify`: only the auto-lock task reads the clock, on its own schedule,
+/// and motion reads the kind when something is about to move.
 impl AppShell {
     /// Every key press in `window`, typed text and shortcuts alike. The
     /// interceptor sees a key before key bindings and text input do; a key
@@ -165,9 +168,10 @@ impl AppShell {
     /// Cmd+C, the arrow keys and Return.
     pub(super) fn count_key_presses(window: &Window, cx: &mut gpui::App) -> Subscription {
         let this_window = window.window_handle();
-        cx.intercept_keystrokes(move |_, window, _| {
+        cx.intercept_keystrokes(move |_, window, cx| {
             if window.window_handle() == this_window {
                 activity::touch(ActivitySource::WindowInput);
+                motion::note_input(motion::Input::Keyboard, cx);
             }
         })
     }
@@ -182,24 +186,68 @@ impl AppShell {
         gpui::canvas(
             |_, _, _| {},
             |_, _, window, _| {
-                window.on_mouse_event(|_: &gpui::MouseMoveEvent, phase, window, _| {
+                window.on_mouse_event(|_: &gpui::MouseMoveEvent, phase, window, cx| {
                     if phase == gpui::DispatchPhase::Capture && window.is_window_active() {
                         activity::touch(ActivitySource::WindowInput);
+                        motion::note_input(motion::Input::Pointer, cx);
                     }
                 });
-                window.on_mouse_event(|_: &gpui::MouseDownEvent, phase, _, _| {
+                window.on_mouse_event(|_: &gpui::MouseDownEvent, phase, _, cx| {
                     if phase == gpui::DispatchPhase::Capture {
                         activity::touch(ActivitySource::WindowInput);
+                        motion::note_input(motion::Input::Pointer, cx);
                     }
                 });
-                window.on_mouse_event(|_: &gpui::ScrollWheelEvent, phase, _, _| {
+                window.on_mouse_event(|_: &gpui::ScrollWheelEvent, phase, _, cx| {
                     if phase == gpui::DispatchPhase::Capture {
                         activity::touch(ActivitySource::WindowInput);
+                        motion::note_input(motion::Input::Pointer, cx);
                     }
                 });
             },
         )
         .absolute()
         .size_full()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point};
+    use gpui_component::Root;
+
+    use super::*;
+    use crate::ui::ds;
+
+    /// The handlers that count input for the auto-lock also note its kind:
+    /// a key press is keyboard input, a click pointer input, whatever came
+    /// before.
+    #[gpui::test]
+    fn the_root_handlers_note_the_input_kind(cx: &mut TestAppContext) {
+        // The window reports its appearance once it opens, which applies the
+        // theme and with it the mode of the old screens' colors.
+        let _lock = ds::tests::lock_mode();
+        cx.update(gpui_component::init);
+        let state = cx.new(|_| AppState::default());
+        let window = cx.add_window(|window, cx| {
+            let shell = cx.new(|cx| AppShell::new(state.clone(), window, cx));
+            Root::new(shell, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.read(motion::last_input), motion::Input::System);
+
+        cx.simulate_keystrokes(window.into(), "x");
+        cx.run_until_parked();
+        assert_eq!(cx.read(motion::last_input), motion::Input::Keyboard);
+
+        let mut in_window = VisualTestContext::from_window(window.into(), cx);
+        let at = point(px(40.), px(40.));
+        in_window.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        in_window.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(cx.read(motion::last_input), motion::Input::Pointer);
+
+        cx.simulate_keystrokes(window.into(), "cmd-f");
+        cx.run_until_parked();
+        assert_eq!(cx.read(motion::last_input), motion::Input::Keyboard);
     }
 }

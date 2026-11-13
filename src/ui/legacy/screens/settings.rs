@@ -298,6 +298,7 @@ fn general_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoEl
     v_flex()
         .gap_4()
         .child(appearance_section(&settings, cx))
+        .child(text_size_section(&settings, cx))
         .child(auto_lock_section(&settings, cx))
         .when(biometric_supported, |this| {
             this.child(touch_id_section(&settings, cx))
@@ -462,7 +463,7 @@ fn appearance_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> imp
                 choice.label().to_string(),
                 choice == current,
                 cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
-                    crate::ui::ds::apply_choice(choice, Some(window), cx);
+                    crate::ui::ds::apply_choice(choice, baseline.text_size, Some(window), cx);
                     shell.update_settings(
                         AppSettings {
                             theme: choice,
@@ -478,6 +479,43 @@ fn appearance_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> imp
         "Appearance",
         "System follows your macOS setting, including a change while FerrisPass is running. \
          Cmd+Shift+D cycles the same three.",
+        option_group(items),
+    )
+}
+
+/// Standard or large text. A choice applies at once, with the theme as it
+/// is, and is saved like any other setting.
+fn text_size_section(settings: &AppSettings, cx: &mut Context<AppShell>) -> impl IntoElement {
+    use crate::app::settings::TextSize;
+
+    let current = settings.text_size;
+    let items: Vec<_> = [
+        (TextSize::Standard, "text-size-standard", "Standard"),
+        (TextSize::Large, "text-size-large", "Large"),
+    ]
+    .into_iter()
+    .map(|(size, id, label)| {
+        let baseline = settings.clone();
+        segment_item(
+            SharedString::new_static(id),
+            label.to_string(),
+            size == current,
+            cx.listener(move |shell: &mut AppShell, _: &ClickEvent, window, cx| {
+                crate::ui::ds::apply_choice(baseline.theme, size, Some(window), cx);
+                shell.update_settings(
+                    AppSettings {
+                        text_size: size,
+                        ..baseline.clone()
+                    },
+                    cx,
+                );
+            }),
+        )
+    })
+    .collect();
+    section_card(
+        "Text size",
+        "Large makes the text bigger. A change applies at once, without a restart.",
         option_group(items),
     )
 }
