@@ -48,7 +48,7 @@ Each page has the component's name and its source file at the top, then the stat
 | status shapes | The four status glyphs side by side at 64 points in the text color, so the shape alone tells them apart, and at 20 points in the color of each status. |
 | Kit glyphs | Each Lucide glyph of the Kit that the app draws again under `assets/icons/`: the app's drawing, which every Kit control shows, next to the Kit's own, at 16 and 32 points. |
 
-The keycap has no page of its own. It is not public outside the design system and shows inside the shortcut pairs, the buttons and the rows.
+The keycap has no page of its own. It is not public outside the design system and shows inside the shortcut pairs and the buttons. A row draws the keys that select it as a hint of its own, without keycaps.
 
 What the components say comes from the text keys wherever the app has one, so it follows the language. The rest is made-up sample data: the entries of a customer called Nordhafen AG in the vault "Team Beratung", the footer's notes on being offline and on an update, and the line about what to connect to first, which have no text keys yet. The one value that looks like a secret is `gallery-9Qz!2026`, and the one-time codes are `123456` and `654321`. None of them opens anything.
 
@@ -56,7 +56,7 @@ The captions under each state are names of components and states in English, wri
 
 ## How the mode, the text size and the language are switched
 
-The gallery starts the way the app starts: it loads the bundled fonts, sets up the Kit, the text keys and the design system with `ds::init`. It skips everything else the app does at start, so it reads no settings, opens no vault and does not touch the clipboard.
+The gallery starts the way the app starts: it loads the bundled fonts and sets up the Kit, the text keys and, with `ds::init`, the design system. It skips everything else the app does at start, so it reads no settings, opens no vault and does not touch the clipboard.
 
 The mode, the text size and the language belong to the gallery. A change goes through `ds::apply` with an `Appearance` the gallery builds itself:
 
@@ -105,7 +105,7 @@ The two scans read every `.rs` file under `examples/design_gallery/` except `tes
 - The status shapes at 64 points are the glyph files scaled up, stroke included. They show the shape, not how the glyph looks at the sizes the app uses.
 - The gallery sets Reduce Motion and VoiceOver off in its appearance. It does not show the components with Reduce Motion on.
 - The `assistive` switch of the secret field and the one-time code ring changes only what VoiceOver reads, not what shows. The gallery leaves it off.
-- The pages show what each component draws, not what a screen does with it: selection does not move in the result list, and the footer's menu button opens nothing. The text fields, the switch and the secret field's buttons answer input; nothing else does.
+- The pages show what each component draws, not what a screen does with it: selection does not move in the result list, and the footer's menu button opens nothing. Apart from the text fields and the switch and secret field that answer clicks, nothing on a page keeps a change from a click or a key.
 
 ## Not done
 
