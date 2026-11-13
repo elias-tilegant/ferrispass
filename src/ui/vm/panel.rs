@@ -835,9 +835,13 @@ pub fn display_untrusted(text: &str) -> SharedString {
 }
 
 /// The marks that turn the writing direction around, so that a name could
-/// read differently from what it is.
+/// read differently from what it is: every character Unicode lists as
+/// `Bidi_Control`, the Arabic letter mark U+061C among them.
 fn turns_direction(c: char) -> bool {
-    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// The vault's name without `.kdbx`, as the panel shows it.

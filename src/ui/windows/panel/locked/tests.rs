@@ -936,7 +936,8 @@ fn the_locked_panel_shows_nothing_from_a_vault(cx: &mut TestAppContext) {
 
 /// A missing vault is named by its file name alone, without its folder, and
 /// cleaned up first: no control characters, no marks that turn the writing
-/// direction around, and no more than sixty characters.
+/// direction around, U+202E and the Arabic letter mark U+061C among them,
+/// and no more than sixty characters.
 #[gpui::test]
 fn the_file_name_in_file_missing_is_a_basename_through_display_untrusted(cx: &mut TestAppContext) {
     let app = locked_app(cx, Setup::Missing);
@@ -956,7 +957,7 @@ fn the_file_name_in_file_missing_is_a_basename_through_display_untrusted(cx: &mu
     let folder = app.path.parent().expect("a folder").display().to_string();
     assert!(!said.contains(&folder), "the folder is shown: {said}");
 
-    let tricky = Path::new("/Users/n/Tresore/inv\u{202E}xbdk.ecioval\u{0007}.kdbx");
+    let tricky = Path::new("/Users/n/Tresore/inv\u{202E}xbdk.ecio\u{061C}val\u{0007}.kdbx");
     assert_eq!(file_name(tricky).as_ref(), "invxbdk.ecioval.kdbx");
     let long = format!("/tmp/{}.kdbx", "a".repeat(80));
     let shown = file_name(Path::new(&long));

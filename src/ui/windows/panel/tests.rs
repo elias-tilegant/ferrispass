@@ -1171,13 +1171,14 @@ fn function<'a>(code: &'a str, start: &str) -> &'a str {
 /// The vault's name comes from its file name, which whatever put the file
 /// on the disk chose. The open panel shows it as the locked panel does:
 /// without control characters and the marks that turn the writing
-/// direction, cut after sixty characters. Read in the model and in every
-/// row's name, off the row's node.
+/// direction, U+202E and the Arabic letter mark U+061C among them, cut
+/// after sixty characters. Read in the model and in every row's name, off
+/// the row's node.
 #[gpui::test]
 fn the_open_panel_cleans_the_vault_name_as_the_locked_panel_does(cx: &mut TestAppContext) {
     let app = open_app_at(
         cx,
-        "/nonexistent/ferrispass-panel-tests/team-\u{202E}beratung\u{0007}.kdbx",
+        "/nonexistent/ferrispass-panel-tests/team-\u{202E}bera\u{061C}tung\u{0007}.kdbx",
         &sample(),
     );
     let _panel = app.open_panel(cx);
