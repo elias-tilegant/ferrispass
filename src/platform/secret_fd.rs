@@ -39,7 +39,10 @@
 //!    `Command::spawn` opens descriptors of its own to learn about a failed
 //!    exec. Held this way, they land above the targets too, so the child's
 //!    `dup2` cannot replace them, which would make a program that does not
-//!    exist look started.
+//!    exist look started. That holds only while no other thread closes a
+//!    descriptor between this step and the spawn: a number freed then can
+//!    go to `Command::spawn`. In the CLI no other thread closes a
+//!    descriptor in that window; the delivery threads start after the spawn.
 //! 5. The spawn runs a `pre_exec` closure in the child, between fork and exec:
 //!    for each target, `dup2(copy, target)`, then `close(copy)` if the copy is
 //!    not the target. After that it closes each number the program must not
@@ -1013,6 +1016,9 @@ mod tests {
     /// an end open for good.
     #[test]
     fn spawn_failure_closes_every_descriptor() {
+        if in_a_process_of_its_own("spawn_failure_closes_every_descriptor") {
+            return;
+        }
         let (mut first, _) = own_pipe("first");
         let (mut second, _) = own_pipe("second");
         let mut first_writer = first.writer.try_clone().expect("a second write end");
@@ -1060,11 +1066,47 @@ mod tests {
         assert_eq!(read, Ok(0), "a write end of the second pipe is still open");
     }
 
+    /// Runs the test `name` again in a process of its own, where it is the
+    /// only test, and returns true once it has passed there. In that process
+    /// this returns false and the test goes on.
+    ///
+    /// For the tests that need a failed exec reported. Step 4 holds the free
+    /// numbers up to the highest target, but another test that closes a
+    /// descriptor before the spawn frees a number below it again. The pipe
+    /// `Command::spawn` reports a failed exec on can get that number, the
+    /// child's `dup2` replaces it, the child aborts because it cannot report,
+    /// and the missing program looks started. Here dozens of tests open and
+    /// close descriptors at the same time; in the CLI nothing does.
+    fn in_a_process_of_its_own(name: &str) -> bool {
+        const ALONE: &str = "FERRISPASS_SECRET_FD_TEST_ALONE";
+        if std::env::var_os(ALONE).is_some() {
+            return false;
+        }
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let output = Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", &format!("{module}::{name}"), "--test-threads=1"])
+            .env(ALONE, "1")
+            .output()
+            .expect("run the test in a process of its own");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // `--exact` with a name that matches nothing passes without a test.
+        assert!(
+            output.status.success() && stdout.contains(" 1 passed"),
+            "{name} in a process of its own: {}\n{stdout}",
+            output.status
+        );
+        true
+    }
+
     /// `Command::spawn` learns about a failed exec on descriptors of its own.
     /// Wherever the target is, those must not be among the numbers the child
     /// replaces, or a missing program would look started.
     #[test]
     fn a_failed_exec_is_reported_whatever_the_target() {
+        if in_a_process_of_its_own("a_failed_exec_is_reported_whatever_the_target") {
+            return;
+        }
         for target in 3..=24 {
             match spawn_with_secret_fds(
                 Command::new(MISSING_PROGRAM),
