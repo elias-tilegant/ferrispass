@@ -50,6 +50,9 @@ commit_parsers = [
   { message = "^ci", skip = true },
   { message = "^test", skip = true },
   { message = "^style", skip = true },
+  # Merge commits repeat what the merged commits already say, and since
+  # pull requests are merged rather than squashed there is one per PR.
+  { message = "^Merge ", skip = true },
 
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Bug Fixes" },
@@ -57,6 +60,7 @@ commit_parsers = [
   { message = "^docs", group = "Documentation" },
   { message = "^refactor", group = "Refactoring" },
   { message = "^build", group = "Build & Tooling" },
+  { message = "^deps", group = "Dependencies" },
 
   # Catch-all for commits without a conventional prefix.
   { message = ".*", group = "Other Changes" },
