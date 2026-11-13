@@ -58,19 +58,40 @@ impl AppShell {
             ),
             cx,
         );
+        self.auto_type_after_countdown(entry_id, cx);
+    }
+
+    /// Types `entry_id` once the countdown has run out. A lock or another
+    /// vault on the way ends the run silently, and so does the quick access
+    /// panel opening meanwhile, unless it is still open when the countdown
+    /// ends: then `perform_auto_type` says why nothing was typed.
+    fn auto_type_after_countdown(&mut self, entry_id: String, cx: &mut Context<Self>) {
         let cancellation = self.state.read(cx).auto_type_cancellation();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_secs(AUTO_TYPE_COUNTDOWN_SECS))
                 .await;
-            if cancellation.is_cancelled() {
-                return;
-            }
             let _ = this.update_in(cx, |shell, window, cx| {
                 shell.perform_auto_type(Some(entry_id.clone()), cancellation.clone(), window, cx);
             });
         })
         .detach();
+    }
+
+    /// The way in for the global Auto-Type shortcut, from the app-level loop
+    /// in `services::hotkeys`. The run needs this window (its notifications
+    /// land there), so it goes through the window handle rather than
+    /// `App::dispatch_action`, which routes through `active_window()`: that
+    /// is `None` while another app holds the focus, which is exactly when
+    /// the shortcut is pressed. A window that is gone ends it quietly.
+    pub(crate) fn dispatch_global_auto_type(shell: Entity<AppShell>, cx: &mut gpui::App) {
+        let window_handle = shell.read(cx).window_handle;
+        let _ = window_handle.update(cx, |_root, window, app| {
+            shell.update(app, |shell, cx| {
+                let cancellation = shell.state.read(cx).auto_type_cancellation();
+                shell.perform_auto_type(None, cancellation, window, cx);
+            });
+        });
     }
 
     /// Shared implementation between the global-hotkey and in-app
@@ -93,8 +114,23 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Stale countdowns and queued hotkey work are deliberately silent.
+        #[cfg(test)]
+        tests::note_run(window.window_handle());
+        // The quick access panel has the keyboard while the app behind it
+        // stays in front: whatever Auto-Type typed now would land in the
+        // panel's search field. Opening the panel stops a run
+        // (`ui::windows::panel::open`), and no run types while it is open.
+        let panel_open = crate::ui::windows::panel::is_open(cx);
+        // Stale countdowns and queued hotkey work are deliberately silent,
+        // except a run the panel stopped while the panel is still open.
         if cancellation.is_cancelled() {
+            if panel_open {
+                say_the_panel_is_open(window, cx);
+            }
+            return;
+        }
+        if panel_open {
+            say_the_panel_is_open(window, cx);
             return;
         }
         let Some(foreground) = autotype::window::foreground() else {
@@ -252,5 +288,316 @@ impl AppShell {
                 window.push_notification(message, cx);
             }
         }
+    }
+}
+
+/// Tells the main window that Auto-Type typed nothing because the quick
+/// access panel is open.
+fn say_the_panel_is_open(window: &mut Window, cx: &mut gpui::App) {
+    #[cfg(test)]
+    tests::note_held_back();
+    window.push_notification("Auto-Type typed nothing because Quick Access is open.", cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::app::services::hotkeys;
+    use crate::autotype::hotkey::fake;
+    use crate::clipboard::{AccessBehavior, fake::FakePasteboard};
+
+    thread_local! {
+        static RUNS: RefCell<Vec<AnyWindowHandle>> = const { RefCell::new(Vec::new()) };
+        static HELD_BACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Called where a run types nothing because the quick access panel is
+    /// open, in test builds.
+    pub(super) fn note_held_back() {
+        HELD_BACK.with(|held| held.set(held.get() + 1));
+    }
+
+    fn held_back() -> usize {
+        HELD_BACK.with(std::cell::Cell::get)
+    }
+
+    /// Called at the top of `perform_auto_type` in test builds, with the
+    /// window it runs in.
+    pub(super) fn note_run(window: AnyWindowHandle) {
+        RUNS.with(|runs| runs.borrow_mut().push(window));
+    }
+
+    fn runs() -> Vec<AnyWindowHandle> {
+        RUNS.with(|runs| runs.borrow().clone())
+    }
+
+    fn pressed(id: u32) -> GlobalHotKeyEvent {
+        GlobalHotKeyEvent {
+            id,
+            state: HotKeyState::Pressed,
+        }
+    }
+
+    /// The Auto-Type shortcut used to have a loop of its own on the main
+    /// window. It now shares the app-level loop with the quick access
+    /// shortcut, and a press still runs Auto-Type once, in the main window.
+    /// A press of the quick access shortcut does not.
+    #[gpui::test]
+    fn the_auto_type_hotkey_still_reaches_the_shell(cx: &mut TestAppContext) {
+        fake::reset();
+        RUNS.with(|runs| runs.borrow_mut().clear());
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::app::actions::init(cx);
+            ClipboardService::install_for_test(
+                cx,
+                Box::new(FakePasteboard::new(AccessBehavior::Default)),
+            );
+        });
+        let state = cx.new(|_| AppState::default());
+        cx.update(|cx| crate::app::open_main_window_for_test(cx, state));
+        cx.run_until_parked();
+        let shell = cx
+            .update(|cx| crate::app::with_shared_shell(cx, |_, cx| cx.entity()))
+            .expect("the main window's shell");
+        let main_window = shell.read_with(cx, |shell, _| shell.window_handle);
+        shell.update(cx, |shell, cx| {
+            shell.settings.quick_access_hotkey_enabled = true;
+            shell.settings.auto_type_enabled = true;
+            shell.sync_auto_type_listener(cx);
+        });
+        let registered = cx.update(|cx| hotkeys::registered(cx));
+        let auto_type = registered.auto_type.expect("Auto-Type registered");
+        let quick_access = registered.quick_access.expect("quick access registered");
+
+        // Two presses: the first opens the panel, the second closes it.
+        for _ in 0..2 {
+            fake::send(pressed(quick_access));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+        }
+        assert!(runs().is_empty(), "the quick access shortcut ran Auto-Type");
+        assert!(!cx.update(|cx| crate::ui::windows::panel::is_open(cx)));
+
+        fake::send(pressed(auto_type));
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_eq!(
+            runs(),
+            vec![main_window],
+            "one press, one Auto-Type run, in the main window"
+        );
+    }
+
+    /// A shortcut switched off reacts to nothing: an event with the id it
+    /// had while it was registered neither opens the panel nor moves the
+    /// idle clock, and neither runs Auto-Type. The other shortcut keeps the
+    /// loop running meanwhile, and once both are on again, each press does
+    /// its work.
+    #[gpui::test]
+    fn a_switched_off_shortcut_does_nothing_with_its_old_id(cx: &mut TestAppContext) {
+        use crate::app::services::activity;
+        use crate::ui::windows::panel;
+        use std::time::SystemTime;
+
+        let _app = panel::tests::open_app(cx, &[panel::tests::entry("Zq panel fixture")]);
+        RUNS.with(|runs| runs.borrow_mut().clear());
+        let shell = cx
+            .update(|cx| crate::app::with_shared_shell(cx, |_, cx| cx.entity()))
+            .expect("the main window's shell");
+        let switch = |cx: &mut TestAppContext, quick_access: bool, auto_type: bool| {
+            shell.update(cx, |shell, cx| {
+                shell.settings.quick_access_hotkey_enabled = quick_access;
+                shell.settings.auto_type_enabled = auto_type;
+                shell.sync_auto_type_listener(cx);
+            });
+        };
+        let press = |cx: &mut TestAppContext, id: u32| {
+            fake::send(pressed(id));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+        };
+        switch(cx, true, true);
+        let registered = cx.update(|cx| hotkeys::registered(cx));
+        let quick_access = registered.quick_access.expect("quick access registered");
+        let auto_type = registered.auto_type.expect("Auto-Type registered");
+        let ten_minutes = Duration::from_secs(600);
+
+        switch(cx, false, true);
+        assert_eq!(cx.update(|cx| hotkeys::registered(cx)).quick_access, None);
+        activity::reset(SystemTime::now() - ten_minutes);
+        press(cx, quick_access);
+        assert!(
+            !cx.update(|cx| panel::is_open(cx)),
+            "the switched-off shortcut opened the panel"
+        );
+        assert!(
+            activity::idle_for(SystemTime::now()) >= ten_minutes,
+            "the switched-off shortcut counted as activity"
+        );
+
+        switch(cx, true, false);
+        assert_eq!(cx.update(|cx| hotkeys::registered(cx)).auto_type, None);
+        press(cx, auto_type);
+        assert!(runs().is_empty(), "the switched-off shortcut ran Auto-Type");
+
+        switch(cx, true, true);
+        press(cx, auto_type);
+        assert_eq!(runs().len(), 1, "Auto-Type on again, a press runs it");
+        press(cx, quick_access);
+        assert!(cx.update(|cx| panel::is_open(cx)), "quick access on again");
+    }
+
+    /// The quick access panel takes the keyboard while the app behind it
+    /// stays in front. Auto-Type reads that app, so a run would find its
+    /// entry and type the user name and the password into the panel's
+    /// search field. While the panel is open the shortcut runs nothing; once
+    /// it is closed, a press runs Auto-Type as before.
+    #[gpui::test]
+    fn the_auto_type_hotkey_types_nothing_while_the_panel_is_open(cx: &mut TestAppContext) {
+        use crate::ui::windows::panel;
+
+        // No address and no window pattern: no app in front matches it.
+        let app = panel::tests::open_app(cx, &[panel::tests::entry("Zq panel fixture")]);
+        RUNS.with(|runs| runs.borrow_mut().clear());
+        let shell = cx
+            .update(|cx| crate::app::with_shared_shell(cx, |_, cx| cx.entity()))
+            .expect("the main window's shell");
+        let main_window = shell.read_with(cx, |shell, _| shell.window_handle);
+        shell.update(cx, |shell, cx| {
+            shell.settings.quick_access_hotkey_enabled = true;
+            shell.settings.auto_type_enabled = true;
+            shell.sync_auto_type_listener(cx);
+        });
+        let auto_type = cx
+            .update(|cx| hotkeys::registered(cx))
+            .auto_type
+            .expect("Auto-Type registered");
+        let press = |cx: &mut TestAppContext| {
+            fake::send(pressed(auto_type));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+        };
+
+        let panel_window = app.open_panel(cx);
+        panel_window
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("the panel");
+        cx.run_until_parked();
+        assert!(cx.update(|cx| panel::is_open(cx)));
+        press(cx);
+        assert!(
+            runs().is_empty(),
+            "Auto-Type ran while the panel had the keyboard"
+        );
+        assert!(cx.update(|cx| panel::is_open(cx)), "the panel stays open");
+
+        cx.update(panel::close);
+        cx.run_until_parked();
+        press(cx);
+        assert_eq!(
+            runs(),
+            vec![main_window],
+            "with the panel closed, a press runs Auto-Type in the main window"
+        );
+    }
+
+    /// Shift-Command-T types after a countdown. When quick access opens
+    /// meanwhile, the run stops: the countdown ends without typing, and the
+    /// main window says why. A run that reaches the main window while the
+    /// panel is open, as the Auto-Type shortcut's would if its loop let it
+    /// through, types nothing either and says so.
+    #[gpui::test]
+    fn the_countdown_types_nothing_when_the_panel_opened_meanwhile(cx: &mut TestAppContext) {
+        use crate::ui::windows::panel;
+
+        let app = panel::tests::open_app(cx, &[panel::tests::entry("Zq panel fixture")]);
+        RUNS.with(|runs| runs.borrow_mut().clear());
+        HELD_BACK.with(|held| held.set(0));
+        let shell = cx
+            .update(|cx| crate::app::with_shared_shell(cx, |_, cx| cx.entity()))
+            .expect("the main window's shell");
+        let main_window = shell.read_with(cx, |shell, _| shell.window_handle);
+        let notices = |cx: &mut TestAppContext| {
+            main_window
+                .update(cx, |_, window, cx| window.notifications(cx).len())
+                .expect("the main window")
+        };
+        let before = notices(cx);
+
+        // The countdown for an entry the vault does not hold: a run that
+        // went on anyway would find nothing to type.
+        shell.update(cx, |shell, cx| {
+            shell.auto_type_after_countdown("not-in-the-vault".to_string(), cx);
+        });
+        app.open_panel(cx);
+        cx.executor()
+            .advance_clock(Duration::from_secs(AUTO_TYPE_COUNTDOWN_SECS));
+        cx.run_until_parked();
+        assert_eq!(runs(), vec![main_window], "the countdown did not end");
+        assert_eq!(held_back(), 1, "the countdown went on into the panel");
+        assert_eq!(notices(cx), before + 1, "the main window does not say why");
+        assert!(cx.update(|cx| panel::is_open(cx)));
+
+        cx.update(|cx| AppShell::dispatch_global_auto_type(shell.clone(), cx));
+        cx.run_until_parked();
+        assert_eq!(runs().len(), 2);
+        assert_eq!(held_back(), 2, "a run went on while the panel was open");
+        assert_eq!(notices(cx), before + 2);
+    }
+
+    /// Opening quick access stops an Auto-Type run that is still typing,
+    /// before the panel takes the keyboard. The run holds the token it
+    /// started with, as `autotype::execute` does: a key already on its way
+    /// out reaches the app it was meant for before the panel opens, and no
+    /// key goes out after that. A run that starts later is not stopped.
+    #[gpui::test]
+    fn opening_the_panel_cancels_a_running_auto_type(cx: &mut TestAppContext) {
+        use crate::ui::windows::panel;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, mpsc};
+
+        let app = panel::tests::open_app(cx, &[panel::tests::entry("Zq panel fixture")]);
+        let run = app
+            .state
+            .read_with(cx, |state, _| state.auto_type_cancellation());
+        // The typer sends every character inside the token's dispatch gate.
+        let (inside, entered) = mpsc::channel();
+        let sent = Arc::new(AtomicBool::new(false));
+        let typer = {
+            let (run, sent) = (run.clone(), sent.clone());
+            std::thread::spawn(move || {
+                run.dispatch_if_active(|| {
+                    inside.send(()).expect("the test waits");
+                    std::thread::sleep(Duration::from_millis(50));
+                    sent.store(true, Ordering::SeqCst);
+                })
+            })
+        };
+        entered.recv().expect("a key on its way out");
+        app.open_panel(cx);
+        assert!(
+            sent.load(Ordering::SeqCst),
+            "the panel took the keyboard while a key was still going out"
+        );
+        assert!(run.is_cancelled(), "the run goes on typing into the panel");
+        assert_eq!(
+            run.dispatch_if_active(|| ()),
+            None,
+            "a key went out after the panel opened"
+        );
+        assert_eq!(typer.join().expect("the typer"), Some(()));
+        let later = app
+            .state
+            .read_with(cx, |state, _| state.auto_type_cancellation());
+        assert!(
+            !later.is_cancelled(),
+            "a run that starts later is stopped too"
+        );
     }
 }

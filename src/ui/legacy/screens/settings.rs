@@ -801,13 +801,19 @@ const AUTO_TYPE_SEQUENCE_PRESETS: &[(&str, &str)] = &[
 fn auto_type_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl IntoElement {
     let settings = shell.settings().clone();
     let trusted = shell.auto_type_is_trusted();
-    let hotkey_err = shell.auto_type_hotkey_error().map(String::from);
+    let quick_access_err = crate::app::services::hotkeys::error(
+        crate::app::services::hotkeys::Shortcut::QuickAccess,
+        cx,
+    );
+    let hotkey_err =
+        crate::app::services::hotkeys::error(crate::app::services::hotkeys::Shortcut::AutoType, cx);
     let sequence_err = shell
         .auto_type_sequence_error()
         .map(|e| format!("Sequence invalid: {e}"));
 
     v_flex()
         .gap_4()
+        .child(quick_access_section(&settings, quick_access_err, cx))
         .child(auto_type_toggle_section(&settings, cx))
         .child(auto_type_hotkey_section(&settings, hotkey_err, cx))
         .child(auto_type_sequence_section(
@@ -817,6 +823,43 @@ fn auto_type_tab_body(shell: &AppShell, cx: &mut Context<AppShell>) -> impl Into
             cx,
         ))
         .child(auto_type_permission_section(trusted, cx))
+}
+
+/// The switch for ⌃⌥⌘P. The shortcut itself is fixed; the panel it opens
+/// searches the open vault from any app.
+fn quick_access_section(
+    settings: &AppSettings,
+    error: Option<String>,
+    cx: &mut Context<AppShell>,
+) -> impl IntoElement {
+    let enabled = settings.quick_access_hotkey_enabled;
+    let baseline = settings.clone();
+    let switch = setting_switch(
+        "quick-access-toggle",
+        enabled,
+        cx.listener(move |shell: &mut AppShell, _: &ClickEvent, _, cx| {
+            shell.update_settings(
+                AppSettings {
+                    quick_access_hotkey_enabled: !enabled,
+                    ..baseline.clone()
+                },
+                cx,
+            );
+        }),
+    );
+    let body = v_flex().gap_2().child(switch).when_some(error, |col, err| {
+        col.child(
+            div()
+                .text_xs()
+                .text_color(palette::red())
+                .child(format!("Shortcut registration failed: {err}")),
+        )
+    });
+    section_card(
+        "Quick Access",
+        "Open Quick Access with ⌃⌥⌘P from any app.",
+        body,
+    )
 }
 
 fn auto_type_toggle_section(

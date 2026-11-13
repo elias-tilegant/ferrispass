@@ -198,7 +198,7 @@ impl ResultList {
     /// Every row of the list as the list draws it, then the list box as
     /// `render` returns it, each read as the tests read it.
     #[cfg(test)]
-    pub(super) fn parts(
+    pub(crate) fn parts(
         self,
         window: &mut Window,
         cx: &mut App,

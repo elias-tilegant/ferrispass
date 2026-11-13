@@ -227,106 +227,28 @@ impl AppShell {
         }
     }
 
-    /// Reconcile the global-hotkey listener with the current settings.
-    /// Called from `new` (initial wire-up) and `update_settings`
-    /// (toggle / combo change). Idempotent on the no-change path.
+    /// Reconcile the global shortcuts with the current settings. Called from
+    /// `new` (initial wire-up) and `update_settings` (toggle / combo change).
+    /// Idempotent on the no-change path.
     ///
-    /// Failure modes are user-actionable, so we cache the error in
-    /// `auto_type_hotkey_error` for the Settings UI to display instead
-    /// of silently leaving the feature off - that's exactly the
-    /// "looks broken" state we want to avoid.
+    /// The registrations and the one loop that reads them live in
+    /// `services::hotkeys`, at app level, so the quick access shortcut works
+    /// without this window and Auto-Type keeps working after Cmd+W hides it.
+    /// Their errors are cached there for the Settings UI to display instead
+    /// of silently leaving the feature off - that's exactly the "looks
+    /// broken" state we want to avoid.
     pub fn sync_auto_type_listener(&mut self, cx: &mut Context<Self>) {
         // Validate the sequence regardless of `enabled` so the Settings
         // UI can show a parse error even when the user is editing a
         // disabled-but-being-set-up feature. Cheap: pure string work.
         self.auto_type_sequence_error =
             autotype::sequence::parse(&self.settings.auto_type_sequence).err();
-
-        let want_listener = self.settings.auto_type_enabled;
-        let current_combo = self
-            .auto_type_listener
-            .as_ref()
-            .map(|l| l.id())
-            .unwrap_or(0);
-        let parsed = autotype::hotkey::parse_combo(&self.settings.auto_type_hotkey);
-        let target_id = parsed.as_ref().map(|h| h.id()).unwrap_or(0);
-
-        // No-op shortcut: feature on, combo unchanged, listener already
-        // registered. Saves the OS round-trip on every settings save.
-        if want_listener && self.auto_type_listener.is_some() && current_combo == target_id {
-            self.auto_type_hotkey_error = None;
-            return;
-        }
-
-        // Tear down any existing listener+poll task. Drop order matters
-        // only insofar as the poll task should stop reading the channel
-        // before the registration is removed; in practice both are safe
-        // to drop concurrently because the channel is process-global.
-        self.auto_type_listener = None;
-        self.auto_type_poll_task = None;
-
-        if !want_listener {
-            self.auto_type_hotkey_error = None;
-            return;
-        }
-
-        match autotype::HotkeyListener::register(&self.settings.auto_type_hotkey) {
-            Ok(listener) => {
-                let expected_id = listener.id();
-                let window_handle = self.window_handle;
-                self.auto_type_listener = Some(listener);
-                self.auto_type_hotkey_error = None;
-                self.auto_type_poll_task = Some(cx.spawn(async move |this, cx| {
-                    loop {
-                        cx.background_executor()
-                            .timer(AUTO_TYPE_POLL_INTERVAL)
-                            .await;
-                        // Liveness check + non-blocking drain on the
-                        // entity context (cheap; no window borrow needed).
-                        let fired = this.update(cx, |_shell, _cx| {
-                            autotype::hotkey::poll_pressed(expected_id)
-                        });
-                        let fired = match fired {
-                            Ok(f) => f,
-                            Err(_) => break, // shell dropped
-                        };
-                        if !fired {
-                            continue;
-                        }
-                        // Hotkey fired. We dispatch into the window
-                        // directly - `App::dispatch_action` would route
-                        // through `active_window()`, which is `None`
-                        // while another app holds OS focus, and would
-                        // then fall back to `dispatch_global_action`
-                        // (skipping our element-tree handler entirely).
-                        // Going through the window handle gives us a
-                        // real `&mut Window` regardless of focus.
-                        let entered = window_handle.update(cx, |_root, window, app| {
-                            this.update(app, |shell, cx| {
-                                let cancellation = shell.state.read(cx).auto_type_cancellation();
-                                shell.perform_auto_type(None, cancellation, window, cx);
-                            })
-                            .ok();
-                        });
-                        if entered.is_err() {
-                            break; // window closed
-                        }
-                    }
-                }));
-            }
-            Err(e) => {
-                self.auto_type_hotkey_error = Some(e.to_string());
-            }
-        }
+        crate::app::services::hotkeys::reconcile(&self.settings, cx);
     }
 
     /// Read-only accessors for the Settings UI. Cached errors are
     /// recomputed on every `update_settings` so the UI can render the
     /// up-to-date status without re-parsing on every frame.
-    pub fn auto_type_hotkey_error(&self) -> Option<&str> {
-        self.auto_type_hotkey_error.as_deref()
-    }
-
     pub fn auto_type_sequence_error(&self) -> Option<&autotype::ParseError> {
         self.auto_type_sequence_error.as_ref()
     }

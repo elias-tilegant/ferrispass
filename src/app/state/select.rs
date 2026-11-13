@@ -301,4 +301,54 @@ impl AppState {
             showing_search_results,
         })
     }
+
+    /// The quick access panel's list for `query` in the open vault, at most
+    /// `limit` entries: what the search lists for a query with words, the
+    /// favorites, the recently used entries and the rest for an empty one
+    /// (`search::panel::rank_for_panel`). Each comes with how many of the
+    /// listed entries stand for the same system as it, itself included
+    /// (`search::panel::twins`). Empty while no vault is open.
+    ///
+    /// The panel keeps a selection of its own. This reads the open vault and
+    /// leaves the main window's search and selection alone.
+    pub fn ranked_for_panel(&self, query: &str, limit: usize) -> Vec<(VaultEntry, usize)> {
+        let VaultStatus::Open {
+            document,
+            last_used,
+            ..
+        } = &self.vault
+        else {
+            return Vec::new();
+        };
+        let mut listed =
+            crate::app::search::panel::rank_for_panel(document.snapshot(), query, last_used);
+        listed.truncate(limit);
+        let twins = crate::app::search::panel::twins(&listed);
+        listed
+            .into_iter()
+            .zip(twins)
+            .map(|(ranked, twins)| (ranked.entry.clone(), twins))
+            .collect()
+    }
+
+    /// The password of the entry with this id in the open vault, for the
+    /// quick access panel, which acts on its own selection rather than the
+    /// main window's (`copy_selected_value`). `None` while no vault is open,
+    /// for an unknown id and for an entry without a password.
+    pub fn password_for_entry(&self, entry_id: &str) -> Option<Zeroizing<String>> {
+        let VaultStatus::Open { document, .. } = &self.vault else {
+            return None;
+        };
+        document.password_for_entry(entry_id)
+    }
+
+    /// The current one-time code of the entry with this id in the open vault,
+    /// for the quick access panel; `totp_for_selected_entry` is the main
+    /// window's. `None` while no vault is open and for an entry without one.
+    pub fn totp_for_entry(&self, entry_id: &str) -> Option<OtpDisplay> {
+        let VaultStatus::Open { document, .. } = &self.vault else {
+            return None;
+        };
+        document.totp_for_entry(entry_id)
+    }
 }

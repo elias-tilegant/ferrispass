@@ -62,3 +62,18 @@ glossary:
   trash:
     en: Trash
     de: Papierkorb
+  # An SAP system's role, written out. A list names a system by its role in
+  # words; the letters PRD, QAS, DEV and SBX stand on a chip only.
+  role:
+    production_system:
+      en: Production system
+      de: Produktivsystem
+    quality_system:
+      en: Quality system
+      de: Qualitätssystem
+    development_system:
+      en: Development system
+      de: Entwicklungssystem
+    sandbox_system:
+      en: Sandbox system
+      de: Sandbox-System

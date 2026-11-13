@@ -11,7 +11,8 @@
 //!   signals. Pure, no IO, fully unit-tested.
 //! - `window` - read the foreground app/window via active-win-pos-rs.
 //! - `permissions` - probe / request the macOS Accessibility TCC bit.
-//! - `hotkey` - register the global hotkey and poll the event channel.
+//! - `hotkey` - register the global shortcuts through one manager and drain
+//!   the event channel.
 //! - `typer` - drive enigo to execute the rendered `TypeOp` stream.
 //! - `mod.rs` (this file) - the `AutoTypeService` orchestrator that
 //!   AppShell instantiates, and the `Outcome` enum that the UI uses
@@ -39,7 +40,7 @@ use std::{
 
 use crate::domain::VaultSnapshot;
 
-pub use hotkey::HotkeyListener;
+pub use hotkey::HotkeyRegistry;
 pub use matcher::MatchedEntry;
 pub use sequence::{DEFAULT_SEQUENCE, ParseError, RenderContext, TypeOp};
 pub use window::ForegroundInfo;

@@ -337,7 +337,7 @@ pub(super) fn cost_question_settled(state: &AppState) -> bool {
 /// Whether an unlock is under way: a Touch ID attempt waits for its answer
 /// or for its vault to open (the attempt stays in flight until the answer is
 /// applied), or the vault is being opened with its password.
-pub(super) fn unlock_under_way(state: &AppState) -> bool {
+pub(crate) fn unlock_under_way(state: &AppState) -> bool {
     matches!(state.biometric_attempt(), BiometricAttempt::InFlight { .. })
         || matches!(state.vault_status(), VaultStatus::Opening { .. })
 }

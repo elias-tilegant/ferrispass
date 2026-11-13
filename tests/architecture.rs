@@ -1482,6 +1482,11 @@ fn content_reads_are_found_outside_tests_only() {
 /// line here and stands out in review.
 const ACTIVITY_CALL_SITES: &[(&str, &str)] = &[
     ("src/ui/legacy/shell/render.rs", "WindowInput"),
+    // A press of the quick access shortcut, when the one loop for the global
+    // shortcuts hands it on.
+    ("src/app/services/hotkeys.rs", "Hotkey"),
+    // Keys and clicks in the quick access panel.
+    ("src/ui/windows/panel/view.rs", "Panel"),
     // The test of the clock as the app builds it. Its second thread stands in
     // for the one that will listen for the global shortcuts; it is not input.
     ("tests/idle_clock.rs", "Hotkey"),
@@ -1537,6 +1542,20 @@ const TOUCH_ID_CALL_SITES: &[(&str, &str, &str)] = &[
     // The command line, with --touch-id, or at a terminal for an enrolled
     // vault.
     ("src/cli.rs", "unlock_password", "retrieve"),
+    // The locked quick access panel: Return, and a click on its unlock
+    // button. Each asks for a token in its own handler...
+    ("src/ui/windows/panel/locked.rs", "on_return", "confirm"),
+    (
+        "src/ui/windows/panel/locked.rs",
+        "on_unlock_click",
+        "confirm",
+    ),
+    // ...and hands it to the panel's way into the flow.
+    (
+        "src/ui/windows/panel/locked.rs",
+        "start_unlock",
+        "unlock_from_panel",
+    ),
 ];
 
 /// The names whose calls [`TOUCH_ID_CALL_SITES`] lists.

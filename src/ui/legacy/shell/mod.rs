@@ -247,30 +247,11 @@ pub struct AppShell {
     /// keeps the timer alive; dropping it cancels (used when lock/quit
     /// purges everything early).
     launch_cleanup_tasks: HashMap<u64, Task<()>>,
-    /// Active global-hotkey registration for auto-type. `Some` only
-    /// when `settings.auto_type_enabled && settings.auto_type_hotkey`
-    /// parses & registers cleanly; dropped (= unregistered) when the
-    /// user toggles the feature off or changes the combo. The
-    /// matching poll loop in `auto_type_poll_task` reads the registered
-    /// id to filter events.
-    auto_type_listener: Option<autotype::HotkeyListener>,
-    /// Background task that polls the global-hotkey event channel at
-    /// ~30 Hz and dispatches `PerformAutoType` when our combo fires.
-    /// Dropped together with the listener - leaving it running with no
-    /// listener would still be safe (the poll would find no matching
-    /// events) but would burn cycles for no reason.
-    auto_type_poll_task: Option<Task<()>>,
     /// Most recent parse-error from the user's auto-type sequence, or
     /// `None` when the template is valid. Cached so the Settings UI
     /// can surface it without re-parsing on every render. Cleared
     /// when `update_settings` accepts a new template.
     auto_type_sequence_error: Option<autotype::ParseError>,
-    /// Most recent registration / parse error from the user's auto-
-    /// type hotkey combo. Same caching rationale as
-    /// `auto_type_sequence_error`. The Settings UI uses this to
-    /// surface a clear "this combo is in use by another app" hint
-    /// rather than letting the feature silently appear broken.
-    auto_type_hotkey_error: Option<String>,
     /// Vault for which this visit to the unlock screen already launched an
     /// automatic Touch ID prompt. Cleared after leaving AwaitingPassword so
     /// a later lock can auto-prompt again without looping after cancellation.
@@ -302,13 +283,6 @@ pub struct AppShell {
 /// so the lock always fires within this window of crossing the
 /// threshold.
 const AUTO_LOCK_TICK_SECS: u64 = 5;
-
-/// Polling interval for the global-hotkey event channel. ~30 Hz -
-/// fast enough that the user can't perceive any lag between the
-/// hotkey press and the auto-type firing, slow enough that the
-/// idle-app cost is negligible (the loop is two channel `try_recv`
-/// calls plus a sleep).
-const AUTO_TYPE_POLL_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Countdown for the in-app ⌘⇧T (PerformAutoTypeForSelected) route.
 /// Mirrors KeePass's classic "type-in-3-seconds" pattern: the user
@@ -625,10 +599,7 @@ impl AppShell {
             pending_launches: HashMap::new(),
             next_launch_id: 0,
             launch_cleanup_tasks: HashMap::new(),
-            auto_type_listener: None,
-            auto_type_poll_task: None,
             auto_type_sequence_error: None,
-            auto_type_hotkey_error: None,
             automatic_biometric_attempted_for: None,
             automatic_biometric_interrupted: false,
             automatic_biometric_rearmed: false,
@@ -636,14 +607,10 @@ impl AppShell {
             window_handle: window.window_handle(),
             _subscriptions,
         };
-        // Bring up the global-hotkey registration immediately if the
-        // user has Auto-Type enabled. Done after Self is built (rather
-        // than starting the task during the struct literal) so the
-        // weak handle that `cx.spawn` captures resolves to the
-        // already-constructed entity. Idempotent if Auto-Type is off
-        // - `sync_auto_type_listener` is the only entry point and it
-        // no-ops cleanly when both desired-state and current-state are
-        // "no listener".
+        // Bring up the global shortcuts the settings ask for: the quick
+        // access one unless it is switched off, the Auto-Type one if the
+        // user enabled it. `sync_auto_type_listener` is the only entry
+        // point, and with both off it registers nothing.
         shell.sync_auto_type_listener(cx);
         #[cfg(target_os = "macos")]
         shell.start_session_lock_task(cx);
@@ -741,6 +708,8 @@ fn copy_value_label(kind: CopyValueKind) -> &'static str {
 mod activity_tests;
 #[cfg(test)]
 mod appearance_tests;
+#[cfg(test)]
+mod biometric_tests;
 #[cfg(test)]
 mod characterization_tests;
 #[cfg(test)]

@@ -158,13 +158,6 @@ pub fn rank(input: RankInput<'_>) -> Vec<Ranked<'_>> {
 /// compared the way identifiers are. 0 for no results, 1 when the first row
 /// is unique, so a footer can warn when the row Return would act on has a
 /// twin.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the main window does not show ties; the quick access panel will"
-    )
-)]
 pub fn tie_count(ranked: &[Ranked<'_>]) -> usize {
     let Some(first) = ranked.first() else {
         return 0;

@@ -49,6 +49,7 @@
 //! match, the entry drops out. False matches feel worse than empty results
 //! when the user can just edit the query.
 
+pub(crate) mod panel;
 pub(crate) mod rank;
 
 use std::cmp::Ordering;

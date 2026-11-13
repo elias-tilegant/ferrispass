@@ -1,8 +1,19 @@
-use gpui::{App, KeyBinding, Menu, MenuItem, Window, actions};
+use gpui::{AnyWindowHandle, App, KeyBinding, Menu, MenuItem, SharedString, Window, actions};
 use gpui_component::WindowExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const APP_CONTEXT: &str = "FerrisPass";
+
+/// The key context of the quick access panel's root.
+pub const PANEL_CONTEXT: &str = "Panel";
+
+/// The panel's search field. The GPUI Kit input binds Cmd+C in its own
+/// context and does not pass it on, so the panel binds it one level further
+/// in; a binding on the panel's root never sees it while the field has
+/// focus, and the field always has it while a vault is open. ↑ and ↓, which
+/// a single-line Kit input has no handler for, are bound here too and would
+/// reach the panel either way. Cmd+W goes here too, see `bind_panel_keys`.
+const PANEL_FIELD_CONTEXT: &str = "Panel > Input";
 
 actions!(
     ferrispass,
@@ -75,8 +86,71 @@ actions!(
         /// from `PerformAutoType` (which runs from a global hotkey
         /// and infers the entry from the foreground).
         PerformAutoTypeForSelected,
+        /// Open the quick access panel, from the Window menu. The global
+        /// shortcut opens it without an action (`services::hotkeys`).
+        OpenQuickAccess,
+        /// Up in the quick access panel's list. Stops at the first row.
+        PanelMoveUp,
+        /// Down in the quick access panel's list. Stops at the last row.
+        PanelMoveDown,
+        /// Return in the quick access panel: the main action of the
+        /// selected entry, unless it waits for a production system to be
+        /// picked.
+        PanelPrimary,
+        /// Copy the password of the entry selected in the panel.
+        PanelCopyPassword,
+        /// Copy the user name of the entry selected in the panel.
+        PanelCopyUsername,
+        /// Copy the one-time code of the entry selected in the panel.
+        PanelCopyCode,
+        /// Close the panel and show the entry selected in it in the main
+        /// window.
+        PanelShowInApp,
     ]
 );
+
+/// Close the quick access panel. Cmd+W closes it at once; Escape first
+/// clears a search that holds text and closes on the next press.
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = ferrispass, no_json)]
+pub struct ClosePanel {
+    pub clear_search_first: bool,
+}
+
+/// Select the row with this number, 1 to 9, in the quick access panel.
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = ferrispass, no_json)]
+pub struct PanelSelect {
+    pub number: u8,
+}
+
+/// The main window, for the app-level handlers that act on a window.
+///
+/// They act on this one and never on whichever window is key: with the quick
+/// access panel in front, that is the panel, and Cmd+Q from there must not
+/// store the panel's size as the window's, a notice must not land in the
+/// panel, and Cmd+M must not minimize it. Set when the main window opens.
+pub(crate) struct MainWindow(pub(crate) AnyWindowHandle);
+
+impl gpui::Global for MainWindow {}
+
+/// The main window, if it was opened.
+pub(crate) fn main_window(cx: &App) -> Option<AnyWindowHandle> {
+    cx.try_global::<MainWindow>().map(|main| main.0)
+}
+
+/// Shows `message` in `window`, the main window when one is in hand, or else
+/// in the main window. Without a main window the message is dropped.
+fn notify_main_window(window: Option<&mut Window>, message: impl Into<SharedString>, cx: &mut App) {
+    let message = message.into();
+    if let Some(window) = window {
+        window.push_notification(message, cx);
+    } else if let Some(main) = main_window(cx) {
+        let _ = main.update(cx, |_root, window, cx| {
+            window.push_notification(message, cx);
+        });
+    }
+}
 
 /// Open the "New group" modal targeting the database root. Dispatched by
 /// the `+` button next to the "Groups" section heading.
@@ -139,13 +213,7 @@ fn block_lifecycle_action_while_saving(window: Option<&mut Window>, cx: &mut App
         None => SAVE_IN_PROGRESS_MESSAGE.to_string(),
     };
 
-    if let Some(window) = window {
-        window.push_notification(message, cx);
-    } else if let Some(window) = cx.active_window() {
-        let _ = window.update(cx, |_root, window, cx| {
-            window.push_notification(message, cx);
-        });
-    }
+    notify_main_window(window, message, cx);
     true
 }
 
@@ -161,13 +229,7 @@ fn block_lifecycle_action_over_dirty_editor(window: Option<&mut Window>, cx: &mu
         return false;
     }
     let message = "This entry has unsaved changes. Save it, or repeat this to discard it.";
-    if let Some(window) = window {
-        window.push_notification(message, cx);
-    } else if let Some(window) = cx.active_window() {
-        let _ = window.update(cx, |_root, window, cx| {
-            window.push_notification(message, cx);
-        });
-    }
+    notify_main_window(window, message, cx);
     true
 }
 
@@ -208,6 +270,8 @@ pub(super) fn restart(cx: &mut App) {
 /// Store where the user left the window, so the next launch opens there
 /// instead of centring a fixed default on whatever display is primary.
 fn remember_window_geometry(window: &Window) {
+    #[cfg(test)]
+    stored_geometry::note(window.window_handle());
     let bounds = window.bounds();
     super::settings::persist_window_bounds(super::settings::WindowBoundsSetting {
         x: f32::from(bounds.origin.x),
@@ -221,10 +285,10 @@ fn remember_window_geometry(window: &Window) {
 /// every other Mac password manager behaves: the Dock icon stays and clicking
 /// it brings the window back at the unlock screen. Quitting is Cmd+Q.
 ///
-/// The window is hidden, not destroyed. The Auto-Type hotkey listener and the
-/// auto-sync timer live on the window's view; tearing it down would silently
-/// switch off a feature the user configured, and a global hotkey that stops
-/// working after Cmd+W is worse than no Cmd+W behaviour at all.
+/// The window is hidden, not destroyed. The auto-sync timer lives on the
+/// window's view; tearing it down would silently switch off a feature the
+/// user configured. The global shortcuts run at app level
+/// (`services::hotkeys`), so they keep working behind the hidden window.
 ///
 /// Native window-close callbacks run while that window is already on GPUI's
 /// update stack, so notify it directly instead of resolving `active_window`.
@@ -252,32 +316,93 @@ fn lock_all_vaults(cx: &mut App) {
     });
 }
 
+/// The windows whose geometry was stored, on this thread, for the tests:
+/// storing it writes the settings file, which tests running side by side
+/// share.
+#[cfg(test)]
+pub(crate) mod stored_geometry {
+    use std::cell::RefCell;
+
+    use gpui::AnyWindowHandle;
+
+    thread_local! {
+        static STORED: RefCell<Vec<AnyWindowHandle>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn note(window: AnyWindowHandle) {
+        STORED.with(|stored| stored.borrow_mut().push(window));
+    }
+
+    /// The windows noted since the last call, oldest first.
+    pub(crate) fn take() -> Vec<AnyWindowHandle> {
+        STORED.with(|stored| std::mem::take(&mut *stored.borrow_mut()))
+    }
+}
+
+/// Cmd+Q and the Quit menu item: remember where the main window is, then
+/// quit unless a save or an unsaved entry holds it back. The geometry is the
+/// main window's, whichever window is in front.
+pub(crate) fn quit_from_anywhere(cx: &mut App) {
+    if let Some(main) = main_window(cx) {
+        let _ = main.update(cx, |_root, window, _cx| remember_window_geometry(window));
+    }
+    request_quit(cx);
+}
+
+/// The Close Window menu item and Cmd+W outside the panel's search field:
+/// lock and hide the main window while it is the key window. Otherwise, with
+/// the quick access panel open, close the panel and nothing else; it is the
+/// window in front. The panel may be the window this runs in, so it closes
+/// right after.
+pub(crate) fn close_main_window(cx: &mut App) {
+    if let Some(main) = main_window(cx) {
+        let closed = main.update(cx, |_root, window, cx| {
+            let key = window.is_window_active();
+            if key {
+                request_window_close(window, cx);
+            }
+            key
+        });
+        if closed.unwrap_or(false) {
+            return;
+        }
+    }
+    if crate::ui::windows::panel::is_open(cx) {
+        cx.defer(crate::ui::windows::panel::close);
+    }
+}
+
+/// Cmd+M: minimize the main window while it is the key window. With the quick
+/// access panel in front it does nothing; the panel is not minimized either.
+pub(crate) fn minimize_main_window(cx: &mut App) {
+    if let Some(main) = main_window(cx) {
+        let _ = main.update(cx, |_root, window, _cx| {
+            if window.is_window_active() {
+                window.minimize_window();
+            }
+        });
+    }
+}
+
 pub fn init(cx: &mut App) {
     // App-global Quit handler. Wired here (not on AppShell) so the action fires
     // independently of whatever view currently holds focus.
-    cx.on_action(|_: &Quit, cx: &mut App| {
-        if let Some(handle) = cx.active_window() {
-            let _ = handle.update(cx, |_root, window, _cx| remember_window_geometry(window));
-        }
-        request_quit(cx);
-    });
-
-    cx.on_action(|_: &CloseWindow, cx: &mut App| {
-        if let Some(handle) = cx.active_window() {
-            let _ = handle.update(cx, |_root, window, cx| {
-                request_window_close(window, cx);
-            });
-        }
-    });
-
-    cx.on_action(|_: &MinimizeWindow, cx: &mut App| {
-        if let Some(handle) = cx.active_window() {
-            let _ = handle.update(cx, |_root, window, _cx| window.minimize_window());
-        }
-    });
+    //
+    // These three act on the main window, and their keys and menu items
+    // usually come from inside it. GPUI runs an app-level handler while the
+    // window the action came from is busy dispatching it, and updating that
+    // window from the handler finds no window. Deferred, they run once the
+    // dispatch is over.
+    cx.on_action(|_: &Quit, cx: &mut App| cx.defer(quit_from_anywhere));
+    cx.on_action(|_: &CloseWindow, cx: &mut App| cx.defer(close_main_window));
+    cx.on_action(|_: &MinimizeWindow, cx: &mut App| cx.defer(minimize_main_window));
 
     cx.on_action(|_: &ShowWindow, cx: &mut App| {
         super::show_main_window(cx);
+    });
+
+    cx.on_action(|_: &OpenQuickAccess, cx: &mut App| {
+        crate::ui::windows::panel::open(cx);
     });
 
     cx.on_action(|_: &RestartToUpdate, cx: &mut App| {
@@ -330,8 +455,55 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
     ]);
+    bind_panel_keys(cx);
 
     install_app_menus(cx);
+}
+
+/// The quick access panel's keys. They come after the GPUI Kit's, which
+/// `gpui_component::init` registers first, and after the app-wide ones, so
+/// that where two bindings rank the same the panel's wins.
+///
+/// GPUI ranks a binding without a context as deep as the focused element,
+/// above any binding on an element around it. The app-wide `cmd-w` would
+/// therefore beat a binding on the panel's root, so the panel binds Cmd+W
+/// on the search field, which always has the focus: there the two rank the
+/// same and the later one, the panel's, wins. Cmd+W and Escape close the
+/// panel and nothing else. Return and Escape go to the field first, which
+/// passes them on to the panel's root.
+fn bind_panel_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new(
+            "escape",
+            ClosePanel {
+                clear_search_first: true,
+            },
+            Some(PANEL_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-w",
+            ClosePanel {
+                clear_search_first: false,
+            },
+            Some(PANEL_FIELD_CONTEXT),
+        ),
+        KeyBinding::new("enter", PanelPrimary, Some(PANEL_CONTEXT)),
+        KeyBinding::new("cmd-shift-c", PanelCopyUsername, Some(PANEL_CONTEXT)),
+        KeyBinding::new("alt-cmd-c", PanelCopyCode, Some(PANEL_CONTEXT)),
+        KeyBinding::new("cmd-o", PanelShowInApp, Some(PANEL_CONTEXT)),
+        KeyBinding::new("up", PanelMoveUp, Some(PANEL_FIELD_CONTEXT)),
+        KeyBinding::new("down", PanelMoveDown, Some(PANEL_FIELD_CONTEXT)),
+        // Cmd+C copies the password even with text marked in the field:
+        // nothing typed into the search is worth more than the password.
+        KeyBinding::new("cmd-c", PanelCopyPassword, Some(PANEL_FIELD_CONTEXT)),
+    ]);
+    cx.bind_keys((1..=9u8).map(|number| {
+        KeyBinding::new(
+            &format!("cmd-{number}"),
+            PanelSelect { number },
+            Some(PANEL_FIELD_CONTEXT),
+        )
+    }));
 }
 
 /// Register the application-level menu bar. On macOS this populates the
@@ -396,6 +568,7 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::action("Minimize", MinimizeWindow),
             MenuItem::separator(),
             MenuItem::action("Show FerrisPass", ShowWindow),
+            MenuItem::action("Quick Access", OpenQuickAccess),
         ]),
         Menu::new("Help").items([MenuItem::action("What's New", OpenWhatsNew)]),
     ]);

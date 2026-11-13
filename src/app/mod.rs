@@ -173,6 +173,9 @@ fn open_main_window(
 
         cx.open_window(window_options, |window, cx| {
             window.on_window_should_close(cx, actions::request_window_close);
+            // The app-level handlers act on this window, not on whichever
+            // window is key, which can be the quick access panel.
+            cx.set_global(actions::MainWindow(window.window_handle()));
 
             let shell = cx.new(|cx| AppShell::new(app_state, window, cx));
             // Reachable from the app-level Cmd+W / Cmd+Q handlers, which have
@@ -184,4 +187,12 @@ fn open_main_window(
         .expect("failed to open FerrisPass window");
     })
     .detach();
+}
+
+/// What `run` does to bring up the main window, for tests: share `state` the
+/// way `run` does and open the main window on it.
+#[cfg(test)]
+pub(crate) fn open_main_window_for_test(cx: &mut App, state: Entity<AppState>) {
+    cx.set_global(SharedAppState(state.clone()));
+    open_main_window(cx, state, None);
 }

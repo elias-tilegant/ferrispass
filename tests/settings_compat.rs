@@ -107,6 +107,7 @@ fn every_field_set(theme: ThemeChoice) -> AppSettings {
         launch_cleanup_secs: 45,
         auto_type_enabled: true,
         auto_type_hotkey: "ctrl+shift+KeyA".to_string(),
+        quick_access_hotkey_enabled: false,
         auto_type_sequence: "{PASSWORD}{ENTER}".to_string(),
         biometric_allow_passcode_fallback: false,
         auto_sync_secs: Some(300),
@@ -206,4 +207,42 @@ fn a_settings_file_without_the_text_size_reads_it_as_standard() {
         ThemeChoice::Dark,
         "the rest of the file as written"
     );
+}
+
+/// The quick access shortcut is a field 0.9.2 does not know, and it is on
+/// unless the file says otherwise. A file written before the switch existed
+/// reads it as on; a file with it, on or off, reads back as written and still
+/// loads into 0.9.2.
+#[test]
+fn a_settings_file_without_the_quick_access_field_reads_it_as_on() {
+    let mut written = serde_json::to_value(AppSettings {
+        quick_access_hotkey_enabled: false,
+        ..AppSettings::default()
+    })
+    .expect("settings serialize");
+    let removed = written
+        .as_object_mut()
+        .expect("settings are an object")
+        .remove("quick_access_hotkey_enabled");
+    assert_eq!(
+        removed,
+        Some(Value::Bool(false)),
+        "the field is not in the file"
+    );
+    let loaded: AppSettings = serde_json::from_value(written).expect("an older file loads");
+    assert!(
+        loaded.quick_access_hotkey_enabled,
+        "a file without the field turned the quick access shortcut off"
+    );
+
+    for enabled in [true, false] {
+        let settings = AppSettings {
+            quick_access_hotkey_enabled: enabled,
+            ..AppSettings::default()
+        };
+        let written = serde_json::to_string_pretty(&settings).expect("settings serialize");
+        let loaded: AppSettings = serde_json::from_str(&written).expect("settings load");
+        assert_eq!(loaded.quick_access_hotkey_enabled, enabled);
+        assert_loads_into_092(&settings, &format!("quick access shortcut {enabled}"));
+    }
 }

@@ -30,3 +30,14 @@ a11y:
   in_progress:
     en: in progress
     de: läuft
+  # The quick access panel: the panel itself, the group around its search
+  # field and result list, and the list.
+  quick_access:
+    en: Quick Access
+    de: Schnellzugriff
+  search:
+    en: Search
+    de: Suche
+  results:
+    en: Results
+    de: Treffer

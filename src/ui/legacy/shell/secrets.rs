@@ -236,7 +236,9 @@ impl AppShell {
         cx.spawn(async move |this, cx| {
             if let Err(error) = write.await {
                 let _ = this.update(cx, |_shell, cx| {
-                    if let Some(handle) = cx.active_window() {
+                    // The main window, also when the quick access panel is in
+                    // front: a notice never lands in the panel.
+                    if let Some(handle) = crate::app::actions::main_window(cx) {
                         let _ = handle.update(cx, |_root, window, cx| {
                             Self::notify_error(
                                 window,
