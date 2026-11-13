@@ -1442,12 +1442,17 @@ fn body_of(code: &str, function: &str) -> Range<usize> {
 /// layout among it, gives none, so what the locked panel hands to assistive
 /// technology is what those two make: the parts `drawn_parts` reads, and
 /// the button, which the tests read by its name. The list names GPUI's
-/// calls that give an element a node, a role or a text, and the builder
-/// methods of the design system that set a text assistive technology
-/// reads: a name, a description, a value or a shortcut. States such as
-/// `.toggled(` or `.selected(` it leaves alone. Read through `code_only`,
-/// so comments and the tests do not count; a call made through a macro or
-/// a function in another file is past it.
+/// calls that give an element a node, a role or a text; the constructors
+/// of the design system's components that take a name, a label or a text
+/// (`Button::`, `Switch::`, `SecretField::`, `TextField::`, `Chip::`,
+/// `Tile::`, `Shortcut::`, `Row::`, `RowParts` and `VaultBadge::`); and the
+/// builder methods of the design system that set a text assistive
+/// technology reads: a name, a description, a value or a shortcut.
+/// `SearchGroup::new`, `ResultList::new`, `PanelFooter::new` and
+/// `OtpRing::new`, which take an id or a name as well, are not in it.
+/// States such as `.toggled(` or `.selected(` it leaves alone. Read
+/// through `code_only`, so comments and the tests do not count; a call
+/// made through a macro or a function in another file is past it.
 /// Where an element is put inside another it does not look:
 /// `only_the_dots_show_how_much_was_typed` does, in `build` and `button`.
 #[test]
@@ -1482,8 +1487,19 @@ fn only_build_names_what_the_locked_panel_draws() {
             "with_id(",
             "InteractiveText",
             "Label",
-            "Button::",
             ".description(",
+            // The design system's constructors that take a name, a label
+            // or a text.
+            "Button::",
+            "Switch::",
+            "SecretField::",
+            "TextField::",
+            "Chip::",
+            "Tile::",
+            "Shortcut::",
+            "Row::",
+            "RowParts",
+            "VaultBadge::",
             // The design system's builder methods: a shortcut, the parts
             // of a row's name, a value, a sentence, the footer's texts.
             ".shortcut(",
