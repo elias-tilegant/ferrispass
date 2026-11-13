@@ -897,9 +897,9 @@ fn a_production_role_in_a_protected_field_counts_in_the_panel(cx: &mut TestAppCo
 /// `SAP_CLIENT`, so the fields the row shows make it a production system
 /// and its chip says PRD. Its protected `SAP_ROLE` of QAS would make it a
 /// quality system, were the whole entry the only answer: then a row that
-/// shows PRD would sign in from an empty search, and at once when typed in
-/// full. It stays a production system: from an empty search Return signs
-/// in to nothing, and the one exact match waits like any production system.
+/// shows PRD would sign in from an empty search. It stays a production
+/// system: from an empty search Return signs in to nothing, and the one
+/// exact match waits like any production system.
 #[gpui::test]
 fn a_protected_role_never_takes_production_away_in_the_panel(cx: &mut TestAppContext) {
     let app = open_app(
@@ -1170,10 +1170,10 @@ fn function<'a>(code: &'a str, start: &str) -> &'a str {
 
 /// The vault's name comes from its file name, which whatever put the file
 /// on the disk chose. The open panel shows it as the locked panel does:
-/// without control characters and the marks that turn the writing
+/// without control characters and the twelve marks that turn the writing
 /// direction, U+202E and the Arabic letter mark U+061C among them, cut
 /// after sixty characters. Read in the model and in every row's name, off
-/// the row's node.
+/// the row's node; all twelve marks are read through `vault_name`.
 #[gpui::test]
 fn the_open_panel_cleans_the_vault_name_as_the_locked_panel_does(cx: &mut TestAppContext) {
     let app = open_app_at(
@@ -1211,6 +1211,20 @@ fn the_open_panel_cleans_the_vault_name_as_the_locked_panel_does(cx: &mut TestAp
     let shown = crate::ui::vm::panel::vault_name(Path::new(&long));
     assert_eq!(shown.chars().count(), crate::ui::vm::panel::NAME_MAX + 1);
     assert!(shown.ends_with('\u{2026}'));
+
+    let marks = [
+        '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+        '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+    ];
+    for mark in marks {
+        let marked = format!("/tmp/te{mark}am.kdbx");
+        assert_eq!(
+            crate::ui::vm::panel::vault_name(Path::new(&marked)).as_ref(),
+            "team",
+            "the vault's name keeps the direction mark U+{:04X}",
+            u32::from(mark)
+        );
+    }
 }
 
 #[gpui::test]

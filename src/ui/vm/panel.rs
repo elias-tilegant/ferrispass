@@ -100,13 +100,14 @@ impl Hit {
     ///
     /// - Whether the entry is a production system: it is when the fields
     ///   the row shows make it one, or when the whole entry does. A
-    ///   production role in a protected `SAP_ROLE` makes the row a
-    ///   production system's row, with its role and its chip, and Return
-    ///   waits for it as for any production system. A protected field can
-    ///   add production but never take it away: a protected `SAP_ROLE` of
-    ///   QAS leaves NHP 100, whose SID says production, a production
-    ///   system, so Return never signs in at once or from an empty search
-    ///   to a row that shows PRD.
+    ///   production role in a protected `SAP_ROLE` makes it one: a row the
+    ///   shown fields make an SAP system gets the production role and its
+    ///   chip, a row they make a web login or remote access gets no chip,
+    ///   and Return waits for either as for any production system. A
+    ///   protected field can add production but never take it away: a
+    ///   protected `SAP_ROLE` of QAS leaves NHP 100, whose SID says
+    ///   production, a production system, so an empty search does not sign
+    ///   in to it.
     /// - Whether signing in puts exactly the client and the user the row
     ///   shows into SAP GUI's launch file, which reads protected fields too
     ///   ([`signs_in_as`]). The footer names them only then, so it never
