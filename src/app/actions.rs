@@ -62,6 +62,9 @@ actions!(
         SaveVault,
         EditEntry,
         DeleteEntry,
+        /// Copy the selected entry next to itself (title gains " - Copy")
+        /// and select the copy. Bound to ⌘D, the macOS "Duplicate" gesture.
+        DuplicateEntry,
         /// Auto-type credentials into the foreground window. Dispatched
         /// by the global hotkey listener when the user presses the
         /// configured combo from any app. The handler matches the
@@ -297,6 +300,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-d", ToggleTheme, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-s", SaveVault, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-e", EditEntry, Some(APP_CONTEXT)),
+        KeyBinding::new("cmd-d", DuplicateEntry, Some(APP_CONTEXT)),
         KeyBinding::new("cmd-backspace", DeleteEntry, Some(APP_CONTEXT)),
         // ⌘⇧T triggers an in-app auto-type for the currently-selected
         // entry with a 3-second countdown so the user has time to
@@ -359,6 +363,7 @@ fn install_app_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("New Entry", NewEntry),
             MenuItem::action("Edit Entry", EditEntry),
+            MenuItem::action("Duplicate Entry", DuplicateEntry),
             MenuItem::action("Delete Entry", DeleteEntry),
             MenuItem::separator(),
             MenuItem::action("Copy Username", CopyUsername),

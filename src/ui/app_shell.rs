@@ -5,9 +5,9 @@ use crate::{
         AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, AddSharePointVault, CancelUnlock, CopyPassword, CopyUrl, CopyUsername,
-            CreateVault, DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch,
-            InstallUpdate, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAbout, OpenAddVault,
-            OpenConnect, OpenReconnect, OpenSettings, OpenSyncSettings, OpenVault,
+            CreateVault, DeleteEntry, DeleteGroup, DownloadFavicons, DuplicateEntry, EditEntry,
+            FocusSearch, InstallUpdate, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAbout,
+            OpenAddVault, OpenConnect, OpenReconnect, OpenSettings, OpenSyncSettings, OpenVault,
             OpenVaultSwitcher, OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected,
             RenameGroupOp, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
         },
@@ -2384,6 +2384,20 @@ impl AppShell {
         self.delete_selected_entry(window, cx);
     }
 
+    fn on_action_duplicate_entry(
+        &mut self,
+        _: &DuplicateEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // ⌘D reaches here from anywhere in the window; with a modal open the
+        // entry underneath is not what the user is looking at.
+        if self.state.read(cx).overlay().is_active() {
+            return;
+        }
+        self.duplicate_selected_entry(window, cx);
+    }
+
     fn on_action_new_group(&mut self, _: &NewGroup, window: &mut Window, cx: &mut Context<Self>) {
         // Every overlay replaces the entry editor, so a draft in it has to
         // be settled first.
@@ -2594,6 +2608,26 @@ impl AppShell {
         };
         self.run_mutation("Moved to Trash.", window, cx, |state, cx| {
             state.delete_entry(&id, cx)
+        });
+    }
+
+    pub fn duplicate_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_entry_id(cx) else {
+            window.push_notification("Select an entry to duplicate first.", cx);
+            return;
+        };
+        let in_trash = self
+            .state
+            .read(cx)
+            .vault_browser()
+            .and_then(|browser| browser.selected_entry)
+            .is_some_and(|entry| entry.in_recycle_bin);
+        if in_trash {
+            window.push_notification("Restore the entry before duplicating it.", cx);
+            return;
+        }
+        self.run_mutation("Entry duplicated.", window, cx, |state, cx| {
+            state.duplicate_entry(&id, cx).map(|_| ())
         });
     }
 
@@ -3970,6 +4004,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_save_vault))
             .on_action(cx.listener(Self::on_action_edit_entry))
             .on_action(cx.listener(Self::on_action_delete_entry))
+            .on_action(cx.listener(Self::on_action_duplicate_entry))
             .on_action(cx.listener(Self::on_action_new_group))
             .on_action(cx.listener(Self::on_action_new_subgroup))
             .on_action(cx.listener(Self::on_action_rename_group_op))

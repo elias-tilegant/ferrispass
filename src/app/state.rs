@@ -379,6 +379,10 @@ struct SyncBackoff {
 const SYNC_BACKOFF_MIN: Duration = Duration::from_secs(60);
 const SYNC_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
 
+/// Appended to a duplicated entry's title so the copy is told apart from its
+/// source in the list.
+const DUPLICATE_TITLE_SUFFIX: &str = " - Copy";
+
 /// Bookkeeping value for `AppState::saves_in_flight` - see the field docs.
 #[derive(Clone, Debug)]
 struct QueuedSave {
@@ -3713,6 +3717,52 @@ impl AppState {
             search_query.clear();
 
             let entries = entries_for_selection(document.snapshot(), selection, "", last_used);
+            *selected_entry_id = Some(new_id.clone());
+            *visible_entries = Rc::new(entries);
+            *selected_strength = document.strength_for_entry(&new_id);
+
+            new_id
+        };
+        cx.notify();
+        self.save_async(cx);
+        Ok(new_id)
+    }
+
+    /// Copy an entry next to itself, select the copy, and trigger a background
+    /// save. The current list view is kept when the copy shows up in it;
+    /// otherwise the sidebar snaps to the copy's group so the user can see
+    /// what was just created, the same way `create_entry` does.
+    pub fn duplicate_entry(
+        &mut self,
+        entry_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, MutationError> {
+        let new_id = {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                last_used,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            let new_id = document.duplicate_entry(entry_id, DUPLICATE_TITLE_SUFFIX)?;
+
+            let mut entries =
+                entries_for_selection(document.snapshot(), selection, search_query, last_used);
+            if !entries.iter().any(|entry| entry.id == new_id)
+                && let Some(group_id) = document.snapshot().find_entry_group_id(&new_id)
+            {
+                *selection = LibrarySelection::Group(group_id);
+                search_query.clear();
+                entries = entries_for_selection(document.snapshot(), selection, "", last_used);
+            }
             *selected_entry_id = Some(new_id.clone());
             *visible_entries = Rc::new(entries);
             *selected_strength = document.strength_for_entry(&new_id);
