@@ -24,7 +24,9 @@
 //!   manager is made the first time a shortcut is wanted and kept for the
 //!   life of the process; switching both shortcuts off unregisters them and
 //!   stops the loop, and switching one back on registers it on the same
-//!   manager.
+//!   manager. What a save changes is let go of before anything is
+//!   registered, so a combo one shortcut gives up goes to the other in the
+//!   same save.
 
 use std::time::Duration;
 
@@ -177,6 +179,17 @@ impl HotkeyLoop {
         }
     }
 
+    /// Unregisters `shortcut` when the settings no longer ask for the combo
+    /// it holds, so the other shortcut can take that combo in the same save.
+    fn release_if_changed(&mut self, shortcut: Shortcut, combo: Option<&str>) {
+        let wanted = combo
+            .and_then(|combo| hotkey::parse_combo(combo).ok())
+            .map(|hotkey| hotkey.id());
+        if *self.registered.slot(shortcut) != wanted {
+            self.unregister(shortcut);
+        }
+    }
+
     fn unregister(&mut self, shortcut: Shortcut) {
         if let Some(id) = self.registered.slot(shortcut).take()
             && let Some(registry) = &mut self.registry
@@ -200,6 +213,8 @@ pub fn reconcile(settings: &AppSettings, cx: &mut App) {
         .then_some(settings.auto_type_hotkey.as_str());
 
     let hotkeys = cx.default_global::<HotkeyLoop>();
+    hotkeys.release_if_changed(Shortcut::QuickAccess, quick_access);
+    hotkeys.release_if_changed(Shortcut::AutoType, auto_type);
     hotkeys.apply(Shortcut::QuickAccess, quick_access);
     hotkeys.apply(Shortcut::AutoType, auto_type);
     let wanted = hotkeys.registered != Registered::default();
@@ -463,6 +478,42 @@ mod tests {
         cx.update(|cx| reconcile(&broken, cx));
         assert!(cx.update(|cx| error(Shortcut::AutoType, cx)).is_some());
         cx.update(|cx| reconcile(&settings(true, false), cx));
+        assert_eq!(cx.update(|cx| error(Shortcut::AutoType, cx)), None);
+    }
+
+    /// A combo that one shortcut lets go of in a save goes to the other in
+    /// the same save. Auto-Type held ⌃⌥⌘P, so quick access was refused; one
+    /// save that moves Auto-Type to another combo registers both and leaves
+    /// no error.
+    #[gpui::test]
+    fn a_combo_auto_type_lets_go_of_goes_to_quick_access_in_the_same_save(cx: &mut TestAppContext) {
+        fake::reset();
+        let quick = id_of(QUICK_ACCESS_HOTKEY);
+        let mut clash = settings(false, true);
+        clash.auto_type_hotkey = QUICK_ACCESS_HOTKEY.to_string();
+        cx.update(|cx| reconcile(&clash, cx));
+        assert_eq!(cx.update(|cx| registered(cx)).auto_type, Some(quick));
+
+        clash.quick_access_hotkey_enabled = true;
+        cx.update(|cx| reconcile(&clash, cx));
+        assert_eq!(cx.update(|cx| registered(cx)).quick_access, None);
+        assert!(
+            cx.update(|cx| error(Shortcut::QuickAccess, cx)).is_some(),
+            "the test needs quick access refused"
+        );
+
+        let mut moved = clash;
+        moved.auto_type_hotkey = "alt+shift+KeyV".to_string();
+        cx.update(|cx| reconcile(&moved, cx));
+        assert_eq!(
+            cx.update(|cx| registered(cx)),
+            Registered {
+                quick_access: Some(quick),
+                auto_type: Some(id_of("alt+shift+KeyV")),
+            },
+            "one save registers both"
+        );
+        assert_eq!(cx.update(|cx| error(Shortcut::QuickAccess, cx)), None);
         assert_eq!(cx.update(|cx| error(Shortcut::AutoType, cx)), None);
     }
 
