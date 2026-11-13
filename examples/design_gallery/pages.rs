@@ -1,18 +1,22 @@
 //! The pages of the gallery: one for each component of the design system,
-//! with every state it offers side by side.
+//! with every state it offers side by side, then the glyphs, the four
+//! status shapes, and the Kit's glyphs that the app draws again.
 //!
 //! A page calls the components and draws nothing of its own but frames and
-//! captions. A caption names a component or a state, in English, as the
-//! code names it. What the components show comes from the text keys where
+//! captions; the glyph pages draw the glyphs as the design system and the
+//! Kit do. A caption names a component, a state or a glyph, in English, as
+//! the code names it. What the components show comes from the text keys where
 //! the app has one, so it follows the language; the rest is made-up sample
 //! data. The one secret-looking value is [`SECRET`], and the codes of the
 //! one-time code ring are [`CODE`] and [`NEXT_CODE`]: none of them opens
 //! anything.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use ferrispass::app::assets::AppAssets;
 use ferrispass::app::registry::{self, CommandId};
 use ferrispass::ui::ds::ActiveTokens as _;
 use ferrispass::ui::ds::components::{
@@ -20,14 +24,16 @@ use ferrispass::ui::ds::components::{
     OtpSize, PanelFooter, ResultList, Row, RowDensity, RowParts, SearchGroup, SecretField,
     Shortcut, Switch, TextField, Tile, VaultBadge, initial_for,
 };
-use ferrispass::ui::ds::icons::FpIcon;
-use ferrispass::ui::ds::tokens::dimension;
+use ferrispass::ui::ds::icons::{self, FpIcon, IconSize, glyph};
+use ferrispass::ui::ds::tokens::{ColorSet, dimension};
 use ferrispass::ui::ds::typography::{TextStyle, TextStyled as _, u};
 use ferrispass::{tp, tr};
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Div, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Task, Window, div,
+    AnyElement, App, AppContext as _, AssetSource as _, ClickEvent, Div, ElementId, Entity, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Task, Window, div,
 };
+use gpui_component::Icon;
 use gpui_component::input::InputState;
 use zeroize::Zeroizing;
 
@@ -47,6 +53,14 @@ const VAULT: &str = "Team Beratung";
 const FLASH: Duration = Duration::from_millis(200);
 const TICK: Duration = Duration::from_millis(1500);
 
+/// The size the status shapes are drawn at to compare them, in points at
+/// text size 13.
+const SHAPE_SIZE: f32 = 64.0;
+
+/// The sizes the Kit's glyphs are drawn at, in points at text size 13: the
+/// size of a glyph in a Kit control, and twice that.
+const KIT_SIZES: [f32; 2] = [16.0, 32.0];
+
 /// One page of the gallery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -63,6 +77,9 @@ pub enum Page {
     SecretField,
     OneTimeCode,
     PanelFooter,
+    Glyphs,
+    StatusShapes,
+    KitGlyphs,
 }
 
 impl Page {
@@ -81,6 +98,9 @@ impl Page {
         Page::SecretField,
         Page::OneTimeCode,
         Page::PanelFooter,
+        Page::Glyphs,
+        Page::StatusShapes,
+        Page::KitGlyphs,
     ];
 
     /// The page's name in the list.
@@ -99,11 +119,14 @@ impl Page {
             Page::SecretField => "secret field",
             Page::OneTimeCode => "one-time code ring",
             Page::PanelFooter => "panel footer",
+            Page::Glyphs => "glyphs",
+            Page::StatusShapes => "status shapes",
+            Page::KitGlyphs => "Kit glyphs",
         }
     }
 
     /// The modules under `src/ui/ds/components/` whose components the page
-    /// shows.
+    /// shows. The glyph pages show none.
     pub fn modules(self) -> &'static [&'static str] {
         match self {
             Page::Button | Page::IconButton => &["button"],
@@ -118,6 +141,22 @@ impl Page {
             Page::SecretField => &["secret_field"],
             Page::OneTimeCode => &["otp"],
             Page::PanelFooter => &["panel_footer"],
+            Page::Glyphs | Page::StatusShapes | Page::KitGlyphs => &[],
+        }
+    }
+
+    /// Where what the page shows comes from, under its heading.
+    fn sources(self) -> Vec<String> {
+        match self {
+            Page::Glyphs | Page::StatusShapes => {
+                vec!["src/ui/ds/icons.rs".into(), "assets/icons/fp/".into()]
+            }
+            Page::KitGlyphs => vec!["assets/icons/".into()],
+            _ => self
+                .modules()
+                .iter()
+                .map(|module| format!("src/ui/ds/components/{module}.rs"))
+                .collect(),
         }
     }
 
@@ -138,13 +177,16 @@ impl Page {
             Page::SecretField => "gallery-secret-field",
             Page::OneTimeCode => "gallery-one-time-code",
             Page::PanelFooter => "gallery-panel-footer",
+            Page::Glyphs => "gallery-glyphs",
+            Page::StatusShapes => "gallery-status-shapes",
+            Page::KitGlyphs => "gallery-kit-glyphs",
         }
     }
 }
 
 /// What the pages keep between frames: the text of the text fields, which
-/// the Kit's inputs hold, and the states the components that answer clicks
-/// are in.
+/// the Kit's inputs hold, the states the components that answer clicks are
+/// in, and the Kit's glyphs that the app draws again.
 pub struct Samples {
     empty: Entity<InputState>,
     placeholder: Entity<InputState>,
@@ -157,6 +199,7 @@ pub struct Samples {
     copied: Rc<Cell<CopyState>>,
     copy_timer: Rc<RefCell<Option<Task<()>>>>,
     revealed: Rc<Cell<bool>>,
+    kit_glyphs: Vec<KitGlyph>,
 }
 
 impl Samples {
@@ -177,6 +220,7 @@ impl Samples {
             copied: Rc::new(Cell::new(CopyState::Idle)),
             copy_timer: Rc::new(RefCell::new(None)),
             revealed: Rc::new(Cell::new(false)),
+            kit_glyphs: kit_glyphs(),
         };
         samples.follow_language(window, cx);
         samples
@@ -207,11 +251,11 @@ pub fn page(page: Page, samples: &Samples, cx: &App) -> AnyElement {
         Page::SecretField => secret_fields(samples),
         Page::OneTimeCode => one_time_codes(),
         Page::PanelFooter => panel_footers(),
+        Page::Glyphs => glyphs(cx),
+        Page::StatusShapes => status_shapes(cx),
+        Page::KitGlyphs => kit_glyph_page(samples, cx),
     };
-    let sources = page
-        .modules()
-        .iter()
-        .map(|module| caption(format!("src/ui/ds/components/{module}.rs")));
+    let sources = page.sources().into_iter().map(caption);
     div()
         .debug_selector(|| page.selector().to_string())
         .flex()
@@ -1167,4 +1211,140 @@ fn panel_footers() -> Div {
             .child(div().text_style(TextStyle::Headline).child("parts"))
             .children(others),
     ])
+}
+
+// ------------------------------------------------------------- glyphs --
+
+/// Every glyph of the design system at 12, 16 and 20 points, with its name
+/// under it.
+fn glyphs(cx: &App) -> Div {
+    let color = cx.ds().colors.text_primary.hsla;
+    let sizes = [IconSize::Chip12, IconSize::Standard16, IconSize::Large20];
+    section(
+        "12, 16 and 20 points",
+        icons::all().iter().map(|icon| {
+            cell(
+                icon.name(),
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(u(dimension::SPACE_8))
+                    .children(sizes.map(|size| glyph(*icon, size).text_color(color))),
+            )
+        }),
+    )
+}
+
+/// The four status glyphs and the color each stands with.
+fn statuses(colors: &ColorSet) -> [(FpIcon, Hsla); 4] {
+    [
+        (FpIcon::StatusOk, colors.status_ok_text.hsla),
+        (FpIcon::StatusAttention, colors.status_attention_text.hsla),
+        (FpIcon::StatusDecision, colors.status_decision_text.hsla),
+        (FpIcon::StatusDanger, colors.status_danger_text.hsla),
+    ]
+}
+
+/// The four status shapes side by side, large in the text color, so that
+/// the shape alone tells them apart, then at 20 points in their colors.
+fn status_shapes(cx: &App) -> Div {
+    let colors = cx.ds().colors;
+    let text = colors.text_primary.hsla;
+    sections([
+        section(
+            "64 points, in the text color",
+            statuses(colors).map(|(icon, _)| {
+                cell(
+                    icon.name(),
+                    glyph(icon, IconSize::Large20)
+                        .size(u(SHAPE_SIZE))
+                        .text_color(text),
+                )
+            }),
+        ),
+        section(
+            "20 points, in the color of the status",
+            statuses(colors).map(|(icon, color)| {
+                cell(
+                    icon.name(),
+                    glyph(icon, IconSize::Large20).text_color(color),
+                )
+            }),
+        ),
+    ])
+}
+
+/// A glyph of the Kit's that the app draws again: the path the Kit loads
+/// it from, which the app's file answers, and the Kit's own drawing.
+pub struct KitGlyph {
+    pub path: SharedString,
+    pub kit: Cow<'static, [u8]>,
+}
+
+impl KitGlyph {
+    /// The glyph's name, the file without its folder and extension.
+    fn name(&self) -> &str {
+        self.path
+            .trim_start_matches("icons/")
+            .trim_end_matches(".svg")
+    }
+}
+
+/// The glyphs of the Kit's own bundle for which the app hands out a file of
+/// its own, in the order of their paths. The app asks its own files before
+/// the Kit's, so these are the ones every Kit control draws differently.
+pub fn kit_glyphs() -> Vec<KitGlyph> {
+    let app = AppAssets::new();
+    let kit = gpui_kit_assets::Assets;
+    let mut paths = kit.list("icons/").unwrap_or_default();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let original = kit.load(&path).ok().flatten()?;
+            let drawn = app.load(&path).ok().flatten()?;
+            (drawn != original).then_some(KitGlyph {
+                path,
+                kit: original,
+            })
+        })
+        .collect()
+}
+
+/// Each of the Kit's glyphs that the app draws again: the app's drawing,
+/// which every Kit control shows, next to the Kit's own, at 16 and 32
+/// points.
+fn kit_glyph_page(samples: &Samples, cx: &App) -> Div {
+    let color = cx.ds().colors.text_primary.hsla;
+    let pair = |glyph: &KitGlyph, size: f32| {
+        div()
+            .flex()
+            .items_end()
+            .gap(u(dimension::SPACE_8))
+            .child(
+                Icon::empty()
+                    .path(glyph.path.clone())
+                    .size(u(size))
+                    .text_color(color),
+            )
+            .child(
+                Icon::empty()
+                    .data(&glyph.kit)
+                    .size(u(size))
+                    .text_color(color),
+            )
+    };
+    section(
+        "the app's drawing, then the Kit's",
+        samples.kit_glyphs.iter().map(|glyph| {
+            cell(
+                glyph.name().to_string(),
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(u(dimension::SPACE_16))
+                    .children(KIT_SIZES.map(|size| pair(glyph, size))),
+            )
+        }),
+    )
 }

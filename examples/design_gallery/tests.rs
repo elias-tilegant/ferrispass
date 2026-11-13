@@ -4,9 +4,10 @@
 //! because its `[[example]]` entry in `Cargo.toml` says `test = true`. They
 //! draw the same view the gallery window shows, headless. They hold that
 //! every component module has a page, that every page draws in every mode,
-//! at both text sizes and in both languages, that the keys switch them, and,
-//! by reading the gallery's source, that it builds no component of its own
-//! and reads nothing.
+//! at both text sizes and in both languages, that the keys switch them, that
+//! the Kit page holds every glyph the app draws again, and, by reading the
+//! gallery's source, that it builds no component of its own and reads
+//! nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use gpui::{AppContext as _, Entity, KeyContext, Keystroke, TestAppContext, Visua
 use gpui_component::Root;
 
 use crate::gallery::{self, Gallery, Look};
-use crate::pages::Page;
+use crate::pages::{self, Page};
 
 /// This file, which the scans of the gallery's source leave out: it names
 /// what they look for.
@@ -532,4 +533,37 @@ fn every_component_module_has_a_page() {
         unknown.is_empty(),
         "pages name modules that are gone: {unknown:?}"
     );
+}
+
+/// The Kit page holds the glyphs the app draws again in place of the Kit's,
+/// which are the files directly under `assets/icons/`, and next to each the
+/// Kit's own drawing, not the app's.
+#[test]
+fn the_kit_page_holds_every_glyph_the_app_draws_again() {
+    let mut files: Vec<String> = std::fs::read_dir(root().join("assets/icons"))
+        .expect("read assets/icons")
+        .map(|entry| entry.expect("a directory entry").path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "svg"))
+        .map(|path| {
+            let name = path.file_name().expect("a file name").to_string_lossy();
+            format!("icons/{name}")
+        })
+        .collect();
+    files.sort();
+    assert!(
+        files.iter().any(|file| file == "icons/eye.svg"),
+        "the scan reads the app's eye: {files:?}"
+    );
+
+    let glyphs = pages::kit_glyphs();
+    let shown: Vec<&str> = glyphs.iter().map(|glyph| &*glyph.path).collect();
+    assert_eq!(
+        shown, files,
+        "the Kit page and the files under assets/icons/"
+    );
+    for glyph in &glyphs {
+        let app =
+            std::fs::read(root().join("assets").join(&*glyph.path)).expect("the app's drawing");
+        assert_ne!(app, glyph.kit.as_ref(), "{} beside itself", glyph.path);
+    }
 }
