@@ -830,11 +830,13 @@ fn typing_lifts_the_production_rule(cx: &mut TestAppContext) {
     );
 }
 
-/// Whether a system is a production system is worked out from the whole
-/// entry, as the main window does. NHX 100 has a SID without a production
-/// letter and the role PRD in a protected field: in the panel it is a
-/// production system too. From an empty search Return signs in to nothing,
-/// and typed in full, the one exact match waits like any production system.
+/// An entry is a production system in the panel when the fields the row
+/// shows make it one, or when the whole entry, protected fields included,
+/// does. NHX 100 has a SID without a production letter, so the fields the
+/// row shows give it no role, and the role PRD in a protected field: in
+/// the panel it is a production system. From an empty search Return signs
+/// in to nothing, and typed in full, the one exact match waits like any
+/// production system.
 #[gpui::test]
 fn a_production_role_in_a_protected_field_counts_in_the_panel(cx: &mut TestAppContext) {
     let app = open_app(
@@ -889,11 +891,68 @@ fn a_production_role_in_a_protected_field_counts_in_the_panel(cx: &mut TestAppCo
     );
 }
 
+/// A protected field can make an entry a production system in the panel,
+/// but never make a production system an ordinary one. NHP 100 has the
+/// production letter in its SID and plain `SAP_HOST`, `SAP_INSTANCE` and
+/// `SAP_CLIENT`, so the fields the row shows make it a production system
+/// and its chip says PRD. Its protected `SAP_ROLE` of QAS would make it a
+/// quality system, were the whole entry the only answer: then a row that
+/// shows PRD would sign in from an empty search, and at once when typed in
+/// full. It stays a production system: from an empty search Return signs
+/// in to nothing, and the one exact match waits like any production system.
+#[gpui::test]
+fn a_protected_role_never_takes_production_away_in_the_panel(cx: &mut TestAppContext) {
+    let app = open_app(
+        cx,
+        &[entry("NHP 100")
+            .user("N.WEISS")
+            .password("sp-nhp")
+            .field("SAP_HOST", "nhp.example")
+            .field("SAP_INSTANCE", "00")
+            .field("SAP_CLIENT", "100")
+            .protected("SAP_ROLE", "QAS")
+            .starred()],
+    );
+    let panel = app.open_panel(cx);
+    let vm = app.vm(cx);
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHP 100"));
+    let hit = vm.read_with(cx, |vm, _| vm.results()[0].clone());
+    let (tone, letters) = hit.chip.clone().expect("a chip");
+    assert_eq!(tone, crate::ui::ds::components::ChipTone::Production);
+    assert_eq!(letters.as_ref(), "PRD");
+
+    keys(cx, panel, "enter");
+    assert!(
+        launches().is_empty(),
+        "Return signed in to a production system from an empty search"
+    );
+    let model = vm.read_with(cx, |vm, _| vm.footer());
+    assert_eq!(model.tone, FooterTone::ProductionSelectFirst);
+    assert_eq!(model.primary, None, "Return runs nothing");
+
+    // Typed in full, the one exact match does not take Return at once.
+    type_into(cx, panel, "nhp 100");
+    assert!(vm.read_with(cx, |vm, _| vm.selected().is_some_and(|hit| hit.exact)));
+    cx.simulate_keystrokes(panel, "enter");
+    cx.run_until_parked();
+    assert!(
+        launches().is_empty(),
+        "Return signed in to a production system at once"
+    );
+    cx.executor()
+        .advance_clock(crate::app::unlock::locked_panel::RETURN_SETTLE);
+    cx.simulate_keystrokes(panel, "enter");
+    cx.run_until_parked();
+    assert_eq!(launches(), [(app.id(cx, "NHP 100"), true)]);
+    assert!(vm.read_with(cx, |vm, _| vm.results()[0].production));
+}
+
 /// An entry whose SID is protected, under a title that names no system, is
-/// a web login in the panel and a production system in the main window.
-/// Return waits for it as for any production system: from an empty search
-/// it opens nothing, and typed in full, the one exact match does not take
-/// Return at once, only 300 ms after the results are drawn.
+/// a web login as the panel shows it, and a production system read over
+/// the whole entry, its protected `SAP_SID` of NHP included. Return waits
+/// for it as for any production system: from an empty search it opens
+/// nothing, and typed in full, the one exact match does not take Return at
+/// once, only 300 ms after the results are drawn.
 #[gpui::test]
 fn a_production_system_the_panel_shows_as_a_web_login_waits_too(cx: &mut TestAppContext) {
     let app = open_app(

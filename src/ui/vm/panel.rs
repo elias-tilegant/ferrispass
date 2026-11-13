@@ -25,10 +25,10 @@
 //!   stand on the row's chip and never in its name.
 //! - The panel shows an entry without its notes and its protected custom
 //!   fields ([`shown_fields`]): neither reaches a row or the footer. Two
-//!   answers come from the whole entry, each a yes or no: whether it is a
-//!   production system, worked out as the main window does, and whether
-//!   signing in uses the client and the user the row shows. The footer
-//!   names them only then.
+//!   answers also read the whole entry, each a yes or no: whether it is a
+//!   production system, which it is when the fields the row shows say so
+//!   or the whole entry does, and whether signing in uses the client and
+//!   the user the row shows. The footer names them only then.
 //! - The vault's name comes from its file and is shown through
 //!   [`display_untrusted`], as the locked panel shows a file name.
 //! - Return counts only once the results have been drawn for 300 ms and no
@@ -76,8 +76,8 @@ pub struct Hit {
     /// The chip after the title: the letters of an SAP system's role.
     pub chip: Option<(ChipTone, SharedString)>,
     pub badge: VaultBadge,
-    /// The entry is a production system, worked out from the whole entry
-    /// (see `Hit::new`).
+    /// The entry is a production system: the fields the row shows say so,
+    /// or the whole entry does (see `Hit::new`).
     pub production: bool,
     pub url: UrlKind,
     pub has_username: bool,
@@ -95,15 +95,18 @@ pub struct Hit {
 impl Hit {
     /// The row for `entry`, read from [`shown_fields`]: its notes and its
     /// protected custom fields reach neither the row nor the footer. Two
-    /// answers come from the whole entry, protected fields included, each a
+    /// answers also read the whole entry, protected fields included, each a
     /// yes or no that keeps no value of such a field:
     ///
-    /// - Whether the entry is a production system, worked out as the main
-    ///   window does. A production role in a protected `SAP_ROLE` makes the
-    ///   row a production system's row, with its role and its chip, and
-    ///   Return waits for it as for any production system. The panel would
-    ///   otherwise treat as an ordinary system what the main window shows
-    ///   as production, and sign in to it from an empty search or at once.
+    /// - Whether the entry is a production system: it is when the fields
+    ///   the row shows make it one, or when the whole entry does. A
+    ///   production role in a protected `SAP_ROLE` makes the row a
+    ///   production system's row, with its role and its chip, and Return
+    ///   waits for it as for any production system. A protected field can
+    ///   add production but never take it away: a protected `SAP_ROLE` of
+    ///   QAS leaves NHP 100, whose SID says production, a production
+    ///   system, so Return never signs in at once or from an empty search
+    ///   to a row that shows PRD.
     /// - Whether signing in puts exactly the client and the user the row
     ///   shows into SAP GUI's launch file, which reads protected fields too
     ///   ([`signs_in_as`]). The footer names them only then, so it never
