@@ -94,7 +94,30 @@ fn clear_if_unchanged_on(pasteboard: &NSPasteboard, expected: ClipboardChangeCou
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
     use super::*;
+
+    /// AppKit's pasteboard code keeps state for the whole process and is not
+    /// safe to call from two threads at once, even when each thread has its
+    /// own pasteboard. Tests running in parallel corrupt that state: a read
+    /// misses a write that just succeeded, an Objective-C exception unwinds
+    /// into Rust and aborts, or the test binary dies with SIGTRAP. Outside
+    /// the tests these functions are meant for the main thread (see the
+    /// module doc); the tests run on their own threads and take turns
+    /// through this lock instead.
+    static PASTEBOARD_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A new private pasteboard, and the lock to hold while using it. Bind
+    /// the lock to a named variable so it lives to the end of the test.
+    fn private_pasteboard() -> (MutexGuard<'static, ()>, Retained<NSPasteboard>) {
+        // A failing test poisons the lock. Every test gets a fresh
+        // pasteboard, so the next one can carry on.
+        let lock = PASTEBOARD_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        (lock, NSPasteboard::pasteboardWithUniqueName())
+    }
 
     fn text_for_type(pasteboard: &NSPasteboard, type_name: &str) -> Option<String> {
         let pasteboard_type = NSString::from_str(type_name);
@@ -105,7 +128,7 @@ mod tests {
 
     #[test]
     fn secret_item_has_all_privacy_types() {
-        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+        let (_lock, pasteboard) = private_pasteboard();
         let token = write_secret_to(&pasteboard, "test-secret").expect("write secret");
 
         assert_eq!(
@@ -129,7 +152,7 @@ mod tests {
 
     #[test]
     fn delayed_clear_does_not_erase_newer_clipboard_contents() {
-        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+        let (_lock, pasteboard) = private_pasteboard();
         let stale = write_secret_to(&pasteboard, "first").expect("write first");
         let current = write_secret_to(&pasteboard, "second").expect("write second");
 
