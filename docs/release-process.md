@@ -121,7 +121,7 @@ is off).
 
 ## Commit message conventions
 
-The Release-page body is auto-generated from commit messages by [git-cliff](https://git-cliff.org), driven by `cliff.toml` at the repo root. Prefix each commit with a Conventional-Commits-style tag so it lands in the right section.
+The Release-page body is auto-generated from commit messages by [git-cliff](https://git-cliff.org), driven by `cliff.toml` at the repo root. Prefix each commit with a Conventional-Commits-style tag so it lands in the right section. A hand-written note for the tag, `docs/release-notes/<tag>.md`, goes above the generated list; [`docs/release-notes/README.md`](./release-notes/README.md) says what belongs in it.
 
 | Prefix | Section | Example |
 |---|---|---|
@@ -147,6 +147,14 @@ Prints the exact markdown that will appear on the Release page. If the output lo
 
 Single source of truth is `Cargo.toml`'s `[package].version`. Everything else (Welcome footer, About box, .app Info.plist, update manifest) reads it via `env!("CARGO_PKG_VERSION")` or `sed`-substitution at build time.
 
+`Info.plist` gets the numeric part only, because Apple allows nothing but
+numbers and periods in its two version keys: for `0.10.0-pre.3` both
+`CFBundleShortVersionString` and `CFBundleVersion` read `0.10.0`, so Finder
+shows a test build as 0.10.0. The About box, the Welcome footer, the file
+names, `update.json` and the download URL keep the full version, and the
+updater compares the version compiled into the binary, not the bundle's.
+Without a suffix, as for every 0.9.x, both keys carry the version unchanged.
+
 ```sh
 # Patch (bug fixes only):     0.2.0 → 0.2.1
 # Minor (new features):       0.2.x → 0.3.0
@@ -168,12 +176,164 @@ git push origin v0.x.y
 
 The `v` prefix matters - `release.yml` matches `tags: ['v*']`. Tagging without push to master means CI runs against a commit nobody else can see; not catastrophic but messy.
 
+A test build is tagged on `rebuild` instead, so the branch push is `git push origin rebuild`. Either way the tag only publishes a pre-release; going live is the next section.
+
+## Pre-releases, test builds and going live
+
+Every tag on a tree that carries this release workflow is published as a
+GitHub pre-release. The in-app updater asks `releases/latest` for its
+manifest, and GitHub resolves "latest" to the newest release *without* the
+pre-release flag, so such a tag reaches nobody's installed app on its own.
+Shipping a version to everyone is a separate step, taken by hand once the
+release page is right:
+
+```sh
+gh release edit vX.Y.Z --prerelease=false --latest
+```
+
+**Never do this for a tag with a hyphen** (`v0.10.0-pre.3`). Those are test
+builds, and they stay pre-releases. The version order is the second guard:
+`0.9.x < 0.10.0-pre.N < 0.10.0`, so a tester on a test build is never offered
+a 0.9.x as an update, and is offered the release once it is live.
+
+**Older trees still publish as latest.** GitHub runs `release.yml` from the
+tagged commit, not from `master`. A tag on a tree without this workflow, such
+as `rebuild` before `master` was merged into it, runs the old workflow,
+which publishes a full release and makes it latest straight away. For a
+test build that means every 0.9.x install is offered it. So check the tree
+before tagging it (step 3 below for test builds). A manual run picks its
+workflow the same way, from the ref it is started on: start it from
+`master`, as `gh workflow run release.yml -f tag=vX.Y.Z` does, never with an
+old tag as `--ref`.
+
+After the run, before going live, check the release page:
+
+- the release is marked Pre-release and carries the disk image, both
+  archives, `update.json`, a `.minisig` file for each of these four, and
+  `SHA256SUMS`;
+- the hand-written note, if there is one, sits above the generated list;
+- the `kanal-vorab` release is still a pre-release and carries `update.json`
+  and `update.json.minisig` of the highest version released so far: this
+  tag's, unless a higher one is already out, which the run reports in a
+  notice.
+
+**0.9.x fixes** come from `master` and take exactly this path: tag, check,
+then mark the release latest.
+
+**Test builds** come from `rebuild`, and `rebuild` is tagged for nothing else:
+
+1. Set the version in `Cargo.toml` to `0.10.0-pre.N` and commit it as
+   `release: v0.10.0-pre.N`.
+2. Add a short build note, `docs/release-notes/v0.10.0-pre.N.md` (what goes
+   into it is in [`docs/release-notes/README.md`](./release-notes/README.md)),
+   in that commit or before it.
+3. Check that the commit you are about to tag has this workflow; nothing
+   printed means stop and merge `master` into `rebuild` first:
+
+   ```sh
+   git show HEAD:.github/workflows/release.yml | grep -q 'prerelease: true' && echo ok
+   ```
+
+4. Tag and push as above, with `rebuild` in place of `master`.
+
+Testers install them from the release page; they are never marked latest.
+
+**A release candidate** carries its real version number, without a suffix,
+and stays a pre-release while the test group uses it. Going live is the same
+`gh release edit` on that same release; nothing is rebuilt.
+
+**The pre-release channel.** After publishing, a job of its own runs
+`scripts/update-channel.sh`. It finds the highest version among the
+published `v*` releases that carry `update.json` and `update.json.minisig`,
+and makes a permanent release named `kanal-vorab` hold exactly that pair.
+The channel only moves forward: a 0.9.x fix tagged after a test build leaves
+the test build's manifest in place, and the run says so in a notice.
+Versions are compared by SemVer precedence (`scripts/semver-compare.py`),
+which ranks `0.10.0-pre.3` below `0.10.0`; `sort -V` gets that wrong. The
+release's tag has no `v`, so it never starts the workflow. The app does not
+read this release yet; test builds will, to find the next test build, while
+builds without a suffix keep reading only `releases/latest`. The release has
+to exist, as a pre-release, before the first tag that runs this workflow;
+create it once:
+
+```sh
+gh release create kanal-vorab --prerelease --title "Pre-release channel" \
+    --notes "Holds the update manifest of the highest version released so far. Do not delete."
+```
+
+It must stay a pre-release: as a full release it could become latest and
+hand test builds to every installed app, so the channel job fails if it is
+not one. Files that have not finished uploading count as missing, in the
+channel and in the releases, and a `v*` release whose tag is not a version
+is skipped with a warning. The job fails, and leaves the channel alone,
+when `kanal-vorab` is missing, is not a pre-release, holds any file but
+those two, or holds a lone manifest above every release, and when a
+manifest or a version cannot be read or a release's manifest names another
+version than its tag. If `kanal-vorab` was missing, create it and re-run
+the failed channel job; the release itself is already up as a pre-release
+and is not touched again.
+
+Because every run looks at all releases, not only the one it published, a
+later run puts right whatever an earlier one left behind. A channel job may
+have been cancelled while it waited: only one runs at a time, and a newer
+one replaces one that is still waiting. A release may have been re-run and
+signed again. Or an upload may have broken off: `gh release upload
+--clobber` deletes the old files before it uploads the new ones, so that
+leaves the channel empty or holding one of the two files. A lone manifest
+still says its version, and the channel moves on from there as from a pair.
+A lone signature says nothing, but every pair in the channel came from a
+release, so the highest release is not lower, and its pair goes in. The
+same script runs by hand with `gh` logged in to an account that may edit
+releases:
+
+```sh
+scripts/update-channel.sh elias-tilegant/ferrispass
+```
+
+It never moves the channel back. To point it at an older release, for
+instance to withdraw a test build, first take `update.json` and
+`update.json.minisig` off the withdrawn release (or delete the release), so
+no later run moves the channel forward to it again, then copy the older pair
+over by hand:
+
+```sh
+gh release delete-asset vX.Y.Z-pre.N update.json
+gh release delete-asset vX.Y.Z-pre.N update.json.minisig
+gh release download vX.Y.Z --pattern 'update.json*' --dir channel
+gh release upload kanal-vorab channel/update.json channel/update.json.minisig --clobber
+```
+
+Two things this relies on:
+
+- Re-running the workflow for a version that is already live sets the
+  pre-release flag again, because the publishing step always does, and takes
+  the version off "latest". Mark it latest again afterwards.
+- Immutable releases stay off for this repository (Settings, General,
+  Releases). The publishing step creates a pre-release first and uploads the
+  files to it afterwards, and the channel release is rewritten on every tag;
+  an immutable release allows neither.
+
+The same order means that when an upload fails, the run fails with the
+pre-release already visible and some files missing. It reaches no installed
+app, but testers could see it. Re-run the failed publish job, which uploads
+the files again, and check the release page before anyone is pointed at it.
+
 ## What the pipeline does
 
-`release.yml` uses separate build, notes, signing, and publishing jobs. The
-build and notes jobs never receive the updater private key. The isolated
-signing job treats the generated notes as bounded data, verifies the payload
-size, and only then signs the payload and complete manifest.
+`release.yml` uses separate build, notes, signing, publishing and channel jobs. The
+build and notes jobs never receive the updater private key. The notes job
+puts the tag's hand-written note, if there is one, above the generated list.
+The isolated signing job treats the combined notes as bounded data, verifies
+the payload size, and only then signs the payload and complete manifest.
+It also signs the disk image with the same key and writes `SHA256SUMS` for
+the disk image and both archives. The updater reads neither; they are for
+anyone who downloads the disk image by hand, such as a tester going back to
+a 0.9.x release:
+
+```sh
+shasum -a 256 -c SHA256SUMS --ignore-missing
+minisign -V -p bundle/minisign-pub.txt -m FerrisPass-X.Y.Z-arm64.dmg
+```
 
 Stages, with rough timing:
 
@@ -188,8 +348,9 @@ Stages, with rough timing:
 | 7 | Notarize via `xcrun notarytool submit --wait` | 1-5 min | Apple's queue. Rejection = read the notarization log carefully |
 | 8 | Staple notarization ticket | <5 s | - |
 | 9 | Generate `.app.tar.gz` + unsigned `update.json` with exact payload size | <10 s | `jq` missing or archive creation fails |
-| Sign | Inject notes, sign payload, then sign the complete manifest | <10 s | minisign key missing, malformed, or payload size mismatch |
-| End | `softprops/action-gh-release@v2` uploads to a GitHub Release | <30 s | `permissions: contents: write` not granted |
+| Sign | Check the disk image's notarization ticket, inject notes, sign payload, then the complete manifest, then the disk image; write `SHA256SUMS` | <10 s | disk image without a valid ticket; minisign key missing, malformed, or payload size mismatch |
+| End | `softprops/action-gh-release@v2` publishes a pre-release with the files | <30 s | `permissions: contents: write` not granted; a file missing from `signed-release` (the step stops before creating the release); an upload failing after the release is created (see above) |
+| Channel | Point `kanal-vorab` at the highest release with a manifest, one run at a time | <30 s | `kanal-vorab` missing, not a pre-release, or holding anything but the manifest and its signature (see above) |
 
 Total wall-clock: usually 8-12 minutes.
 
@@ -251,7 +412,7 @@ git tag -a v0.x.(y+1) -m "FerrisPass 0.x.(y+1)"
 git push origin master --tags
 ```
 
-Existing v0.x.y installs will see the new release on their next auto-update check.
+Existing v0.x.y installs will see the new release on their next auto-update check once it is marked latest (see "Pre-releases, test builds and going live").
 
 If the tag was pushed but no Release was ever created (workflow failed early), it's safe to delete + re-push:
 
@@ -290,10 +451,27 @@ scripts/build-mac.sh --skip-notarize
 
 Outputs `dist/FerrisPass-X.Y.Z-arm64.dmg` that opens with a Gatekeeper warning (signed but not notarized). Useful for verifying the icon, app start-up flow, etc., before committing to a real release.
 
-`--skip-notarize` stops after the DMG and deliberately does not create updater
-artefacts. A normal notarized build produces `.app.tar.gz` and an unsigned
-`update.json`; `scripts/build-mac.sh --sign-update` then signs those existing
-artefacts. Unsigned manifests are rejected by the application.
+`--skip-notarize` leaves out notarization, stapling and the final Gatekeeper
+check, and still builds the updater artefacts: `.app.tar.gz`, the CLI archive
+and an unsigned `update.json`, the same files a notarized build produces. It
+never signs them on its own, even with a key in `~/.ferrispass/`: a signed
+manifest is what installed apps accept, and it should only exist for a build
+Apple has checked. For the same reason `scripts/build-mac.sh --sign-update`
+signs only when `xcrun stapler validate` passes on the disk image, which it
+does once the notarization ticket is stapled. To try the signing step on an
+unnotarized build, use a throwaway key, never the real one, and set
+`FERRISPASS_ALLOW_UNSTAPLED=1`. The script refuses the override unless
+`MINISIGN_KEY` names a key, and one other than `~/.ferrispass/minisign.key`:
+
+```sh
+minisign -G -W -p /tmp/test.pub -s /tmp/test.key         # throwaway, no passphrase
+FERRISPASS_ALLOW_UNSTAPLED=1 MINISIGN_KEY=/tmp/test.key scripts/build-mac.sh --sign-update
+```
+
+It ends with an error there, because the result is checked against the real
+public key in `bundle/minisign-pub.txt`. That check is the point: nothing
+signed with a throwaway key passes for a release. Delete `dist/` afterwards.
+Unsigned manifests are rejected by the application.
 
 ## v0.2.1 release: cleanup recipe for affected users
 
