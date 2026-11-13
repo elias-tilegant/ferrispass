@@ -1441,10 +1441,12 @@ fn body_of(code: &str, function: &str) -> Range<usize> {
 /// layout among it, gives none, so what the locked panel hands to assistive
 /// technology is what those two make: the parts `drawn_parts` reads, and
 /// the button, which the tests read by its name. The list names GPUI's
-/// calls that give an element a node, a role or a text, and every builder
-/// method of the design system that sets something assistive technology
-/// reads. Read through `code_only`, so comments and the tests do not count;
-/// a call made through a macro or a function in another file is past it.
+/// calls that give an element a node, a role or a text, and the builder
+/// methods of the design system that set a text assistive technology
+/// reads: a name, a description, a value or a shortcut. States such as
+/// `.toggled(` or `.selected(` it leaves alone. Read through `code_only`,
+/// so comments and the tests do not count; a call made through a macro or
+/// a function in another file is past it.
 /// Where an element is put inside another it does not look:
 /// `only_the_dots_show_how_much_was_typed` does, in `build` and `button`.
 #[test]
