@@ -35,6 +35,48 @@ impl AppShell {
         }
     }
 
+    /// Typing re-filters the group picker; Enter files the entry into the
+    /// best match, so "type part of the name, press Enter" is the whole
+    /// gesture.
+    pub(super) fn on_group_filter_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => cx.notify(),
+            InputEvent::PressEnter { .. } => {
+                let query = input.read(cx).value().to_string();
+                // Without a query the first row is the vault root, and the
+                // picker marks no Enter target. "Move to Group…" opens with an
+                // empty field, so an early Enter would file the entry into the
+                // root unseen.
+                if query.trim().is_empty() {
+                    return;
+                }
+                let first = {
+                    let state = self.state.read(cx);
+                    state.vault_browser().and_then(|browser| {
+                        match_groups(
+                            &browser.snapshot.root,
+                            browser.snapshot.recycle_bin_id.as_deref(),
+                            &query,
+                        )
+                        .into_iter()
+                        .next()
+                        .map(|row| row.group.id.clone())
+                    })
+                };
+                if let Some(group_id) = first {
+                    self.set_new_entry_target_group(group_id, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(super) fn on_picker_query_event(
         &mut self,
         input: &Entity<InputState>,

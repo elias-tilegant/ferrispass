@@ -139,6 +139,8 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_action_save_vault))
             .on_action(cx.listener(Self::on_action_edit_entry))
             .on_action(cx.listener(Self::on_action_delete_entry))
+            .on_action(cx.listener(Self::on_action_duplicate_entry))
+            .on_action(cx.listener(Self::on_action_move_entry_to_group))
             .on_action(cx.listener(Self::on_action_new_group))
             .on_action(cx.listener(Self::on_action_new_subgroup))
             .on_action(cx.listener(Self::on_action_rename_group_op))

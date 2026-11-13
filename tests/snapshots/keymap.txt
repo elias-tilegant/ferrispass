@@ -151,6 +151,7 @@ cmd-n	FerrisPass	ferrispass::NewEntry
 cmd-shift-d	FerrisPass	ferrispass::ToggleTheme
 cmd-s	FerrisPass	ferrispass::SaveVault
 cmd-e	FerrisPass	ferrispass::EditEntry
+cmd-d	FerrisPass	ferrispass::DuplicateEntry
 cmd-backspace	FerrisPass	ferrispass::DeleteEntry
 cmd-shift-t	FerrisPass	ferrispass::PerformAutoTypeForSelected
 cmd-m	-	ferrispass::MinimizeWindow

@@ -21,8 +21,8 @@ than 128 KiB; a note should be a fraction of that.
 
 ## A release
 
-Written for the people who use the app, not for developers, in German and in
-English. Three parts, then the generated list:
+Written for the people who use the app, not for developers, in English only.
+Three parts, then the generated list:
 
 ```markdown
 ## What you will notice

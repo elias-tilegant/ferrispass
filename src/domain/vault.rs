@@ -257,6 +257,13 @@ impl VaultSnapshot {
         self.root.find_entry(id)
     }
 
+    /// Id of the group that directly holds the entry.
+    pub fn find_entry_group_id(&self, entry_id: &str) -> Option<String> {
+        self.root
+            .find_entry_parent(entry_id)
+            .map(|group| group.id.clone())
+    }
+
     /// Every entry in the vault, deleted ones included. Only the CLI's
     /// `--include-trash` and the merge diff want this; user-facing lists use
     /// [`Self::live_entries`].
@@ -439,6 +446,16 @@ impl VaultGroup {
             .iter()
             .find(|entry| entry.id == id)
             .or_else(|| self.groups.iter().find_map(|group| group.find_entry(id)))
+    }
+
+    /// The group, at any depth below this one, that directly holds the entry.
+    pub fn find_entry_parent(&self, entry_id: &str) -> Option<&VaultGroup> {
+        if self.entries.iter().any(|entry| entry.id == entry_id) {
+            return Some(self);
+        }
+        self.groups
+            .iter()
+            .find_map(|group| group.find_entry_parent(entry_id))
     }
 
     /// Every entry below this group, deleted ones included. Callers that

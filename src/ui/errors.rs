@@ -22,6 +22,8 @@ pub fn mutation_message(error: &MutationError) -> String {
         MutationError::CannotMoveRoot => "The root group cannot be moved.".into(),
         MutationError::CannotMoveRecycleBin => "The Trash itself cannot be moved.".into(),
         MutationError::WouldCreateCycle => "A group cannot be moved inside itself.".into(),
+        MutationError::EntryInRecycleBin => "That entry is in the Trash. Restore it first.".into(),
+        MutationError::GroupInRecycleBin => "That group is in the Trash. Pick another one.".into(),
     }
 }
 
@@ -136,6 +138,8 @@ mod tests {
             MutationError::CannotMoveRoot,
             MutationError::CannotMoveRecycleBin,
             MutationError::WouldCreateCycle,
+            MutationError::EntryInRecycleBin,
+            MutationError::GroupInRecycleBin,
         ] {
             let message = mutation_message(&error);
             assert!(message.ends_with('.'), "{error:?} is not a sentence");
