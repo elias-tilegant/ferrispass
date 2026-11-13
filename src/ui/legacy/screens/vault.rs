@@ -1,7 +1,8 @@
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{Sizable as _, h_flex, input::Input, menu::ContextMenuExt as _, v_flex};
 
@@ -10,7 +11,8 @@ use zeroize::Zeroizing;
 use crate::app::{
     AppState, CopyValueKind, SaveStatus, SyncTone, VaultBrowserModel, VaultStatus, VaultSummary,
     actions::{
-        DeleteGroup, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAddVault, OpenSettings,
+        CopyPassword, CopyUrl, CopyUsername, DeleteEntry, DeleteGroup, DuplicateEntry, EditEntry,
+        LockVault, MoveEntryToGroup, NewEntry, NewGroup, NewSubgroup, OpenAddVault, OpenSettings,
         OpenSyncSettings, OpenVault, OpenVaultSwitcher, RenameGroupOp, SaveVault, SyncNow,
     },
 };
@@ -589,7 +591,7 @@ fn groups_section(
                 .context_menu(move |menu, _, _| {
                     let gid = group_id_for_menu.clone();
                     menu.menu(
-                        "New subgroup…",
+                        "New Subgroup…",
                         Box::new(NewSubgroup {
                             parent_group_id: gid.clone(),
                         }),
@@ -1701,6 +1703,9 @@ fn entry_row(
     let starred = entry.starred;
     let tags = entry.tags.clone();
     let fav = entry.favicon.clone();
+    let in_recycle_bin = entry.in_recycle_bin;
+    let entry_id_for_menu = entry_id.clone();
+    let state_for_menu = state_entity.clone();
 
     let bg = if selected {
         palette::blue_soft()
@@ -1722,12 +1727,21 @@ fn entry_row(
         },
     };
 
-    h_flex()
+    let row = h_flex()
         .id(gpui::SharedString::from(format!("entry-{entry_id}")))
         .on_click(cx.listener(move |_: &mut AppShell, _: &ClickEvent, _, cx| {
             let id = entry_id.clone();
             state_entity.update(cx, |state, cx| state.select_entry(id, cx));
         }))
+        // A right-click selects the row first, the way Finder does, so the
+        // context menu's commands act on the entry under the pointer.
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |_: &mut AppShell, _: &MouseDownEvent, _, cx| {
+                let id = entry_id_for_menu.clone();
+                state_for_menu.update(cx, |state, cx| state.select_entry(id, cx));
+            }),
+        )
         // Drag-source. The closure builds a fresh preview entity
         // anchored at the cursor; GPUI handles offset + repaint.
         .on_drag(drag_payload, |drag, _offset, _window, cx| {
@@ -1818,7 +1832,25 @@ fn entry_row(
                         .text_color(palette::text_faint())
                         .child(updated),
                 ),
-        )
+        );
+
+    if in_recycle_bin {
+        // The Trash has its own Restore / Delete forever footer; none of the
+        // commands below apply to an entry that is already deleted.
+        return row.into_any_element();
+    }
+    row.context_menu(|menu, _, _| {
+        menu.menu("Edit…", Box::new(EditEntry))
+            .menu("Duplicate", Box::new(DuplicateEntry))
+            .menu("Move to Group…", Box::new(MoveEntryToGroup))
+            .separator()
+            .menu("Copy Username", Box::new(CopyUsername))
+            .menu("Copy Password", Box::new(CopyPassword))
+            .menu("Copy URL", Box::new(CopyUrl))
+            .separator()
+            .menu("Move to Trash", Box::new(DeleteEntry))
+    })
+    .into_any_element()
 }
 
 fn entry_detail(

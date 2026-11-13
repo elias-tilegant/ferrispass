@@ -7,12 +7,14 @@ use crate::{
         AppSettings, AppState, CopyValueKind, Overlay,
         actions::{
             APP_CONTEXT, AddSharePointVault, CancelUnlock, CopyPassword, CopyUrl, CopyUsername,
-            CreateVault, DeleteEntry, DeleteGroup, DownloadFavicons, EditEntry, FocusSearch,
-            InstallUpdate, LockVault, NewEntry, NewGroup, NewSubgroup, OpenAbout, OpenAddVault,
-            OpenConnect, OpenReconnect, OpenSettings, OpenSyncSettings, OpenVault,
-            OpenVaultSwitcher, OpenWhatsNew, PerformAutoType, PerformAutoTypeForSelected,
-            RenameGroupOp, SaveVault, SubmitPassword, SyncNow, ToggleTheme,
+            CreateVault, DeleteEntry, DeleteGroup, DownloadFavicons, DuplicateEntry, EditEntry,
+            FocusSearch, InstallUpdate, LockVault, MoveEntryToGroup, NewEntry, NewGroup,
+            NewSubgroup, OpenAbout, OpenAddVault, OpenConnect, OpenReconnect, OpenSettings,
+            OpenSyncSettings, OpenVault, OpenVaultSwitcher, OpenWhatsNew, PerformAutoType,
+            PerformAutoTypeForSelected, RenameGroupOp, SaveVault, SubmitPassword, SyncNow,
+            ToggleTheme,
         },
+        match_groups,
         services::clipboard::ClipboardService,
     },
     autotype,
@@ -113,6 +115,10 @@ pub struct AppShell {
     /// subscribe to `Change` events and forward the value to AppState
     /// (which keeps the filtered list in `connect_flow.Picking.query`).
     picker_query_input: Entity<InputState>,
+    /// Search field at the top of the entry editor's group picker. Cleared
+    /// and focused whenever the picker opens; Enter files the entry into
+    /// the first matching group.
+    new_entry_group_filter_input: Entity<InputState>,
     /// Filter input for the vault-switcher overlay (`Overlay::VaultSwitcher`).
     /// Cleared on every overlay-open so the picker always starts empty;
     /// Enter on the input opens whichever recent currently floats to the top.
@@ -323,6 +329,8 @@ impl AppShell {
             cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let picker_query_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter by name or folder…"));
+        let new_entry_group_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search groups…"));
         let vault_switcher_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Switch vault - type to filter…"));
         // Seed the sequence input with whatever's currently persisted -
@@ -449,6 +457,11 @@ impl AppShell {
             cx.subscribe_in(&search_input, window, Self::on_search_input_event),
             cx.subscribe_in(&picker_query_input, window, Self::on_picker_query_event),
             cx.subscribe_in(
+                &new_entry_group_filter_input,
+                window,
+                Self::on_group_filter_event,
+            ),
+            cx.subscribe_in(
                 &auto_type_sequence_input,
                 window,
                 Self::on_auto_type_sequence_input_event,
@@ -565,6 +578,7 @@ impl AppShell {
             new_entry_otp_input,
             new_group_name_input,
             picker_query_input,
+            new_entry_group_filter_input,
             vault_switcher_input,
             vault_switcher,
             auto_type_sequence_input,

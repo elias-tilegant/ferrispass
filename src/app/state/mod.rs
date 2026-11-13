@@ -407,6 +407,10 @@ struct SyncBackoff {
 const SYNC_BACKOFF_MIN: Duration = Duration::from_secs(60);
 const SYNC_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
 
+/// Appended to a duplicated entry's title so the copy is told apart from its
+/// source in the list.
+const DUPLICATE_TITLE_SUFFIX: &str = " - Copy";
+
 /// Bookkeeping value for `AppState::saves_in_flight` - see the field docs.
 #[derive(Clone, Debug)]
 struct QueuedSave {

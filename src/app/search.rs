@@ -56,9 +56,9 @@ use std::cmp::Ordering;
 
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
-use crate::domain::VaultEntry;
 #[cfg(test)]
 use crate::domain::VaultSnapshot;
+use crate::domain::{VaultEntry, VaultGroup};
 
 const SCORE_EXACT: u32 = 1000;
 const SCORE_PREFIX: u32 = 700;
@@ -423,6 +423,101 @@ fn fuzzy_score(token: &str, haystack: &str, matcher: &mut Matcher, needle_len: u
     (raw as u32).min(FUZZY_MAX)
 }
 
+/// One group the entry editor's group picker offers.
+pub(crate) struct GroupMatch<'a> {
+    pub group: &'a VaultGroup,
+    /// Nesting below the root, for the indented tree view.
+    pub depth: usize,
+    /// Names of the groups above this one, root excluded. Shown next to a
+    /// search hit so two groups with the same name are told apart.
+    pub parents: Vec<&'a str>,
+}
+
+/// Groups for the entry editor's picker, best first.
+///
+/// The candidates are every group except the Recycle Bin and what is inside
+/// it (filing an entry there would be a delete in disguise), in sidebar
+/// preorder and regardless of the sidebar's collapse state, so a folded
+/// group can still be picked. An empty query returns all of them.
+///
+/// Otherwise every whitespace-separated word has to appear,
+/// case-insensitively, in the group's name or in the names of the groups
+/// above it, so "cust sap" finds "Customers / Acme / SAP". Groups whose own
+/// name starts with the query come first, then those whose name contains
+/// it, then those that match only through their path; ties keep the tree
+/// order.
+///
+/// Unlike [`ranked_entries`], short words match anywhere and nothing is
+/// fuzzy. A vault holds tens of groups rather than thousands of entries, so
+/// a two-letter word cannot flood the list, and group names are often short
+/// abbreviations that people type in full.
+pub(crate) fn match_groups<'a>(
+    root: &'a VaultGroup,
+    recycle_bin_id: Option<&str>,
+    query: &str,
+) -> Vec<GroupMatch<'a>> {
+    fn collect<'a>(
+        group: &'a VaultGroup,
+        depth: usize,
+        parents: &mut Vec<&'a str>,
+        recycle_bin_id: Option<&str>,
+        out: &mut Vec<GroupMatch<'a>>,
+    ) {
+        if recycle_bin_id == Some(group.id.as_str()) {
+            return;
+        }
+        out.push(GroupMatch {
+            group,
+            depth,
+            parents: parents.clone(),
+        });
+        if depth > 0 {
+            parents.push(group.name.as_str());
+        }
+        for child in &group.groups {
+            collect(child, depth + 1, parents, recycle_bin_id, out);
+        }
+        if depth > 0 {
+            parents.pop();
+        }
+    }
+
+    let mut rows = Vec::new();
+    collect(root, 0, &mut Vec::new(), recycle_bin_id, &mut rows);
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return rows;
+    }
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let mut ranked: Vec<(u8, usize, GroupMatch<'a>)> = rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(order, row)| {
+            let name = row.group.name.to_lowercase();
+            let path = row
+                .parents
+                .iter()
+                .map(|parent| parent.to_lowercase())
+                .chain(std::iter::once(name.clone()))
+                .collect::<Vec<_>>()
+                .join(" / ");
+            if !words.iter().all(|word| path.contains(word)) {
+                return None;
+            }
+            let rank = if name.starts_with(&query) {
+                0
+            } else if name.contains(&query) {
+                1
+            } else {
+                2
+            };
+            Some((rank, order, row))
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, order, _)| (*rank, *order));
+    ranked.into_iter().map(|(_, _, row)| row).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,5 +829,100 @@ mod tests {
         let s = snapshot(vec![entry("z", "github"), entry("a", "github")]);
         let result = ranked_entries(&s, "github");
         assert_eq!(ids(&result), vec!["a", "z"]);
+    }
+
+    fn group(id: &str, name: &str, groups: Vec<VaultGroup>) -> VaultGroup {
+        VaultGroup {
+            id: id.into(),
+            name: name.into(),
+            groups,
+            ..VaultGroup::default()
+        }
+    }
+
+    fn group_tree() -> VaultGroup {
+        group(
+            "root",
+            "Root",
+            vec![
+                group(
+                    "customers",
+                    "Customers",
+                    vec![
+                        group("acme", "Acme", vec![group("acme-sap", "SAP", vec![])]),
+                        group("globex", "Globex", vec![group("globex-sap", "SAP", vec![])]),
+                    ],
+                ),
+                group(
+                    "internal",
+                    "Internal",
+                    vec![
+                        group("sap-basis", "SAP Basis", vec![]),
+                        group("my-sap", "My SAP", vec![]),
+                    ],
+                ),
+                group(
+                    "bin",
+                    "Recycle Bin",
+                    vec![group("old-sap", "SAP old", vec![])],
+                ),
+            ],
+        )
+    }
+
+    fn group_ids(rows: &[GroupMatch<'_>]) -> Vec<String> {
+        rows.iter().map(|row| row.group.id.clone()).collect()
+    }
+
+    #[test]
+    fn an_empty_group_query_lists_the_whole_tree_without_the_recycle_bin() {
+        let root = group_tree();
+        let rows = match_groups(&root, Some("bin"), "  ");
+        assert_eq!(
+            group_ids(&rows),
+            [
+                "root",
+                "customers",
+                "acme",
+                "acme-sap",
+                "globex",
+                "globex-sap",
+                "internal",
+                "sap-basis",
+                "my-sap",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_group_query_ranks_prefix_then_name_then_path_hits() {
+        let root = group_tree();
+        // "SAP" and "SAP Basis" start with the query, "My SAP" only contains
+        // it, "Internal" matches through nothing and stays out. The bin's
+        // "SAP old" stays out as well.
+        let rows = match_groups(&root, Some("bin"), "SAP");
+        assert_eq!(
+            group_ids(&rows),
+            ["acme-sap", "globex-sap", "sap-basis", "my-sap"]
+        );
+        assert_eq!(
+            rows[0].parents,
+            ["Customers", "Acme"],
+            "the path tells the twins apart"
+        );
+
+        // "Acme" itself and its child "SAP" (through the path) both match.
+        let rows = match_groups(&root, Some("bin"), "acme");
+        assert_eq!(group_ids(&rows), ["acme", "acme-sap"]);
+    }
+
+    #[test]
+    fn every_word_of_a_group_query_has_to_match_somewhere_in_the_path() {
+        let root = group_tree();
+        let rows = match_groups(&root, Some("bin"), "cust sap");
+        assert_eq!(group_ids(&rows), ["acme-sap", "globex-sap"]);
+        let rows = match_groups(&root, Some("bin"), "globex sap");
+        assert_eq!(group_ids(&rows), ["globex-sap"]);
+        assert!(match_groups(&root, Some("bin"), "nowhere").is_empty());
     }
 }

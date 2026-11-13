@@ -1,4 +1,5 @@
 use crate::domain::{CustomField, VaultSnapshot};
+use crate::keepass::merge::GENERATED_CUSTOM_DATA;
 use crate::keepass::repository::{
     STANDARD_FIELDS, find_entry_id, find_group_id, snapshot_from_database,
 };
@@ -358,6 +359,98 @@ impl VaultDocument {
         Ok(id)
     }
 
+    /// Copy an entry into the same group and return the copy's id.
+    ///
+    /// The copy carries every string field (custom fields and their
+    /// protection flag included), tags, attachments, the icon, colours,
+    /// Auto-Type settings and plugin data, the way KeePassXC's "Clone entry"
+    /// does. It gets a fresh UUID, fresh timestamps and an empty history:
+    /// the source's history describes the source, not the copy. The title
+    /// gains `title_suffix` so the two are told apart in the list.
+    ///
+    /// Entries in the Recycle Bin are not duplicated; a copy landing in the
+    /// bin would be deleted on arrival.
+    pub fn duplicate_entry(
+        &mut self,
+        entry_id_str: &str,
+        title_suffix: &str,
+    ) -> Result<String, MutationError> {
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
+        let source = self
+            .database
+            .entry(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        let parent_id = source.parent().id();
+        if let Some(recycle_bin_id) = self.database.recycle_bin().map(|group| group.id())
+            && group_is_within(&self.database, parent_id, recycle_bin_id)
+        {
+            return Err(MutationError::EntryInRecycleBin);
+        }
+        let template: keepass::db::Entry = (*source).clone();
+        // Everything that can fail is settled before `add_entry`: once the
+        // copy exists, an early return would leave it in the database,
+        // outside the snapshot, for the next save to write. A custom icon
+        // the database does not hold is dropped rather than refused.
+        let icon = match source.icon() {
+            Some(keepass::db::Icon::Custom(id)) if self.database.custom_icon(*id).is_none() => None,
+            other => other.cloned(),
+        };
+        let title_protected = template
+            .fields
+            .get(fields::TITLE)
+            .is_some_and(|value| value.is_protected());
+        let attachments: Vec<(String, keepass::db::Value<Vec<u8>>)> = source
+            .named_attachments()
+            .map(|(name, attachment)| (name.to_string(), attachment.data.clone()))
+            .collect();
+
+        let mut group = self
+            .database
+            .group_mut(parent_id)
+            .ok_or(MutationError::GroupNotFound)?;
+        let mut copy = group.add_entry();
+        copy.fields = template.fields.clone();
+        let title = format!("{}{title_suffix}", template.get_title().unwrap_or_default());
+        if title_protected {
+            copy.set_protected(fields::TITLE, title);
+        } else {
+            copy.set_unprotected(fields::TITLE, title);
+        }
+        copy.autotype = template.autotype.clone();
+        copy.tags = template.tags.clone();
+        // Keys KeePassXC regenerates on every save describe the source
+        // object, not data the user put there.
+        copy.custom_data = template
+            .custom_data
+            .iter()
+            .filter(|(key, _)| !GENERATED_CUSTOM_DATA.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        copy.foreground_color = template.foreground_color.clone();
+        copy.background_color = template.background_color.clone();
+        copy.override_url = template.override_url.clone();
+        copy.quality_check = template.quality_check;
+        copy.times.expires = template.times.expires;
+        copy.times.expiry = template.times.expiry;
+        match icon {
+            Some(keepass::db::Icon::BuiltIn(id)) => copy.set_icon_builtin(id),
+            Some(keepass::db::Icon::Custom(id)) => {
+                // Shares the source's image rather than storing it twice.
+                // The id was checked against the database above, so this
+                // cannot fail; if it did, the copy would simply have no icon.
+                let _ = copy.set_icon_custom(id);
+            }
+            None => {}
+        }
+        for (name, data) in attachments {
+            copy.add_attachment(name, data);
+        }
+        let id = copy.id().to_string();
+        self.refresh_snapshot();
+        Ok(id)
+    }
+
     /// Add or remove the favorite-marker tag on an entry. The convention
     /// is a single tag named `Favorite` (case-insensitive on read), which
     /// KeePassXC users already commonly use to flag favourites - this
@@ -546,6 +639,73 @@ impl VaultDocument {
         entry
             .move_to(target_id)
             .map_err(|_| MutationError::GroupNotFound)?;
+        entry.times.last_modification = Some(changed_at);
+        entry.times.location_changed = Some(changed_at);
+        drop(entry);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
+    /// File an entry into `target_group_id` from the entry editor, applying
+    /// `draft` in the same step when the user also changed fields.
+    ///
+    /// One `track_changes` covers both, so the entry gains one history
+    /// version and one clock step. `update_entry` followed by `move_entry`
+    /// archived the half-done state in between as a version of its own.
+    /// Without a draft the fields are left exactly as they are:
+    /// `apply_draft_to_entry` rewrites the protection of the standard fields
+    /// and adds the ones an entry lacks, which a pure move must not do to an
+    /// entry another client wrote.
+    ///
+    /// A target inside the Recycle Bin is refused. The picker leaves the bin
+    /// out, but a sync can move the chosen group there while the editor is
+    /// open, and the entry would then land in the Trash without anyone
+    /// having deleted it.
+    pub fn update_and_move_entry(
+        &mut self,
+        entry_id_str: &str,
+        draft: Option<&EntryDraft>,
+        target_group_id_str: &str,
+    ) -> Result<(), MutationError> {
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
+        let target_id = find_group_id(&self.database, target_group_id_str)
+            .ok_or(MutationError::GroupNotFound)?;
+        if let Some(recycle_bin_id) = self.database.recycle_bin().map(|group| group.id())
+            && group_is_within(&self.database, target_id, recycle_bin_id)
+        {
+            return Err(MutationError::GroupInRecycleBin);
+        }
+        let current_parent = self
+            .database
+            .entry(entry_id)
+            .ok_or(MutationError::EntryNotFound)?
+            .parent()
+            .id();
+        if current_parent == target_id {
+            return match draft {
+                Some(draft) => self.update_entry(entry_id_str, draft),
+                None => Ok(()),
+            };
+        }
+        let mut entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        // Both clocks, as in `move_entry`.
+        let changed_at = next_change_time(
+            entry
+                .times
+                .last_modification
+                .max(entry.times.location_changed),
+        );
+        let mut entry = entry.track_changes();
+        entry
+            .move_to(target_id)
+            .map_err(|_| MutationError::GroupNotFound)?;
+        if let Some(draft) = draft {
+            entry.edit(|entry| apply_draft_to_entry(entry, draft));
+        }
         entry.times.last_modification = Some(changed_at);
         entry.times.location_changed = Some(changed_at);
         drop(entry);
@@ -1186,6 +1346,10 @@ pub enum MutationError {
     CannotMoveRecycleBin,
     #[error("moving the group would create a cycle")]
     WouldCreateCycle,
+    #[error("the entry is in the Recycle Bin")]
+    EntryInRecycleBin,
+    #[error("the group is in the Recycle Bin")]
+    GroupInRecycleBin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3464,6 +3628,344 @@ mod tests {
         assert!(
             doc.snapshot().root.entries.iter().any(|e| e.id == entry_id),
             "entry now at root"
+        );
+    }
+
+    #[test]
+    fn duplicate_entry_copies_everything_but_identity_and_history() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("duplicate.kdbx");
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let work_id = {
+            let mut root = doc.database.root_mut();
+            let mut group = root.add_group();
+            group.name = "Work".into();
+            group.id().to_string()
+        };
+        doc.refresh_snapshot();
+
+        let source_id = doc
+            .create_entry(
+                &work_id,
+                &EntryDraft {
+                    title: "SAP DEV".into(),
+                    username: "alice".into(),
+                    password: Zeroizing::new("S3cret!".into()),
+                    url: "sap.example.com".into(),
+                    notes: "Development system".into(),
+                    tags: vec!["SAP".into()],
+                    otp: Zeroizing::new(String::new()),
+                    custom_fields: vec![
+                        CustomField {
+                            key: "SAP_CLIENT".into(),
+                            value: "100".into(),
+                            protected: false,
+                        },
+                        CustomField {
+                            key: "PIN".into(),
+                            value: "4711".into(),
+                            protected: true,
+                        },
+                    ],
+                },
+            )
+            .expect("create");
+        // Give the source a history, a custom icon, an attachment and the
+        // fields the editor never touches, so each has something to copy.
+        doc.toggle_starred(&source_id).expect("star");
+        doc.set_entry_custom_icon(&source_id, vec![1, 2, 3])
+            .expect("icon");
+        let expiry = chrono::NaiveDate::from_ymd_opt(2030, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .unwrap();
+        let sequence = "{USERNAME}{TAB}{PASSWORD}{ENTER}";
+        let colour = keepass::db::Color { r: 200, g: 0, b: 0 };
+        {
+            let id = find_entry_id(&doc.database, &source_id).unwrap();
+            let mut entry = doc.database.entry_mut(id).unwrap();
+            entry.add_attachment("cert.pem", keepass::db::Value::Unprotected(b"PEM".to_vec()));
+            // Some clients let the user protect the title.
+            entry.set_protected(fields::TITLE, "SAP DEV");
+            entry.foreground_color = Some(colour.clone());
+            entry.times.expires = Some(true);
+            entry.times.expiry = Some(expiry);
+            entry.autotype = Some(keepass::db::AutoType {
+                enabled: true,
+                default_sequence: Some(sequence.into()),
+                ..Default::default()
+            });
+            for key in [
+                "_LAST_MODIFIED",
+                "KPXC_RANDOM_SLUG",
+                "ExamplePlugin.Setting",
+            ] {
+                entry.custom_data.insert(
+                    key.into(),
+                    keepass::db::CustomDataItem {
+                        value: Some(keepass::db::CustomDataValue::String("value".into())),
+                        last_modification_time: None,
+                    },
+                );
+            }
+        }
+        doc.refresh_snapshot();
+        let icon_count = doc.database.num_custom_icons();
+        let source_ref = doc
+            .database
+            .entry(find_entry_id(&doc.database, &source_id).unwrap())
+            .unwrap();
+        let source_icon = source_ref.icon().cloned();
+        assert!(matches!(source_icon, Some(keepass::db::Icon::Custom(_))));
+        assert!(
+            source_ref
+                .history
+                .as_ref()
+                .is_some_and(|h| !h.get_entries().is_empty()),
+            "the source needs a history for the check on the copy to mean anything"
+        );
+
+        let copy_id = doc
+            .duplicate_entry(&source_id, " - Copy")
+            .expect("duplicate");
+        assert_ne!(copy_id, source_id);
+
+        let work = doc.snapshot().find_group(&work_id).unwrap();
+        assert_eq!(work.entries.len(), 2, "copy lands next to its source");
+        let copy = work.entries.iter().find(|e| e.id == copy_id).unwrap();
+        assert_eq!(copy.title, "SAP DEV - Copy");
+        assert_eq!(copy.username, "alice");
+        assert_eq!(copy.url, "sap.example.com");
+        assert_eq!(copy.notes, "Development system");
+        assert!(copy.starred, "tags travel, the Favorite marker included");
+        assert!(copy.tags.iter().any(|tag| tag == "SAP"));
+        assert_eq!(
+            doc.custom_field_value(&copy_id, "SAP_CLIENT")
+                .as_deref()
+                .map(String::as_str),
+            Some("100")
+        );
+        let pin = copy.custom_fields.iter().find(|f| f.key == "PIN").unwrap();
+        assert!(pin.protected, "protection flag is kept");
+        assert_eq!(
+            doc.password_for_entry(&copy_id)
+                .as_deref()
+                .map(String::as_str),
+            Some("S3cret!")
+        );
+
+        let copy_ref = doc
+            .database
+            .entry(find_entry_id(&doc.database, &copy_id).unwrap())
+            .unwrap();
+        assert!(
+            copy_ref
+                .history
+                .as_ref()
+                .is_none_or(|h| h.get_entries().is_empty()),
+            "the source's history is not the copy's"
+        );
+        assert_eq!(
+            copy_ref
+                .attachment_by_name("cert.pem")
+                .map(|attachment| attachment.data.clone()),
+            Some(keepass::db::Value::Unprotected(b"PEM".to_vec()))
+        );
+        assert!(
+            copy_ref
+                .fields
+                .get(fields::TITLE)
+                .is_some_and(|title| title.is_protected()),
+            "a protected title stays protected"
+        );
+        assert_eq!(
+            copy_ref.icon(),
+            source_icon.as_ref(),
+            "the copy shares the source's custom icon"
+        );
+        assert_eq!(
+            doc.database.num_custom_icons(),
+            icon_count,
+            "the icon is not stored twice"
+        );
+        assert_eq!(copy_ref.foreground_color, Some(colour));
+        assert_eq!(copy_ref.times.expires, Some(true));
+        assert_eq!(copy_ref.times.expiry, Some(expiry));
+        assert_eq!(
+            copy_ref
+                .autotype
+                .as_ref()
+                .and_then(|autotype| autotype.default_sequence.as_deref()),
+            Some(sequence)
+        );
+        assert!(copy_ref.custom_data.contains_key("ExamplePlugin.Setting"));
+        for generated in GENERATED_CUSTOM_DATA {
+            assert!(
+                !copy_ref.custom_data.contains_key(generated),
+                "{generated} describes the source and stays behind"
+            );
+        }
+
+        let source = doc.snapshot().find_entry(&source_id).unwrap();
+        assert_eq!(source.title, "SAP DEV", "the source is left alone");
+
+        // The copy survives a save and reopen like any other entry.
+        doc.save_payload().save_to(&path).expect("save");
+        let reopened = crate::keepass::KeePassRepository::open(&path, "pw", None).expect("reopen");
+        assert_eq!(
+            reopened
+                .password_for_entry(&copy_id)
+                .as_deref()
+                .map(String::as_str),
+            Some("S3cret!")
+        );
+    }
+
+    #[test]
+    fn duplicate_entry_refuses_entries_in_the_recycle_bin() {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let root_id = doc.database.root().id().to_string();
+        let id = doc
+            .create_entry(
+                &root_id,
+                &EntryDraft {
+                    title: "Gone".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+        doc.delete_entry(&id).expect("trash");
+        let entries_before = doc.database.num_entries();
+        assert!(matches!(
+            doc.duplicate_entry(&id, " - Copy"),
+            Err(MutationError::EntryInRecycleBin)
+        ));
+        assert_eq!(
+            doc.database.num_entries(),
+            entries_before,
+            "nothing was added"
+        );
+    }
+
+    /// A document with the groups Work and Personal under the root, one
+    /// entry in Work, and the ids of all three.
+    fn doc_with_entry_in_work() -> (VaultDocument, String, String, String) {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let mut add_group = |name: &str| {
+            let mut root = doc.database.root_mut();
+            let mut group = root.add_group();
+            group.name = name.into();
+            group.id().to_string()
+        };
+        let work_id = add_group("Work");
+        let personal_id = add_group("Personal");
+        doc.refresh_snapshot();
+        let entry_id = doc
+            .create_entry(
+                &work_id,
+                &EntryDraft {
+                    title: "Movable".into(),
+                    username: "alice".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+        (doc, work_id, personal_id, entry_id)
+    }
+
+    fn history_len(doc: &VaultDocument, entry_id: &str) -> usize {
+        doc.database
+            .entry(find_entry_id(&doc.database, entry_id).unwrap())
+            .unwrap()
+            .history
+            .as_ref()
+            .map_or(0, |history| history.get_entries().len())
+    }
+
+    #[test]
+    fn update_and_move_entry_is_one_change() {
+        let (mut doc, _, personal_id, entry_id) = doc_with_entry_in_work();
+        let before = history_len(&doc, &entry_id);
+        let draft = EntryDraft {
+            title: "Moved and renamed".into(),
+            username: "alice".into(),
+            ..Default::default()
+        };
+
+        doc.update_and_move_entry(&entry_id, Some(&draft), &personal_id)
+            .expect("edit and move");
+
+        let personal = doc.snapshot().find_group(&personal_id).unwrap();
+        let moved = personal.entries.iter().find(|e| e.id == entry_id).unwrap();
+        assert_eq!(moved.title, "Moved and renamed");
+        assert_eq!(
+            history_len(&doc, &entry_id),
+            before + 1,
+            "one history version, not one for the edit and one for the move"
+        );
+        let times = &doc
+            .database
+            .entry(find_entry_id(&doc.database, &entry_id).unwrap())
+            .unwrap()
+            .times;
+        assert_eq!(times.last_modification, times.location_changed);
+    }
+
+    #[test]
+    fn update_and_move_entry_without_a_draft_leaves_the_fields_alone() {
+        let (mut doc, _, personal_id, entry_id) = doc_with_entry_in_work();
+        // Written the way another client might: a protected username and no
+        // OTP field at all.
+        {
+            let id = find_entry_id(&doc.database, &entry_id).unwrap();
+            let mut entry = doc.database.entry_mut(id).unwrap();
+            entry.set_protected(fields::USERNAME, "alice");
+            entry.fields.remove(fields::OTP);
+        }
+        doc.refresh_snapshot();
+        let before = history_len(&doc, &entry_id);
+
+        doc.update_and_move_entry(&entry_id, None, &personal_id)
+            .expect("move");
+
+        let entry = doc
+            .database
+            .entry(find_entry_id(&doc.database, &entry_id).unwrap())
+            .unwrap();
+        assert_eq!(entry.parent().id().to_string(), personal_id);
+        assert!(
+            entry
+                .fields
+                .get(fields::USERNAME)
+                .is_some_and(|value| value.is_protected()),
+            "a move keeps the username protected"
+        );
+        assert!(
+            !entry.fields.contains_key(fields::OTP),
+            "a move adds no fields"
+        );
+        assert_eq!(history_len(&doc, &entry_id), before + 1);
+    }
+
+    #[test]
+    fn update_and_move_entry_refuses_a_group_in_the_recycle_bin() {
+        let (mut doc, work_id, personal_id, entry_id) = doc_with_entry_in_work();
+        // A sync, say, has moved the chosen group into the Trash meanwhile.
+        doc.delete_group(&personal_id).expect("trash the group");
+
+        assert!(matches!(
+            doc.update_and_move_entry(&entry_id, None, &personal_id),
+            Err(MutationError::GroupInRecycleBin)
+        ));
+        let work = doc.snapshot().find_group(&work_id).unwrap();
+        assert!(
+            work.entries.iter().any(|e| e.id == entry_id),
+            "the entry stays where it was"
         );
     }
 

@@ -13,6 +13,7 @@ pub(crate) mod time;
 pub mod unlock;
 
 pub use recents::{RecentEntry, RecentsError};
+pub(crate) use search::match_groups;
 pub use settings::AppSettings;
 pub use state::{
     AppState, BiometricAttempt, BiometricLaunch, ConflictState, ConnectFlow, CopyValueKind,

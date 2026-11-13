@@ -77,6 +77,10 @@ impl AppShell {
         &self.picker_query_input
     }
 
+    pub fn new_entry_group_filter_input(&self) -> &Entity<InputState> {
+        &self.new_entry_group_filter_input
+    }
+
     pub fn vault_switcher_input(&self) -> &Entity<InputState> {
         &self.vault_switcher_input
     }
@@ -263,9 +267,25 @@ impl AppShell {
         });
 
         let state = self.state.clone();
-        let result = match editing_id.as_ref() {
-            Some(entry_id) => state.update(cx, |state, cx| state.update_entry(entry_id, draft, cx)),
-            None => {
+        // A pick in Edit mode that differs from the entry's group moves the
+        // entry, in one mutation with the field changes if there are any. A
+        // pure move hands over no draft: saving one would rewrite fields the
+        // user never touched (`apply_draft_to_entry` sets the protection of
+        // the standard fields and adds the ones an entry lacks). For the same
+        // reason an edit that changed nothing writes nothing.
+        let pending_move = self.pending_group_move(cx);
+        // Without a baseline the editor cannot tell what changed, so it
+        // saves the draft rather than risk dropping an edit.
+        let fields_changed = self.entry_form_baseline.is_none() || self.entry_fields_changed(cx);
+        let result = match (editing_id.as_ref(), pending_move.as_ref()) {
+            (Some(entry_id), Some(target)) => state.update(cx, |state, cx| {
+                state.update_and_move_entry(entry_id, fields_changed.then_some(draft), target, cx)
+            }),
+            (Some(_), None) if !fields_changed => Ok(()),
+            (Some(entry_id), None) => {
+                state.update(cx, |state, cx| state.update_entry(entry_id, draft, cx))
+            }
+            (None, _) => {
                 let Some(group_id) = target_group_id else {
                     self.entry_form_error = Some("Pick a group to save this entry in.".into());
                     cx.notify();
@@ -278,18 +298,32 @@ impl AppShell {
         };
         match result {
             Ok(()) => {
+                // The entry leaves the list it was in, so say where it went.
+                let moved_to = pending_move.as_ref().and_then(|group_id| {
+                    self.state.read(cx).vault_browser().and_then(|browser| {
+                        browser
+                            .snapshot
+                            .find_group(group_id)
+                            .map(|group| group.name.clone())
+                    })
+                });
+                let message: Option<SharedString> = match (editing_id.is_some(), moved_to) {
+                    (true, Some(group)) if fields_changed => {
+                        Some(format!("Changes saved, entry moved to {group}.").into())
+                    }
+                    (true, Some(group)) => Some(format!("Moved to {group}.").into()),
+                    (true, None) if fields_changed => Some("Changes saved.".into()),
+                    // Nothing was written, so there is nothing to report.
+                    (true, None) => None,
+                    (false, _) => Some("Entry saved.".into()),
+                };
                 self.clear_entry_form(window, cx);
                 self.state.clone().update(cx, |state, cx| {
                     let _ = state.close_overlay(cx);
                 });
-                window.push_notification(
-                    if editing_id.is_some() {
-                        "Changes saved."
-                    } else {
-                        "Entry saved."
-                    },
-                    cx,
-                );
+                if let Some(message) = message {
+                    window.push_notification(message, cx);
+                }
             }
             Err(error) => {
                 self.entry_form_error = Some(errors::mutation_message(&error));
@@ -360,9 +394,33 @@ impl AppShell {
         self.entry_discard_armed = false;
     }
 
-    pub fn entry_form_is_dirty(&self, cx: &gpui::App) -> bool {
+    /// Whether any field differs from what the editor opened with.
+    fn entry_fields_changed(&self, cx: &gpui::App) -> bool {
         self.entry_form_baseline
             .is_some_and(|baseline| baseline != self.entry_form_fingerprint(cx))
+    }
+
+    /// The group the edited entry moves to on save: a pick in Edit mode that
+    /// differs from the group the entry is in. A pick in Add mode only says
+    /// where a new entry lands, and picking the entry's own group changes
+    /// nothing, so neither counts.
+    fn pending_group_move(&self, cx: &gpui::App) -> Option<String> {
+        let target = self.new_entry_target_group_id.as_ref()?;
+        let state = self.state.read(cx);
+        let Overlay::EditEntry { entry_id } = state.overlay() else {
+            return None;
+        };
+        let current = state
+            .vault_browser()?
+            .snapshot
+            .find_entry_group_id(entry_id);
+        (current.as_deref() != Some(target.as_str())).then(|| target.clone())
+    }
+
+    /// A pending move is lost on close as silently as a typed change, so it
+    /// counts as one.
+    pub fn entry_form_is_dirty(&self, cx: &gpui::App) -> bool {
+        self.entry_fields_changed(cx) || self.pending_group_move(cx).is_some()
     }
 
     pub fn entry_discard_armed(&self) -> bool {
@@ -539,6 +597,8 @@ impl AppShell {
         // from the current sidebar selection, and snap the picker shut.
         self.new_entry_target_group_id = None;
         self.new_entry_picker_open = false;
+        self.new_entry_group_filter_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
         // Drop all custom-field rows. Their `Entity<InputState>`s are
         // released on Vec drop; gpui will GC them once no view still
         // references them. Don't reset `next_custom_field_id` - keeping
@@ -554,13 +614,21 @@ impl AppShell {
         self.new_entry_target_group_id.as_deref()
     }
 
+    /// File the entry being edited (or created) into `group_id`. Closes the
+    /// picker and hands focus back to the form, so Enter saves right away.
     pub fn set_new_entry_target_group(
         &mut self,
         group_id: impl Into<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.new_entry_target_group_id = Some(group_id.into());
         self.new_entry_picker_open = false;
+        // Like typing: a warning about the draft as it stood no longer
+        // covers it.
+        self.entry_discard_armed = false;
+        self.new_entry_title_input
+            .update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
@@ -568,8 +636,28 @@ impl AppShell {
         self.new_entry_picker_open
     }
 
-    pub fn toggle_new_entry_picker(&mut self, cx: &mut Context<Self>) {
-        self.new_entry_picker_open = !self.new_entry_picker_open;
+    pub fn toggle_new_entry_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_entry_picker_open {
+            self.close_new_entry_picker(window, cx);
+        } else {
+            self.open_new_entry_picker(window, cx);
+        }
+    }
+
+    /// Expand the group picker with an empty, focused search field.
+    pub fn open_new_entry_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_entry_picker_open = true;
+        self.new_entry_group_filter_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn close_new_entry_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_entry_picker_open = false;
+        self.new_entry_title_input
+            .update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 

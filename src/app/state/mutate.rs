@@ -47,6 +47,52 @@ impl AppState {
         Ok(new_id)
     }
 
+    /// Copy an entry next to itself, select the copy, and trigger a background
+    /// save. The current list view is kept when the copy shows up in it;
+    /// otherwise the sidebar snaps to the copy's group so the user can see
+    /// what was just created, the same way `create_entry` does.
+    pub fn duplicate_entry(
+        &mut self,
+        entry_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, MutationError> {
+        let new_id = {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                last_used,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            let new_id = document.duplicate_entry(entry_id, DUPLICATE_TITLE_SUFFIX)?;
+
+            let mut entries =
+                entries_for_selection(document.snapshot(), selection, search_query, last_used);
+            if !entries.iter().any(|entry| entry.id == new_id)
+                && let Some(group_id) = document.snapshot().find_entry_group_id(&new_id)
+            {
+                *selection = LibrarySelection::Group(group_id);
+                search_query.clear();
+                entries = entries_for_selection(document.snapshot(), selection, "", last_used);
+            }
+            *selected_entry_id = Some(new_id.clone());
+            *visible_entries = Rc::new(entries);
+            *selected_strength = document.strength_for_entry(&new_id);
+
+            new_id
+        };
+        cx.notify();
+        self.save_async(cx);
+        Ok(new_id)
+    }
+
     pub fn update_entry(
         &mut self,
         entry_id: &str,
@@ -77,6 +123,49 @@ impl AppState {
                 last_used,
             ));
             // Re-score; the password may have changed.
+            if selected_entry_id.as_deref() == Some(entry_id) {
+                *selected_strength = document.strength_for_entry(entry_id);
+            }
+        }
+        cx.notify();
+        self.save_async(cx);
+        Ok(())
+    }
+
+    /// File an entry into another group from the entry editor, applying the
+    /// editor's draft in the same step when it changed fields. One mutation
+    /// and one save; see `VaultDocument::update_and_move_entry` for why the
+    /// two are not run one after the other.
+    pub fn update_and_move_entry(
+        &mut self,
+        entry_id: &str,
+        draft: Option<EntryDraft>,
+        target_group_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), MutationError> {
+        {
+            let VaultStatus::Open {
+                document,
+                selection,
+                selected_entry_id,
+                search_query,
+                visible_entries,
+                selected_strength,
+                last_used,
+                ..
+            } = &mut self.vault
+            else {
+                return Err(MutationError::EntryNotFound);
+            };
+
+            document.update_and_move_entry(entry_id, draft.as_ref(), target_group_id)?;
+
+            *visible_entries = Rc::new(entries_for_selection(
+                document.snapshot(),
+                selection,
+                search_query,
+                last_used,
+            ));
             if selected_entry_id.as_deref() == Some(entry_id) {
                 *selected_strength = document.strength_for_entry(entry_id);
             }

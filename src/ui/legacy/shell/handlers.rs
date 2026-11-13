@@ -147,6 +147,15 @@ impl AppShell {
             self.cancel_disconnect(cx);
             return;
         }
+        if self.new_entry_picker_open
+            && matches!(
+                self.state.read(cx).overlay(),
+                Overlay::AddEntry | Overlay::EditEntry { .. }
+            )
+        {
+            self.close_new_entry_picker(window, cx);
+            return;
+        }
         // A half-written entry, and its freshly generated password, used to
         // vanish on one Escape with no warning. The first Escape arms the
         // discard, the second one performs it.
@@ -472,6 +481,39 @@ impl AppShell {
         self.delete_selected_entry(window, cx);
     }
 
+    pub(super) fn on_action_duplicate_entry(
+        &mut self,
+        _: &DuplicateEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // ⌘D reaches here from anywhere in the window; with a modal open the
+        // entry underneath is not what the user is looking at.
+        if self.state.read(cx).overlay().is_active() {
+            return;
+        }
+        self.duplicate_selected_entry(window, cx);
+    }
+
+    pub(super) fn on_action_move_entry_to_group(
+        &mut self,
+        _: &MoveEntryToGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.entry_draft_blocks_close(cx) {
+            return;
+        }
+        if self.selected_entry_in_trash(cx) {
+            window.push_notification("Restore the entry before moving it.", cx);
+            return;
+        }
+        self.begin_edit_selected_entry(window, cx);
+        if matches!(self.state.read(cx).overlay(), Overlay::EditEntry { .. }) {
+            self.open_new_entry_picker(window, cx);
+        }
+    }
+
     pub(super) fn on_action_new_group(
         &mut self,
         _: &NewGroup,
@@ -692,6 +734,20 @@ impl AppShell {
         });
     }
 
+    pub fn duplicate_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_entry_id(cx) else {
+            window.push_notification("Select an entry to duplicate first.", cx);
+            return;
+        };
+        if self.selected_entry_in_trash(cx) {
+            window.push_notification("Restore the entry before duplicating it.", cx);
+            return;
+        }
+        self.run_mutation("Entry duplicated.", window, cx, |state, cx| {
+            state.duplicate_entry(&id, cx).map(|_| ())
+        });
+    }
+
     pub fn restore_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.selected_entry_id(cx) else {
             return;
@@ -745,6 +801,16 @@ impl AppShell {
             state.delete_entry_permanent(&entry_id, cx)
         });
         cx.notify();
+    }
+
+    /// Whether the entry the commands act on is in the Trash. Duplicating
+    /// and moving refuse it; it has to be restored first.
+    fn selected_entry_in_trash(&self, cx: &gpui::App) -> bool {
+        self.state
+            .read(cx)
+            .vault_browser()
+            .and_then(|browser| browser.selected_entry)
+            .is_some_and(|entry| entry.in_recycle_bin)
     }
 
     pub(super) fn selected_entry_id(&self, cx: &gpui::App) -> Option<String> {
