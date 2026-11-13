@@ -156,6 +156,12 @@ impl Gallery {
         }
     }
 
+    /// The sample data the pages draw.
+    #[cfg(test)]
+    pub fn samples(&self) -> &Samples {
+        &self.samples
+    }
+
     pub fn show(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
         cx.notify();

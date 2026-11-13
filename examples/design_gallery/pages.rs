@@ -233,6 +233,13 @@ impl Samples {
             state.set_placeholder(tr!("quick.search.placeholder"), window, cx)
         });
     }
+
+    /// The inputs of the text field with text and of the masked one that
+    /// holds [`SECRET`], for the test of what a copy takes out of them.
+    #[cfg(test)]
+    pub fn text_and_secret(&self) -> [Entity<InputState>; 2] {
+        [self.filled.clone(), self.wrong.clone()]
+    }
 }
 
 /// `page` with its heading.

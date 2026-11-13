@@ -5,7 +5,8 @@
 //! draw the same view the gallery window shows, headless. They hold that
 //! the pages name every component module, that every page draws in every
 //! mode, at both text sizes and in both languages, that the keys switch
-//! them, that the Kit page holds every glyph the app draws again, and, by
+//! them, that the Kit page holds every glyph the app draws again, that a
+//! copy or a cut leaves the sample secret in its masked field, and, by
 //! reading the gallery's source, that it builds no component of its own and
 //! reads nothing.
 
@@ -17,11 +18,15 @@ use ferrispass::app::settings::TextSize;
 use ferrispass::i18n::Language;
 use ferrispass::tr;
 use ferrispass::ui::ds::{self, ActiveTokens as _, Mode};
-use gpui::{AppContext as _, Entity, KeyContext, Keystroke, TestAppContext, VisualTestContext};
+use gpui::{
+    AppContext as _, Entity, Focusable as _, KeyContext, Keystroke, TestAppContext,
+    VisualTestContext,
+};
 use gpui_component::Root;
+use gpui_component::input::InputState;
 
 use crate::gallery::{self, Gallery, Look};
-use crate::pages::{self, Page};
+use crate::pages::{self, Page, SECRET};
 
 /// This file, which the scans of the gallery's source leave out: it names
 /// what they look for.
@@ -158,6 +163,60 @@ fn the_keys_stay_off_while_a_text_field_has_focus(cx: &mut TestAppContext) {
             assert!(bindings.is_empty(), "{keys} in a text field");
         }
     });
+}
+
+// -------------------------------------------------------- clipboard --
+
+/// The text on the clipboard of the test platform, which is not the
+/// system's.
+fn clipboard_text(cx: &VisualTestContext) -> Option<String> {
+    cx.read_from_clipboard().and_then(|item| item.text())
+}
+
+/// Gives `field` the keyboard focus, as a click into it does.
+fn focus(cx: &mut VisualTestContext, field: &Entity<InputState>) {
+    cx.update(|window, cx| field.update(cx, |state, cx| state.focus(window, cx)));
+    cx.run_until_parked();
+}
+
+fn focused(cx: &mut VisualTestContext, field: &Entity<InputState>) -> bool {
+    cx.update(|window, cx| field.read(cx).focus_handle(cx).is_focused(window))
+}
+
+/// The text fields are the Kit's inputs and keep the Kit's copy, cut and
+/// paste: Cmd-C in the field with text puts its text on the clipboard. The
+/// field that holds the sample secret is masked, and the Kit copies and
+/// cuts nothing out of a masked field, so the secret stays in its field
+/// and off the clipboard.
+#[gpui::test]
+fn the_sample_secret_stays_in_its_masked_field(cx: &mut TestAppContext) {
+    let _lock = lock();
+    let (gallery, cx) = open(cx);
+    cx.update(|_, cx| gallery.update(cx, |gallery, cx| gallery.show(Page::TextField, cx)));
+    assert_shows(cx, Page::TextField, Look::FIRST);
+    let [text, secret] = cx.update(|_, cx| gallery.read(cx).samples().text_and_secret());
+
+    // The keys reach a field, so an unchanged clipboard below means the
+    // mask held, not that the keys went nowhere.
+    let shown = cx.update(|_, cx| text.read(cx).value().to_string());
+    assert!(!shown.is_empty(), "the field with text is empty");
+    focus(cx, &text);
+    cx.simulate_keystrokes("cmd-a cmd-c");
+    assert!(focused(cx, &text), "the copy moved the focus away");
+    assert_eq!(clipboard_text(cx), Some(shown.clone()), "a copy in a field");
+
+    focus(cx, &secret);
+    for keys in ["cmd-a cmd-c", "cmd-a cmd-x"] {
+        cx.simulate_keystrokes(keys);
+        assert!(focused(cx, &secret), "{keys} moved the focus away");
+        assert_eq!(
+            clipboard_text(cx),
+            Some(shown.clone()),
+            "{keys} in the masked field"
+        );
+        let value = cx.update(|_, cx| secret.read(cx).value().to_string());
+        assert_eq!(value, SECRET, "{keys} took the secret out of its field");
+    }
 }
 
 // ------------------------------------------------------------ scans --
@@ -466,10 +525,11 @@ fn reads_in(file: &str, source: &str) -> Vec<String> {
     found
 }
 
-/// The gallery reads no settings, no vault and no clipboard, and leaves the
-/// accessibility settings of macOS to `ds::init`, which the app runs the
-/// same way at start. A read hidden behind a function of the app that the
-/// gallery calls is past this scan.
+/// The gallery's own code reads no settings, no vault and no clipboard, and
+/// leaves the accessibility settings of macOS to `ds::init`, which the app
+/// runs the same way at start. A read hidden behind a function of the app
+/// that the gallery calls is past this scan, and so are the copy, cut and
+/// paste the Kit's inputs keep in the text fields.
 #[test]
 fn the_gallery_reads_nothing() {
     let found: Vec<String> = gallery_sources()
