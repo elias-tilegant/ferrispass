@@ -1,4 +1,5 @@
 use crate::domain::{CustomField, VaultSnapshot};
+use crate::keepass::merge::GENERATED_CUSTOM_DATA;
 use crate::keepass::repository::{
     STANDARD_FIELDS, find_entry_id, find_group_id, snapshot_from_database,
 };
@@ -384,10 +385,21 @@ impl VaultDocument {
         if let Some(recycle_bin_id) = self.database.recycle_bin().map(|group| group.id())
             && group_is_within(&self.database, parent_id, recycle_bin_id)
         {
-            return Err(MutationError::EntryNotFound);
+            return Err(MutationError::EntryInRecycleBin);
         }
         let template: keepass::db::Entry = (*source).clone();
-        let icon = source.icon().cloned();
+        // Everything that can fail is settled before `add_entry`: once the
+        // copy exists, an early return would leave it in the database,
+        // outside the snapshot, for the next save to write. A custom icon
+        // the database does not hold is dropped rather than refused.
+        let icon = match source.icon() {
+            Some(keepass::db::Icon::Custom(id)) if self.database.custom_icon(*id).is_none() => None,
+            other => other.cloned(),
+        };
+        let title_protected = template
+            .fields
+            .get(fields::TITLE)
+            .is_some_and(|value| value.is_protected());
         let attachments: Vec<(String, keepass::db::Value<Vec<u8>>)> = source
             .named_attachments()
             .map(|(name, attachment)| (name.to_string(), attachment.data.clone()))
@@ -399,8 +411,12 @@ impl VaultDocument {
             .ok_or(MutationError::GroupNotFound)?;
         let mut copy = group.add_entry();
         copy.fields = template.fields.clone();
-        let title = template.get_title().unwrap_or_default();
-        copy.set_unprotected("Title", format!("{title}{title_suffix}"));
+        let title = format!("{}{title_suffix}", template.get_title().unwrap_or_default());
+        if title_protected {
+            copy.set_protected(fields::TITLE, title);
+        } else {
+            copy.set_unprotected(fields::TITLE, title);
+        }
         copy.autotype = template.autotype.clone();
         copy.tags = template.tags.clone();
         // Keys KeePassXC regenerates on every save describe the source
@@ -408,7 +424,7 @@ impl VaultDocument {
         copy.custom_data = template
             .custom_data
             .iter()
-            .filter(|(key, _)| !matches!(key.as_str(), "KPXC_RANDOM_SLUG" | "_LAST_MODIFIED"))
+            .filter(|(key, _)| !GENERATED_CUSTOM_DATA.contains(&key.as_str()))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         copy.foreground_color = template.foreground_color.clone();
@@ -421,8 +437,9 @@ impl VaultDocument {
             Some(keepass::db::Icon::BuiltIn(id)) => copy.set_icon_builtin(id),
             Some(keepass::db::Icon::Custom(id)) => {
                 // Shares the source's image rather than storing it twice.
-                copy.set_icon_custom(id)
-                    .map_err(|_| MutationError::EntryNotFound)?;
+                // The id was checked against the database above, so this
+                // cannot fail; if it did, the copy would simply have no icon.
+                let _ = copy.set_icon_custom(id);
             }
             None => {}
         }
@@ -1262,6 +1279,8 @@ pub enum MutationError {
     CannotMoveRecycleBin,
     #[error("moving the group would create a cycle")]
     WouldCreateCycle,
+    #[error("the entry is in the Recycle Bin")]
+    EntryInRecycleBin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3562,11 +3581,11 @@ mod tests {
             .create_entry(
                 &work_id,
                 &EntryDraft {
-                    title: "SAP SH1".into(),
-                    username: "sebbe".into(),
+                    title: "SAP DEV".into(),
+                    username: "alice".into(),
                     password: Zeroizing::new("S3cret!".into()),
                     url: "sap.example.com".into(),
-                    notes: "Entwicklung".into(),
+                    notes: "Development system".into(),
                     tags: vec!["SAP".into()],
                     otp: Zeroizing::new(String::new()),
                     custom_fields: vec![
@@ -3584,14 +3603,59 @@ mod tests {
                 },
             )
             .expect("create");
-        // Give the source a history and an attachment to copy (or not).
+        // Give the source a history, a custom icon, an attachment and the
+        // fields the editor never touches, so each has something to copy.
         doc.toggle_starred(&source_id).expect("star");
+        doc.set_entry_custom_icon(&source_id, vec![1, 2, 3])
+            .expect("icon");
+        let expiry = chrono::NaiveDate::from_ymd_opt(2030, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .unwrap();
+        let sequence = "{USERNAME}{TAB}{PASSWORD}{ENTER}";
+        let colour = keepass::db::Color { r: 200, g: 0, b: 0 };
         {
             let id = find_entry_id(&doc.database, &source_id).unwrap();
             let mut entry = doc.database.entry_mut(id).unwrap();
             entry.add_attachment("cert.pem", keepass::db::Value::Unprotected(b"PEM".to_vec()));
+            // Some clients let the user protect the title.
+            entry.set_protected(fields::TITLE, "SAP DEV");
+            entry.foreground_color = Some(colour.clone());
+            entry.times.expires = Some(true);
+            entry.times.expiry = Some(expiry);
+            entry.autotype = Some(keepass::db::AutoType {
+                enabled: true,
+                default_sequence: Some(sequence.into()),
+                ..Default::default()
+            });
+            for key in [
+                "_LAST_MODIFIED",
+                "KPXC_RANDOM_SLUG",
+                "ExamplePlugin.Setting",
+            ] {
+                entry.custom_data.insert(
+                    key.into(),
+                    keepass::db::CustomDataItem {
+                        value: Some(keepass::db::CustomDataValue::String("value".into())),
+                        last_modification_time: None,
+                    },
+                );
+            }
         }
         doc.refresh_snapshot();
+        let icon_count = doc.database.num_custom_icons();
+        let source_ref = doc
+            .database
+            .entry(find_entry_id(&doc.database, &source_id).unwrap())
+            .unwrap();
+        let source_icon = source_ref.icon().cloned();
+        assert!(matches!(source_icon, Some(keepass::db::Icon::Custom(_))));
+        assert!(
+            source_ref
+                .history
+                .as_ref()
+                .is_some_and(|h| !h.get_entries().is_empty()),
+            "the source needs a history for the check on the copy to mean anything"
+        );
 
         let copy_id = doc
             .duplicate_entry(&source_id, " - Copy")
@@ -3601,10 +3665,10 @@ mod tests {
         let work = doc.snapshot().find_group(&work_id).unwrap();
         assert_eq!(work.entries.len(), 2, "copy lands next to its source");
         let copy = work.entries.iter().find(|e| e.id == copy_id).unwrap();
-        assert_eq!(copy.title, "SAP SH1 - Copy");
-        assert_eq!(copy.username, "sebbe");
+        assert_eq!(copy.title, "SAP DEV - Copy");
+        assert_eq!(copy.username, "alice");
         assert_eq!(copy.url, "sap.example.com");
-        assert_eq!(copy.notes, "Entwicklung");
+        assert_eq!(copy.notes, "Development system");
         assert!(copy.starred, "tags travel, the Favorite marker included");
         assert!(copy.tags.iter().any(|tag| tag == "SAP"));
         assert_eq!(
@@ -3639,9 +3703,43 @@ mod tests {
                 .map(|attachment| attachment.data.clone()),
             Some(keepass::db::Value::Unprotected(b"PEM".to_vec()))
         );
+        assert!(
+            copy_ref
+                .fields
+                .get(fields::TITLE)
+                .is_some_and(|title| title.is_protected()),
+            "a protected title stays protected"
+        );
+        assert_eq!(
+            copy_ref.icon(),
+            source_icon.as_ref(),
+            "the copy shares the source's custom icon"
+        );
+        assert_eq!(
+            doc.database.num_custom_icons(),
+            icon_count,
+            "the icon is not stored twice"
+        );
+        assert_eq!(copy_ref.foreground_color, Some(colour));
+        assert_eq!(copy_ref.times.expires, Some(true));
+        assert_eq!(copy_ref.times.expiry, Some(expiry));
+        assert_eq!(
+            copy_ref
+                .autotype
+                .as_ref()
+                .and_then(|autotype| autotype.default_sequence.as_deref()),
+            Some(sequence)
+        );
+        assert!(copy_ref.custom_data.contains_key("ExamplePlugin.Setting"));
+        for generated in GENERATED_CUSTOM_DATA {
+            assert!(
+                !copy_ref.custom_data.contains_key(generated),
+                "{generated} describes the source and stays behind"
+            );
+        }
 
         let source = doc.snapshot().find_entry(&source_id).unwrap();
-        assert_eq!(source.title, "SAP SH1", "the source is left alone");
+        assert_eq!(source.title, "SAP DEV", "the source is left alone");
 
         // The copy survives a save and reopen like any other entry.
         doc.save_payload().save_to(&path).expect("save");
@@ -3671,7 +3769,16 @@ mod tests {
             )
             .expect("create");
         doc.delete_entry(&id).expect("trash");
-        assert!(doc.duplicate_entry(&id, " - Copy").is_err());
+        let entries_before = doc.database.num_entries();
+        assert!(matches!(
+            doc.duplicate_entry(&id, " - Copy"),
+            Err(MutationError::EntryInRecycleBin)
+        ));
+        assert_eq!(
+            doc.database.num_entries(),
+            entries_before,
+            "nothing was added"
+        );
     }
 
     #[test]

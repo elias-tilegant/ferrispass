@@ -591,7 +591,7 @@ fn groups_section(
                 .context_menu(move |menu, _, _| {
                     let gid = group_id_for_menu.clone();
                     menu.menu(
-                        "New subgroup…",
+                        "New Subgroup…",
                         Box::new(NewSubgroup {
                             parent_group_id: gid.clone(),
                         }),
