@@ -24,11 +24,14 @@ const INFO_PLIST: &str = "bundle/macos/Info.plist";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 
 /// What the bundle check says when a copy is not the binary in the release
-/// folder or that binary was built from another checkout, and when a file
-/// compiled into the binary is newer than it.
+/// folder or the dep-info of that binary names no file of the source tree,
+/// and when a file compiled into the binary is newer than it.
 const FOREIGN: &str = "the bundle does not carry the binary this build produced; \
                        CARGO_TARGET_DIR points somewhere else";
 const STALE: &str = "a source file is newer than the binary; the build did not rebuild it";
+/// What it says when a file compiled into the binary has been deleted since.
+const GONE: &str = "a source file the binary was built from no longer exists; \
+                    the build did not rebuild it";
 
 /// What the bundle check says when cargo left no dep-info next to `binary`.
 fn no_dep_info(binary: &str) -> String {
@@ -416,6 +419,9 @@ const COMPILED: [&str; 5] = [
     "bundle/minisign-pub.txt",
 ];
 
+/// A file compiled into one binary only, deleted after that binary was built.
+const REMOVED: &str = "src/app/removed.rs";
+
 /// Files in the source tree that go into no binary.
 const NOT_COMPILED: [&str; 3] = [
     "src/app/kinds/tests.rs",
@@ -453,25 +459,25 @@ impl Build {
         for binary in BINARIES {
             let bytes = format!("{binary} as cargo built it");
             build.write(&format!("release/{binary}"), &bytes, 200);
-            let dep_info = build.dep_info(binary, SOURCE);
+            let dep_info = build.dep_info(binary, SOURCE, &COMPILED);
             build.write(&format!("release/{binary}.d"), &dep_info, 200);
             build.write(&format!("copies/{binary}"), &bytes, 300);
         }
         build
     }
 
-    /// The dep-info cargo writes next to `binary` when it builds it from the
-    /// tree in `tree`: one rule, the binary, a colon and the files it
-    /// compiled, each by its full path with spaces escaped. Cargo writes it
-    /// on one line; here the last two files go on a continued line, which
-    /// the format allows as well.
-    fn dep_info(&self, binary: &str, tree: &str) -> String {
+    /// The dep-info cargo writes next to `binary` when it builds it from
+    /// `files` in the tree in `tree`: one rule, the binary, a colon and the
+    /// files, each by its full path with spaces escaped. Cargo writes it on
+    /// one line; here the last two files go on a continued line, which the
+    /// format allows as well.
+    fn dep_info(&self, binary: &str, tree: &str, files: &[&str]) -> String {
         // Cargo names the files with symbolic links resolved, and the
         // temporary folder can be behind one (/var is /private/var on
         // macOS). The check is handed the path as it is.
         let real = fs::canonicalize(self.dir.path()).expect("temporary folder");
         let escaped = |path: PathBuf| path.to_str().expect("a UTF-8 path").replace(' ', "\\ ");
-        let files: Vec<String> = COMPILED
+        let files: Vec<String> = files
             .iter()
             .map(|file| escaped(real.join(tree).join(file)))
             .collect();
@@ -567,6 +573,29 @@ fn the_bundle_check_refuses_a_stale_or_foreign_binary() {
             );
         }
 
+        // A file compiled into `binary`, though not into the other one, that
+        // has been deleted since: cargo would have built `binary` again, or
+        // failed.
+        let build = Build::new();
+        build.write(&source(REMOVED), REMOVED, 100);
+        let mut named = COMPILED.to_vec();
+        named.push(REMOVED);
+        let dep_info = build.dep_info(binary, SOURCE, &named);
+        build.write(&format!("release/{binary}.d"), &dep_info, 200);
+        fs::remove_file(build.path(&source(REMOVED))).unwrap();
+        let (code, output) = build.check();
+        assert_eq!(
+            code,
+            Some(1),
+            "{REMOVED} was deleted after {binary} was built:\n{output}"
+        );
+        assert!(output.contains(GONE), "{binary}:\n{output}");
+        assert!(
+            output.contains(&format!("release/{binary}.d names "))
+                && output.contains(&format!("{SOURCE}/{REMOVED}, which no longer exists")),
+            "the check names the dep-info of {binary} and {REMOVED}:\n{output}"
+        );
+
         // No dep-info next to `binary`.
         let build = Build::new();
         fs::remove_file(build.path(&format!("release/{binary}.d"))).unwrap();
@@ -580,7 +609,7 @@ fn the_bundle_check_refuses_a_stale_or_foreign_binary() {
         for file in COMPILED {
             build.write(&format!("other checkout/{file}"), file, 100);
         }
-        let elsewhere = build.dep_info(binary, "other checkout");
+        let elsewhere = build.dep_info(binary, "other checkout", &COMPILED);
         build.write(&format!("release/{binary}.d"), &elsewhere, 200);
         let (code, output) = build.check();
         assert_eq!(

@@ -457,7 +457,8 @@ compiles the app icon, and the Command Line Tools alone have none. Right after
 cargo, the script stops if a binary it copied is not the one cargo left in
 `${CARGO_TARGET_DIR:-target}/aarch64-apple-darwin/release`, or if the dep-info
 file cargo wrote next to it (`ferrispass.d`, `ferrispass-cli.d`) is missing,
-names no file in this checkout, or names a file that is newer than the binary.
+names no file in this checkout, or names a file that no longer exists or is
+newer than the binary.
 The dep-info lists what cargo compiled into the binary, so a change to a test
 module or a license text alone does not stop the build.
 

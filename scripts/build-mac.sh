@@ -281,8 +281,8 @@ cp "${RELEASE_DIR}/${BINARY_NAME}" "${BIN_PATH}"
 cp "${RELEASE_DIR}/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}"
 # Stop if either copy is not the binary cargo left in RELEASE_DIR, or if the
 # dep-info cargo wrote next to one is missing, belongs to another checkout or
-# names a file that is newer than the binary: then cargo built somewhere else
-# and RELEASE_DIR holds binaries from an earlier build.
+# names a file that is gone or newer than the binary: then cargo built
+# somewhere else and RELEASE_DIR holds binaries from an earlier build.
 sh "${PROJECT_ROOT}/scripts/check-bundle-binaries.sh" "${RELEASE_DIR}" "${DIST_DIR}" "${PROJECT_ROOT}"
 echo "    ✓ $(file "${BIN_PATH}" | sed 's|.*: ||')"
 

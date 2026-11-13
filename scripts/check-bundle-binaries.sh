@@ -12,7 +12,8 @@
 #   1. the copy has the same bytes as the binary in <release_dir>,
 #   2. cargo wrote a dep-info file next to that binary, <release_dir>/<name>.d,
 #      and it names at least one file under <source_root>, and
-#   3. no file the dep-info names is newer than the binary.
+#   3. every file the dep-info names still exists, and none is newer than the
+#      binary.
 #
 # The dep-info lists the files cargo compiled into the binary: the sources of
 # the package and whatever they take in with include_str! or include_bytes!.
@@ -21,8 +22,9 @@
 # not have to rebuild is older than the build that finds it, but newer than
 # every file it was made from, so it passes. One left in a target folder that
 # cargo did not write to this time fails as soon as one of its files has
-# changed since, one built from another checkout names none of this one's
-# files, and a copy taken from anywhere else fails the byte comparison.
+# changed or been deleted since, one built from another checkout names none of
+# this one's files, and a copy taken from anywhere else fails the byte
+# comparison.
 #
 # Exits 0 when both binaries pass, 1 when one does not, 2 on wrong usage.
 
@@ -101,6 +103,16 @@ for binary in ferrispass ferrispass-cli; do
         echo "  ${dep_info} names no file under ${source_root}" >&2
         exit 1
     fi
+
+    # Cargo takes a file it compiled that is gone for a change: it rebuilds,
+    # or fails without the file. A dep-info that names one is left over.
+    for file in "$@"; do
+        if [ ! -e "${file}" ]; then
+            echo "✗ a source file the binary was built from no longer exists; the build did not rebuild it" >&2
+            echo "  ${dep_info} names ${file}, which no longer exists" >&2
+            exit 1
+        fi
+    done
 
     newer=$(find "$@" -newer "${built}" -print 2>/dev/null | head -n 1)
     if [ -n "${newer}" ]; then
