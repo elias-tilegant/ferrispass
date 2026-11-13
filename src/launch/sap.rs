@@ -40,14 +40,16 @@
 //! parse the conn string and fell back to picking text from the
 //! file path. We now write characters as-is.
 //!
-//! The parameter names are SAP GUI for Java's own (`conn`, `user`, `pass`,
-//! `lang`, `clnt`, `expert`), the ones its connection document writes when
-//! it saves a `.sapc` itself. Anything else lands in its list of ignored
-//! parameters without a word: `client=` used to be written here, so every
-//! launch logged on to the system's default client instead of the one in
-//! the entry. Passwords containing
-//! `&` or `=` aren't representable in this format; that's a SAP GUI
-//! limitation, not ours, and is rare enough in practice to ignore.
+//! The parameter names are the ones SAP GUI for Java reads (`conn`, `user`,
+//! `pass`, `lang`, `clnt`, `expert`). Anything else lands in its list of
+//! ignored parameters without a word: `client=` used to be written here, so
+//! every launch logged on to the system's default client instead of the one
+//! in the entry.
+//!
+//! The format has no escaping, so a value containing `&`, `=` or a line
+//! break cannot be written as it is. `render_sapc_body` refuses such a value
+//! with `UnsupportedCharacter` instead of writing a body that means
+//! something else.
 //!
 //! ## Process-list defence
 //!
