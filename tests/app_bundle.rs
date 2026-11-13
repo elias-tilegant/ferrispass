@@ -301,11 +301,28 @@ fn the_build_script_calls_the_bundle_check() {
         lines[copy + 1],
         r#"cp "${RELEASE_DIR}/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}""#
     );
+    let call = copy + 2;
     assert_eq!(
-        lines[copy + 2],
+        lines[call],
         r#"sh "${PROJECT_ROOT}/scripts/check-bundle-binaries.sh" "${RELEASE_DIR}" "${DIST_DIR}" "${PROJECT_ROOT}""#,
-        "the bundle check has to run right after the two copies, and its result has to count"
+        "the bundle check has to run right after the two copies"
     );
+    // The call has no `|| exit 1` of its own; its exit code stops the build
+    // through errexit. `set -euo pipefail` comes first, and no line from
+    // there up to the call has `set +e`, `set +o errexit` or `|| true`.
+    let errexit = line_of(&lines, "set -euo pipefail");
+    assert!(
+        errexit < call,
+        "`set -euo pipefail` has to come before the bundle check"
+    );
+    for line in &lines[errexit + 1..=call] {
+        for off in ["set +e", "set +o errexit", "|| true"] {
+            assert!(
+                !line.contains(off),
+                "a line between `set -euo pipefail` and the bundle check has `{off}`: {line}"
+            );
+        }
+    }
     let into_bundle = line_of(
         &lines,
         r#"mv "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${BINARY_NAME}""#,
@@ -314,7 +331,7 @@ fn the_build_script_calls_the_bundle_check() {
         &lines,
         r#"cp "${CLI_BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${CLI_BINARY_NAME}""#,
     );
-    assert!(copy + 2 < into_bundle && copy + 2 < cli_into_bundle);
+    assert!(call < into_bundle && call < cli_into_bundle);
 }
 
 /// The lines of the job in `workflow` that builds the release, the one that
