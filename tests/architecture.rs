@@ -1341,3 +1341,849 @@ fn lint_levels_are_read_from_the_lints_table() {
     assert!(level("[lints.rust]\nunsafe_code = \"loud\"\n").is_err());
     assert!(level("[lints.rust]\n").is_err());
 }
+
+// -------------------------------------------------------- release pipeline --
+
+/// The release rules, read from the workflow files as text, because nothing
+/// else exercises a workflow before a tag does.
+///
+/// Every release is published as a pre-release, and the workflow has no other
+/// way to create a release, edit one or mark one as latest; the publishing
+/// step says `make_latest: false` outright. The updater reads
+/// `releases/latest`, which GitHub never resolves to a pre-release, so
+/// shipping a version to everyone stays a step taken by hand. The signed
+/// artefacts the sign job hands over, `SHA256SUMS` included, are all
+/// attached, and a missing one stops the publishing step. After
+/// publishing, a job of its own, one run at a time and for every tag, runs
+/// `scripts/update-channel.sh`, which points the permanent `kanal-vorab`
+/// release at the highest version released so far; what that script does
+/// is tested by running it, in `tests/release_channel.rs`. Versions are
+/// never ordered with `sort -V`, in the workflow or in that script: it
+/// ranks `0.10.0-pre.1` above `0.10.0`. No step or job may fail quietly.
+///
+/// CI and CodeQL run for pushes to `master` and `rebuild` and for pull
+/// requests into either, so merges from `master` into the long-lived
+/// `rebuild` branch are built and scanned like everything else.
+#[test]
+fn release_pipeline_rules_hold() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |name: &str| {
+        fs::read_to_string(root.join(name))
+            .unwrap_or_else(|err| panic!("cannot read {name}: {err}"))
+    };
+
+    let mut problems: Vec<String> =
+        release_workflow_problems(&read(".github/workflows/release.yml"))
+            .into_iter()
+            .map(|problem| format!(".github/workflows/release.yml: {problem}"))
+            .collect();
+    let script = read(CHANNEL_SCRIPT);
+    let code: Vec<&str> = script
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .flat_map(str::split_whitespace)
+        .collect();
+    if let Some(sort) = version_sort(&code) {
+        problems.push(format!(
+            "{CHANNEL_SCRIPT}: `{sort}` does not order versions by SemVer precedence"
+        ));
+    }
+    for name in [".github/workflows/ci.yml", ".github/workflows/codeql.yml"] {
+        let workflow = read(name);
+        for event in ["push", "pull_request"] {
+            match branch_filter(&workflow, event) {
+                Ok(None) => {}
+                Ok(Some(branches)) => {
+                    for branch in ["master", "rebuild"] {
+                        if !branches.iter().any(|b| b == branch) {
+                            problems.push(format!(
+                                "{name}: `{event}` does not run for {branch}, only for \
+                                 {branches:?}"
+                            ));
+                        }
+                    }
+                }
+                Err(err) => problems.push(format!("{name}: {err}")),
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "the release pipeline rules are broken:\n{}",
+        problems.join("\n")
+    );
+}
+
+const PUBLISH_ACTION: &str = "softprops/action-gh-release";
+const CHANNEL_RELEASE: &str = "kanal-vorab";
+const VERSION_COMPARE: &str = "scripts/semver-compare.py";
+const CHANNEL_SCRIPT: &str = "scripts/update-channel.sh";
+/// What the sign job hands over in `signed-release` and the release carries.
+const RELEASE_FILES: &[&str] = &[
+    "dist/*.dmg",
+    "dist/*.tar.gz",
+    "dist/*.minisig",
+    "dist/update.json",
+    "dist/SHA256SUMS",
+];
+
+fn release_workflow_problems(workflow: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (_, line) in yaml_lines(workflow) {
+        let Some((key, value)) = yaml_entry(line) else {
+            continue;
+        };
+        match key {
+            "prerelease" if unquote(value) != "true" => {
+                problems.push(format!("`{line}`: every release is a pre-release"));
+            }
+            "make_latest" if unquote(value) != "false" => {
+                problems.push(format!("`{line}`: only a person marks a release as latest"));
+            }
+            "continue-on-error" => {
+                problems.push(format!(
+                    "`{line}`: a failing release step must fail the run"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let steps = workflow_steps(workflow);
+    let publishing: Vec<usize> = (0..steps.len())
+        .filter(|&i| {
+            steps[i]
+                .get("uses")
+                .is_some_and(|uses| uses.starts_with(PUBLISH_ACTION))
+        })
+        .collect();
+    let publish = match publishing[..] {
+        [publish] => publish,
+        _ => {
+            problems.push(format!(
+                "expected one step that uses {PUBLISH_ACTION}, found {}",
+                publishing.len()
+            ));
+            return problems;
+        }
+    };
+    for (key, value) in [("prerelease", "true"), ("make_latest", "false")] {
+        if !steps[publish]
+            .lines
+            .iter()
+            .any(|line| yaml_entry(line).is_some_and(|(k, _)| k == key))
+        {
+            problems.push(format!(
+                "the step that uses {PUBLISH_ACTION} must set `{key}: {value}`"
+            ));
+        }
+    }
+    if !steps[publish].lines.iter().any(|line| {
+        yaml_entry(line).is_some_and(|(key, value)| {
+            key == "fail_on_unmatched_files" && unquote(value) == "true"
+        })
+    }) {
+        problems.push(format!(
+            "the step that uses {PUBLISH_ACTION} must set `fail_on_unmatched_files: true`"
+        ));
+    }
+    let handover: Vec<&Step> = steps
+        .iter()
+        .filter(|step| {
+            step.get("uses")
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact"))
+                && step.words().contains(&"signed-release")
+        })
+        .collect();
+    if handover.len() != 1 {
+        problems.push(format!(
+            "expected one upload of the `signed-release` artefact, found {}",
+            handover.len()
+        ));
+    }
+    for file in RELEASE_FILES {
+        if !steps[publish].words().contains(file) {
+            problems.push(format!("the release does not attach `{file}`"));
+        }
+        for step in &handover {
+            if !step.words().contains(file) {
+                problems.push(format!("`signed-release` does not carry `{file}`"));
+            }
+        }
+    }
+
+    let channel: Vec<usize> = (0..steps.len())
+        .filter(|&i| steps[i].words().contains(&CHANNEL_SCRIPT))
+        .collect();
+    match channel[..] {
+        [at] => {
+            let step = &steps[at];
+            let lines = yaml_lines(workflow);
+            let job = job_block(&lines, &step.job).unwrap_or_default();
+            let key = |name: &str| {
+                entries(job).find(|(_, (_, line))| yaml_entry(line).is_some_and(|(k, _)| k == name))
+            };
+            let needs = key("needs").map_or_else(Vec::new, |(at, (_, line))| {
+                yaml_list(yaml_entry(line).map_or("", |(_, v)| v), children(job, at))
+            });
+            if !needs.contains(&steps[publish].job) {
+                problems.push(format!(
+                    "{CHANNEL_SCRIPT} runs in a job that needs `{}`, after the release is up",
+                    steps[publish].job
+                ));
+            }
+            let concurrency: Vec<(&str, &str)> =
+                key("concurrency").map_or_else(Vec::new, |(at, _)| {
+                    entries(children(job, at))
+                        .filter_map(|(_, (_, line))| yaml_entry(line))
+                        .map(|(k, v)| (k, unquote(v)))
+                        .collect()
+                });
+            if !concurrency.contains(&("group", CHANNEL_RELEASE))
+                || !concurrency.contains(&("cancel-in-progress", "false"))
+            {
+                problems.push(format!(
+                    "job {} must run alone: `concurrency` with `group: {CHANNEL_RELEASE}` and \
+                     `cancel-in-progress: false`",
+                    step.job
+                ));
+            }
+            if let Some((_, (_, line))) = key("if") {
+                problems.push(format!(
+                    "job {}: {CHANNEL_SCRIPT} runs for every tag, not `{line}`",
+                    step.job
+                ));
+            }
+            if let Some(condition) = step.get("if") {
+                problems.push(format!(
+                    "{CHANNEL_SCRIPT} runs for every tag, not `if: {condition}`"
+                ));
+            }
+            if !steps[..at].iter().any(|before| {
+                before.job == step.job
+                    && before
+                        .get("uses")
+                        .is_some_and(|uses| uses.starts_with("actions/checkout"))
+            }) {
+                problems.push(format!(
+                    "job {} must check out the repository before it runs {CHANNEL_SCRIPT}",
+                    step.job
+                ));
+            }
+        }
+        _ => problems.push(format!(
+            "expected one step that runs {CHANNEL_SCRIPT}, found {}",
+            channel.len()
+        )),
+    }
+
+    for step in &steps {
+        let words = step.words();
+        if let Some(sort) = version_sort(&words) {
+            problems.push(format!(
+                "job {}: `{sort}` does not order versions by SemVer precedence; use \
+                 {VERSION_COMPARE}",
+                step.job
+            ));
+        }
+        for command in words.windows(3) {
+            if command[..2] == ["gh", "release"]
+                && matches!(command[2], "create" | "edit" | "delete")
+            {
+                problems.push(format!(
+                    "job {}: `gh release {}`: the workflow publishes through {PUBLISH_ACTION} \
+                     only; releases are edited by hand",
+                    step.job, command[2]
+                ));
+            }
+        }
+        if words
+            .windows(4)
+            .any(|command| command == ["gh", "release", "upload", CHANNEL_RELEASE])
+        {
+            problems.push(format!(
+                "job {}: only {CHANNEL_SCRIPT} writes to {CHANNEL_RELEASE}",
+                step.job
+            ));
+        }
+    }
+    problems
+}
+
+/// A `sort` that orders by version (`-V`, `--version-sort`), as the command
+/// reads, or `None`. It ranks `0.10.0-pre.1` above `0.10.0`.
+fn version_sort(words: &[&str]) -> Option<String> {
+    words
+        .windows(2)
+        .find(|pair| {
+            let flag = pair[1];
+            pair[0] == "sort"
+                && (flag == "--version-sort"
+                    || (flag.starts_with('-') && !flag.starts_with("--") && flag.contains('V')))
+        })
+        .map(|pair| pair.join(" "))
+}
+
+/// The lines below job `name`'s key, or `None` when the workflow has no
+/// such job.
+fn job_block<'a>(lines: &'a [(usize, &'a str)], name: &str) -> Option<&'a [(usize, &'a str)]> {
+    let jobs = children(lines, top_level(lines, "jobs")?);
+    let (at, _) = entries(jobs)
+        .find(|(_, (_, line))| yaml_entry(line).is_some_and(|(key, _)| key == name))?;
+    Some(children(jobs, at))
+}
+
+/// The branches `event` runs for, from the workflow's `on:` block: `None` for
+/// every branch, otherwise the names listed under `branches`. A trigger that
+/// lists only tags runs for no branch at all. Forms this reader does not
+/// follow are an error, not a guess.
+fn branch_filter(workflow: &str, event: &str) -> Result<Option<Vec<String>>, String> {
+    let lines = yaml_lines(workflow);
+    let on = top_level(&lines, "on").ok_or("no `on:` block")?;
+    if !yaml_entry(lines[on].1).is_some_and(|(_, value)| value.is_empty()) {
+        return Err(format!("`{}`: list the triggers as a block", lines[on].1));
+    }
+    let triggers = children(&lines, on);
+    let (at, (_, line)) = entries(triggers)
+        .find(|(_, (_, line))| yaml_entry(line).is_some_and(|(key, _)| key == event))
+        .ok_or_else(|| format!("no `{event}` trigger"))?;
+    if yaml_entry(line).is_some_and(|(_, value)| !value.is_empty()) {
+        return Err(format!("`{line}`: write the filters as a block"));
+    }
+    let filters = children(triggers, at);
+    let mut branches = None;
+    let mut tags_only = false;
+    for (at, (_, line)) in entries(filters) {
+        match yaml_entry(line) {
+            Some(("branches", value)) => branches = Some(yaml_list(value, children(filters, at))),
+            Some(("tags" | "tags-ignore", _)) => tags_only = true,
+            Some(("branches-ignore", _)) => {
+                return Err(format!("`{line}`: name the branches instead"));
+            }
+            _ => {}
+        }
+    }
+    Ok(branches.or(tags_only.then(Vec::new)))
+}
+
+/// A list written inline (`[a, b]`), as `- a` lines below its key, or as a
+/// single value.
+fn yaml_list(value: &str, below: &[(usize, &str)]) -> Vec<String> {
+    if let Some(inline) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+        return inline
+            .split(',')
+            .map(|item| unquote(item).to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+    }
+    if !value.is_empty() {
+        return vec![unquote(value).to_string()];
+    }
+    below
+        .iter()
+        .filter_map(|(_, line)| line.strip_prefix('-'))
+        .map(|item| unquote(item).to_string())
+        .collect()
+}
+
+/// One step of a job: its top-level keys, and all its lines for searching.
+struct Step {
+    job: String,
+    keys: Vec<(String, String)>,
+    lines: Vec<String>,
+}
+
+impl Step {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.keys
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The step's text split on blanks, with shell line continuations gone,
+    /// so a command reads the same however it is wrapped.
+    fn words(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .flat_map(|line| line.split_whitespace())
+            .filter(|word| *word != "\\")
+            .collect()
+    }
+}
+
+/// Every step of every job, in file order.
+fn workflow_steps(workflow: &str) -> Vec<Step> {
+    let lines = yaml_lines(workflow);
+    let mut steps = Vec::new();
+    let Some(jobs) = top_level(&lines, "jobs") else {
+        return steps;
+    };
+    let jobs = children(&lines, jobs);
+    for (job, (_, line)) in entries(jobs) {
+        let Some((name, _)) = yaml_entry(line) else {
+            continue;
+        };
+        let job_block = children(jobs, job);
+        let Some(at) = entries(job_block)
+            .find(|(_, (_, line))| yaml_entry(line).is_some_and(|(key, _)| key == "steps"))
+            .map(|(at, _)| at)
+        else {
+            continue;
+        };
+        let items = children(job_block, at);
+        for (item, (indent, line)) in entries(items) {
+            let Some(first) = line.strip_prefix('-') else {
+                continue;
+            };
+            let first = first.trim_start();
+            let key_indent = indent + (line.len() - first.len());
+            let mut keys = Vec::new();
+            let mut lines = vec![first.to_string()];
+            if let Some((key, value)) = yaml_entry(first) {
+                keys.push((key.to_string(), unquote(value).to_string()));
+            }
+            for &(indent, line) in children(items, item) {
+                if indent == key_indent
+                    && let Some((key, value)) = yaml_entry(line)
+                {
+                    keys.push((key.to_string(), unquote(value).to_string()));
+                }
+                lines.push(line.to_string());
+            }
+            steps.push(Step {
+                job: name.to_string(),
+                keys,
+                lines,
+            });
+        }
+    }
+    steps
+}
+
+/// The lines of a YAML file that carry content, as (indent, text), without
+/// comments and trailing blanks.
+fn yaml_lines(text: &str) -> Vec<(usize, &str)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = strip_yaml_comment(line).trim_end();
+            let text = line.trim_start();
+            (!text.is_empty()).then_some((line.len() - text.len(), text))
+        })
+        .collect()
+}
+
+/// `line` without a `# comment`: a `#` at the start or after a blank, outside
+/// a quoted string. A quote only opens a string where a value or a word
+/// starts, so an apostrophe in a shell comment does not hide the comment.
+fn strip_yaml_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut prev = ' ';
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if (c == '"' || c == '\'')
+                && (prev.is_whitespace() || "[{,:=(".contains(prev)) =>
+            {
+                quote = Some(c)
+            }
+            None if c == '#' && prev.is_whitespace() => return &line[..i],
+            None => {}
+        }
+        prev = c;
+    }
+    line
+}
+
+/// The lines below `lines[at]` that belong to it: those indented further,
+/// and for a key that is not itself a list item, a list at its own indent.
+fn children<'a>(lines: &'a [(usize, &'a str)], at: usize) -> &'a [(usize, &'a str)] {
+    let (indent, line) = lines[at];
+    let item = line.starts_with('-');
+    let end = lines[at + 1..]
+        .iter()
+        .position(|&(i, text)| i < indent || (i == indent && (item || !text.starts_with('-'))))
+        .map_or(lines.len(), |n| at + 1 + n);
+    &lines[at + 1..end]
+}
+
+/// The lines of a block at its own level: its keys, or its list items.
+fn entries<'a>(
+    block: &'a [(usize, &'a str)],
+) -> impl Iterator<Item = (usize, (usize, &'a str))> + 'a {
+    let indent = block.first().map_or(0, |&(indent, _)| indent);
+    block
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(move |&(_, (i, _))| i == indent)
+}
+
+fn top_level(lines: &[(usize, &str)], key: &str) -> Option<usize> {
+    lines
+        .iter()
+        .position(|&(indent, line)| indent == 0 && yaml_entry(line).is_some_and(|(k, _)| k == key))
+}
+
+/// `key: value` on a line, with a leading `- ` and quotes around the key
+/// removed. The value is empty when it follows on the lines below.
+fn yaml_entry(line: &str) -> Option<(&str, &str)> {
+    let line = line.strip_prefix("- ").unwrap_or(line);
+    let (key, value) = match line.find(": ") {
+        Some(at) => (&line[..at], line[at + 2..].trim()),
+        None => (line.strip_suffix(':')?, ""),
+    };
+    let key = unquote(key.trim());
+    (!key.is_empty() && !key.contains(' ')).then_some((key, value))
+}
+
+fn unquote(value: &str) -> &str {
+    let value = value.trim();
+    for q in ['"', '\''] {
+        if let Some(inner) = value.strip_prefix(q).and_then(|v| v.strip_suffix(q)) {
+            return inner;
+        }
+    }
+    value
+}
+
+#[test]
+fn yaml_lines_drop_comments_but_keep_quoted_hashes() {
+    let text = "a: 1 # one\n  # whole line\n\nb: \"x # y\"\nc: it's # gone\nd: a#b\n";
+    assert_eq!(
+        yaml_lines(text),
+        vec![
+            (0, "a: 1"),
+            (0, "b: \"x # y\""),
+            (0, "c: it's"),
+            (0, "d: a#b")
+        ]
+    );
+}
+
+#[test]
+fn steps_are_read_with_their_job_and_keys() {
+    let workflow = r#"
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        if: always()
+        run: |
+          make \
+            all
+  release:
+    runs-on: macos-latest
+    steps:
+    - name: "Publish"
+      uses: 'softprops/action-gh-release@v2'
+      with:
+        prerelease: true
+"#;
+    let steps = workflow_steps(workflow);
+    let summary: Vec<(&str, Option<&str>, Option<&str>)> = steps
+        .iter()
+        .map(|step| (step.job.as_str(), step.get("name"), step.get("uses")))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("build", None, Some("actions/checkout@v4")),
+            ("build", Some("Build"), None),
+            (
+                "release",
+                Some("Publish"),
+                Some("softprops/action-gh-release@v2")
+            ),
+        ]
+    );
+    assert_eq!(steps[1].get("if"), Some("always()"));
+    assert_eq!(
+        steps[1].words(),
+        vec![
+            "name:", "Build", "if:", "always()", "run:", "|", "make", "all"
+        ]
+    );
+    assert_eq!(steps[2].get("prerelease"), None);
+}
+
+/// The smallest workflow that keeps the release rules.
+const RELEASE_SAMPLE: &str = r#"
+on:
+  push:
+    tags: ['v*']
+jobs:
+  sign:
+    steps:
+      - name: Hand over
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.minisig
+            dist/update.json
+            dist/SHA256SUMS
+  release:
+    steps:
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.minisig
+            dist/update.json
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          prerelease: true
+          make_latest: false
+  channel:
+    needs: release
+    concurrency:
+      group: kanal-vorab
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Channel
+        run: scripts/update-channel.sh "${GITHUB_REPOSITORY}"
+"#;
+
+#[test]
+fn release_rules_catch_every_way_around_the_pre_release_flag() {
+    assert_eq!(
+        release_workflow_problems(RELEASE_SAMPLE),
+        Vec::<String>::new()
+    );
+    let publish = "      - name: Publish\n";
+    for (from, to) in [
+        ("prerelease: true", "prerelease: false"),
+        ("prerelease: true", "# prerelease: true"),
+        (
+            "prerelease: true",
+            "prerelease: ${{ !contains(github.ref, '-') }}",
+        ),
+        (
+            "prerelease: true",
+            "prerelease: true\n          make_latest: true",
+        ),
+        (
+            "softprops/action-gh-release@v2",
+            "ncipollo/release-action@v1",
+        ),
+        (
+            publish,
+            "      - run: gh release edit \"$TAG\" --latest\n      - name: Publish\n",
+        ),
+        (
+            publish,
+            "      - run: |\n          gh release \\\n            create x\n      - name: Publish\n",
+        ),
+        (
+            publish,
+            "      - name: Publish\n        continue-on-error: true\n",
+        ),
+        ("    steps:", "    continue-on-error: true\n    steps:"),
+        (
+            "fail_on_unmatched_files: true",
+            "fail_on_unmatched_files: false",
+        ),
+        ("          make_latest: false\n", ""),
+        ("make_latest: false", "make_latest: legacy"),
+        ("make_latest: false", "make_latest: \"true\""),
+        ("          fail_on_unmatched_files: true\n", ""),
+        (
+            "            dist/SHA256SUMS\n          fail",
+            "          fail",
+        ),
+        ("            dist/SHA256SUMS\n  release:", "  release:"),
+        ("files: |\n            dist/*.dmg\n", "files: |\n"),
+        ("path: |\n            dist/*.dmg\n", "path: |\n"),
+        ("name: signed-release", "name: signed"),
+    ] {
+        let mutated = RELEASE_SAMPLE.replacen(from, to, 1);
+        assert_ne!(mutated, RELEASE_SAMPLE, "{from} not in the sample");
+        assert!(
+            !release_workflow_problems(&mutated).is_empty(),
+            "not caught: {from:?} -> {to:?}"
+        );
+    }
+}
+
+/// The comparison that keeps `kanal-vorab` moving forward, run as the
+/// workflow runs it. The order is semver.org's example plus the versions
+/// this project tags; `sort -V` gets every pre-release against its release
+/// wrong.
+#[test]
+fn the_channel_compares_versions_by_semver_precedence() {
+    let compare = |a: &str, b: &str| {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(VERSION_COMPARE);
+        let out = std::process::Command::new("python3")
+            .arg("-I")
+            .arg(&script)
+            .args([a, b])
+            .output()
+            .unwrap_or_else(|err| panic!("cannot run python3 {}: {err}", script.display()));
+        let answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.code(), answer)
+    };
+    let ascending = [
+        "0.9.3",
+        "0.9.4",
+        "0.9.10",
+        "0.10.0-pre.1",
+        "0.10.0-pre.2",
+        "0.10.0-pre.10",
+        "0.10.0-rc.1",
+        "0.10.0",
+        "1.0.0-alpha",
+        "1.0.0-alpha.1",
+        "1.0.0-alpha.beta",
+        "1.0.0-beta",
+        "1.0.0-beta.2",
+        "1.0.0-beta.11",
+        "1.0.0-rc.1",
+        "1.0.0",
+        "2.0.0",
+        "10.0.0",
+    ];
+    let mut cases = vec![
+        ("0.9.4", "0.10.0-pre.3", "lower"),
+        ("0.10.0", "0.10.0-pre.9", "higher"),
+        ("0.10.0-pre.3", "0.10.0-pre.3", "equal"),
+        ("1.0.0+build.2", "1.0.0+build.1", "equal"),
+        ("1.0.0-rc.1+a", "1.0.0-rc.1", "equal"),
+        ("1.0.0-0a", "1.0.0-0", "higher"),
+    ];
+    for pair in ascending.windows(2) {
+        cases.push((pair[0], pair[1], "lower"));
+        cases.push((pair[1], pair[0], "higher"));
+    }
+    for (a, b, expected) in cases {
+        assert_eq!(
+            compare(a, b),
+            (Some(0), expected.to_string()),
+            "{a} against {b}"
+        );
+    }
+    for malformed in [
+        "v0.9.4",
+        "0.9",
+        "1.2.3.4",
+        "01.2.3",
+        "1.2.3-",
+        "1.2.3-01",
+        "1.2.3-a..b",
+        "1.2.3+",
+        "",
+    ] {
+        assert_eq!(
+            compare(malformed, "0.9.4"),
+            (Some(2), String::new()),
+            "{malformed:?}"
+        );
+        assert_eq!(
+            compare("0.9.4", malformed),
+            (Some(2), String::new()),
+            "{malformed:?}"
+        );
+    }
+}
+
+#[test]
+fn branch_filters_are_read_from_the_triggers() {
+    let list = |names: &[&str]| Ok(Some(names.iter().map(|n| n.to_string()).collect()));
+    let workflow = "on:\n  push:\n    branches: [master, \"rebuild\"] # both\n  pull_request:\n  \
+                    schedule:\n    - cron: '0 6 * * 1'\n";
+    assert_eq!(
+        branch_filter(workflow, "push"),
+        list(&["master", "rebuild"])
+    );
+    assert_eq!(branch_filter(workflow, "pull_request"), Ok(None));
+    assert!(branch_filter(workflow, "workflow_dispatch").is_err());
+
+    let block = "\"on\":\n  pull_request:\n    branches:\n    - master\n    # - rebuild\n    \
+                 paths: ['src/**']\n  workflow_dispatch:\n";
+    assert_eq!(branch_filter(block, "pull_request"), list(&["master"]));
+    assert_eq!(
+        branch_filter("on:\n  push:\n    tags: ['v*']\n", "push"),
+        list(&[])
+    );
+    assert_eq!(
+        branch_filter("on:\n  push:\n    branches: rebuild\n", "push"),
+        list(&["rebuild"])
+    );
+    for unreadable in [
+        "on: [push, pull_request]\n",
+        "on:\n  push: {branches: [master]}\n",
+        "on:\n  push:\n    branches-ignore: [main]\n",
+    ] {
+        assert!(branch_filter(unreadable, "push").is_err(), "{unreadable}");
+    }
+}
+
+#[test]
+fn release_rules_catch_a_tag_that_skips_the_channel() {
+    let channel = "      - name: Channel\n";
+    let (head, step) = RELEASE_SAMPLE.split_once(channel).expect("channel step");
+    let before_publish = head.replacen(
+        "      - name: Publish\n",
+        &format!("{channel}{step}      - name: Publish\n"),
+        1,
+    );
+    assert!(!release_workflow_problems(&before_publish).is_empty());
+
+    for (from, to) in [
+        (format!("{channel}{step}"), String::new()),
+        (
+            "scripts/update-channel.sh".into(),
+            "scripts/channel.sh".into(),
+        ),
+        (
+            channel.into(),
+            format!("{channel}        if: startsWith(github.ref, 'refs/tags/v0.10')\n"),
+        ),
+        (channel.into(), format!("  late:\n    steps:\n{channel}")),
+        ("    needs: release\n".into(), String::new()),
+        ("    needs: release\n".into(), "    needs: [sign]\n".into()),
+        (
+            "    concurrency:\n      group: kanal-vorab\n      cancel-in-progress: false\n".into(),
+            String::new(),
+        ),
+        (
+            "group: kanal-vorab".into(),
+            "group: ${{ github.ref }}".into(),
+        ),
+        (
+            "cancel-in-progress: false".into(),
+            "cancel-in-progress: true".into(),
+        ),
+        (
+            "  channel:\n".into(),
+            "  channel:\n    if: ${{ !contains(github.ref_name, '-') }}\n".into(),
+        ),
+        (channel.into(), format!("{channel}{step}{channel}")),
+        ("      - uses: actions/checkout@v4\n".into(), String::new()),
+        (
+            channel.into(),
+            format!(
+                "      - run: gh release upload kanal-vorab dist/update.json --clobber\n{channel}"
+            ),
+        ),
+        (
+            channel.into(),
+            format!("      - run: git tag --list | sort -V | tail -1\n{channel}"),
+        ),
+    ] {
+        let mutated = RELEASE_SAMPLE.replacen(&from, &to, 1);
+        assert_ne!(mutated, RELEASE_SAMPLE, "{from} not in the sample");
+        assert!(
+            !release_workflow_problems(&mutated).is_empty(),
+            "not caught: {from:?} -> {to:?}"
+        );
+    }
+}

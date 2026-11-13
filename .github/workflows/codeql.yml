@@ -2,9 +2,11 @@ name: CodeQL
 
 on:
   push:
-    branches: [master, main]
+    # rebuild is a long-lived branch that ends in one large merge into
+    # master; scanning it on the way finds problems while they are small.
+    branches: [master, main, rebuild]
   pull_request:
-    branches: [master, main]
+    branches: [master, main, rebuild]
   schedule:
     # Pick up newly published queries even when the repository is unchanged.
     - cron: '0 6 * * 1'
