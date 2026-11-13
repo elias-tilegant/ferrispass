@@ -17,7 +17,7 @@ fn dark_after_appearance_change(
     chosen: ThemeChoice,
     applied: ThemeChoice,
 ) -> bool {
-    cx.update(|cx| ds::apply_choice(applied, None, cx));
+    cx.update(|cx| ds::apply_choice(applied, crate::app::settings::TextSize::Standard, None, cx));
     let state = cx.new(|_| AppState::default());
     cx.add_window(|window, cx| {
         let shell = cx.new(|cx| {

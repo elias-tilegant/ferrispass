@@ -544,7 +544,7 @@ impl AppShell {
             cx.observe_window_appearance(window, |shell: &mut AppShell, window, cx| {
                 let choice = shell.settings.theme;
                 if choice == crate::app::settings::ThemeChoice::System {
-                    crate::ui::ds::apply_choice(choice, Some(window), cx);
+                    crate::ui::ds::apply_choice(choice, shell.settings.text_size, Some(window), cx);
                 }
             }),
             cx.observe(&clipboard, |_shell: &mut AppShell, _, cx| cx.notify()),
