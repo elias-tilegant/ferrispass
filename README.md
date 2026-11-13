@@ -148,7 +148,7 @@ Requirements (one-time setup):
       --apple-id <your-apple-id> --team-id <your-team-id> \
       --password <app-specific-password>
   ```
-- `bundle/icon.png` - a 1024×1024 master PNG of the app icon
+- `bundle/icon/AppIcon.icon` - the app icon, an Icon Composer document. The script compiles it with `actool`, which needs full Xcode 26 or newer; the Command Line Tools alone have no `actool`
 - Optional: `brew install create-dmg` (prettier DMG window; falls back to plain `hdiutil` if absent)
 
 Forks must edit the `TEAM_ID`, `SIGNING_IDENTITY`, and `BUNDLE_ID` constants at the top of `scripts/build-mac.sh` to match their own Apple Developer account, plus generate their own minisign keypair (`scripts/setup-minisign.sh`) and update the `UPDATE_ENDPOINT` constant in `src/update/mod.rs` to point at their fork's release URL. The embedded public key is unique per fork - users of one fork won't accept update bundles signed by another.
