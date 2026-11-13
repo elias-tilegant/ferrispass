@@ -52,6 +52,11 @@ bundle/
 scripts/
 ├── build-mac.sh         9-stage release pipeline (build → sign → notarize → manifest).
 └── setup-minisign.sh    One-time keypair generation for update signing.
+
+examples/
+├── design_gallery/      Every design system component in all its states, in four modes, two text sizes and two languages, with the glyphs.
+├── dump_xml.rs          Decrypts a .kdbx and prints its inner XML.
+└── make_test_vault.rs   Writes a small KDBX 4 vault to test against.
 ```
 
 ## Data flow: opening a vault
