@@ -8,9 +8,11 @@
 # there's demand; for now the simpler path wins.
 #
 # Pipeline:
-#   1. cargo build --release --target aarch64-apple-darwin
-#   2. Generate AppIcon.icns from bundle/icon.png
-#   3. Assemble FerrisPass.app bundle
+#   1. cargo build --release --target aarch64-apple-darwin, and stop unless the
+#      copied binaries are the ones it left in the release folder
+#   2. Compile bundle/icon/AppIcon.icon into Assets.car (actool)
+#   3. Assemble FerrisPass.app bundle, and check that Assets.car holds the
+#      icon in more than one appearance
 #   4. Codesign with Hardened Runtime
 #   5. Build DMG (create-dmg if available, else hdiutil)
 #   6. Codesign the DMG
@@ -35,10 +37,12 @@
 #                      than ~/.ferrispass/minisign.key.
 #
 # Requirements:
-#   - Xcode Command Line Tools (lipo, sips, iconutil, codesign, notarytool)
+#   - Full Xcode 26 or newer (actool compiles .icon files; the Command Line
+#     Tools alone do not), selected with xcode-select
 #   - Developer ID Application certificate in Keychain
 #   - Notarization credentials stored as keychain profile (see TEAM/PROFILE below)
-#   - bundle/icon.png at 1024×1024 (recommend transparent corners outside squircle)
+#   - bundle/icon/AppIcon.icon, the app icon as an Icon Composer document
+#   - jq
 #   - Optional: brew install create-dmg  (else falls back to plain hdiutil)
 #
 # Output:
@@ -74,7 +78,7 @@ done
 # ---------- paths ----------
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUNDLE_DIR="${PROJECT_ROOT}/bundle/macos"
-ICON_PNG="${PROJECT_ROOT}/bundle/icon.png"
+ICON_SRC="${PROJECT_ROOT}/bundle/icon/AppIcon.icon"
 DIST_DIR="${PROJECT_ROOT}/dist"
 
 # ---------- read version from Cargo.toml ----------
@@ -225,8 +229,8 @@ if [ "${SIGN_UPDATE_ONLY}" = "true" ]; then
 fi
 
 # ---------- preconditions ----------
-if [ ! -f "${ICON_PNG}" ]; then
-    echo "✗ ${ICON_PNG} not found. Drop your 1024×1024 master PNG there before running." >&2
+if [ ! -d "${ICON_SRC}" ]; then
+    echo "✗ ${ICON_SRC} not found. The app icon is an Icon Composer document there." >&2
     exit 1
 fi
 
@@ -275,20 +279,45 @@ CLI_BIN_PATH="${DIST_DIR}/${CLI_BINARY_NAME}"
 RELEASE_DIR="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}/aarch64-apple-darwin/release"
 cp "${RELEASE_DIR}/${BINARY_NAME}" "${BIN_PATH}"
 cp "${RELEASE_DIR}/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}"
+# Stop if either copy is not the binary cargo left in RELEASE_DIR, or if the
+# dep-info cargo wrote next to one is missing, belongs to another checkout or
+# names a file that is gone or newer than the binary: then cargo built
+# somewhere else and RELEASE_DIR holds binaries from an earlier build.
+sh "${PROJECT_ROOT}/scripts/check-bundle-binaries.sh" "${RELEASE_DIR}" "${DIST_DIR}" "${PROJECT_ROOT}"
 echo "    ✓ $(file "${BIN_PATH}" | sed 's|.*: ||')"
 
 # ---------- 2. icon ----------
-echo "▸ [2/9] Generating .icns from bundle/icon.png"
-ICONSET="${DIST_DIR}/AppIcon.iconset"
-mkdir -p "${ICONSET}"
-for size in 16 32 128 256 512; do
-    sips -z "${size}" "${size}" "${ICON_PNG}" \
-        --out "${ICONSET}/icon_${size}x${size}.png" >/dev/null
-    sips -z "$((size*2))" "$((size*2))" "${ICON_PNG}" \
-        --out "${ICONSET}/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "${ICONSET}" -o "${DIST_DIR}/AppIcon.icns"
-rm -rf "${ICONSET}"
+echo "▸ [2/9] Compiling AppIcon.icon into Assets.car"
+ICON_OUT="${DIST_DIR}/icon"
+rm -rf "${ICON_OUT}"
+mkdir -p "${ICON_OUT}"
+# actool compiles .icon files from Xcode 26 on, and only the one in a full
+# Xcode. A version it cannot read counts as too old.
+ACTOOL_VERSION="$(xcrun actool --version 2>/dev/null | grep -A1 'short-bundle-version' \
+    | tail -1 | sed -E 's/.*<string>([0-9.]+)<.*/\1/')" || ACTOOL_VERSION=""
+ACTOOL_MAJOR="${ACTOOL_VERSION%%.*}"
+case "${ACTOOL_MAJOR}" in
+    ''|*[!0-9]*) ACTOOL_MAJOR=0 ;;
+esac
+if [ "${ACTOOL_MAJOR}" -lt 26 ]; then
+    echo "✗ actool ${ACTOOL_VERSION:-(none found)} cannot compile .icon files (needs full Xcode 26 or newer)" >&2
+    echo "  Select full Xcode 26 or newer with xcode-select; the Command Line Tools have no actool." >&2
+    exit 1
+fi
+echo "    actool ${ACTOOL_VERSION}"
+# The name after --app-icon is the name of the .icon document and the
+# CFBundleIconName in Info.plist; the three have to match.
+xcrun actool "${ICON_SRC}" --compile "${ICON_OUT}" \
+    --app-icon AppIcon --include-all-app-icons \
+    --platform macosx --target-device mac \
+    --minimum-deployment-target "${MIN_MACOS}" \
+    --output-partial-info-plist "${ICON_OUT}/partial.plist" \
+    --errors --warnings --output-format human-readable-text
+# actool can exit 0 without writing anything, so check the result ourselves.
+if ! test -s "${ICON_OUT}/Assets.car"; then
+    echo "✗ actool wrote no Assets.car into ${ICON_OUT}" >&2
+    exit 1
+fi
 
 # ---------- 3. .app bundle ----------
 echo "▸ [3/9] Assembling .app bundle"
@@ -296,7 +325,13 @@ APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
 mv "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${BINARY_NAME}"
 cp "${CLI_BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/${CLI_BINARY_NAME}"
-mv "${DIST_DIR}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+cp "${ICON_OUT}/Assets.car" "${APP_BUNDLE}/Contents/Resources/Assets.car"
+# actool also writes AppIcon.icns for CFBundleIconFile, the key older systems
+# read. macOS 26 reads Assets.car, so the .icns only comes along if it is there.
+if [ -f "${ICON_OUT}/AppIcon.icns" ]; then
+    cp "${ICON_OUT}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+fi
+rm -rf "${ICON_OUT}"
 # The OFL (JetBrains Mono) and the ISC license (Lucide icons) require their
 # texts to travel with every copy. Copied before signing, so the seal covers them.
 mkdir -p "${APP_BUNDLE}/Contents/Resources/Licenses"
@@ -311,6 +346,20 @@ done
 echo "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
 sed "s/__VERSION__/${BUNDLE_VERSION}/g" "${BUNDLE_DIR}/Info.plist" \
     > "${APP_BUNDLE}/Contents/Info.plist"
+# A catalog that holds the icon in one appearance only shows the default icon
+# in dark, tinted and clear too. assetutil lists an image stack per appearance
+# (NSAppearanceNameAqua, NSAppearanceNameDarkAqua, ISAppearanceTintable).
+if ! command -v jq >/dev/null 2>&1; then
+    echo "✗ jq is required to check Assets.car" >&2
+    exit 1
+fi
+xcrun assetutil --info "${APP_BUNDLE}/Contents/Resources/Assets.car" > "${DIST_DIR}/assets-car.json"
+ICON_APPEARANCES='[.[] | select(.Name == "AppIcon" and .Appearance != null) | .Appearance] | unique'
+if ! jq -e "${ICON_APPEARANCES} | length > 1" "${DIST_DIR}/assets-car.json" >/dev/null; then
+    echo "✗ Assets.car holds AppIcon in one appearance or none; see ${DIST_DIR}/assets-car.json" >&2
+    exit 1
+fi
+echo "    ✓ Assets.car: AppIcon in $(jq -r "${ICON_APPEARANCES} | join(\", \")" "${DIST_DIR}/assets-car.json")"
 
 # ---------- 4. codesign ----------
 echo "▸ [4/9] Code-signing with Hardened Runtime"

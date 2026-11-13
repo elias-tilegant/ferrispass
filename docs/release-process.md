@@ -341,7 +341,7 @@ Stages, with rough timing:
 | # | Stage | Time | Failure modes |
 |---|---|---|---|
 | 1 | `cargo build --release --target aarch64-apple-darwin` | 3-7 min | code errors (caught by CI before tagging if you ran `cargo test` first) |
-| 2 | Generate `.icns` from `bundle/icon.png` | <5 s | icon missing → script exits early with clear error |
+| 2 | Compile `bundle/icon/AppIcon.icon` into `Assets.car` (actool) | <10 s | icon folder missing or actool older than 26 → script exits early; actool writes no `Assets.car`, or one with the icon in a single appearance → script stops before signing |
 | 3 | Assemble `.app` bundle, render `Info.plist` | <1 s | - |
 | 4 | Codesign with Developer ID + Hardened Runtime | <5 s | cert not in Keychain (CI: `APPLE_CERT_BASE64` invalid) |
 | 5 | Build DMG via `create-dmg` | 10-30 s | - |
@@ -451,6 +451,16 @@ scripts/build-mac.sh --skip-notarize
 ```
 
 Outputs `dist/FerrisPass-X.Y.Z-arm64.dmg` that opens with a Gatekeeper warning (signed but not notarized). Useful for verifying the icon, app start-up flow, etc., before committing to a real release.
+
+The build needs full Xcode 26 or newer, selected with `xcode-select`: `actool`
+compiles the app icon, and the Command Line Tools alone have none. Right after
+cargo, the script stops if a binary it copied is not the one cargo left in
+`${CARGO_TARGET_DIR:-target}/aarch64-apple-darwin/release`, or if the dep-info
+file cargo wrote next to it (`ferrispass.d`, `ferrispass-cli.d`) is missing,
+names no file in this checkout, or names a file that no longer exists or is
+newer than the binary.
+The dep-info lists what cargo compiled into the binary, so a change to a test
+module or a license text alone does not stop the build.
 
 `--skip-notarize` leaves out notarization, stapling and the final Gatekeeper
 check, and still builds the updater artefacts: `.app.tar.gz`, the CLI archive
