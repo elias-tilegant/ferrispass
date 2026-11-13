@@ -1,0 +1,74 @@
+{
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "key.svg",
+          "name": "key"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0.25
+      }
+    },
+    {
+      "layers": [
+        {
+          "image-name": "face.svg",
+          "name": "face"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0.25
+      }
+    },
+    {
+      "layers": [
+        {
+          "image-name": "body.svg",
+          "name": "body"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.25
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  },
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.96471,0.93333,0.89412,1.00000",
+          "srgb:0.91373,0.85098,0.77647,1.00000"
+        ]
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.16471,0.14902,0.13333,1.00000",
+          "srgb:0.09020,0.08235,0.07451,1.00000"
+        ]
+      }
+    }
+  ]
+}
