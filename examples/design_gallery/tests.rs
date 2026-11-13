@@ -3,11 +3,11 @@
 //! `cargo test` builds every example, and runs the tests inside this one
 //! because its `[[example]]` entry in `Cargo.toml` says `test = true`. They
 //! draw the same view the gallery window shows, headless. They hold that
-//! every component module has a page, that every page draws in every mode,
-//! at both text sizes and in both languages, that the keys switch them, that
-//! the Kit page holds every glyph the app draws again, and, by reading the
-//! gallery's source, that it builds no component of its own and reads
-//! nothing.
+//! the pages name every component module, that every page draws in every
+//! mode, at both text sizes and in both languages, that the keys switch
+//! them, that the Kit page holds every glyph the app draws again, and, by
+//! reading the gallery's source, that it builds no component of its own and
+//! reads nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -496,11 +496,13 @@ fn the_gallery_reads_nothing() {
     );
 }
 
-/// Every module in a file of its own that `src/ui/ds/components/mod.rs`
-/// declares `pub mod` has a page, and no page names a module that is not
-/// there. The keycap is no `pub mod`: it lives inside a shortcut pair or a
-/// button and shows on their pages. The copper count, a `pub mod` written
-/// inline, is no component.
+/// Each page says in `Page::modules` which component modules it shows. Every
+/// module in a file of its own that `src/ui/ds/components/mod.rs` declares
+/// `pub mod` is named there by some page, and no page names a module that
+/// is not there. The test reads those lists, not what a page draws: which
+/// component a page shows is for the eye. The keycap is no `pub mod`: it
+/// lives inside a shortcut pair or a button and shows on their pages. The
+/// copper count, a `pub mod` written inline, is no component.
 #[test]
 fn every_component_module_has_a_page() {
     let source = std::fs::read_to_string(root().join("src/ui/ds/components/mod.rs"))

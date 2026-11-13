@@ -80,7 +80,7 @@ After a change the window draws again in the new tokens and the new language. Th
 The tests are in `examples/design_gallery/tests.rs`. The `[[example]]` entry in `Cargo.toml` sets `test = true`, so `cargo test` runs them with the rest, and CI keeps the gallery building and drawing.
 
 - `every_page_renders_in_every_mode_size_and_language`: opens the gallery headless, under the Kit's `Root` as the window does, and draws every page in each of the four modes, at 13 and 15 points, in English and German, without a panic. Each time the page is laid out, and the mode and text size of the tokens, the window's rem size and the language of the catalogues are those the gallery set. "Cancel" reads "Abbrechen" in German.
-- `every_component_module_has_a_page`: every `pub mod` in `src/ui/ds/components/mod.rs` is shown by some page, and no page names a module that is gone. The copper count, a module written inline that only debug builds have, is no component.
+- `every_component_module_has_a_page`: each page says in `Page::modules` which component modules it shows. Every `pub mod` in `src/ui/ds/components/mod.rs` is named there by some page, and no page names a module that is gone. The test reads those lists, not what a page draws. The copper count, a module written inline that only debug builds have, is no component.
 - `the_gallery_builds_no_component_of_its_own`: no code in the gallery names a color token of a component (the aliases, the brand tokens and the component tokens in `ColorSet`), the keycap, or what the components are built on: `gpui_base`, `uniform_list`, `canvas`, and the Kit's input, switch, button and spinner. The semantic tokens are left for frames and captions. Comments and strings do not count.
 - `the_gallery_reads_nothing`: no code in the gallery names `settings::load`, the app's settings or state, KeePass, `fs::`, `File::`, `env::var`, the clipboard or the pasteboard in any spelling, or the macOS accessibility settings (`a11y_prefs`, `Appearance::current`, `apply_choice`).
 - `the_kit_page_holds_every_glyph_the_app_draws_again`: the Kit glyphs page lists exactly the files directly under `assets/icons/`, and the drawing next to each is the Kit's, not the app's.
@@ -100,6 +100,7 @@ The two scans read every `.rs` file under `examples/design_gallery/` except `tes
 ## Limits
 
 - The scans read the gallery's source text. A frame drawn in a semantic token that copies what a component draws, or a read hidden inside a function of the app that the gallery calls, passes them.
+- No test ties a page to the component it names. `every_component_module_has_a_page` reads the modules each page names in `Page::modules`, and `every_page_renders_in_every_mode_size_and_language` finds a page by the frame that `pages::page` puts around every page. A page that drew another component under its own name would pass both. Which component a page shows is for the eye, against the name and source file at the top of the page.
 - In debug builds the button page draws more than one copper surface: every primary and large button that is not disabled is one. The copper count, which holds a view to one copper surface, prints a line about it on stderr for every frame the page draws, and the loading buttons draw frames for as long as their spinners turn. The count is not there in a release build.
 - The test platform loads no files from the app's assets into a window, so the tests lay out the glyph pages and the components without the app's glyphs. What a glyph or a page looks like is for the eye.
 - The status shapes at 64 points are the glyph files scaled up, stroke included. They show the shape, not how the glyph looks at the sizes the app uses.
@@ -112,4 +113,4 @@ The two scans read every `.rs` file under `examples/design_gallery/` except `tes
 - Pages for components that do not exist yet, among them the banner, the HUD, the segment, the copper thread, the field card, the sidebar entry, the stepper, the version card and the command palette. Each component brings its page when it is built.
 - The comparison with the boards happens by eye. What differs goes to the acceptance page of P1a.09b, or to P1a.17 and P1a.26, not into the gallery.
 
-The agents spent about 3 hours on this, including review and fixes.
+The agents spent about 3.5 hours on this, including review and fixes.
