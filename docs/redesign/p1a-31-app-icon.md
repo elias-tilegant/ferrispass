@@ -10,6 +10,7 @@ The app icon is Ferris holding a key, on cream, and it is built the way macOS 26
 | `3a7b32d` | The release build on the `macos-26` image with Xcode 26.6 |
 | `fd6b02e`, `bd855de` | `tests/app_bundle.rs` |
 | `6d3f91d` | README, `docs/architecture.md`, `docs/release-process.md` |
+| `2785fe2` | The bundle check judges a stale binary by the dep-info cargo writes next to it, with the test and `docs/release-process.md` |
 
 ## Where the icon's sources live
 
@@ -35,10 +36,12 @@ The release job runs on the `macos-26` image and selects `/Applications/Xcode_26
 
 `scripts/check-bundle-binaries.sh <release_dir> <copies_dir> <source_root>` runs right after the build script copies `ferrispass` and `ferrispass-cli` out of `RELEASE_DIR`. For each of the two it stops the build
 
-- when the copy has other bytes than the binary in `RELEASE_DIR` ("the bundle does not carry the binary this build produced; CARGO_TARGET_DIR points somewhere else"), and
-- when a file under `src/`, `locales/` or `assets/`, or `Cargo.toml` or `Cargo.lock`, is newer than that binary ("a source file is newer than the binary; the build did not rebuild it").
+- when the copy has other bytes than the binary in `RELEASE_DIR` ("the bundle does not carry the binary this build produced; CARGO_TARGET_DIR points somewhere else"),
+- when the dep-info file cargo writes next to that binary, `ferrispass.d` or `ferrispass-cli.d`, is missing or cannot be read ("cargo wrote no dep-info for ferrispass; the build did not come from cargo", with the binary's name),
+- when that dep-info names no file under the source root, as it does for a binary built from another checkout (the first sentence again), and
+- when a file the dep-info names is newer than that binary ("a source file is newer than the binary; the build did not rebuild it").
 
-A binary that cargo did not have to rebuild is older than the build but newer than every source, so it passes. Binaries left in a target folder that cargo did not write to fail as soon as any source has changed since they were built. The check runs on the release runner too, which is macOS with the same `find` and `cmp` as a local build.
+The dep-info is in make's format, `<binary>: <file> <file> ...`, with a space in a path written as `\ ` and a line that ends in `\` continued on the next. It lists the files cargo compiled into the binary: the Rust sources and what they take in with `include_str!` and `include_bytes!`, such as the locales, the assets and `bundle/minisign-pub.txt`. Test modules, license texts and the docs are not in it, so a change to them alone does not stop a build that cargo rightly left alone. A binary that cargo did not have to rebuild is older than the build but newer than every file it was made from, so it passes. Binaries left in a target folder that cargo did not write to fail as soon as one of their files has changed since they were built. The check runs on the release runner too, which is macOS with the same `awk`, `find` and `cmp` as a local build.
 
 ## What the tests show
 
@@ -49,7 +52,7 @@ A binary that cargo did not have to rebuild is older than the build but newer th
 - `the_build_script_guards_actool_and_the_car`: the source path, the precondition, the version guard with an unreadable version counting as too old, the `actool` options, the `test -s` on `Assets.car`, the copy, the `assetutil` check and the removal of the temporary folder, each stopping the build where it should and all before signing. No `sips`, `iconutil` or `icon.png` is left.
 - `the_build_script_calls_the_bundle_check`: the call is the line right after the two copies, without anything that would ignore its result, and the bundle takes the binaries from those copies.
 - `the_release_workflow_checks_the_icon_folder_and_pins_xcode`: the job that runs the build script runs on `macos-26`, selects one fixed Xcode 26 release before the build, and stops when `bundle/icon/AppIcon.icon` is missing.
-- `the_bundle_check_refuses_a_stale_or_foreign_binary` runs the script with `sh` in a temporary folder that holds a release folder, the copies and a source tree, with modification times set by the test. Same bytes and older sources pass, and so do newer files outside the watched paths. For each binary on its own: a source in each of the five watched places that is newer than that binary, but not the other one, fails with the second sentence and names that binary; a copy with other bytes, and a missing copy, fail with the first. No cargo runs in the test.
+- `the_bundle_check_refuses_a_stale_or_foreign_binary` runs the script with `sh` in a temporary folder that holds a release folder with a dep-info file for each binary, the copies and a source tree with a space in its path, with modification times set by the test. Each dep-info names five files, under `src/`, `locales/`, `assets/` (one with a space in its name) and `bundle/`, two of them on a continued line. Same bytes and older files pass, and so do a newer test module, license text and doc that the dep-info does not name. For each binary on its own: each named file that is newer than that binary, but not the other one, fails with the stale sentence and names the file and the binary; a missing dep-info fails with the dep-info sentence; a dep-info that names the files of another checkout, a copy with other bytes and a missing copy fail with the first sentence. No cargo runs in the test.
 
 ## Mutation probes
 
@@ -62,10 +65,10 @@ Each probe changed one thing on a clean tree, ran `cargo test --locked --test ap
 | `bundle/icon.png` put back | `the_icon_source_is_the_composer_document` | `bundle/icon.png is back; the app icon is bundle/icon/AppIcon.icon` |
 | The "Select Xcode 26" step removed from `release.yml` | `the_release_workflow_checks_the_icon_folder_and_pins_xcode` | `the release build selects Xcode 0 times` |
 | The call of the bundle check removed from the build script | `the_build_script_calls_the_bundle_check` | `the bundle check has to run right after the two copies, and its result has to count` |
-| The bundle check compares `ferrispass` only | `the_bundle_check_refuses_a_stale_or_foreign_binary` | `src/app/mod.rs is newer than ferrispass-cli:` followed by the check's own success line |
+| The bundle check judges `ferrispass` only | `the_bundle_check_refuses_a_stale_or_foreign_binary` | `src/lib.rs is newer than ferrispass-cli:` followed by the check's own success line |
 | `-newer` turned into `! -newer` | `the_bundle_check_refuses_a_stale_or_foreign_binary` | `the copies are the binaries cargo built:` followed by "a source file is newer than the binary" |
 | The version guard at 25 instead of 26 | `the_build_script_guards_actool_and_the_car` | ``scripts/build-mac.sh has no line `if [ "${ACTOOL_MAJOR}" -lt 26 ]; then` `` |
-| `Cargo.lock` dropped from the watched paths | `the_bundle_check_refuses_a_stale_or_foreign_binary` | `Cargo.lock is newer than ferrispass:` followed by the check's own success line |
+| The bundle check skips the dep-info after the byte comparison and accepts anything | `the_bundle_check_refuses_a_stale_or_foreign_binary` | `src/lib.rs is newer than ferrispass:` followed by the check's own success line |
 
 ## What was checked on this Mac
 
@@ -77,7 +80,8 @@ macOS 27 with Xcode 27 (`actool` 27.0, macOS SDK 27.0), `scripts/build-mac.sh --
 - The bundled `ferrispass` contains "Search saved", a text only recent sources have. With the signatures removed, the bundled `ferrispass-cli` is byte for byte the one in the release folder, and `ferrispass` differs only in two bytes of the `__LINKEDIT` size that its signature leaves behind.
 - With the version guard fed `ACTOOL_MAJOR=25` by hand, the build stops in step 2 with "actool 27.0 cannot compile .icon files (needs full Xcode 26 or newer)" and exit 1. The version in the message is the real one; only the major version the guard compares was replaced.
 - That second build found nothing to rebuild: cargo left both binaries untouched, older than the build, and the bundle check passed them.
-- After touching only `src/app/kinds/tests.rs`, cargo again rebuilt nothing and the bundle check stopped the build, naming that file (see Limits).
+- With the bundle check reading the dep-info, the build ran again from an empty target folder and passed. Cargo wrote `ferrispass.d` and `ferrispass-cli.d` into `target/aarch64-apple-darwin/release`, next to the binaries, which is where the check reads them. Each is one line naming 258 files, all in this checkout: the Rust sources, the locales, the assets and `bundle/minisign-pub.txt`, no test module, and neither `Cargo.toml` nor `Cargo.lock`.
+- After touching only `src/app/kinds/tests.rs`, cargo rebuilt nothing and the check passed. After touching `src/app/mod.rs`, cargo rebuilt both binaries and the check passed.
 - `ictool` 2.0 renders of the six appearances with `--design-generation 26` and `27` side by side: generation 27 looks like the renders from October. Generation 26 draws more light on the edges of the glassy body, a rounder outline, and in Tinted Dark a darker, bluer background. Clear Light is faint in both, a light figure on light glass. At 16 px both keep the silhouette with the claws, the two eyes and the key as a green spot.
 
 ## What waits
@@ -87,12 +91,12 @@ macOS 27 with Xcode 27 (`actool` 27.0, macOS SDK 27.0), `scripts/build-mac.sh --
 
 ## Limits
 
-- The bundle check counts every file in the watched paths, also the ones the binaries do not depend on: test modules, the license texts that the build script copies, `locales/_reserved.txt`, sources for other platforms, and `Cargo.toml` and `Cargo.lock` by their time, not their content. On 13.11.2026 that was 30 tracked files. After a change to only those, cargo rebuilds nothing and the check stops a build whose binaries are right; `cargo clean --release --target aarch64-apple-darwin` and a new build get past it. `docs/release-process.md` says so.
-- It does not watch the one compiled file outside those paths, `bundle/minisign-pub.txt`, nor build settings such as `.cargo/config.toml` or `RUSTFLAGS`.
-- It compares times. A source that changes but keeps an older time is not noticed, by cargo nor by the check.
+- The dep-info names files, not settings. A change to `Cargo.toml` or `Cargo.lock` alone (a version or a dependency), to `.cargo/config.toml` or to `RUSTFLAGS` makes cargo rebuild, but when the release folder holds binaries from an earlier build, the check does not see it.
+- It compares times. A file that changes but keeps an older time is not noticed, by cargo nor by the check, and a file the dep-info names that has been deleted since does not count.
+- It needs the dep-info to name files by their full path, as cargo does by default. With `build.dep-info-basedir` set to a folder above the sources, cargo writes their paths relative to it, and the check stops every build.
 - `cmp` runs on the copies before signing. The binaries in the signed bundle differ from the release folder by their signature.
 - The `assetutil` check relies on the field names that Xcode 27's `assetutil` prints (`Name`, `Appearance`). If Xcode 26's report names them differently, the release build stops at that check; it does not let an icon with one appearance through.
 - `ci.yml` still says that the release build runs on the same image as CI. CI stays on `macos-latest`, which is the macOS 26 image today.
 - The tests read the build script and the workflow as text. They hold the lines that do the work and their order, not what the shell or the runner does with them; the build on this Mac and the probes above do that.
 
-The agents spent about 0.7 hours on this, including review and fixes.
+The agents spent about 1.5 hours on this, including review and fixes.
