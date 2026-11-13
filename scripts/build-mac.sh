@@ -8,7 +8,8 @@
 # there's demand; for now the simpler path wins.
 #
 # Pipeline:
-#   1. cargo build --release --target aarch64-apple-darwin
+#   1. cargo build --release --target aarch64-apple-darwin, and stop unless the
+#      copied binaries are the ones it left in the release folder
 #   2. Compile bundle/icon/AppIcon.icon into Assets.car (actool)
 #   3. Assemble FerrisPass.app bundle, and check that Assets.car holds the
 #      icon in more than one appearance
@@ -278,6 +279,10 @@ CLI_BIN_PATH="${DIST_DIR}/${CLI_BINARY_NAME}"
 RELEASE_DIR="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}/aarch64-apple-darwin/release"
 cp "${RELEASE_DIR}/${BINARY_NAME}" "${BIN_PATH}"
 cp "${RELEASE_DIR}/${CLI_BINARY_NAME}" "${CLI_BIN_PATH}"
+# Stop if either copy is not the binary cargo left in RELEASE_DIR, or if a
+# source file is newer than one there: then cargo built somewhere else and
+# RELEASE_DIR holds binaries from an earlier build.
+sh "${PROJECT_ROOT}/scripts/check-bundle-binaries.sh" "${RELEASE_DIR}" "${DIST_DIR}" "${PROJECT_ROOT}"
 echo "    ✓ $(file "${BIN_PATH}" | sed 's|.*: ||')"
 
 # ---------- 2. icon ----------
