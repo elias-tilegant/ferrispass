@@ -305,21 +305,22 @@ jobs:
           # so the step stays harmless if the flag above is ever changed.
           make_latest: false
 
-  # The permanent release kanal-vorab (no v, so it never starts this
-  # workflow) holds the manifest of the highest version released so far. The
-  # app does not read it yet. Test builds will, to find the next test build;
-  # builds without a pre-release suffix keep reading only releases/latest.
+  # The permanent release pre-release-channel (no v, so it never starts
+  # this workflow) holds the manifest of the highest version released so
+  # far. The app does not read it yet. Test builds will, to find the next
+  # test build; builds without a pre-release suffix keep reading only
+  # releases/latest.
   #
   # scripts/update-channel.sh finds the highest version, by SemVer precedence
   # (sort -V ranks 0.10.0-pre.3 above 0.10.0), among all published v*
   # releases that carry update.json and update.json.minisig, and copies that
-  # pair into kanal-vorab. The channel only moves forward, so a 0.9.x fix
-  # after a test build leaves it as it is. Because every run looks at every
-  # release, any run puts right what an earlier run left behind, an upload
-  # that broke off included. The script fails when kanal-vorab is missing,
-  # is not a pre-release (it could then become latest and hand test builds
-  # to everyone) or holds a file it does not expect; its header lists the
-  # rest.
+  # pair into pre-release-channel. The channel only moves forward, so a
+  # 0.9.x fix after a test build leaves it as it is. Because every run looks
+  # at every release, any run puts right what an earlier run left behind,
+  # an upload that broke off included. The script fails when
+  # pre-release-channel is missing, is not a pre-release (it could then
+  # become latest and hand test builds to everyone) or holds a file it does
+  # not expect; its header lists the rest.
   #
   # A job of its own, so that one run at a time reads and writes the
   # channel: two runs close together could otherwise both read it before
@@ -333,7 +334,7 @@ jobs:
     permissions:
       contents: write
     concurrency:
-      group: kanal-vorab
+      group: pre-release-channel
       cancel-in-progress: false
     steps:
       # The script comes from the commit this workflow runs from: the tag on
@@ -343,7 +344,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Point kanal-vorab at the highest release
+      - name: Point pre-release-channel at the highest release
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/update-channel.sh "${GITHUB_REPOSITORY}"

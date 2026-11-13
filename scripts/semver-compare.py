@@ -7,7 +7,7 @@ prints `higher`, `equal` or `lower`: where A stands relative to B. Build
 metadata (`+...`) does not count. A malformed version is an error (exit 2),
 never an answer.
 
-The release workflow uses it so the kanal-vorab channel only moves forward.
+The release workflow uses it so the pre-release channel only moves forward.
 `sort -V` cannot do that job: it puts 0.10.0 before 0.10.0-pre.1, while
 SemVer ranks a pre-release below its release.
 """

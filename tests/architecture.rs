@@ -2812,11 +2812,12 @@ fn files_under_a_test_only_module_are_found() {
 /// artefacts the sign job hands over, `SHA256SUMS` included, are all
 /// attached, and a missing one stops the publishing step. After
 /// publishing, a job of its own, one run at a time and for every tag, runs
-/// `scripts/update-channel.sh`, which points the permanent `kanal-vorab`
-/// release at the highest version released so far; what that script does
-/// is tested by running it, in `tests/release_channel.rs`. Versions are
-/// never ordered with `sort -V`, in the workflow or in that script: it
-/// ranks `0.10.0-pre.1` above `0.10.0`. No step or job may fail quietly.
+/// `scripts/update-channel.sh`, which points the permanent
+/// `pre-release-channel` release at the highest version released so far;
+/// what that script does is tested by running it, in
+/// `tests/release_channel.rs`. Versions are never ordered with `sort -V`,
+/// in the workflow or in that script: it ranks `0.10.0-pre.1` above
+/// `0.10.0`. No step or job may fail quietly.
 ///
 /// CI and CodeQL run for pushes to `master` and `rebuild` and for pull
 /// requests into either, so merges from `master` into the long-lived
@@ -2872,7 +2873,7 @@ fn release_pipeline_rules_hold() {
 }
 
 const PUBLISH_ACTION: &str = "softprops/action-gh-release";
-const CHANNEL_RELEASE: &str = "kanal-vorab";
+const CHANNEL_RELEASE: &str = "pre-release-channel";
 const VERSION_COMPARE: &str = "scripts/semver-compare.py";
 const CHANNEL_SCRIPT: &str = "scripts/update-channel.sh";
 /// What the sign job hands over in `signed-release` and the release carries.
@@ -3402,7 +3403,7 @@ jobs:
   channel:
     needs: release
     concurrency:
-      group: kanal-vorab
+      group: pre-release-channel
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -3471,7 +3472,7 @@ fn release_rules_catch_every_way_around_the_pre_release_flag() {
     }
 }
 
-/// The comparison that keeps `kanal-vorab` moving forward, run as the
+/// The comparison that keeps `pre-release-channel` moving forward, run as the
 /// workflow runs it. The order is semver.org's example plus the versions
 /// this project tags; `sort -V` gets every pre-release against its release
 /// wrong.
@@ -3608,11 +3609,12 @@ fn release_rules_catch_a_tag_that_skips_the_channel() {
         ("    needs: release\n".into(), String::new()),
         ("    needs: release\n".into(), "    needs: [sign]\n".into()),
         (
-            "    concurrency:\n      group: kanal-vorab\n      cancel-in-progress: false\n".into(),
+            "    concurrency:\n      group: pre-release-channel\n      cancel-in-progress: false\n"
+                .into(),
             String::new(),
         ),
         (
-            "group: kanal-vorab".into(),
+            "group: pre-release-channel".into(),
             "group: ${{ github.ref }}".into(),
         ),
         (
@@ -3628,7 +3630,7 @@ fn release_rules_catch_a_tag_that_skips_the_channel() {
         (
             channel.into(),
             format!(
-                "      - run: gh release upload kanal-vorab dist/update.json --clobber\n{channel}"
+                "      - run: gh release upload pre-release-channel dist/update.json --clobber\n{channel}"
             ),
         ),
         (

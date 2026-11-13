@@ -4,11 +4,11 @@
 //!
 //! The workflow test in `tests/architecture.rs` checks that the script runs
 //! after every release; this file checks what it decides. The channel
-//! `kanal-vorab` must end up holding exactly the manifest pair of the highest
-//! version among the published `v*` releases that carry one, whatever an
-//! earlier run left behind, must never move back, must receive every upload
-//! the script makes, and must be left alone, with the run failing, whenever
-//! its state or a version cannot be trusted.
+//! `pre-release-channel` must end up holding exactly the manifest pair of
+//! the highest version among the published `v*` releases that carry one,
+//! whatever an earlier run left behind, must never move back, must receive
+//! every upload the script makes, and must be left alone, with the run
+//! failing, whenever its state or a version cannot be trusted.
 
 #![cfg(unix)]
 
@@ -18,7 +18,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const CHANNEL: &str = "kanal-vorab";
+const CHANNEL: &str = "pre-release-channel";
 
 /// A stand-in for the `gh` commands the script uses, as close to the real
 /// ones as the script can tell.
@@ -577,13 +577,13 @@ fn a_channel_it_cannot_trust_stops_the_run() {
     };
 
     let releases = base();
-    refuses(&releases, "kanal-vorab missing");
+    refuses(&releases, "pre-release-channel missing");
 
     let releases = base();
     releases
         .channel_from("v0.9.4")
         .meta(CHANNEL, r#"{"prerelease": false}"#);
-    refuses(&releases, "kanal-vorab not a pre-release");
+    refuses(&releases, "pre-release-channel not a pre-release");
 
     let releases = base();
     releases
