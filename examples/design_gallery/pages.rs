@@ -886,8 +886,10 @@ fn result_row(list: &'static str, index: usize, count: usize, cx: &App) -> Row {
 }
 
 /// The list in the search group with five rows and the second selected, the
-/// group with an empty list and the sentence in its place, and the list on
-/// its own with nothing selected.
+/// group with an empty list, and the list on its own with nothing selected.
+/// The group with the empty list shows the field over an empty box. It
+/// takes the no-match sentence as its description, which VoiceOver reads
+/// after the group's name; the group draws no sentence of its own.
 fn result_lists(samples: &Samples) -> Div {
     const ROWS: usize = 5;
     let searching = tr!("quick.header.searching_vault", vault = VAULT);

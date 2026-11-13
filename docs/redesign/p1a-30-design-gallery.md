@@ -6,6 +6,7 @@ The design gallery is an example that shows every component of the design system
 |---|---|
 | `8378af0` | The gallery with a page for each component, its tests, and the `[[example]]` entry that lets `cargo test` run them |
 | `1d93212` | The glyphs, the four status shapes and the Kit glyphs the app draws again |
+| `88c81b1` | The test that a copy or a cut leaves the sample secret in its masked field |
 
 ## How to run it
 
@@ -40,7 +41,7 @@ Each page has the component's name and its source file at the top, then the stat
 | chip | The six tones, each with text only and with a glyph. |
 | vault badge | The personal vault, a team in each of the four team colors, and any other vault. Two teams that start with the same letter get two letters. |
 | row | The four densities, each with the row as it is (its verb shows under the pointer), selected, selected while the list has no focus, discreet, and selected with its verb. |
-| result list | Five rows in the search group with the second selected; the search group with no match and the sentence in place of the list; the list on its own with nothing selected. The result list and the search group share the page, since the list goes into the group. |
+| result list | Five rows in the search group with the second selected; the search group with no match, which shows the field over an empty list and carries the no-match sentence as the group's description, read by VoiceOver after the group's name and not drawn; the list on its own with nothing selected. The result list and the search group share the page, since the list goes into the group. |
 | secret field | Hidden without buttons, with the copy button, with the copy and reveal buttons; the flash right after a copy; the tick; revealed with and without buttons; without a value; and one whose buttons answer clicks. |
 | one-time code ring | At 16 and 18: masked and shown with 25 seconds left, shown with 4 seconds left and the next code beside it, masked with 4 seconds left, and without a code. |
 | panel footer | Each of the seven tones (normal, a production system to choose first, a decision, a decision a day old, offline, matches that look the same, an update ready), with three more shortcuts and with none; then the line about what to connect to first, the menu open, and nothing but the menu button. |
@@ -56,7 +57,7 @@ The captions under each state are names of components and states in English, wri
 
 ## How the mode, the text size and the language are switched
 
-The gallery starts the way the app starts: it loads the bundled fonts and sets up the Kit, the text keys and, with `ds::init`, the design system. It skips everything else the app does at start, so it reads no settings, opens no vault and does not touch the clipboard.
+The gallery starts the way the app starts: it loads the bundled fonts and sets up the Kit, the text keys and, with `ds::init`, the design system. It skips everything else the app does at start, so its own code reads no settings, opens no vault and does not touch the clipboard. The text fields on its pages are the Kit's inputs and keep the Kit's copy, cut and paste (see Limits).
 
 The mode, the text size and the language belong to the gallery. A change goes through `ds::apply` with an `Appearance` the gallery builds itself:
 
@@ -86,6 +87,7 @@ The tests are in `examples/design_gallery/tests.rs`. The `[[example]]` entry in 
 - `the_kit_page_holds_every_glyph_the_app_draws_again`: the Kit glyphs page lists exactly the files directly under `assets/icons/`, and the drawing next to each is the Kit's, not the app's.
 - `the_keys_switch_the_page_the_mode_the_text_size_and_the_language`: Up and Down move through the pages and stop at the first, 1 to 4 pick the mode, + and - the text size, L the language.
 - `the_keys_stay_off_while_a_text_field_has_focus`: each of those keys is bound in the gallery and not inside a text field.
+- `the_sample_secret_stays_in_its_masked_field`: on the text field page, Cmd-A and Cmd-C in the field with text put its text on the clipboard of the test platform, so the keys reach a field. In the masked field that holds the sample secret, Cmd-A with Cmd-C and with Cmd-X leave the clipboard as it was and the secret in its field.
 
 The two scans read every `.rs` file under `examples/design_gallery/` except `tests.rs`, which names what they look for.
 
@@ -100,6 +102,7 @@ The two scans read every `.rs` file under `examples/design_gallery/` except `tes
 ## Limits
 
 - The scans read the gallery's source text. A frame drawn in a semantic token that copies what a component draws, or a read hidden inside a function of the app that the gallery calls, passes them.
+- The text fields on the pages are the Kit's inputs, and the Kit binds Cmd-C, Cmd-X and Cmd-V in them, so a copy, a cut or a paste in a field reaches the system clipboard. `the_gallery_reads_nothing` reads only the gallery's own code. The field that holds the sample secret is masked, and the Kit copies and cuts nothing out of a masked field.
 - No test ties a page to the component it names. `every_component_module_has_a_page` reads the modules each page names in `Page::modules`, and `every_page_renders_in_every_mode_size_and_language` finds a page by the frame that `pages::page` puts around every page. A page that drew another component under its own name would pass both. Which component a page shows is for the eye, against the name and source file at the top of the page.
 - In debug builds the button page draws more than one copper surface: every primary and large button that is not disabled is one. The copper count, which holds a view to one copper surface, prints a line about it on stderr for every frame the page draws, and the loading buttons draw frames for as long as their spinners turn. The count is not there in a release build.
 - The test platform loads no files from the app's assets into a window, so the tests lay out the glyph pages and the components without the app's glyphs. What a glyph or a page looks like is for the eye.
@@ -113,4 +116,4 @@ The two scans read every `.rs` file under `examples/design_gallery/` except `tes
 - Pages for components that do not exist yet, among them the banner, the HUD, the segment, the copper thread, the field card, the sidebar entry, the stepper, the version card and the command palette. Each component brings its page when it is built.
 - The comparison with the boards happens by eye. What differs goes to the acceptance page of P1a.09b, or to P1a.17 and P1a.26, not into the gallery.
 
-The agents spent about 3.5 hours on this, including review and fixes.
+The agents spent about 4 hours on this, including review and fixes.

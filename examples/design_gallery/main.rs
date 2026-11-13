@@ -6,10 +6,11 @@
 //! ```
 //!
 //! One window, 1120 by 760. It starts the way the app starts, without the
-//! app's state, windows and services: it reads no settings and no vault and
-//! never touches the clipboard. `docs/redesign/p1a-30-design-gallery.md`
-//! says what each page shows and how to switch the mode, the text size and
-//! the language.
+//! app's state, windows and services: its own code reads no settings, no
+//! vault and no clipboard. The text fields on its pages are the Kit's
+//! inputs and keep the Kit's copy, cut and paste.
+//! `docs/redesign/p1a-30-design-gallery.md` says what each page shows and
+//! how to switch the mode, the text size and the language.
 
 mod gallery;
 mod pages;
