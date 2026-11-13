@@ -4,13 +4,13 @@
 #
 #   scripts/update-channel.sh [owner/repo]
 #
-# kanal-vorab is a permanent pre-release that holds one pair of files,
-# update.json and update.json.minisig, copied from a v* release. This script
-# finds the highest version, by SemVer precedence, among the published v*
-# releases that carry both files, fully uploaded, and makes kanal-vorab hold
-# exactly that pair, unless the channel already holds a higher version: the
-# channel only moves forward. A v* release whose tag is not a version is
-# skipped with a warning.
+# pre-release-channel is a permanent pre-release that holds one pair of
+# files, update.json and update.json.minisig, copied from a v* release. This
+# script finds the highest version, by SemVer precedence, among the
+# published v* releases that carry both files, fully uploaded, and makes
+# pre-release-channel hold exactly that pair, unless the channel already
+# holds a higher version: the channel only moves forward. A v* release whose
+# tag is not a version is skipped with a warning.
 #
 # Because it looks at every release, not only the one just published, any
 # run puts right what an earlier run left behind: a run that was cancelled
@@ -22,11 +22,12 @@
 # but every pair the channel held came from a release, so the highest
 # release is not lower than it, and its pair goes in.
 #
-# It fails, and leaves the channel as it is, when kanal-vorab is missing, is
-# not a pre-release (a full release could become "latest" and hand test
-# builds to everyone), holds any other file, holds a lone manifest above
-# every release, or when a manifest or the channel's version cannot be read,
-# or when the manifest a release carries names another version than its tag.
+# It fails, and leaves the channel as it is, when pre-release-channel is
+# missing, is not a pre-release (a full release could become "latest" and
+# hand test builds to everyone), holds any other file, holds a lone manifest
+# above every release, or when a manifest or the channel's version cannot be
+# read, or when the manifest a release carries names another version than
+# its tag.
 #
 # The release workflow runs it after publishing; it also runs by hand, with
 # gh logged in to an account that may edit releases. Needs gh, jq, python3.
@@ -34,7 +35,7 @@
 set -euo pipefail
 
 REPO="${1:-${GITHUB_REPOSITORY:?pass owner/repo or set GITHUB_REPOSITORY}}"
-CHANNEL=kanal-vorab
+CHANNEL=pre-release-channel
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
