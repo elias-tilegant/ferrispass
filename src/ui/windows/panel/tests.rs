@@ -1186,7 +1186,7 @@ fn the_open_panel_cleans_the_vault_name_as_the_locked_panel_does(cx: &mut TestAp
     assert_eq!(
         vm.read_with(cx, |vm, _| vm.vault_name().cloned()),
         Some("team-beratung".into()),
-        "the model keeps the name as the file has it"
+        "the model did not clean the vault's name of control characters and direction marks"
     );
     let model = vm.read_with(cx, |vm, _| vm.clone());
     assert_eq!(model.results().len(), 5, "the test needs every row listed");
@@ -1203,7 +1203,7 @@ fn the_open_panel_cleans_the_vault_name_as_the_locked_panel_does(cx: &mut TestAp
         let label = label.as_deref().expect("every row has a name");
         assert!(
             label.ends_with(", team-beratung"),
-            "the row names the vault as the file has it: {label:?}"
+            "a row names the vault without cleaning its name of control characters and direction marks: {label:?}"
         );
     }
 
