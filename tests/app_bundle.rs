@@ -5,8 +5,9 @@
 //! The build itself needs Xcode, a signing identity and several minutes, so
 //! the script and the workflow are read as text here, the way
 //! `tests/architecture.rs` reads the other workflows. The bundle check is
-//! the exception: it runs for real, with `sh`, against a release folder and
-//! a source tree made up in a temporary folder.
+//! the exception: it runs for real, with `sh`, against a release folder with
+//! dep-info files like cargo's and a source tree, made up in a temporary
+//! folder.
 
 #![cfg(unix)]
 
@@ -23,10 +24,16 @@ const INFO_PLIST: &str = "bundle/macos/Info.plist";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 
 /// What the bundle check says when a copy is not the binary in the release
-/// folder, and when a source is newer than that binary.
+/// folder or that binary was built from another checkout, and when a file
+/// compiled into the binary is newer than it.
 const FOREIGN: &str = "the bundle does not carry the binary this build produced; \
                        CARGO_TARGET_DIR points somewhere else";
 const STALE: &str = "a source file is newer than the binary; the build did not rebuild it";
+
+/// What the bundle check says when cargo left no dep-info next to `binary`.
+fn no_dep_info(binary: &str) -> String {
+    format!("cargo wrote no dep-info for {binary}; the build did not come from cargo")
+}
 
 fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -394,14 +401,32 @@ fn the_release_workflow_checks_the_icon_folder_and_pins_xcode() {
 /// The two binaries the bundle carries.
 const BINARIES: [&str; 2] = ["ferrispass", "ferrispass-cli"];
 
-/// One file for each place the check reads.
-const SOURCES: [&str; 5] = [
+/// The source tree. A checkout may have a space in its path, and the
+/// dep-info then escapes it.
+const SOURCE: &str = "source tree";
+
+/// What cargo compiled into both binaries, as their dep-info names it: Rust
+/// sources, and files they take in with `include_str!` or `include_bytes!`,
+/// also outside `src/`.
+const COMPILED: [&str; 5] = [
+    "src/lib.rs",
     "src/app/mod.rs",
     "locales/app.yml",
-    "assets/icons/fp/key.svg",
-    "Cargo.toml",
-    "Cargo.lock",
+    "assets/fonts/Mono Regular.ttf",
+    "bundle/minisign-pub.txt",
 ];
+
+/// Files in the source tree that go into no binary.
+const NOT_COMPILED: [&str; 3] = [
+    "src/app/kinds/tests.rs",
+    "assets/licenses/OFL.txt",
+    "docs/notes.md",
+];
+
+/// `file` in the source tree.
+fn source(file: &str) -> String {
+    format!("{SOURCE}/{file}")
+}
 
 /// A point in time, `seconds` after an arbitrary start.
 fn time(seconds: u64) -> SystemTime {
@@ -409,28 +434,54 @@ fn time(seconds: u64) -> SystemTime {
 }
 
 /// A finished cargo build in a temporary folder: `release/` with the two
-/// binaries, `copies/` with what was copied out of it, and `source/`, the
-/// tree they were built from.
+/// binaries and their dep-info, `copies/` with what was copied out of it,
+/// and the source tree they were built from.
 struct Build {
     dir: tempfile::TempDir,
 }
 
 impl Build {
-    /// Every source last changed at 100, both binaries built at 200, and
-    /// the copies, taken at 300, the same bytes.
+    /// Every source last changed at 100, both binaries and their dep-info
+    /// written at 200, and the copies, taken at 300, the same bytes.
     fn new() -> Self {
         let build = Build {
             dir: tempfile::tempdir().expect("temporary folder"),
         };
-        for source in SOURCES {
-            build.write(&format!("source/{source}"), source, 100);
+        for file in COMPILED.iter().chain(&NOT_COMPILED) {
+            build.write(&source(file), file, 100);
         }
         for binary in BINARIES {
             let bytes = format!("{binary} as cargo built it");
             build.write(&format!("release/{binary}"), &bytes, 200);
+            let dep_info = build.dep_info(binary, SOURCE);
+            build.write(&format!("release/{binary}.d"), &dep_info, 200);
             build.write(&format!("copies/{binary}"), &bytes, 300);
         }
         build
+    }
+
+    /// The dep-info cargo writes next to `binary` when it builds it from the
+    /// tree in `tree`: one rule, the binary, a colon and the files it
+    /// compiled, each by its full path with spaces escaped. Cargo writes it
+    /// on one line; here the last two files go on a continued line, which
+    /// the format allows as well.
+    fn dep_info(&self, binary: &str, tree: &str) -> String {
+        // Cargo names the files with symbolic links resolved, and the
+        // temporary folder can be behind one (/var is /private/var on
+        // macOS). The check is handed the path as it is.
+        let real = fs::canonicalize(self.dir.path()).expect("temporary folder");
+        let escaped = |path: PathBuf| path.to_str().expect("a UTF-8 path").replace(' ', "\\ ");
+        let files: Vec<String> = COMPILED
+            .iter()
+            .map(|file| escaped(real.join(tree).join(file)))
+            .collect();
+        let (first, last) = files.split_at(files.len() - 2);
+        format!(
+            "{}: {} \\\n    {}\n",
+            escaped(real.join("release").join(binary)),
+            first.join(" "),
+            last.join(" ")
+        )
     }
 
     fn path(&self, relative: &str) -> PathBuf {
@@ -460,7 +511,7 @@ impl Build {
             .arg(root().join(BUNDLE_CHECK))
             .arg(self.path("release"))
             .arg(self.path("copies"))
-            .arg(self.path("source"))
+            .arg(self.path(SOURCE))
             .output()
             .expect("run the bundle check");
         let output = format!(
@@ -482,35 +533,66 @@ fn the_bundle_check_refuses_a_stale_or_foreign_binary() {
         "the copies are the binaries cargo built:\n{output}"
     );
 
-    // Other files may be newer: a change to the docs or the tests does not
-    // go into the binaries.
-    build.write("source/docs/notes.md", "notes", 400);
-    build.write("source/tests/app.rs", "test", 400);
+    // A test module, a license text or the docs may be newer: cargo compiles
+    // none of them into the binaries and has nothing to rebuild after a
+    // change to them.
+    for file in NOT_COMPILED {
+        build.touch(&source(file), 400);
+    }
     let (code, output) = build.check();
     assert_eq!(
         code,
         Some(0),
-        "only sources of the binaries count:\n{output}"
+        "only the files the dep-info names count:\n{output}"
     );
 
     for (binary, other) in [
         ("ferrispass", "ferrispass-cli"),
         ("ferrispass-cli", "ferrispass"),
     ] {
-        // A source that changed after `binary` was built, though not after
-        // the other one: cargo would have built `binary` again.
-        for source in SOURCES {
+        // A file compiled into `binary` that changed after it was built,
+        // though not after the other one: cargo would have built `binary`
+        // again.
+        for file in COMPILED {
             let build = Build::new();
             build.touch(&format!("release/{other}"), 400);
-            build.touch(&format!("source/{source}"), 300);
+            build.touch(&source(file), 300);
             let (code, output) = build.check();
-            assert_eq!(code, Some(1), "{source} is newer than {binary}:\n{output}");
-            assert!(output.contains(STALE), "{source}, {binary}:\n{output}");
+            assert_eq!(code, Some(1), "{file} is newer than {binary}:\n{output}");
+            assert!(output.contains(STALE), "{file}, {binary}:\n{output}");
             assert!(
-                output.contains(&format!("release/{binary}\n")),
-                "the check names {binary}:\n{output}"
+                output.contains(&format!("{SOURCE}/{file} is newer than "))
+                    && output.contains(&format!("release/{binary}\n")),
+                "the check names {file} and {binary}:\n{output}"
             );
         }
+
+        // No dep-info next to `binary`.
+        let build = Build::new();
+        fs::remove_file(build.path(&format!("release/{binary}.d"))).unwrap();
+        let (code, output) = build.check();
+        assert_eq!(code, Some(1), "{binary} has no dep-info:\n{output}");
+        assert!(output.contains(&no_dep_info(binary)), "{binary}:\n{output}");
+
+        // A dep-info of a build from another checkout, whose files are all
+        // older than `binary`.
+        let build = Build::new();
+        for file in COMPILED {
+            build.write(&format!("other checkout/{file}"), file, 100);
+        }
+        let elsewhere = build.dep_info(binary, "other checkout");
+        build.write(&format!("release/{binary}.d"), &elsewhere, 200);
+        let (code, output) = build.check();
+        assert_eq!(
+            code,
+            Some(1),
+            "{binary} was built from another checkout:\n{output}"
+        );
+        assert!(output.contains(FOREIGN), "{binary}:\n{output}");
+        assert!(
+            output.contains(&format!("release/{binary}.d names no file under ")),
+            "the check names the dep-info of {binary}:\n{output}"
+        );
 
         // A copy with other bytes than the binary in the release folder.
         let build = Build::new();

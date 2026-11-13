@@ -455,12 +455,11 @@ Outputs `dist/FerrisPass-X.Y.Z-arm64.dmg` that opens with a Gatekeeper warning (
 The build needs full Xcode 26 or newer, selected with `xcode-select`: `actool`
 compiles the app icon, and the Command Line Tools alone have none. Right after
 cargo, the script stops if a binary it copied is not the one cargo left in
-`${CARGO_TARGET_DIR:-target}/aarch64-apple-darwin/release`, or if a file under
-`src/`, `locales/` or `assets/`, or `Cargo.toml` or `Cargo.lock`, is newer than
-that binary. Every file there counts, including test modules and license
-texts that cargo does not compile into the binaries, so after a change to
-only those it stops as well; run
-`cargo clean --release --target aarch64-apple-darwin` and build again.
+`${CARGO_TARGET_DIR:-target}/aarch64-apple-darwin/release`, or if the dep-info
+file cargo wrote next to it (`ferrispass.d`, `ferrispass-cli.d`) is missing,
+names no file in this checkout, or names a file that is newer than the binary.
+The dep-info lists what cargo compiled into the binary, so a change to a test
+module or a license text alone does not stop the build.
 
 `--skip-notarize` leaves out notarization, stapling and the final Gatekeeper
 check, and still builds the updater artefacts: `.app.tar.gz`, the CLI archive
