@@ -12,6 +12,7 @@ use crate::{
             PerformAutoTypeForSelected, RenameGroupOp, SaveVault, SubmitPassword, SyncNow,
             ToggleTheme,
         },
+        match_groups,
     },
     autotype,
     keepass::{KeePassRepository, MutationError, limits::KdfCost},
@@ -1353,23 +1354,25 @@ impl AppShell {
         });
 
         let state = self.state.clone();
-        // An explicit pick in Edit mode files the entry into that group; with
-        // no pick the entry stays where it is.
-        let move_to = self.new_entry_target_group_id.clone();
-        let result = match editing_id.as_ref() {
-            Some(entry_id) => state.update(cx, |state, cx| {
-                state.update_entry(entry_id, draft, cx)?;
-                let current_group = state
-                    .vault_browser()
-                    .and_then(|browser| browser.snapshot.find_entry_group_id(entry_id));
-                match move_to {
-                    Some(target) if current_group.as_deref() != Some(target.as_str()) => {
-                        state.move_entry(entry_id, &target, cx)
-                    }
-                    _ => Ok(()),
-                }
+        // A pick in Edit mode that differs from the entry's group moves the
+        // entry, in one mutation with the field changes if there are any. A
+        // pure move hands over no draft: saving one would rewrite fields the
+        // user never touched (`apply_draft_to_entry` sets the protection of
+        // the standard fields and adds the ones an entry lacks). For the same
+        // reason an edit that changed nothing writes nothing.
+        let pending_move = self.pending_group_move(cx);
+        // Without a baseline the editor cannot tell what changed, so it
+        // saves the draft rather than risk dropping an edit.
+        let fields_changed = self.entry_form_baseline.is_none() || self.entry_fields_changed(cx);
+        let result = match (editing_id.as_ref(), pending_move.as_ref()) {
+            (Some(entry_id), Some(target)) => state.update(cx, |state, cx| {
+                state.update_and_move_entry(entry_id, fields_changed.then_some(draft), target, cx)
             }),
-            None => {
+            (Some(_), None) if !fields_changed => Ok(()),
+            (Some(entry_id), None) => {
+                state.update(cx, |state, cx| state.update_entry(entry_id, draft, cx))
+            }
+            (None, _) => {
                 let Some(group_id) = target_group_id else {
                     self.entry_form_error = Some("Pick a group to save this entry in.".into());
                     cx.notify();
@@ -1382,18 +1385,32 @@ impl AppShell {
         };
         match result {
             Ok(()) => {
+                // The entry leaves the list it was in, so say where it went.
+                let moved_to = pending_move.as_ref().and_then(|group_id| {
+                    self.state.read(cx).vault_browser().and_then(|browser| {
+                        browser
+                            .snapshot
+                            .find_group(group_id)
+                            .map(|group| group.name.clone())
+                    })
+                });
+                let message: Option<SharedString> = match (editing_id.is_some(), moved_to) {
+                    (true, Some(group)) if fields_changed => {
+                        Some(format!("Changes saved, entry moved to {group}.").into())
+                    }
+                    (true, Some(group)) => Some(format!("Moved to {group}.").into()),
+                    (true, None) if fields_changed => Some("Changes saved.".into()),
+                    // Nothing was written, so there is nothing to report.
+                    (true, None) => None,
+                    (false, _) => Some("Entry saved.".into()),
+                };
                 self.clear_entry_form(window, cx);
                 self.state.clone().update(cx, |state, cx| {
                     let _ = state.close_overlay(cx);
                 });
-                window.push_notification(
-                    if editing_id.is_some() {
-                        "Changes saved."
-                    } else {
-                        "Entry saved."
-                    },
-                    cx,
-                );
+                if let Some(message) = message {
+                    window.push_notification(message, cx);
+                }
             }
             Err(error) => {
                 self.entry_form_error = Some(errors::mutation_message(&error));
@@ -1454,12 +1471,6 @@ impl AppShell {
             hasher.update(field.value.as_bytes());
             hasher.update([u8::from(field.protected)]);
         }
-        // Picking another group is an edit too: leaving without saving
-        // would drop it as silently as a typed change.
-        if let Some(group_id) = &self.new_entry_target_group_id {
-            hasher.update([1]);
-            hasher.update(group_id.as_bytes());
-        }
         hasher.finalize().into()
     }
 
@@ -1470,9 +1481,33 @@ impl AppShell {
         self.entry_discard_armed = false;
     }
 
-    pub fn entry_form_is_dirty(&self, cx: &gpui::App) -> bool {
+    /// Whether any field differs from what the editor opened with.
+    fn entry_fields_changed(&self, cx: &gpui::App) -> bool {
         self.entry_form_baseline
             .is_some_and(|baseline| baseline != self.entry_form_fingerprint(cx))
+    }
+
+    /// The group the edited entry moves to on save: a pick in Edit mode that
+    /// differs from the group the entry is in. A pick in Add mode only says
+    /// where a new entry lands, and picking the entry's own group changes
+    /// nothing, so neither counts.
+    fn pending_group_move(&self, cx: &gpui::App) -> Option<String> {
+        let target = self.new_entry_target_group_id.as_ref()?;
+        let state = self.state.read(cx);
+        let Overlay::EditEntry { entry_id } = state.overlay() else {
+            return None;
+        };
+        let current = state
+            .vault_browser()?
+            .snapshot
+            .find_entry_group_id(entry_id);
+        (current.as_deref() != Some(target.as_str())).then(|| target.clone())
+    }
+
+    /// A pending move is lost on close as silently as a typed change, so it
+    /// counts as one.
+    pub fn entry_form_is_dirty(&self, cx: &gpui::App) -> bool {
+        self.entry_fields_changed(cx) || self.pending_group_move(cx).is_some()
     }
 
     pub fn entry_discard_armed(&self) -> bool {
@@ -1676,6 +1711,9 @@ impl AppShell {
     ) {
         self.new_entry_target_group_id = Some(group_id.into());
         self.new_entry_picker_open = false;
+        // Like typing: a warning about the draft as it stood no longer
+        // covers it.
+        self.entry_discard_armed = false;
         self.new_entry_title_input
             .update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
@@ -2480,13 +2518,7 @@ impl AppShell {
         if self.entry_draft_blocks_close(cx) {
             return;
         }
-        let in_trash = self
-            .state
-            .read(cx)
-            .vault_browser()
-            .and_then(|browser| browser.selected_entry)
-            .is_some_and(|entry| entry.in_recycle_bin);
-        if in_trash {
+        if self.selected_entry_in_trash(cx) {
             window.push_notification("Restore the entry before moving it.", cx);
             return;
         }
@@ -2714,13 +2746,7 @@ impl AppShell {
             window.push_notification("Select an entry to duplicate first.", cx);
             return;
         };
-        let in_trash = self
-            .state
-            .read(cx)
-            .vault_browser()
-            .and_then(|browser| browser.selected_entry)
-            .is_some_and(|entry| entry.in_recycle_bin);
-        if in_trash {
+        if self.selected_entry_in_trash(cx) {
             window.push_notification("Restore the entry before duplicating it.", cx);
             return;
         }
@@ -2782,6 +2808,16 @@ impl AppShell {
             state.delete_entry_permanent(&entry_id, cx)
         });
         cx.notify();
+    }
+
+    /// Whether the entry the commands act on is in the Trash. Duplicating
+    /// and moving refuse it; it has to be restored first.
+    fn selected_entry_in_trash(&self, cx: &gpui::App) -> bool {
+        self.state
+            .read(cx)
+            .vault_browser()
+            .and_then(|browser| browser.selected_entry)
+            .is_some_and(|entry| entry.in_recycle_bin)
     }
 
     fn selected_entry_id(&self, cx: &gpui::App) -> Option<String> {
@@ -2921,17 +2957,24 @@ impl AppShell {
             InputEvent::Change => cx.notify(),
             InputEvent::PressEnter { .. } => {
                 let query = input.read(cx).value().to_string();
+                // Without a query the first row is the vault root, and the
+                // picker marks no Enter target. "Move to Group…" opens with an
+                // empty field, so an early Enter would file the entry into the
+                // root unseen.
+                if query.trim().is_empty() {
+                    return;
+                }
                 let first = {
                     let state = self.state.read(cx);
                     state.vault_browser().and_then(|browser| {
-                        crate::ui::screens::add_entry::group_picker_matches(
+                        match_groups(
                             &browser.snapshot.root,
                             browser.snapshot.recycle_bin_id.as_deref(),
                             &query,
                         )
                         .into_iter()
                         .next()
-                        .map(|row| row.id)
+                        .map(|row| row.group.id.clone())
                     })
                 };
                 if let Some(group_id) = first {

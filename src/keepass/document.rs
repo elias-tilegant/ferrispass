@@ -646,6 +646,73 @@ impl VaultDocument {
         Ok(())
     }
 
+    /// File an entry into `target_group_id` from the entry editor, applying
+    /// `draft` in the same step when the user also changed fields.
+    ///
+    /// One `track_changes` covers both, so the entry gains one history
+    /// version and one clock step. `update_entry` followed by `move_entry`
+    /// archived the half-done state in between as a version of its own.
+    /// Without a draft the fields are left exactly as they are:
+    /// `apply_draft_to_entry` rewrites the protection of the standard fields
+    /// and adds the ones an entry lacks, which a pure move must not do to an
+    /// entry another client wrote.
+    ///
+    /// A target inside the Recycle Bin is refused. The picker leaves the bin
+    /// out, but a sync can move the chosen group there while the editor is
+    /// open, and the entry would then land in the Trash without anyone
+    /// having deleted it.
+    pub fn update_and_move_entry(
+        &mut self,
+        entry_id_str: &str,
+        draft: Option<&EntryDraft>,
+        target_group_id_str: &str,
+    ) -> Result<(), MutationError> {
+        let entry_id =
+            find_entry_id(&self.database, entry_id_str).ok_or(MutationError::EntryNotFound)?;
+        let target_id = find_group_id(&self.database, target_group_id_str)
+            .ok_or(MutationError::GroupNotFound)?;
+        if let Some(recycle_bin_id) = self.database.recycle_bin().map(|group| group.id())
+            && group_is_within(&self.database, target_id, recycle_bin_id)
+        {
+            return Err(MutationError::GroupInRecycleBin);
+        }
+        let current_parent = self
+            .database
+            .entry(entry_id)
+            .ok_or(MutationError::EntryNotFound)?
+            .parent()
+            .id();
+        if current_parent == target_id {
+            return match draft {
+                Some(draft) => self.update_entry(entry_id_str, draft),
+                None => Ok(()),
+            };
+        }
+        let mut entry = self
+            .database
+            .entry_mut(entry_id)
+            .ok_or(MutationError::EntryNotFound)?;
+        // Both clocks, as in `move_entry`.
+        let changed_at = next_change_time(
+            entry
+                .times
+                .last_modification
+                .max(entry.times.location_changed),
+        );
+        let mut entry = entry.track_changes();
+        entry
+            .move_to(target_id)
+            .map_err(|_| MutationError::GroupNotFound)?;
+        if let Some(draft) = draft {
+            entry.edit(|entry| apply_draft_to_entry(entry, draft));
+        }
+        entry.times.last_modification = Some(changed_at);
+        entry.times.location_changed = Some(changed_at);
+        drop(entry);
+        self.refresh_snapshot();
+        Ok(())
+    }
+
     /// Move an entry to the database's Recycle Bin (creating one if missing).
     /// We deliberately don't expose hard-delete from this API yet - that lives
     /// behind the future "Empty trash" affordance in the Trash sidebar view.
@@ -1281,6 +1348,8 @@ pub enum MutationError {
     WouldCreateCycle,
     #[error("the entry is in the Recycle Bin")]
     EntryInRecycleBin,
+    #[error("the group is in the Recycle Bin")]
+    GroupInRecycleBin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3778,6 +3847,125 @@ mod tests {
             doc.database.num_entries(),
             entries_before,
             "nothing was added"
+        );
+    }
+
+    /// A document with the groups Work and Personal under the root, one
+    /// entry in Work, and the ids of all three.
+    fn doc_with_entry_in_work() -> (VaultDocument, String, String, String) {
+        let db = Database::new();
+        let snapshot = VaultSnapshot::new(VaultGroup::default());
+        let mut doc = VaultDocument::new(db, snapshot, "pw".into(), None);
+        let mut add_group = |name: &str| {
+            let mut root = doc.database.root_mut();
+            let mut group = root.add_group();
+            group.name = name.into();
+            group.id().to_string()
+        };
+        let work_id = add_group("Work");
+        let personal_id = add_group("Personal");
+        doc.refresh_snapshot();
+        let entry_id = doc
+            .create_entry(
+                &work_id,
+                &EntryDraft {
+                    title: "Movable".into(),
+                    username: "alice".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("create");
+        (doc, work_id, personal_id, entry_id)
+    }
+
+    fn history_len(doc: &VaultDocument, entry_id: &str) -> usize {
+        doc.database
+            .entry(find_entry_id(&doc.database, entry_id).unwrap())
+            .unwrap()
+            .history
+            .as_ref()
+            .map_or(0, |history| history.get_entries().len())
+    }
+
+    #[test]
+    fn update_and_move_entry_is_one_change() {
+        let (mut doc, _, personal_id, entry_id) = doc_with_entry_in_work();
+        let before = history_len(&doc, &entry_id);
+        let draft = EntryDraft {
+            title: "Moved and renamed".into(),
+            username: "alice".into(),
+            ..Default::default()
+        };
+
+        doc.update_and_move_entry(&entry_id, Some(&draft), &personal_id)
+            .expect("edit and move");
+
+        let personal = doc.snapshot().find_group(&personal_id).unwrap();
+        let moved = personal.entries.iter().find(|e| e.id == entry_id).unwrap();
+        assert_eq!(moved.title, "Moved and renamed");
+        assert_eq!(
+            history_len(&doc, &entry_id),
+            before + 1,
+            "one history version, not one for the edit and one for the move"
+        );
+        let times = &doc
+            .database
+            .entry(find_entry_id(&doc.database, &entry_id).unwrap())
+            .unwrap()
+            .times;
+        assert_eq!(times.last_modification, times.location_changed);
+    }
+
+    #[test]
+    fn update_and_move_entry_without_a_draft_leaves_the_fields_alone() {
+        let (mut doc, _, personal_id, entry_id) = doc_with_entry_in_work();
+        // Written the way another client might: a protected username and no
+        // OTP field at all.
+        {
+            let id = find_entry_id(&doc.database, &entry_id).unwrap();
+            let mut entry = doc.database.entry_mut(id).unwrap();
+            entry.set_protected(fields::USERNAME, "alice");
+            entry.fields.remove(fields::OTP);
+        }
+        doc.refresh_snapshot();
+        let before = history_len(&doc, &entry_id);
+
+        doc.update_and_move_entry(&entry_id, None, &personal_id)
+            .expect("move");
+
+        let entry = doc
+            .database
+            .entry(find_entry_id(&doc.database, &entry_id).unwrap())
+            .unwrap();
+        assert_eq!(entry.parent().id().to_string(), personal_id);
+        assert!(
+            entry
+                .fields
+                .get(fields::USERNAME)
+                .is_some_and(|value| value.is_protected()),
+            "a move keeps the username protected"
+        );
+        assert!(
+            !entry.fields.contains_key(fields::OTP),
+            "a move adds no fields"
+        );
+        assert_eq!(history_len(&doc, &entry_id), before + 1);
+    }
+
+    #[test]
+    fn update_and_move_entry_refuses_a_group_in_the_recycle_bin() {
+        let (mut doc, work_id, personal_id, entry_id) = doc_with_entry_in_work();
+        // A sync, say, has moved the chosen group into the Trash meanwhile.
+        doc.delete_group(&personal_id).expect("trash the group");
+
+        assert!(matches!(
+            doc.update_and_move_entry(&entry_id, None, &personal_id),
+            Err(MutationError::GroupInRecycleBin)
+        ));
+        let work = doc.snapshot().find_group(&work_id).unwrap();
+        assert!(
+            work.entries.iter().any(|e| e.id == entry_id),
+            "the entry stays where it was"
         );
     }
 
