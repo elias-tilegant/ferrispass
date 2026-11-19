@@ -191,6 +191,10 @@ toml = "0.8"
 name = "text_system"
 harness = false
 
+[[example]]
+name = "design_gallery"
+test = true
+
 [lints.rust]
 # `deny` (rather than `forbid`) so a single targeted module - currently
 # only `src/biometric/macos.rs`, which wraps LocalAuthentication FFI
