@@ -356,9 +356,12 @@ impl PanelView {
     /// ⌘O: closes the panel and shows the selected entry in the main window,
     /// or just the main window when no vault is open. The one action of the
     /// panel that brings FerrisPass to the front, because the user asked.
+    /// Over an app that was hidden, the app is not hidden again, and its
+    /// windows come back.
     pub(super) fn show_in_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entry_id = self.vm.read(cx).selected().map(|hit| hit.entry_id.clone());
-        self.close(window, cx);
+        self.locked.wipe();
+        super::close_for_main_window(window, cx);
         if let Some(entry_id) = entry_id {
             self.state.update(cx, |state, cx| {
                 let listed = state

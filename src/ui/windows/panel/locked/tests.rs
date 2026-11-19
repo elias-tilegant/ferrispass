@@ -119,6 +119,7 @@ fn locked_app_with(cx: &mut TestAppContext, setup: Setup, api: FakeApi, titles: 
     AHEAD.with(|ahead| ahead.set(Duration::ZERO));
     KEY_TAKEN.with(|taken| taken.set(0));
     crate::autotype::hotkey::fake::reset();
+    crate::platform::activation::fake::reset();
     let secure = cx.update(|cx| {
         gpui_component::init(cx);
         actions::init(cx);

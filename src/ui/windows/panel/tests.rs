@@ -1,6 +1,8 @@
 //! The panel as the app opens it: the main window over a test vault, then the
 //! panel as a second window, driven by its keys and actions.
 
+pub(crate) mod apps;
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -146,6 +148,7 @@ pub(crate) fn open_app(cx: &mut TestAppContext, entries: &[Fixture]) -> Harness 
 /// The same, with the vault at `path`, whose folder must not exist.
 fn open_app_at(cx: &mut TestAppContext, path: &str, entries: &[Fixture]) -> Harness {
     crate::autotype::hotkey::fake::reset();
+    crate::platform::activation::fake::reset();
     LAUNCHES.with(|launches| launches.borrow_mut().clear());
     let pasteboard = FakePasteboard::new(AccessBehavior::Default);
     cx.update(|cx| {
@@ -1656,7 +1659,7 @@ fn nothing_in_the_panel_logs_a_title() {
     assert!(files.len() >= 4, "the scan found {files:?}");
     let mut found = Vec::new();
     // The tests' own file names the patterns it looks for.
-    for file in files.iter().filter(|file| !file.ends_with("tests.rs")) {
+    for file in files.iter().filter(|file| !is_test_source(file)) {
         let code = probe::code_only(&std::fs::read_to_string(file).expect("read source"));
         for pattern in [
             "log::",
@@ -1676,6 +1679,11 @@ fn nothing_in_the_panel_logs_a_title() {
 
 // ------------------------------------------------------- Return and copies --
 
+/// Whether `file` holds tests: a `tests.rs`, or a file in a `tests` folder.
+fn is_test_source(file: &Path) -> bool {
+    file.ends_with("tests.rs") || file.parent().is_some_and(|dir| dir.ends_with("tests"))
+}
+
 /// The panel's own files, without the tests, which name what they look
 /// for.
 fn panel_sources() -> Vec<(String, String)> {
@@ -1686,7 +1694,7 @@ fn panel_sources() -> Vec<(String, String)> {
     }
     let sources: Vec<(String, String)> = files
         .into_iter()
-        .filter(|file| !file.ends_with("tests.rs"))
+        .filter(|file| !is_test_source(file))
         .map(|file| {
             let code = probe::code_only(&std::fs::read_to_string(&file).expect("read source"));
             (file.display().to_string(), code)

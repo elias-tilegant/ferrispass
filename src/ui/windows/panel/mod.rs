@@ -40,6 +40,13 @@
 //!     nothing from a vault is shown. When no vault waits on the unlock
 //!     screen, opening the panel puts the most recent one there, so that
 //!     its header is read and Touch ID can unlock it.
+//! 11. Over a hidden app, after Cmd+H or after Cmd+W hid it, the panel
+//!     unhides the app without activating it and keeps the main window off
+//!     the screen, and hides the app again when it closes
+//!     (`platform::activation`). Only when the app was hidden as the panel
+//!     opened: a visible, minimized or windowless app opens and closes the
+//!     panel without any of it. When the panel closes for the main window,
+//!     the app is not hidden again; the main window comes back instead.
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, Global, Pixels, Subscription, Task,
@@ -49,6 +56,7 @@ use gpui_component::Root;
 
 use crate::app::{AppState, VaultStatus};
 use crate::launch::{LaunchContext, LaunchError, LaunchHandle, LaunchTarget};
+use crate::platform::activation::{self, KeptOut};
 use crate::ui::vm::panel::PanelVm;
 
 pub mod locked;
@@ -72,6 +80,9 @@ struct PanelWindow {
     /// Launch files handed to SAP GUI, each removed after the cleanup time
     /// from the settings, or when the vault is locked. Drop = remove.
     launches: Vec<Task<()>>,
+    /// The app was hidden when the open window opened: the windows the
+    /// unhide brought back and the panel ordered out again.
+    kept_out: Option<KeptOut>,
     _state_changes: Subscription,
 }
 
@@ -93,6 +104,7 @@ fn panel(cx: &mut App) -> Option<(Entity<PanelVm>, Entity<AppState>)> {
         vm: vm.clone(),
         state: state.clone(),
         launches: Vec::new(),
+        kept_out: None,
         _state_changes: subscription,
     });
     Some((vm, state))
@@ -137,7 +149,9 @@ pub fn toggle(cx: &mut App) {
 }
 
 /// Opens the panel over whatever app is in front, without activating
-/// FerrisPass. A search from less than two minutes ago is still there.
+/// FerrisPass. A search from less than two minutes ago is still there. Over
+/// a hidden FerrisPass the app is unhidden without activation first, and the
+/// windows that brings back are ordered out again.
 pub fn open(cx: &mut App) {
     if is_open(cx) {
         return;
@@ -155,13 +169,24 @@ pub fn open(cx: &mut App) {
         vm.forget_if_stale(now);
         vm.refresh(state.read(cx));
     });
+    let kept_out = activation::app_is_hidden().then(|| {
+        activation::unhide_without_activation();
+        activation::order_out_app_windows()
+    });
     let opened = cx.open_window(window_options(cx), |window, cx| {
         let view = cx.new(|cx| PanelView::new(vm, state, window, cx));
         cx.global_mut::<PanelWindow>().view = Some(view.downgrade());
         cx.new(|cx| Root::new(view, window, cx))
     });
-    if let Ok(handle) = opened {
-        cx.global_mut::<PanelWindow>().handle = Some(handle.into());
+    match opened {
+        Ok(handle) => {
+            let panel = cx.global_mut::<PanelWindow>();
+            panel.handle = Some(handle.into());
+            panel.kept_out = kept_out;
+        }
+        // No panel to show: the app goes back to how it was.
+        Err(_) if kept_out.is_some() => activation::hide_app(cx),
+        Err(_) => {}
     }
 }
 
@@ -192,33 +217,53 @@ pub fn close(cx: &mut App) {
     if let Some(view) = view {
         view.update(cx, |view, _| view.locked.wipe());
     }
-    if let Some(handle) = forget_window(cx) {
+    if let Some((handle, kept_out)) = forget_window(cx) {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
+        if kept_out.is_some() {
+            activation::hide_app(cx);
+        }
     }
 }
 
 /// Closes the panel from inside its window, whose handle cannot be updated
 /// from there: Escape, Cmd+W, an action that hands over to another app, and
 /// the panel losing the keyboard. `PanelView::close` wipes what was typed
-/// while locked first.
+/// while locked first. An app that was hidden when the panel opened is
+/// hidden again.
 fn close_from(window: &mut Window, cx: &mut App) {
-    forget_window(cx);
+    let kept_out = forget_window(cx).and_then(|(_, kept_out)| kept_out);
     window.remove_window();
+    if kept_out.is_some() {
+        activation::hide_app(cx);
+    }
 }
 
-/// Takes the open window's handle and notes when the panel closed, so its
-/// search is kept for two minutes.
-fn forget_window(cx: &mut App) -> Option<AnyWindowHandle> {
+/// Closes the panel from inside its window for the main window, which the
+/// caller shows next. An app that was hidden when the panel opened stays
+/// unhidden, and the windows the panel ordered out come back.
+fn close_for_main_window(window: &mut Window, cx: &mut App) {
+    let kept_out = forget_window(cx).and_then(|(_, kept_out)| kept_out);
+    window.remove_window();
+    if let Some(kept_out) = kept_out {
+        activation::order_front(&kept_out);
+    }
+}
+
+/// Takes the open window's handle, and what the panel ordered out over a
+/// hidden app, and notes when the panel closed, so its search is kept for
+/// two minutes.
+fn forget_window(cx: &mut App) -> Option<(AnyWindowHandle, Option<KeptOut>)> {
     if !cx.has_global::<PanelWindow>() {
         return None;
     }
     let panel = cx.global_mut::<PanelWindow>();
     panel.view = None;
     let handle = panel.handle.take()?;
+    let kept_out = panel.kept_out.take();
     let vm = panel.vm.clone();
     let now = cx.background_executor().now();
     vm.update(cx, |vm, _| vm.remember(now));
-    Some(handle)
+    Some((handle, kept_out))
 }
 
 /// A non-activating panel that takes the keyboard, 680 by 460 points, in the
