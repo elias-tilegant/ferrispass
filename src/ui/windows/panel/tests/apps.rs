@@ -1,4 +1,5 @@
-//! The panel over the other apps: over a hidden FerrisPass.
+//! The panel over the other apps: over a hidden FerrisPass, and with an SAP
+//! client written as a spreadsheet leaves it.
 
 use gpui::TestAppContext;
 
@@ -118,4 +119,101 @@ fn activation_is_the_only_place_that_unhides_or_orders_windows() {
     for (file, code) in panel_sources() {
         assert!(!code.contains("cx.hide("), "{file} hides the app itself");
     }
+}
+
+// ------------------------------------------------------ the SAP client --
+
+/// An SAP system whose `SAP_CLIENT` is 1, as a spreadsheet leaves it: SAP
+/// GUI gets client 001, so the row names client 001, and "NHP 001" is its
+/// exact identifier.
+#[gpui::test]
+fn a_short_client_shows_and_ranks_as_the_launch_writes_it(cx: &mut TestAppContext) {
+    let app = open_app(
+        cx,
+        &[
+            entry("Nordhafen ERP")
+                .user("N.WEISS")
+                .password("sp-erp")
+                .field("SAP_SID", "NHP")
+                .field("SAP_HOST", "nhp.example")
+                .field("SAP_INSTANCE", "00")
+                .field("SAP_CLIENT", "1"),
+            entry("NHP 002").password("sp-other"),
+        ],
+    );
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "NHP 001");
+    let hit = app
+        .vm(cx)
+        .read_with(cx, |vm, _| vm.results().first().cloned())
+        .expect("a row");
+    assert_eq!(app.selected_title(cx).as_deref(), Some("Nordhafen ERP"));
+    assert!(hit.exact, "NHP 001 names it exactly");
+    let name = hit.parts.accessible_name();
+    assert!(
+        name.contains(&format!("{} 001", tr!("glossary.sap_client"))),
+        "{name}"
+    );
+    assert!(!name.contains(&format!("{} 1,", tr!("glossary.sap_client"))));
+}
+
+/// The footer names the client the launch writes, 001 for a `SAP_CLIENT` of
+/// 1, so signing in uses what the footer says.
+#[gpui::test]
+fn the_footer_names_the_client_the_launch_writes(cx: &mut TestAppContext) {
+    let app = open_app(
+        cx,
+        &[entry("Nordhafen ERP")
+            .user("N.WEISS")
+            .password("sp-erp")
+            .field("SAP_SID", "NHP")
+            .field("SAP_HOST", "nhp.example")
+            .field("SAP_INSTANCE", "00")
+            .field("SAP_CLIENT", " 1 ")],
+    );
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "nordhafen");
+    let words = app
+        .vm(cx)
+        .read_with(cx, |vm, _| vm.footer().main.map(|(_, words)| words));
+    assert_eq!(
+        words,
+        Some(tr!(
+            "quick.footer.sap_login",
+            sid = "NHP",
+            client = "001",
+            user = "N.WEISS"
+        ))
+    );
+}
+
+/// Two entries for NHP, one with `SAP_CLIENT` 1 and one with 001, stand
+/// for the same system, and the footer counts them.
+#[gpui::test]
+fn one_and_001_are_twins(cx: &mut TestAppContext) {
+    let app = open_app(
+        cx,
+        &[
+            entry("Nordhafen ERP")
+                .user("N.WEISS")
+                .password("sp-north")
+                .field("SAP_SID", "NHP")
+                .field("SAP_HOST", "nhp-north.example")
+                .field("SAP_INSTANCE", "00")
+                .field("SAP_CLIENT", "1"),
+            entry("Nordhafen ERP old")
+                .user("K.BRAUN")
+                .password("sp-south")
+                .field("SAP_SID", "NHP")
+                .field("SAP_HOST", "nhp-south.example")
+                .field("SAP_INSTANCE", "00")
+                .field("SAP_CLIENT", "001"),
+        ],
+    );
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "nordhafen");
+    let twins: Vec<usize> = app.vm(cx).read_with(cx, |vm, _| {
+        vm.results().iter().map(|hit| hit.twins).collect()
+    });
+    assert_eq!(twins, [2, 2]);
 }

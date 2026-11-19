@@ -51,7 +51,7 @@ use crate::app::registry::{
 use crate::app::unlock::locked_panel::{ReturnGate, exact_hit_takes_return_at_once};
 use crate::app::{AppState, VaultStatus};
 use crate::domain::VaultEntry;
-use crate::launch::sap::{KEY_CLIENT, KEY_USER};
+use crate::launch::sap::{KEY_CLIENT, KEY_USER, normalize_client};
 use crate::ui::ds::components::{
     ChipTone, FooterTone, ListSelection, ResultsDrawn, RowParts, VaultBadge, move_selection,
     select_by_number,
@@ -211,9 +211,13 @@ fn shown_login(sap: &SapSystem) -> Option<(&str, &str)> {
 /// Whether signing in to `entry` puts exactly `client` and `user` into SAP
 /// GUI's launch file. This is the rule `SapGuiMacLauncher::launch` in
 /// `src/launch/sap.rs` follows, read over every field, the protected ones
-/// too: the client from `SAP_CLIENT`, trimmed, or none at all; the user
-/// from `SAP_USER` unless it is empty, otherwise the entry's user name as
-/// it is. It only compares, so no value of a protected field leaves it.
+/// too: the client from `SAP_CLIENT`, trimmed, with a number shorter than
+/// three digits padded with zeros as the launch writes it
+/// (`normalize_client`), or none at all; the user from `SAP_USER` unless it
+/// is empty, otherwise the entry's user name as it is. The row's client
+/// comes through the same padding, so `SAP_CLIENT` 1 shows as 001 and
+/// compares as 001. It only compares, so no value of a protected field
+/// leaves it.
 fn signs_in_as(entry: &VaultEntry, client: &str, user: &str) -> bool {
     let field = |key: &str| {
         entry
@@ -222,7 +226,8 @@ fn signs_in_as(entry: &VaultEntry, client: &str, user: &str) -> bool {
             .find(|field| field.key == key)
             .map(|field| field.value.as_str())
     };
-    let launched_client = field(KEY_CLIENT).map_or("", str::trim);
+    let launched_client =
+        field(KEY_CLIENT).map_or_else(String::new, |value| normalize_client(value.trim()));
     let launched_user = field(KEY_USER)
         .filter(|value| !value.is_empty())
         .unwrap_or(entry.username.as_str());

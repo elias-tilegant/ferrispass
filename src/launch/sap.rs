@@ -195,8 +195,10 @@ fn resolve_instance_port(raw: &str) -> String {
 /// SAP clients are three digits, and SAP GUI compares them as text: `1`
 /// is not client `001`. Numeric values shorter than three digits get their
 /// leading zeros back (a spreadsheet or a hand-typed field often drops
-/// them); anything else passes through for SAP GUI to judge.
-fn normalize_client(raw: &str) -> String {
+/// them); anything else passes through for SAP GUI to judge. The entry
+/// kinds read `SAP_CLIENT` through it too, so a row, the search and the
+/// quick access footer name the client the launch writes.
+pub(crate) fn normalize_client(raw: &str) -> String {
     if !raw.is_empty() && raw.len() < 3 && raw.chars().all(|c| c.is_ascii_digit()) {
         format!("{raw:0>3}")
     } else {
