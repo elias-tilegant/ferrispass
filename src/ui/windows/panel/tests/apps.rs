@@ -311,7 +311,9 @@ fn the_panel_remembers_whether_the_app_was_hidden_and_hides_it_again(cx: &mut Te
 
 /// After the panel closed over the hidden app, the app comes back with its
 /// main window: a click in the Dock or Cmd+Tab, which unhide the app, bring
-/// the main window along, however the panel closed. And the next panel
+/// the main window along, whether Escape, Cmd+W, the shortcut or a click
+/// elsewhere closed the panel (for Lock everything, the test above holds the
+/// same order of calls). And the next panel
 /// over the hidden app finds the main window too, so Cmd+O there shows it.
 #[gpui::test]
 fn the_main_window_comes_back_with_the_app_after_the_panel_hid_it_again(cx: &mut TestAppContext) {

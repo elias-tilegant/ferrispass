@@ -8,7 +8,8 @@
 //!    while the app the user works in stays in front, and closing it removes
 //!    the window and activates nothing, so the keys go back to that app. The
 //!    one way out of the panel that brings FerrisPass forward is
-//!    `show_in_app` in `view.rs` (⌘O), on the user's word.
+//!    `show_in_app` in `view.rs` (⌘O and the commands that need the main
+//!    window, such as ⌘N or Settings), on the user's word.
 //! 2. Every copy goes through `ClipboardService::write_secret`, with the
 //!    clear timer from the settings. The panel knows no other way to the
 //!    pasteboard. A copy keeps the panel open; an action that hands over to
@@ -19,7 +20,8 @@
 //!    (`activity::touch(Panel)`); the shortcut that opens it counts in
 //!    `services::hotkeys`.
 //! 5. Cmd+W and Escape close the panel and nothing else: no vault is locked,
-//!    the app is not hidden, and the main window stays as it was. Cmd+M
+//!    a visible app is not hidden, and the main window stays as it was; over
+//!    a hidden app, rule 11 applies. Cmd+M
 //!    minimizes nothing while the panel is in front.
 //! 6. It closes when it loses the keyboard, as after a click elsewhere, and
 //!    when the vault is locked. Locking also forgets the search.
