@@ -606,11 +606,7 @@ impl IconButton {
     }
 
     #[cfg(test)]
-    pub(in crate::ui::ds) fn into_base(
-        self,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> gpui_base::Button {
+    pub(crate) fn into_base(self, window: &mut Window, cx: &mut App) -> gpui_base::Button {
         self.0.into_base(window, cx)
     }
 }

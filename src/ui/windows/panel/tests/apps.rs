@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{Focusable as _, Role, TestAppContext, VisualTestContext};
+use gpui::{Focusable as _, RenderOnce, Role, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::app::Overlay;
@@ -350,11 +350,15 @@ fn activation_is_the_only_place_that_unhides_or_orders_windows() {
 /// `PreviewParts` does not compile until it is read here; the badge shows
 /// the vault and nothing of the entry.
 ///
-/// The two copy buttons write their node only once the design system has
-/// turned them into GPUI's, which the panel's tests cannot reach, so they
-/// are read in the source of the panel's files, `src/ui/windows` and
-/// `src/ui/vm`. Those build exactly two `IconButton`s, both in `preview`,
-/// each with a literal id and a name from `tr!` with a literal key. No
+/// The two copy buttons are read as the design system hands them to GPUI
+/// (`IconButton::into_base`): each is a button named for what it copies,
+/// and neither the texts of its node nor the whole node, with every
+/// property it carries, hold the secret or the code, with VoiceOver and
+/// without. That reads the buttons `preview` builds, not what a later step
+/// does to them, so the source of the panel's files, `src/ui/windows` and
+/// `src/ui/vm`, is read as well. Those build exactly two `IconButton`s,
+/// both in `preview`, each with a literal id and a name from `tr!` with a
+/// literal key. No
 /// function there whose signature names `IconButton`, a name it is brought
 /// in under, or a struct, enum or alias there that holds one, such as
 /// `PreviewParts`, and no `impl` block for one of those, has a description,
@@ -375,7 +379,7 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
     for assistive in [false, true] {
         let state = app.state.clone();
         let model = model.clone();
-        let (texts, user, code) = probe::in_frame(cx, move |window, cx| {
+        let (texts, buttons, user, code) = probe::in_frame(cx, move |window, cx| {
             let (password, otp) = {
                 let state = state.read(cx);
                 (
@@ -413,15 +417,41 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
                 }
             };
             read(password.expect("the secret field").parts(window, cx));
-            // The copy buttons are read in the source, below.
-            let (ring, _copy_code) = ring.expect("the ring");
+            let (ring, copy_code) = ring.expect("the ring");
             read(ring.parts(window, cx));
-            let (user, _copy_user) = user.expect("the user line");
+            let (user, copy_user) = user.expect("the user line");
+            // The copy buttons as the design system hands them to GPUI: the
+            // texts of their nodes by name, and the whole node, which shows
+            // every property it carries, keys and numbers included.
+            let mut buttons = Vec::new();
+            let mut nodes = Vec::new();
+            for (name, button) in [("copy user", copy_user), ("copy code", copy_code)] {
+                let base = button.into_base(window, cx);
+                let part = probe::part(name, RenderOnce::render(base, window, cx));
+                buttons.push((part.role, part.node.label().map(str::to_string)));
+                nodes.push(format!("{name} node: {:?}", part.node));
+                read(vec![part]);
+            }
+            texts.extend(nodes);
             texts.push(format!("user line: {user}"));
-            (texts, user.to_string(), code)
+            (texts, buttons, user.to_string(), code)
         });
         assert_eq!(user, "petra.engel@example.com");
         assert!(!texts.is_empty(), "the parts were read");
+        assert_eq!(
+            buttons,
+            [
+                (
+                    Some(Role::Button),
+                    Some(tr!("action.copy_username.label").to_string())
+                ),
+                (
+                    Some(Role::Button),
+                    Some(tr!("action.copy_code.label").to_string())
+                ),
+            ],
+            "assistive {assistive}: the copy buttons, read as GPUI draws them"
+        );
         let mut forbidden = spellings(&code);
         forbidden.push(SENTINEL.to_string());
         forbidden.push("sp-p w-7Q x".to_string());
@@ -435,7 +465,7 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
         }
     }
 
-    // The copy buttons, in the source.
+    // The copy buttons, in the source as well.
     let sources = panel_sources();
     let carriers = button_carriers(&sources);
     let way = on_the_buttons_way(&sources, &carriers);
