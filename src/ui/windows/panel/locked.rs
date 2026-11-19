@@ -637,7 +637,7 @@ impl PanelView {
             .min_h(u(dimension::SPACE_24));
         let button = button.map(|button| match look.kind {
             Kind::NotSetUp => button.on_click(cx.listener(|view, _, window, cx| {
-                view.show_in_app(window, cx);
+                view.show_in_app(None, window, cx);
             })),
             _ => button.on_click(cx.listener(|view, _, window, cx| {
                 view.on_unlock_click(window, cx);

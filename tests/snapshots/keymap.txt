@@ -175,3 +175,4 @@ cmd-6	Panel > Input	ferrispass::PanelSelect
 cmd-7	Panel > Input	ferrispass::PanelSelect
 cmd-8	Panel > Input	ferrispass::PanelSelect
 cmd-9	Panel > Input	ferrispass::PanelSelect
+cmd-n	Panel	ferrispass::PanelNewEntry
