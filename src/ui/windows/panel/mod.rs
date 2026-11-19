@@ -333,9 +333,13 @@ fn start(target: LaunchTarget, context: LaunchContext<'_>) -> Result<LaunchHandl
     crate::launch::launch(target, context)
 }
 
-/// Unit tests never start SAP GUI: the launch is noted instead.
+/// Unit tests never start SAP GUI: the launch is noted instead. What the
+/// launch would refuse is refused here too, through the same renderer of
+/// the launch file, which starts nothing.
 #[cfg(test)]
 fn start(target: LaunchTarget, context: LaunchContext<'_>) -> Result<LaunchHandle, LaunchError> {
+    let password = context.password.ok_or(LaunchError::NoPassword)?;
+    crate::launch::sap::render_sapc_body("host", "3200", "", "", "", password, true)?;
     tests::note_launch(context.entry.id.clone(), context.password.is_some());
     Ok(LaunchHandle {
         temp_file: None,

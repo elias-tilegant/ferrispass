@@ -120,6 +120,7 @@ fn locked_app_with(cx: &mut TestAppContext, setup: Setup, api: FakeApi, titles: 
     KEY_TAKEN.with(|taken| taken.set(0));
     crate::autotype::hotkey::fake::reset();
     crate::platform::activation::fake::reset();
+    crate::ui::windows::panel::tests::apps::reset();
     let secure = cx.update(|cx| {
         gpui_component::init(cx);
         actions::init(cx);
@@ -1294,13 +1295,17 @@ fn return_waits_while_an_unlock_is_under_way(cx: &mut TestAppContext) {
     assert_eq!(search(cx), "sales");
 
     // Open, Return runs the main action of the entry it found: Salesforce
-    // has no address, so the footer says the website did not open.
+    // has no address, so the line above the search says the website did
+    // not open.
     cx.executor().advance_clock(locked_panel::RETURN_SETTLE);
     cx.run_until_parked();
     keys(cx, panel, "enter");
     let vm = cx.update(|cx| panel::for_test(cx).1).expect("the model");
-    let note = vm.read_with(cx, |vm, _| vm.footer().note);
-    assert_eq!(note, Some(tr!("quick.error.website_failed")));
+    let error = vm.read_with(cx, |vm, _| vm.error());
+    assert_eq!(
+        error.map(crate::ui::vm::panel::PanelError::text),
+        Some(tr!("quick.error.website_failed"))
+    );
 }
 
 /// Should the panel be key again while the prompt is still up, it takes

@@ -36,6 +36,12 @@
 //!   whole title or the SID and client of the system it names, in a vault
 //!   that was open before the search takes Return at once, unless it is a
 //!   production system.
+//! - Once something is typed, or a row is picked, the selected entry shows
+//!   in a preview next to the list ([`PanelVm::preview`]). The model holds
+//!   which entry and what of it may show; the password and the one-time code
+//!   are read by its id while the panel draws and are never kept here.
+//! - What failed stands in one line above the search ([`PanelError`]), set
+//!   by the action and gone with the next key. Its texts name no entry.
 //! - Nothing here writes to a log, and no text here holds a password or a
 //!   one-time code.
 
@@ -71,6 +77,10 @@ pub const MEMORY: Duration = Duration::from_secs(2 * 60);
 #[derive(Clone, PartialEq)]
 pub struct Hit {
     pub entry_id: String,
+    /// The entry's title, for the preview's heading.
+    pub title: SharedString,
+    /// The entry's user name field, which Cmd+Shift+C copies.
+    pub user: SharedString,
     pub parts: RowParts,
     pub kind: EntryKind,
     /// The chip after the title: the letters of an SAP system's role.
@@ -81,6 +91,7 @@ pub struct Hit {
     pub production: bool,
     pub url: UrlKind,
     pub has_username: bool,
+    pub has_password: bool,
     pub has_otp: bool,
     /// How many listed rows stand for the same system as this one, this one
     /// included: 1 for a row without a twin.
@@ -138,6 +149,8 @@ impl Hit {
         };
         Self {
             entry_id: entry.id.clone(),
+            title: shown.title.clone().into(),
+            user: shown.username.clone().into(),
             parts: row_parts(&shown, &kind, vault),
             production,
             chip,
@@ -146,6 +159,7 @@ impl Hit {
             badge: VaultBadge::Personal,
             url: UrlKind::of(&shown.url),
             has_username: !shown.username.trim().is_empty(),
+            has_password: shown.has_password,
             has_otp: shown.has_otp,
             twins,
             exact,
@@ -185,6 +199,7 @@ impl std::fmt::Debug for Hit {
             .field("entry_id", &self.entry_id)
             .field("production", &self.production)
             .field("has_username", &self.has_username)
+            .field("has_password", &self.has_password)
             .field("has_otp", &self.has_otp)
             .field("twins", &self.twins)
             .field("exact", &self.exact)
@@ -352,17 +367,13 @@ pub fn shown_fields(entry: &VaultEntry) -> VaultEntry {
     }
 }
 
-/// What the footer says after an action, until the selection or the query
-/// changes.
+/// What the footer says after a copy, until the selection or the query
+/// changes. What failed goes to the error line instead ([`PanelError`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FooterNote {
     CopiedPassword,
     CopiedUser,
     CopiedCode,
-    /// The password could not be copied, or the entry has none.
-    CopyFailed,
-    /// The website did not open: its address is not http or https.
-    WebsiteFailed,
 }
 
 impl FooterNote {
@@ -371,10 +382,69 @@ impl FooterNote {
             Self::CopiedPassword => tr!("quick.footer.copied.password"),
             Self::CopiedUser => tr!("quick.footer.copied.user"),
             Self::CopiedCode => tr!("quick.footer.copied.one_time_code"),
-            Self::CopyFailed => tr!("quick.error.copy_failed"),
-            Self::WebsiteFailed => tr!("quick.error.website_failed"),
         }
     }
+}
+
+/// What failed, as the line above the search says it. None of the texts
+/// names an entry, a host or a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelError {
+    /// The password could not be copied, or the entry has none.
+    CopyFailed,
+    /// The website did not open: its address is not http or https.
+    WebsiteFailed,
+    /// SAP GUI did not start for the entry.
+    SignInFailed,
+    /// SAP GUI cannot take the entry's password: the launch file cannot
+    /// carry one of its characters. Which one stays unsaid.
+    PasswordRefused,
+}
+
+impl PanelError {
+    pub fn text(self) -> SharedString {
+        match self {
+            Self::CopyFailed => tr!("quick.error.copy_failed"),
+            Self::WebsiteFailed => tr!("quick.error.website_failed"),
+            Self::SignInFailed => tr!("quick.error.sign_in_failed"),
+            Self::PasswordRefused => tr!("quick.error.password_refused"),
+        }
+    }
+}
+
+/// What the preview next to the list shows of the selected entry. The
+/// password and the one-time code are not here: the panel reads them by
+/// `entry_id` while it draws and never keeps them. No `Debug`: the title
+/// and the user name are an entry's.
+#[derive(Clone, PartialEq)]
+pub struct PreviewModel {
+    pub entry_id: String,
+    pub title: SharedString,
+    pub badge: VaultBadge,
+    /// The user name, shortened in the middle to [`USER_SHOWN`] characters.
+    pub user: Option<SharedString>,
+    pub has_password: bool,
+    pub has_code: bool,
+}
+
+/// The most characters of a user name the preview shows.
+pub const USER_SHOWN: usize = 28;
+
+/// `text` with its middle taken out once it is longer than `max`
+/// characters, so that its start and its end both show: a long e-mail
+/// address keeps its name and its domain.
+pub fn shortened_in_the_middle(text: &str, max: usize) -> SharedString {
+    let count = text.chars().count();
+    if count <= max || max < 3 {
+        return text.to_string().into();
+    }
+    let kept = max - 1;
+    let head = kept.div_ceil(2);
+    let tail = kept - head;
+    let mut shown: String = text.chars().take(head).collect();
+    shown.push('\u{2026}');
+    shown.extend(text.chars().skip(count - tail));
+    shown.into()
 }
 
 /// What the footer shows, decided here and drawn by `PanelFooter`. No
@@ -416,6 +486,8 @@ pub struct PanelVm {
     /// one only.
     parked_vaults: usize,
     footer_note: Option<FooterNote>,
+    /// What failed, for the line above the search.
+    error: Option<PanelError>,
     /// The vault was unlocked from the panel for this query, which was typed
     /// while it was locked: it was not open before the search.
     unlocked_for_query: bool,
@@ -433,6 +505,7 @@ impl std::fmt::Debug for PanelVm {
             .field("vault_open", &self.vault_name.is_some())
             .field("parked_vaults", &self.parked_vaults)
             .field("footer_note", &self.footer_note)
+            .field("error", &self.error)
             .field("unlocked_for_query", &self.unlocked_for_query)
             .finish_non_exhaustive()
     }
@@ -450,6 +523,7 @@ impl Default for PanelVm {
             vault_name: None,
             parked_vaults: 0,
             footer_note: None,
+            error: None,
             unlocked_for_query: false,
         }
     }
@@ -615,10 +689,68 @@ impl PanelVm {
         self.footer_note = Some(note);
     }
 
+    /// Shows `error` in the line above the search until the next key.
+    pub fn fail(&mut self, error: PanelError) {
+        self.error = Some(error);
+    }
+
+    /// What the line above the search says, if anything failed.
+    pub fn error(&self) -> Option<PanelError> {
+        self.error
+    }
+
+    /// A key was pressed: the line above the search goes. Says whether it
+    /// was there.
+    pub fn clear_error(&mut self) -> bool {
+        self.error.take().is_some()
+    }
+
+    /// The search names nothing in the open vault: the panel says so, with
+    /// the vault's name.
+    pub fn no_match(&self) -> bool {
+        self.vault_name.is_some() && !self.query.trim().is_empty() && self.results.is_empty()
+    }
+
+    /// The preview of the selected entry, once something is typed or the
+    /// row was picked; `None` from an empty search with a row that only
+    /// came first.
+    pub fn preview(&self) -> Option<PreviewModel> {
+        if self.query.trim().is_empty() && !self.explicit {
+            return None;
+        }
+        let hit = self.selected()?;
+        Some(PreviewModel {
+            entry_id: hit.entry_id.clone(),
+            title: hit.title.clone(),
+            badge: hit.badge.clone(),
+            user: (!hit.user.trim().is_empty())
+                .then(|| shortened_in_the_middle(hit.user.trim(), USER_SHOWN)),
+            has_password: hit.has_password,
+            has_code: hit.has_otp,
+        })
+    }
+
+    /// What the command table's availability rules need to know about the
+    /// panel now.
+    fn command_ctx(&self) -> CommandCtx {
+        CommandCtx {
+            locked: self.vault_name.is_none(),
+            query_empty: self.query.trim().is_empty(),
+            selection: self.selected().map(|hit| Selection {
+                kind: hit.kind_for_the_production_rule(),
+                explicit: self.explicit,
+                url: hit.url,
+                has_otp: hit.has_otp,
+                has_username: hit.has_username,
+            }),
+        }
+    }
+
     /// The panel closed at `now`.
     pub fn remember(&mut self, now: Instant) {
         self.remembered_at = Some(now);
         self.footer_note = None;
+        self.error = None;
     }
 
     /// The panel opens at `now`: a search older than [`MEMORY`] is
@@ -662,17 +794,7 @@ impl PanelVm {
             };
         };
         let kind = hit.selected_kind();
-        let ctx = CommandCtx {
-            locked: false,
-            query_empty: self.query.trim().is_empty(),
-            selection: Some(Selection {
-                kind: hit.kind_for_the_production_rule(),
-                explicit: self.explicit,
-                url: hit.url,
-                has_otp: hit.has_otp,
-                has_username: hit.has_username,
-            }),
-        };
+        let ctx = self.command_ctx();
         let main_action = registry::primary_command(&kind);
         let returns = registry::command(CommandId::ENTRY_PRIMARY)
             .map_or(Enablement::Hidden, |spec| (spec.enabled)(&ctx));

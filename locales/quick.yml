@@ -104,6 +104,14 @@ quick:
     copy_failed:
       en: The password couldn't be copied.
       de: Das Passwort ließ sich nicht kopieren.
+    sign_in_failed:
+      en: SAP GUI didn't start.
+      de: SAP GUI ließ sich nicht starten.
+    # A character of the password can't go into SAP GUI's launch file.
+    # The sentence never says which one.
+    password_refused:
+      en: SAP GUI doesn't take this password.
+      de: SAP GUI nimmt dieses Passwort nicht an.
   # Above the search field: the vault the panel searches.
   header:
     searching_vault:
