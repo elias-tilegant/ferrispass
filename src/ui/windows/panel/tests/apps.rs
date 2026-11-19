@@ -44,8 +44,9 @@ pub(crate) fn reset() {
     OTP_TICKS.set(0);
 }
 
-/// A password the tests look for everywhere it must not be.
-const SECRET: &str = "sp-pw-7Qx";
+/// The password of the web login, which the tests look for everywhere it
+/// must not be.
+const SENTINEL: &str = "sp-pw-7Qx";
 
 /// A one-time code secret; the code itself changes every 30 seconds.
 const OTP: &str = "otpauth://totp/X?secret=JBSWY3DPEHPK3PXP";
@@ -54,7 +55,7 @@ const OTP: &str = "otpauth://totp/X?secret=JBSWY3DPEHPK3PXP";
 fn sales() -> Fixture {
     entry("Salesforce")
         .user("petra.engel@example.com")
-        .password(SECRET)
+        .password(SENTINEL)
         .url("https://login.salesforce.com")
         .field("otp", OTP)
 }
@@ -270,13 +271,13 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
         assert_eq!(user, "petra.engel@example.com");
         assert!(!texts.is_empty(), "the parts were read");
         let mut forbidden = spellings(&code);
-        forbidden.push(SECRET.to_string());
+        forbidden.push(SENTINEL.to_string());
         forbidden.push("sp-p w-7Q x".to_string());
         for text in &texts {
-            for secret in &forbidden {
+            for sentinel in &forbidden {
                 assert!(
-                    !text.contains(secret.as_str()),
-                    "assistive {assistive}: {secret} in {text}"
+                    !text.contains(sentinel.as_str()),
+                    "assistive {assistive}: {sentinel} in {text}"
                 );
             }
         }
@@ -416,7 +417,7 @@ fn preview_copies_go_through_the_service_and_keep_the_panel_open(cx: &mut TestAp
     let note = |cx: &mut TestAppContext| vm.read_with(cx, |vm, _| vm.footer().note);
 
     click(cx, panel, "fp-secret-value");
-    assert_eq!(app.copied(), (1, Some(SECRET.to_string())));
+    assert_eq!(app.copied(), (1, Some(SENTINEL.to_string())));
     assert!(panel_is_open(cx), "a copy keeps the panel open");
     assert_eq!(note(cx), Some(tr!("quick.footer.copied.password")));
     assert!(
@@ -538,8 +539,8 @@ fn a_failed_website_shows_a_carmine_line_without_the_title(cx: &mut TestAppConte
     );
     let texts = [node.label(), node.value(), node.description()];
     for text in texts.into_iter().flatten() {
-        for secret in ["Nordhafen", "Portal", "intranet.example"] {
-            assert!(!text.contains(secret), "{secret} in {text}");
+        for word in ["Nordhafen", "Portal", "intranet.example"] {
+            assert!(!text.contains(word), "{word} in {text}");
         }
     }
     assert!(
@@ -574,13 +575,13 @@ fn the_carmine_line_clears_on_the_next_key(cx: &mut TestAppContext) {
 /// GUI did not start.
 #[gpui::test]
 fn a_refused_sign_in_shows_a_carmine_line_and_keeps_the_panel_open(cx: &mut TestAppContext) {
-    const PASSWORD: &str = "sp&pw-7Qx";
+    const REFUSED: &str = "sp&pw-7Qx";
     let app = open_app(
         cx,
         &[
             entry("NHQ 100")
                 .user("N.WEISS")
-                .password(PASSWORD)
+                .password(REFUSED)
                 .field("SAP_HOST", "nhq.example")
                 .field("SAP_INSTANCE", "00")
                 .field("SAP_CLIENT", "100"),
@@ -619,8 +620,8 @@ fn a_refused_sign_in_shows_a_carmine_line_and_keeps_the_panel_open(cx: &mut Test
             .into_iter()
             .flatten()
         {
-            for secret in [PASSWORD, "&", "NHQ", "NHS", "N.WEISS", "nhq.example"] {
-                assert!(!text.contains(secret), "{query}: {secret} in {text}");
+            for word in [REFUSED, "&", "NHQ", "NHS", "N.WEISS", "nhq.example"] {
+                assert!(!text.contains(word), "{query}: {word} in {text}");
             }
         }
         assert!(drawn(cx, panel, "fp-panel-error"), "{query}");
