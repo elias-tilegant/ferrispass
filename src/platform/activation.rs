@@ -13,11 +13,16 @@
 //!    app and are not in the Dock. In FerrisPass that is the main window. It
 //!    runs before the panel's own window exists, so the panel is never one
 //!    of them.
-//! 4. When the panel closes, [`hide_app`] hides the app again. When it closes
-//!    because the user asked for the main window (Cmd+O, Unlock, New, the
-//!    menu's Settings), the app is not hidden again: [`order_front`] puts
-//!    back the windows step 3 took away, and the panel activates the app as
-//!    it always does for that.
+//! 4. When the panel has closed, [`order_front`] puts back the windows step
+//!    3 took away, and [`hide_app`] hides the app again right after. An
+//!    unhide brings back only the windows that were on screen when the app
+//!    was hidden, so a window still ordered out at the hide would stay off
+//!    the screen when the user brings the app back with a click in the Dock
+//!    or Cmd+Tab, and the next panel over the hidden app would find it
+//!    missing too. When the panel closes because the user asked for the
+//!    main window (Cmd+O, Unlock, New, the menu's Settings), the app is not
+//!    hidden again: [`order_front`] puts back the windows, and the panel
+//!    activates the app as it always does for that.
 //!
 //! A visible, minimized or windowless app needs none of this: there the panel
 //! opens and closes as it always does.
@@ -31,8 +36,10 @@
 //! turn on for their own use of the crate.
 //!
 //! Tests put a fake in place of AppKit for the whole test build
-//! (`fake::hide_for_test`): the fake counts the calls, and hiding the app,
-//! which the test platform cannot do, only marks it hidden.
+//! (`fake::hide_for_test`): the fake notes the calls in the order they come,
+//! and in place of hiding the app, which the test platform cannot do, it
+//! keeps AppKit's rule for which windows a hide takes along and an unhide
+//! brings back.
 
 #![forbid(unsafe_code)]
 
@@ -146,19 +153,28 @@ use fake as system;
 
 /// The stand-in for AppKit in the test build. Its state belongs to the
 /// thread, so each test sees only its own calls.
+///
+/// It notes each call in the order it comes, and keeps AppKit's rule for a
+/// hidden app as far as the panel meets it: hiding takes the app's windows
+/// that are on the screen off it, and unhiding brings back exactly those,
+/// not a window that was already ordered out when the app was hidden. The
+/// app has one window, the main window, on the screen until a test hides it.
 #[cfg(test)]
 pub(crate) mod fake {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use gpui::App;
 
-    /// How often each step ran.
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub(crate) struct Calls {
-        pub(crate) unhides: usize,
-        pub(crate) order_outs: usize,
-        pub(crate) order_fronts: usize,
-        pub(crate) hides: usize,
+    /// One call into `activation`, as the fake noted it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Step {
+        Unhide,
+        OrderOut,
+        OrderFront,
+        /// Hiding the app, with the number of windows GPUI listed then.
+        Hide {
+            windows: usize,
+        },
     }
 
     /// The number the fake gives the main window.
@@ -166,30 +182,70 @@ pub(crate) mod fake {
 
     thread_local! {
         static HIDDEN: Cell<bool> = const { Cell::new(false) };
-        static CALLS: Cell<Calls> = const {
-            Cell::new(Calls { unhides: 0, order_outs: 0, order_fronts: 0, hides: 0 })
-        };
+        /// The app's windows on the screen.
+        static ON_SCREEN: RefCell<Vec<isize>> = RefCell::new(vec![MAIN_WINDOW]);
+        /// The windows the last hide took off the screen.
+        static BACK_ON_UNHIDE: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
+        static STEPS: RefCell<Vec<Step>> = const { RefCell::new(Vec::new()) };
     }
 
-    /// A visible app and no calls, as at the start of a test.
+    /// A visible app with its main window on the screen, and no calls, as
+    /// at the start of a test.
     pub(crate) fn reset() {
         HIDDEN.set(false);
-        CALLS.set(Calls::default());
+        ON_SCREEN.set(vec![MAIN_WINDOW]);
+        BACK_ON_UNHIDE.set(Vec::new());
+        STEPS.set(Vec::new());
     }
 
-    /// The app is hidden now, as after Cmd+H.
+    /// The user hides the app, as Cmd+H does.
     pub(crate) fn hide_for_test() {
-        HIDDEN.set(true);
+        hide();
     }
 
-    pub(crate) fn calls() -> Calls {
-        CALLS.get()
+    /// The user brings the hidden app back, as a click in the Dock or
+    /// Cmd+Tab does.
+    pub(crate) fn unhide_for_test() {
+        unhide();
     }
 
-    fn count(step: impl FnOnce(&mut Calls)) {
-        let mut calls = CALLS.get();
-        step(&mut calls);
-        CALLS.set(calls);
+    /// The calls so far, in the order they came.
+    pub(crate) fn steps() -> Vec<Step> {
+        STEPS.with_borrow(Clone::clone)
+    }
+
+    /// The app's windows on the screen; none while the app is hidden.
+    pub(crate) fn on_screen() -> Vec<isize> {
+        ON_SCREEN.with_borrow(Clone::clone)
+    }
+
+    fn note(step: Step) {
+        STEPS.with_borrow_mut(|steps| steps.push(step));
+    }
+
+    /// AppKit's hide: the windows on the screen go off it, and are the ones
+    /// the next unhide brings back.
+    fn hide() {
+        if !HIDDEN.replace(true) {
+            BACK_ON_UNHIDE.set(ON_SCREEN.take());
+        }
+    }
+
+    fn unhide() {
+        if HIDDEN.replace(false) {
+            let back = BACK_ON_UNHIDE.take();
+            put_on_screen(&back);
+        }
+    }
+
+    fn put_on_screen(windows: &[isize]) {
+        ON_SCREEN.with_borrow_mut(|shown| {
+            for window in windows {
+                if !shown.contains(window) {
+                    shown.push(*window);
+                }
+            }
+        });
     }
 
     pub(super) fn app_is_hidden() -> bool {
@@ -197,21 +253,24 @@ pub(crate) mod fake {
     }
 
     pub(super) fn unhide_without_activation() {
-        HIDDEN.set(false);
-        count(|calls| calls.unhides += 1);
+        note(Step::Unhide);
+        unhide();
     }
 
     pub(super) fn order_out_app_windows() -> Vec<isize> {
-        count(|calls| calls.order_outs += 1);
-        vec![MAIN_WINDOW]
+        note(Step::OrderOut);
+        ON_SCREEN.take()
     }
 
-    pub(super) fn order_front(_: &[isize]) {
-        count(|calls| calls.order_fronts += 1);
+    pub(super) fn order_front(kept: &[isize]) {
+        note(Step::OrderFront);
+        put_on_screen(kept);
     }
 
-    pub(super) fn hide_app(_: &mut App) {
-        HIDDEN.set(true);
-        count(|calls| calls.hides += 1);
+    pub(super) fn hide_app(cx: &mut App) {
+        note(Step::Hide {
+            windows: cx.windows().len(),
+        });
+        hide();
     }
 }

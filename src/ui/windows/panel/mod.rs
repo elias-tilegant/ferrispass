@@ -42,11 +42,13 @@
 //!     its header is read and Touch ID can unlock it.
 //! 11. Over a hidden app, after Cmd+H or after Cmd+W hid it, the panel
 //!     unhides the app without activating it and keeps the main window off
-//!     the screen, and hides the app again when it closes
-//!     (`platform::activation`). Only when the app was hidden as the panel
-//!     opened: a visible, minimized or windowless app opens and closes the
-//!     panel without any of it. When the panel closes for the main window,
-//!     the app is not hidden again; the main window comes back instead.
+//!     the screen (`platform::activation`). Once the panel's window is gone,
+//!     the main window goes back and the app is hidden again, so that the
+//!     app comes back with its main window the next time it is unhidden.
+//!     Only when the app was hidden as the panel opened: a visible,
+//!     minimized or windowless app opens and closes the panel without any
+//!     of it. When the panel closes for the main window, the app is not
+//!     hidden again; the main window comes back instead.
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, Global, Pixels, Subscription, Task,
@@ -196,8 +198,11 @@ pub fn open(cx: &mut App) {
             panel.kept_out = kept_out;
         }
         // No panel to show: the app goes back to how it was.
-        Err(_) if kept_out.is_some() => activation::hide_app(cx),
-        Err(_) => {}
+        Err(_) => {
+            if let Some(kept_out) = kept_out {
+                hide_again(&kept_out, cx);
+            }
+        }
     }
 }
 
@@ -230,8 +235,8 @@ pub fn close(cx: &mut App) {
     }
     if let Some((handle, kept_out)) = forget_window(cx) {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
-        if kept_out.is_some() {
-            activation::hide_app(cx);
+        if let Some(kept_out) = kept_out {
+            hide_again(&kept_out, cx);
         }
     }
 }
@@ -240,12 +245,13 @@ pub fn close(cx: &mut App) {
 /// from there: Escape, Cmd+W, an action that hands over to another app, and
 /// the panel losing the keyboard. `PanelView::close` wipes what was typed
 /// while locked first. An app that was hidden when the panel opened is
-/// hidden again.
+/// hidden again once GPUI has removed the panel's window, which happens
+/// when the window's update ends.
 fn close_from(window: &mut Window, cx: &mut App) {
     let kept_out = forget_window(cx).and_then(|(_, kept_out)| kept_out);
     window.remove_window();
-    if kept_out.is_some() {
-        activation::hide_app(cx);
+    if let Some(kept_out) = kept_out {
+        cx.defer(move |cx| hide_again(&kept_out, cx));
     }
 }
 
@@ -258,6 +264,15 @@ fn close_for_main_window(window: &mut Window, cx: &mut App) {
     if let Some(kept_out) = kept_out {
         activation::order_front(&kept_out);
     }
+}
+
+/// Hides the app again after the panel showed over it while it was hidden.
+/// The windows the panel ordered out go back first, so that the hide takes
+/// them along: an unhide, a click in the Dock or Cmd+Tab, brings back only
+/// the windows that were on the screen when the app was hidden.
+fn hide_again(kept_out: &KeptOut, cx: &mut App) {
+    activation::order_front(kept_out);
+    activation::hide_app(cx);
 }
 
 /// Takes the open window's handle, and what the panel ordered out over a

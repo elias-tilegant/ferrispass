@@ -11,6 +11,7 @@ use gpui::{Focusable as _, RenderOnce, Role, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::app::Overlay;
+use crate::platform::activation::fake::{MAIN_WINDOW, Step};
 use crate::platform::activation::{self, fake as hidden};
 use crate::ui::ds::components::CopyState;
 use crate::ui::ds::components::Shortcut;
@@ -228,62 +229,125 @@ fn on_the_buttons_way<'a>(
 
 // ------------------------------------------------------ the hidden app --
 
-/// Over a hidden app the panel unhides it without activating it and orders
-/// the main window out, once each, and hides the app again when it closes,
-/// however it closes. Over a visible app it does none of the three.
+/// Closes the open panel `panel` one of the ways the panel closes over a
+/// hidden app without asking for the main window.
+fn close_panel(app: &Harness, cx: &mut TestAppContext, panel: AnyWindowHandle, close: &str) {
+    match close {
+        "shortcut" => cx.update(toggle),
+        "click elsewhere" => {
+            activate(cx, panel);
+            activate(cx, app.main);
+        }
+        "lock" => app.state.update(cx, |state, cx| {
+            let _ = state.lock_vault(cx);
+        }),
+        keystroke => {
+            activate(cx, panel);
+            keys(cx, panel, keystroke);
+        }
+    }
+    cx.run_until_parked();
+    assert!(!panel_is_open(cx), "{close}: the panel closed");
+}
+
+/// Over a hidden app the panel first unhides it without activating it and
+/// then orders out the main window the unhide brought back, once each and
+/// in that order. When it closes, however it closes, it puts the main
+/// window back and then hides the app again, once each and only once GPUI
+/// lists the panel's window no more; while the app is hidden, none of its
+/// windows is on the screen. Over a visible app it does none of it.
 #[gpui::test]
 fn the_panel_remembers_whether_the_app_was_hidden_and_hides_it_again(cx: &mut TestAppContext) {
     let app = open_app(cx, &sample());
-    let none = hidden::Calls::default();
+    let windows = cx.update(|cx| cx.windows().len());
 
     let panel = app.open_panel(cx);
     activate(cx, panel);
     keys(cx, panel, "escape");
     assert!(!panel_is_open(cx));
-    assert_eq!(hidden::calls(), none, "a visible app: nothing extra");
+    assert_eq!(
+        hidden::steps(),
+        Vec::<Step>::new(),
+        "a visible app: nothing extra"
+    );
 
     for close in ["escape", "cmd-w", "shortcut", "click elsewhere", "lock"] {
         hidden::reset();
         hidden::hide_for_test();
         let panel = app.open_panel(cx);
-        let opened = hidden::calls();
         assert_eq!(
-            (opened.unhides, opened.order_outs, opened.hides),
-            (1, 1, 0),
-            "{close}: opening over the hidden app"
+            hidden::steps(),
+            [Step::Unhide, Step::OrderOut],
+            "{close}: opening over the hidden app unhides it, then orders the main window out"
         );
         assert!(!activation::app_is_hidden(), "{close}: unhidden to show");
-        match close {
-            "shortcut" => cx.update(toggle),
-            "click elsewhere" => {
-                activate(cx, panel);
-                activate(cx, app.main);
-            }
-            "lock" => app.state.update(cx, |state, cx| {
-                let _ = state.lock_vault(cx);
-            }),
-            keystroke => {
-                activate(cx, panel);
-                keys(cx, panel, keystroke);
-            }
-        }
-        cx.run_until_parked();
-        assert!(!panel_is_open(cx), "{close}: the panel closed");
         assert_eq!(
-            hidden::calls(),
-            hidden::Calls {
-                unhides: 1,
-                order_outs: 1,
-                order_fronts: 0,
-                hides: 1,
-            },
-            "{close}: closing hides the app again, once"
+            hidden::on_screen(),
+            Vec::<isize>::new(),
+            "{close}: the main window stays off the screen"
+        );
+        close_panel(&app, cx, panel, close);
+        assert_eq!(
+            hidden::steps(),
+            [
+                Step::Unhide,
+                Step::OrderOut,
+                Step::OrderFront,
+                Step::Hide { windows },
+            ],
+            "{close}: closing puts the main window back, then hides the app once the panel's window is gone"
         );
         assert!(activation::app_is_hidden(), "{close}: hidden again");
+        assert_eq!(
+            hidden::on_screen(),
+            Vec::<isize>::new(),
+            "{close}: no window on the screen while hidden"
+        );
         if close == "lock" {
             break;
         }
     }
+}
+
+/// After the panel closed over the hidden app, the app comes back with its
+/// main window: a click in the Dock or Cmd+Tab, which unhide the app, bring
+/// the main window along, however the panel closed. And the next panel
+/// over the hidden app finds the main window too, so Cmd+O there shows it.
+#[gpui::test]
+fn the_main_window_comes_back_with_the_app_after_the_panel_hid_it_again(cx: &mut TestAppContext) {
+    let app = open_app(cx, &sample());
+    for close in ["escape", "cmd-w", "shortcut", "click elsewhere"] {
+        hidden::reset();
+        hidden::hide_for_test();
+        let panel = app.open_panel(cx);
+        close_panel(&app, cx, panel, close);
+        hidden::unhide_for_test();
+        assert_eq!(
+            hidden::on_screen(),
+            [MAIN_WINDOW],
+            "{close}: the app comes back with its main window"
+        );
+    }
+
+    hidden::reset();
+    hidden::hide_for_test();
+    let panel = app.open_panel(cx);
+    close_panel(&app, cx, panel, "escape");
+    let panel = app.open_panel(cx);
+    assert_eq!(
+        hidden::on_screen(),
+        Vec::<isize>::new(),
+        "the second panel keeps the main window off the screen as well"
+    );
+    type_into(cx, panel, "webmail");
+    keys(cx, panel, "cmd-o");
+    assert!(!panel_is_open(cx));
+    assert!(!activation::app_is_hidden());
+    assert_eq!(
+        hidden::on_screen(),
+        [MAIN_WINDOW],
+        "Cmd+O in the second panel shows the main window"
+    );
 }
 
 /// Cmd+O over a hidden app: the user asked for the main window, so the app
@@ -297,15 +361,11 @@ fn the_main_window_comes_back_when_the_panel_closes_for_it(cx: &mut TestAppConte
     keys(cx, panel, "cmd-o");
     assert!(!panel_is_open(cx));
     assert_eq!(
-        hidden::calls(),
-        hidden::Calls {
-            unhides: 1,
-            order_outs: 1,
-            order_fronts: 1,
-            hides: 0,
-        }
+        hidden::steps(),
+        [Step::Unhide, Step::OrderOut, Step::OrderFront]
     );
     assert!(!activation::app_is_hidden());
+    assert_eq!(hidden::on_screen(), [MAIN_WINDOW]);
 }
 
 /// The panel unhides, orders windows out and hides the app only through
