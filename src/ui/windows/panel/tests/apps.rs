@@ -835,6 +835,14 @@ fn menu_open_is_set_while_the_popover_shows(cx: &mut TestAppContext) {
         }
     });
     assert_eq!(expanded, Some(true));
+    let view = squeezed(&source_of("src/ui/windows/panel/view.rs"));
+    let render = function(&view, "fnrender(&mutself");
+    assert!(
+        render.contains("(error,menu_open,commands)=")
+            && render.contains("vm.menu_open()")
+            && render.contains(".child(footer.menu_open(menu_open))"),
+        "render does not tell the footer that the menu is open: {render}"
+    );
     let search_focused = panel
         .update(cx, |_, window, cx| {
             let view = view_for_test(cx).expect("the view");
