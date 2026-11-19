@@ -97,6 +97,135 @@ fn spellings(digits: &str) -> Vec<String> {
     vec![digits.to_string(), grouped(3), grouped(2)]
 }
 
+fn in_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `code` names `word` as a whole word.
+fn names(code: &str, word: &str) -> bool {
+    code.match_indices(word).any(|(at, _)| {
+        !code[..at].ends_with(in_word) && !code[at + word.len()..].starts_with(in_word)
+    })
+}
+
+/// Where `keyword` starts in `code` and is not the end of a longer word.
+fn starts_of(code: &str, keyword: &str) -> Vec<usize> {
+    code.match_indices(keyword)
+        .filter(|(at, _)| !code[..*at].ends_with(in_word))
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// The name that starts `code`.
+fn leading_name(code: &str) -> String {
+    code.trim_start()
+        .chars()
+        .take_while(|c| in_word(*c))
+        .collect()
+}
+
+/// The types of the panel's files that are or hold a copy button:
+/// `IconButton`, each name it is brought in under with `as`, and each
+/// struct, enum, union or alias whose definition names one of those, until
+/// no new one turns up.
+fn button_carriers(sources: &[(String, String)]) -> Vec<String> {
+    let mut carriers = vec!["IconButton".to_string()];
+    loop {
+        let known = carriers.len();
+        for (_, code) in sources {
+            for keyword in ["struct ", "enum ", "union ", "type "] {
+                for at in starts_of(code, keyword) {
+                    let rest = &code[at + keyword.len()..];
+                    let name = leading_name(rest);
+                    let definition = match (rest.find(';'), rest.find('{')) {
+                        (Some(end), Some(open)) if end < open => &rest[..end],
+                        (Some(end), None) => &rest[..end],
+                        (_, Some(_)) => probe::braced(rest),
+                        (None, None) => rest,
+                    };
+                    if !name.is_empty()
+                        && !carriers.contains(&name)
+                        && carriers.iter().any(|carrier| names(definition, carrier))
+                    {
+                        carriers.push(name);
+                    }
+                }
+            }
+            for carrier in carriers.clone() {
+                for at in starts_of(code, &format!("{carrier} as ")) {
+                    let name = leading_name(&code[at + carrier.len() + " as ".len()..]);
+                    if !name.is_empty() && !carriers.contains(&name) {
+                        carriers.push(name);
+                    }
+                }
+            }
+        }
+        if carriers.len() == known {
+            return carriers;
+        }
+    }
+}
+
+/// Where the signature that starts `code` ends: the offset of the brace
+/// that opens its body, or `None` for a declaration without one. Brackets
+/// and parentheses are skipped, so `[u8; 4]` ends nothing.
+fn body_start(code: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, c) in code.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            '{' if depth == 0 => return Some(at),
+            ';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Every function and `impl` block of the panel's files a copy button can
+/// pass through: a `fn` whose signature names one of `carriers`, and an
+/// `impl` whose header does. Each comes with a label, its file and its
+/// header, and its body.
+fn on_the_buttons_way<'a>(
+    sources: &'a [(String, String)],
+    carriers: &[String],
+) -> Vec<(String, &'a str)> {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/");
+    let carries = |text: &str| carriers.iter().any(|carrier| names(text, carrier));
+    let mut way = Vec::new();
+    for (file, code) in sources {
+        let file = file.strip_prefix(root).unwrap_or(file);
+        for at in starts_of(code, "fn ") {
+            let rest = &code[at..];
+            let Some(open) = body_start(rest) else {
+                continue;
+            };
+            let header = &rest[..open];
+            if carries(header) {
+                let name = header.split('(').next().unwrap_or(header).trim();
+                way.push((format!("{file}: {name}("), probe::braced(&rest[open..])));
+            }
+        }
+        for at in starts_of(code, "impl") {
+            let line = code[..at].rfind('\n').map_or(0, |end| end + 1);
+            let before = code[line..at].trim();
+            let item = before.is_empty() || before == "unsafe";
+            let rest = &code[at..];
+            let follows = rest["impl".len()..].starts_with(|c: char| c.is_whitespace() || c == '<');
+            let Some(open) = rest.find('{').filter(|_| item && follows) else {
+                continue;
+            };
+            let header = &rest[..open];
+            if carries(header) {
+                let header = header.split_whitespace().collect::<Vec<_>>().join(" ");
+                way.push((format!("{file}: {header}"), probe::braced(&rest[open..])));
+            }
+        }
+    }
+    way
+}
+
 // ------------------------------------------------------ the hidden app --
 
 /// Over a hidden app the panel unhides it without activating it and orders
@@ -223,11 +352,15 @@ fn activation_is_the_only_place_that_unhides_or_orders_windows() {
 ///
 /// The two copy buttons write their node only once the design system has
 /// turned them into GPUI's, which the panel's tests cannot reach, so they
-/// are read in the source. `preview` builds each with a literal id, the copy
-/// glyph and a name from `tr!` with a literal key, and neither `preview`
-/// nor `assemble_preview`, which puts the buttons in place, gives anything
-/// a description, an accessibility id, a tooltip or an `aria_` property;
-/// `render_open` hands what `preview` builds straight to `assemble_preview`.
+/// are read in the source of the panel's files, `src/ui/windows` and
+/// `src/ui/vm`. Those build exactly two `IconButton`s, both in `preview`,
+/// each with a literal id and a name from `tr!` with a literal key. No
+/// function there whose signature names `IconButton`, a name it is brought
+/// in under, or a struct, enum or alias there that holds one, such as
+/// `PreviewParts`, and no `impl` block for one of those, has a description,
+/// an accessibility id, a tooltip or an `aria_` property in its body;
+/// `preview` and `assemble_preview` are among them. `render_open` hands
+/// what `preview` builds straight to `assemble_preview`.
 #[gpui::test]
 fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestAppContext) {
     let app = open_app(cx, &[sales()]);
@@ -303,10 +436,18 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
     }
 
     // The copy buttons, in the source.
-    let view = source_of("src/ui/windows/panel/view.rs");
-    let mut buttons = Vec::new();
-    for start in ["fn preview(", "fn assemble_preview("] {
-        let body = function(&view, start);
+    let sources = panel_sources();
+    let carriers = button_carriers(&sources);
+    let way = on_the_buttons_way(&sources, &carriers);
+    let read: Vec<&str> = way.iter().map(|(label, _)| label.as_str()).collect();
+    for start in ["view.rs: fn preview(", "view.rs: fn assemble_preview("] {
+        assert!(
+            read.iter().any(|label| label.ends_with(start)),
+            "the scan reads {start}: {read:?}"
+        );
+    }
+    let mut handed = Vec::new();
+    for (label, body) in &way {
         for call in [
             ".description(",
             "accessibility_",
@@ -314,13 +455,31 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
             "aria_",
             "a11y_",
         ] {
-            assert!(!body.contains(call), "{start} hands a button {call}");
-        }
-        for (at, call) in body.match_indices("IconButton::new(") {
-            buttons.push(probe::call_arguments(body, at + call.len() - 1));
+            if body.contains(call) {
+                handed.push(format!("{label} hands a button {call}"));
+            }
         }
     }
-    assert_eq!(buttons.len(), 2, "the two copy buttons: {buttons:?}");
+    assert!(handed.is_empty(), "{handed:#?}");
+    let built: usize = sources
+        .iter()
+        .flat_map(|(_, code)| {
+            carriers
+                .iter()
+                .map(move |carrier| code.matches(&format!("{carrier}::new(")).count())
+        })
+        .sum();
+    let view = source_of("src/ui/windows/panel/view.rs");
+    let body = function(&view, "fn preview(");
+    let buttons: Vec<Vec<&str>> = body
+        .match_indices("IconButton::new(")
+        .map(|(at, call)| probe::call_arguments(body, at + call.len() - 1))
+        .collect();
+    assert_eq!(
+        (built, buttons.len()),
+        (2, 2),
+        "the two copy buttons, both built in preview: {buttons:?}"
+    );
     let literal = |text: &str, prefix: &str, suffix: &str, allowed: &str| {
         text.strip_prefix(prefix)
             .and_then(|text| text.strip_suffix(suffix))
