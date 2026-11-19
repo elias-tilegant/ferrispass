@@ -227,4 +227,4 @@ Each rule was checked by taking it out on a clean tree and running the tests nam
 | 110 | same | closing from outside the panel hides the app before it removes the panel's window |
 | 111 | same | closing hides the app first and puts the main window back after |
 
-The agents spent about 16 hours on this, including review and fixes.
+The agents spent about 18 hours on this, including review and fixes.
