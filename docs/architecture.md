@@ -43,7 +43,7 @@ src/bin/
 └── ferrispass-cli.rs  Thin CLI entry point that delegates to `cli::run()`.
 
 bundle/
-├── icon.png            App icon master (1024×1024).
+├── icon/AppIcon.icon/  App icon, an Icon Composer document (compiled by actool).
 ├── minisign-pub.txt    Update-signing public key, embedded via include_str!.
 └── macos/
     ├── Info.plist          App-bundle metadata (rendered with __VERSION__ substitution).
