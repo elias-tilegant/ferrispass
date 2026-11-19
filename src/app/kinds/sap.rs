@@ -7,7 +7,9 @@
 //! own check for a host and an instance.
 
 use crate::domain::VaultEntry;
-use crate::launch::sap::{KEY_CLIENT, KEY_HOST, KEY_INSTANCE, KEY_LANG, KEY_USER};
+use crate::launch::sap::{
+    KEY_CLIENT, KEY_HOST, KEY_INSTANCE, KEY_LANG, KEY_USER, normalize_client,
+};
 
 use super::{Source, field, is_word_char};
 
@@ -134,15 +136,16 @@ pub struct SapSystem {
 impl SapSystem {
     /// Collects everything the entry has, whichever rule made it an SAP
     /// system. The SID comes from `SAP_SID`, else from the title; the client
-    /// from `SAP_CLIENT`, else from the title; the role from `SAP_ROLE`, else
-    /// from the last letter of the SID.
+    /// from `SAP_CLIENT`, padded to three digits as the launch writes it,
+    /// else from the title; the role from `SAP_ROLE`, else from the last
+    /// letter of the SID.
     pub(super) fn read(entry: &VaultEntry, source: Source) -> Self {
         let from_title = title_pattern(&entry.title);
         let sid = field(entry, KEY_SID)
             .and_then(Sid::parse)
             .or_else(|| from_title.as_ref().map(|(sid, _)| sid.clone()));
         let client = field(entry, KEY_CLIENT)
-            .map(str::to_string)
+            .map(normalize_client)
             .or_else(|| from_title.map(|(_, client)| client));
         let role = field(entry, KEY_ROLE)
             .and_then(SapRole::parse)
