@@ -1,6 +1,8 @@
 //! The panel as the app opens it: the main window over a test vault, then the
 //! panel as a second window, driven by its keys and actions.
 
+pub(crate) mod apps;
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -146,6 +148,8 @@ pub(crate) fn open_app(cx: &mut TestAppContext, entries: &[Fixture]) -> Harness 
 /// The same, with the vault at `path`, whose folder must not exist.
 fn open_app_at(cx: &mut TestAppContext, path: &str, entries: &[Fixture]) -> Harness {
     crate::autotype::hotkey::fake::reset();
+    crate::platform::activation::fake::reset();
+    apps::reset();
     LAUNCHES.with(|launches| launches.borrow_mut().clear());
     let pasteboard = FakePasteboard::new(AccessBehavior::Default);
     cx.update(|cx| {
@@ -1656,7 +1660,7 @@ fn nothing_in_the_panel_logs_a_title() {
     assert!(files.len() >= 4, "the scan found {files:?}");
     let mut found = Vec::new();
     // The tests' own file names the patterns it looks for.
-    for file in files.iter().filter(|file| !file.ends_with("tests.rs")) {
+    for file in files.iter().filter(|file| !is_test_source(file)) {
         let code = probe::code_only(&std::fs::read_to_string(file).expect("read source"));
         for pattern in [
             "log::",
@@ -1676,6 +1680,11 @@ fn nothing_in_the_panel_logs_a_title() {
 
 // ------------------------------------------------------- Return and copies --
 
+/// Whether `file` holds tests: a `tests.rs`, or a file in a `tests` folder.
+fn is_test_source(file: &Path) -> bool {
+    file.ends_with("tests.rs") || file.parent().is_some_and(|dir| dir.ends_with("tests"))
+}
+
 /// The panel's own files, without the tests, which name what they look
 /// for.
 fn panel_sources() -> Vec<(String, String)> {
@@ -1686,7 +1695,7 @@ fn panel_sources() -> Vec<(String, String)> {
     }
     let sources: Vec<(String, String)> = files
         .into_iter()
-        .filter(|file| !file.ends_with("tests.rs"))
+        .filter(|file| !is_test_source(file))
         .map(|file| {
             let code = probe::code_only(&std::fs::read_to_string(&file).expect("read source"));
             (file.display().to_string(), code)
@@ -1877,10 +1886,11 @@ fn announces(role: Option<Role>) -> bool {
     )
 }
 
-/// What the panel has to say goes into its footer and nowhere else: no
-/// copy, failed copy, refused website or sign-in puts up a notification, in
-/// the panel or in the main window, and neither a row nor the group around
-/// the list is a live region or has a role that announces itself.
+/// What the panel has to say goes into its footer, and what failed into the
+/// one line above the search, and nowhere else: no copy, failed copy,
+/// refused website or sign-in puts up a notification, in the panel or in
+/// the main window, and neither a row nor the group around the list is a
+/// live region or has a role that announces itself.
 #[gpui::test]
 fn what_the_panel_says_stays_in_its_footer(cx: &mut TestAppContext) {
     let mut entries = sample();
@@ -1895,11 +1905,31 @@ fn what_the_panel_says_stays_in_its_footer(cx: &mut TestAppContext) {
     let in_main = notices(cx, app.main);
     let panel = app.open_panel(cx);
     let vm = app.vm(cx);
-    for (query, keystrokes, said) in [
-        ("salesforce", "cmd-c", tr!("quick.footer.copied.password")),
-        ("salesforce", "cmd-shift-c", tr!("quick.footer.copied.user")),
-        ("locker", "cmd-c", tr!("quick.error.copy_failed")),
-        ("script portal", "enter", tr!("quick.error.website_failed")),
+    for (query, keystrokes, said, failed) in [
+        (
+            "salesforce",
+            "cmd-c",
+            Some(tr!("quick.footer.copied.password")),
+            None,
+        ),
+        (
+            "salesforce",
+            "cmd-shift-c",
+            Some(tr!("quick.footer.copied.user")),
+            None,
+        ),
+        (
+            "locker",
+            "cmd-c",
+            None,
+            Some(crate::ui::vm::panel::PanelError::CopyFailed),
+        ),
+        (
+            "script portal",
+            "enter",
+            None,
+            Some(crate::ui::vm::panel::PanelError::WebsiteFailed),
+        ),
     ] {
         if !app.query(cx).is_empty() {
             keys(cx, panel, "escape");
@@ -1909,8 +1939,13 @@ fn what_the_panel_says_stays_in_its_footer(cx: &mut TestAppContext) {
         let step = format!("{query}, {keystrokes}");
         assert_eq!(
             vm.read_with(cx, |vm, _| vm.footer().note),
-            Some(said),
+            said,
             "{step}: the footer says it"
+        );
+        assert_eq!(
+            vm.read_with(cx, |vm, _| vm.error()),
+            failed,
+            "{step}: the line above the search says it"
         );
         assert_eq!(notices(cx, panel), 0, "{step}: a notification in the panel");
         assert_eq!(
@@ -1955,12 +1990,30 @@ fn what_the_panel_says_stays_in_its_footer(cx: &mut TestAppContext) {
 
 /// No notification and no live region in the panel's code either, so a
 /// path the tests above do not drive is held too. The one sentence the
-/// panel has for an action stands in its footer.
+/// panel has for an action stands in its footer; the one exception is the
+/// line that says what failed, an alert built in `error_line` and nowhere
+/// else.
 #[test]
 fn the_panel_builds_no_notification_and_no_live_region() {
     let mut found = Vec::new();
+    let mut alerts = 0;
     for (file, code) in panel_sources() {
+        let error_line = code.find("fn error_line(").map(|start| {
+            let body = probe::braced(&code[start..]);
+            let at = body.as_ptr() as usize - code.as_ptr() as usize;
+            at..at + body.len()
+        });
+        let mut offset = 0;
         for (at, line) in code.lines().enumerate() {
+            let range = offset..offset + line.len();
+            offset += line.len() + 1;
+            let in_error_line = error_line
+                .as_ref()
+                .is_some_and(|body| body.start <= range.start && range.end <= body.end);
+            if in_error_line && file.ends_with("panel/view.rs") && line.contains("Role::Alert") {
+                alerts += line.matches("Role::Alert").count();
+                continue;
+            }
             for forbidden in [
                 "notification",
                 "Notification",
@@ -1982,6 +2035,7 @@ fn the_panel_builds_no_notification_and_no_live_region() {
         found.is_empty(),
         "the panel announces something itself: {found:#?}"
     );
+    assert_eq!(alerts, 1, "the line that says what failed is one alert");
 }
 
 /// Two rows can stand for the same system, the same SID and client at two
@@ -2149,8 +2203,11 @@ fn only_http_and_https_open(cx: &mut TestAppContext) {
         keys(cx, panel, "enter");
         assert_eq!(cx.opened_url(), None, "{title} opened");
         assert!(panel_is_open(cx), "{title}: the panel stays open");
-        let note = app.vm(cx).read_with(cx, |vm, _| vm.footer().note);
-        assert_eq!(note, Some(tr!("quick.error.website_failed")));
+        let error = app.vm(cx).read_with(cx, |vm, _| vm.error());
+        assert_eq!(
+            error.map(crate::ui::vm::panel::PanelError::text),
+            Some(tr!("quick.error.website_failed"))
+        );
         cx.update(close);
         cx.run_until_parked();
     }

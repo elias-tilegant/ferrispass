@@ -49,16 +49,9 @@ glossary.password.team               unlocking a team vault
 glossary.password.saved_team         unlocking a team vault
 glossary.favorite                    entry lists and quick access
 glossary.pinned_for_everyone         entry lists and quick access
-glossary.one_time_code               entry details and quick access
 glossary.system_number               SAP entry details
 glossary.earlier_versions            entry history
 glossary.trash                       the trash
-
-quick.preview.user                   the quick access panel
-quick.preview.password               the quick access panel
-quick.no_match.text                  the quick access panel
-quick.no_match.unlock                the quick access panel
-quick.no_match.new_entry             the quick access panel
 
 menubar.notch.hidden                 the menu bar item, when the notch hides it
 menubar.notch.practice               the menu bar item, when the notch hides it

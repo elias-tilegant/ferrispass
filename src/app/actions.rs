@@ -113,6 +113,8 @@ actions!(
         /// Close the panel and show the entry selected in it in the main
         /// window.
         PanelShowInApp,
+        /// Close the panel and start a new entry in the main window.
+        PanelNewEntry,
     ]
 );
 
@@ -512,6 +514,7 @@ fn bind_panel_keys(cx: &mut App) {
             Some(PANEL_FIELD_CONTEXT),
         )
     }));
+    cx.bind_keys([KeyBinding::new("cmd-n", PanelNewEntry, Some(PANEL_CONTEXT))]);
 }
 
 /// Register the application-level menu bar. On macOS this populates the
