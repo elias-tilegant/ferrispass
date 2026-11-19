@@ -42,6 +42,8 @@
 //!   are read by its id while the panel draws and are never kept here.
 //! - What failed stands in one line above the search ([`PanelError`]), set
 //!   by the action and gone with the next key. Its texts name no entry.
+//! - The footer's menu lists the commands of the command table that the
+//!   panel offers and that apply to the selected row ([`PanelVm::menu`]).
 //! - Nothing here writes to a log, and no text here holds a password or a
 //!   one-time code.
 
@@ -52,7 +54,7 @@ use gpui::SharedString;
 
 use crate::app::kinds::{self, EntryKind, SapRole, SapSystem, Sid};
 use crate::app::registry::{
-    self, CommandCtx, CommandId, Enablement, SelectedKind, Selection, UrlKind,
+    self, CommandCtx, CommandId, Enablement, SelectedKind, Selection, Surface, UrlKind,
 };
 use crate::app::unlock::locked_panel::{ReturnGate, exact_hit_takes_return_at_once};
 use crate::app::{AppState, VaultStatus};
@@ -374,6 +376,7 @@ pub enum FooterNote {
     CopiedPassword,
     CopiedUser,
     CopiedCode,
+    CopiedAddress,
 }
 
 impl FooterNote {
@@ -382,6 +385,7 @@ impl FooterNote {
             Self::CopiedPassword => tr!("quick.footer.copied.password"),
             Self::CopiedUser => tr!("quick.footer.copied.user"),
             Self::CopiedCode => tr!("quick.footer.copied.one_time_code"),
+            Self::CopiedAddress => tr!("quick.footer.copied.address"),
         }
     }
 }
@@ -488,6 +492,8 @@ pub struct PanelVm {
     footer_note: Option<FooterNote>,
     /// What failed, for the line above the search.
     error: Option<PanelError>,
+    /// The footer's menu is open.
+    menu_open: bool,
     /// The vault was unlocked from the panel for this query, which was typed
     /// while it was locked: it was not open before the search.
     unlocked_for_query: bool,
@@ -506,6 +512,7 @@ impl std::fmt::Debug for PanelVm {
             .field("parked_vaults", &self.parked_vaults)
             .field("footer_note", &self.footer_note)
             .field("error", &self.error)
+            .field("menu_open", &self.menu_open)
             .field("unlocked_for_query", &self.unlocked_for_query)
             .finish_non_exhaustive()
     }
@@ -524,6 +531,7 @@ impl Default for PanelVm {
             parked_vaults: 0,
             footer_note: None,
             error: None,
+            menu_open: false,
             unlocked_for_query: false,
         }
     }
@@ -607,6 +615,7 @@ impl PanelVm {
         self.selection = ListSelection::first(0);
         self.explicit = false;
         self.footer_note = None;
+        self.menu_open = false;
         self.unlocked_for_query = false;
         self.refresh(state);
     }
@@ -663,6 +672,7 @@ impl PanelVm {
         self.selection = move_selection(self.selection, delta);
         self.explicit = true;
         self.footer_note = None;
+        self.menu_open = false;
     }
 
     /// ⌘ and `number`, 1 to 9: picks that row. A number past the end of the
@@ -675,6 +685,7 @@ impl PanelVm {
         self.selection = next;
         self.explicit = true;
         self.footer_note = None;
+        self.menu_open = false;
     }
 
     /// Counts `parked` vaults as unlocked besides the open one, for tests
@@ -705,6 +716,15 @@ impl PanelVm {
         self.error.take().is_some()
     }
 
+    /// Whether the footer's menu is open.
+    pub fn menu_open(&self) -> bool {
+        self.menu_open
+    }
+
+    pub fn set_menu_open(&mut self, open: bool) {
+        self.menu_open = open;
+    }
+
     /// The search names nothing in the open vault: the panel says so, with
     /// the vault's name.
     pub fn no_match(&self) -> bool {
@@ -730,6 +750,34 @@ impl PanelVm {
         })
     }
 
+    /// The commands the footer's menu lists: those of the command table that
+    /// the panel offers and that are available for the selected row, in the
+    /// table's order. Return's row names the entry's main action, as the
+    /// footer does; while Return waits for a production system to be picked,
+    /// that row is left out. A remote access entry's main action, copying
+    /// its password, is listed once.
+    pub fn menu(&self) -> Vec<CommandId> {
+        let ctx = self.command_ctx();
+        let mut rows = Vec::new();
+        for (spec, enablement) in registry::for_surface(Surface::Panel, &ctx) {
+            if enablement != Enablement::Enabled {
+                continue;
+            }
+            let id = if spec.id == CommandId::ENTRY_PRIMARY {
+                match self.selected() {
+                    Some(hit) => registry::primary_command(&hit.selected_kind()),
+                    None => continue,
+                }
+            } else {
+                spec.id
+            };
+            if !rows.contains(&id) {
+                rows.push(id);
+            }
+        }
+        rows
+    }
+
     /// What the command table's availability rules need to know about the
     /// panel now.
     fn command_ctx(&self) -> CommandCtx {
@@ -751,6 +799,7 @@ impl PanelVm {
         self.remembered_at = Some(now);
         self.footer_note = None;
         self.error = None;
+        self.menu_open = false;
     }
 
     /// The panel opens at `now`: a search older than [`MEMORY`] is

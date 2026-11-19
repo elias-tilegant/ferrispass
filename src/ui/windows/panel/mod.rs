@@ -132,6 +132,17 @@ fn state_changed(vm: &Entity<PanelVm>, state: &Entity<AppState>, cx: &mut App) {
     }
 }
 
+/// The footer's menu button: opens the footer's menu, or closes it.
+fn toggle_menu(cx: &mut App) {
+    let Some(vm) = cx.try_global::<PanelWindow>().map(|panel| panel.vm.clone()) else {
+        return;
+    };
+    vm.update(cx, |vm, cx| {
+        vm.set_menu_open(!vm.menu_open());
+        cx.notify();
+    });
+}
+
 /// Whether the panel is open.
 pub fn is_open(cx: &App) -> bool {
     cx.try_global::<PanelWindow>()

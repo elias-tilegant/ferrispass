@@ -15,7 +15,9 @@
 //!
 //! A search without a match names the vault and offers the main window, to
 //! unlock other vaults or to add an entry. What failed stands in one carmine
-//! line above the search, an alert, until the next key.
+//! line above the search, an alert, until the next key. The footer's menu
+//! button opens the commands of the command table for the selected row, each
+//! with its keys.
 //!
 //! The keyboard stays in the search field. Cmd+C, which the GPUI Kit input
 //! binds to its own Copy, and Cmd+1 to Cmd+9 and Cmd+W, which an app-wide
@@ -32,16 +34,19 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Div, Entity, FocusHandle, Focusable as _,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, Role, SharedString,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
+    Action, Anchor, AnyElement, App, AppContext as _, Context, Div, Entity, FocusHandle,
+    Focusable as _, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
 use gpui_component::input::{Copy as FieldCopy, Cut as FieldCut, InputEvent, InputState};
+use gpui_component::popover::Popover;
 use zeroize::Zeroizing;
 
 use crate::app::actions::{
-    ClosePanel, NewEntry, PANEL_CONTEXT, PanelCopyCode, PanelCopyPassword, PanelCopyUsername,
-    PanelMoveDown, PanelMoveUp, PanelNewEntry, PanelPrimary, PanelSelect, PanelShowInApp,
+    ClosePanel, LockVault, NewEntry, OpenSettings, PANEL_CONTEXT, PanelCopyCode, PanelCopyPassword,
+    PanelCopyUsername, PanelMoveDown, PanelMoveUp, PanelNewEntry, PanelPrimary, PanelSelect,
+    PanelShowInApp,
 };
 use crate::app::kinds::EntryKind;
 use crate::app::registry::CommandId;
@@ -114,6 +119,7 @@ pub(super) enum Value {
     Password,
     User,
     Code,
+    Url,
 }
 
 /// Whether VoiceOver runs, as macOS says. The one source of the preview's
@@ -274,9 +280,14 @@ impl PanelView {
         self.update_vm(cx, |vm| vm.fail(error));
     }
 
-    /// Escape clears a search that holds text; Cmd+W and Escape on an empty
-    /// search close the panel, and nothing else.
+    /// Escape closes the footer's menu first, then clears a search that
+    /// holds text; Cmd+W and Escape on an empty search close the panel, and
+    /// nothing else.
     fn on_close(&mut self, action: &ClosePanel, window: &mut Window, cx: &mut Context<Self>) {
+        if action.clear_search_first && self.vm.read(cx).menu_open() {
+            self.update_vm(cx, |vm| vm.set_menu_open(false));
+            return;
+        }
         if self.is_locked(cx) {
             if action.clear_search_first && self.escape_locked(window, cx) {
                 return;
@@ -384,7 +395,7 @@ impl PanelView {
         }
     }
 
-    /// Copies a value of the selected entry, for its keys.
+    /// Copies a value of the selected entry: the keys, and the menu.
     fn copy(&mut self, what: Value, input: Input, cx: &mut Context<Self>) {
         let Some(entry_id) = self.vm.read(cx).selected().map(|hit| hit.entry_id.clone()) else {
             return;
@@ -408,6 +419,10 @@ impl PanelView {
                     .filter(|user| !user.trim().is_empty())
                     .map(Zeroizing::new),
                 Value::Code => state.totp_for_entry(entry_id).map(|otp| digits_of(&otp)),
+                Value::Url => entry_of(state, entry_id)
+                    .map(|entry| entry.url)
+                    .filter(|url| !url.trim().is_empty())
+                    .map(Zeroizing::new),
             }
         };
         let Some(value) = value else {
@@ -431,6 +446,7 @@ impl PanelView {
             Value::Password => FooterNote::CopiedPassword,
             Value::User => FooterNote::CopiedUser,
             Value::Code => FooterNote::CopiedCode,
+            Value::Url => FooterNote::CopiedAddress,
         };
         if matches!(what, Value::Password | Value::User) {
             self.state
@@ -530,7 +546,8 @@ impl PanelView {
 
     /// ⌘O: closes the panel and shows the selected entry in the main window,
     /// or just the main window when no vault is open. With `then`, the main
-    /// window gets that action instead of the entry: a new entry. The one way of the panel that brings FerrisPass to the
+    /// window gets that action instead of the entry: a new entry, the
+    /// settings. The one way of the panel that brings FerrisPass to the
     /// front, because the user asked. Over an app that was hidden, the app
     /// is not hidden again, and its windows come back.
     pub(super) fn show_in_app(
@@ -561,6 +578,42 @@ impl PanelView {
             && let Some(main) = crate::app::actions::main_window(cx)
         {
             let _ = main.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+        }
+    }
+
+    /// A row of the footer's menu: runs its command, as its keys would.
+    fn run_menu_command(
+        &mut self,
+        command: CommandId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_vm(cx, |vm| vm.set_menu_open(false));
+        let entry_id = self.vm.read(cx).selected().map(|hit| hit.entry_id.clone());
+        match command {
+            CommandId::ENTRY_SAP_LOGIN | CommandId::ENTRY_OPEN_WEBSITE => {
+                self.on_primary(&PanelPrimary, window, cx);
+            }
+            CommandId::ENTRY_COPY_PASSWORD => self.copy(Value::Password, Input::Pointer, cx),
+            CommandId::ENTRY_COPY_USERNAME => self.copy(Value::User, Input::Pointer, cx),
+            CommandId::ENTRY_COPY_CODE => self.copy(Value::Code, Input::Pointer, cx),
+            CommandId::ENTRY_COPY_URL => self.copy(Value::Url, Input::Pointer, cx),
+            CommandId::ENTRY_OPEN_URL => {
+                if let Some(entry_id) = entry_id {
+                    self.open_website(&entry_id, window, cx);
+                }
+            }
+            CommandId::ENTRY_SHOW_IN_APP => self.show_in_app(None, window, cx),
+            CommandId::APP_SETTINGS => self.show_in_app(Some(Box::new(OpenSettings)), window, cx),
+            CommandId::APP_LOCK_ALL => {
+                if let Some(main) = crate::app::actions::main_window(cx) {
+                    let _ = main.update(cx, |_, window, cx| {
+                        window.dispatch_action(Box::new(LockVault), cx);
+                    });
+                }
+            }
+            CommandId::PANEL_CLOSE => self.close(window, cx),
+            _ => {}
         }
     }
 }
@@ -611,9 +664,10 @@ fn tile_icon(kind: &EntryKind) -> FpIcon {
     }
 }
 
-/// The footer for `model`. Its menu button does nothing yet.
+/// The footer for `model`. Its menu button opens the footer's menu.
 pub(super) fn footer(model: &FooterModel) -> PanelFooter {
-    let mut footer = PanelFooter::new("panel-footer", |_, _, _| {}).tone(model.tone.clone());
+    let mut footer = PanelFooter::new("panel-footer", |_, _, cx| super::toggle_menu(cx))
+        .tone(model.tone.clone());
     if let Some((keys, words)) = &model.main {
         footer = footer.primary(Shortcut::from_keystroke(keys, words.clone()));
     }
@@ -920,6 +974,65 @@ pub(super) fn error_line(error: PanelError) -> Stateful<Div> {
         .child(text)
 }
 
+/// A row of the footer's menu: the command's keys and its word, both from
+/// the command table.
+pub(super) fn menu_row(command: CommandId) -> Shortcut {
+    Shortcut::for_command(command)
+}
+
+/// The footer's menu: a GPUI Kit popover over the end of the footer, with
+/// one row per command. Focus stays where it is, in the search field or the
+/// locked panel's field.
+fn footer_menu(
+    commands: Vec<CommandId>,
+    open: bool,
+    focus: &FocusHandle,
+    view: WeakEntity<PanelView>,
+    vm: Entity<PanelVm>,
+    hover: Hsla,
+) -> Popover {
+    Popover::new("panel-menu")
+        .anchor(Anchor::BottomRight)
+        .trigger(MenuAnchor { open })
+        .open(open)
+        .track_focus(focus)
+        .on_open_change(move |open, _, cx| {
+            let open = *open;
+            vm.update(cx, |vm, cx| {
+                vm.set_menu_open(open);
+                cx.notify();
+            });
+        })
+        .content(move |_, _, _| {
+            div()
+                .debug_selector(|| "fp-panel-menu".into())
+                .flex()
+                .flex_col()
+                .gap(u(dimension::SPACE_2))
+                .children(commands.iter().enumerate().map(|(index, command)| {
+                    let command = *command;
+                    let view = view.clone();
+                    let pair = menu_row(command);
+                    div()
+                        .id(("panel-menu-row", index))
+                        .debug_selector(move || format!("fp-panel-menu-row-{index}"))
+                        .role(Role::MenuItem)
+                        .aria_label(pair.label().clone())
+                        .px(u(dimension::SPACE_8))
+                        .py(u(dimension::SPACE_4))
+                        .rounded(px(dimension::RADIUS_SM))
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover))
+                        .on_click(move |_, window, cx| {
+                            let _ = view.update(cx, |view, cx| {
+                                view.run_menu_command(command, window, cx);
+                            });
+                        })
+                        .child(pair)
+                }))
+        })
+}
+
 impl PanelView {
     /// The open panel: `group`, the search over the list, then a search
     /// without a match, and the preview next to them.
@@ -1033,7 +1146,23 @@ impl Render for PanelView {
             }
             None => self.render_locked(cx),
         };
-        let error = self.vm.read(cx).error();
+        let (error, menu_open, commands) = {
+            let vm = self.vm.read(cx);
+            (vm.error(), vm.menu_open(), vm.menu())
+        };
+        let keyboard = if self.is_locked(cx) {
+            self.focus.clone()
+        } else {
+            self.search.read(cx).focus_handle(cx)
+        };
+        let menu = footer_menu(
+            commands,
+            menu_open,
+            &keyboard,
+            cx.entity().downgrade(),
+            self.vm.clone(),
+            colors.bg_hover.hsla,
+        );
         div()
             .id("panel")
             .role(Role::Dialog)
@@ -1064,7 +1193,39 @@ impl Render for PanelView {
                 error.map(|error| error_line(error).text_color(colors.status_danger_text.hsla)),
             )
             .child(div().flex_1().min_h(px(0.)).flex().flex_col().child(body))
-            .child(footer)
+            .child(footer.menu_open(menu_open))
+            .child(
+                div()
+                    .absolute()
+                    .right(u(dimension::SPACE_12))
+                    .bottom(u(dimension::SPACE_12))
+                    .child(menu),
+            )
+    }
+}
+
+/// Where the footer's menu hangs: an empty spot at the end of the footer,
+/// under the footer's menu button, which opens the menu through
+/// `toggle_menu`.
+#[derive(IntoElement)]
+struct MenuAnchor {
+    open: bool,
+}
+
+impl gpui_base::Selectable for MenuAnchor {
+    fn selected(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.open
+    }
+}
+
+impl RenderOnce for MenuAnchor {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().size_0()
     }
 }
 

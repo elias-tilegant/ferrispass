@@ -1,17 +1,19 @@
 //! The panel over the other apps: over a hidden FerrisPass, the preview of
 //! the selected entry, a search without a match, the line that says what
-//! failed, and an SAP client written as a spreadsheet leaves it.
+//! failed, an SAP client written as a spreadsheet leaves it, and the
+//! footer's menu.
 
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{Role, TestAppContext, VisualTestContext};
+use gpui::{Focusable as _, Role, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::app::Overlay;
 use crate::platform::activation::{self, fake as hidden};
 use crate::ui::ds::components::CopyState;
+use crate::ui::ds::components::Shortcut;
 use crate::ui::vm::panel::PanelError;
 use crate::ui::windows::panel::view::{
     PreviewFlags, PreviewValues, error_line, no_match, preview, preview_flags,
@@ -721,4 +723,149 @@ fn one_and_001_are_twins(cx: &mut TestAppContext) {
         vm.results().iter().map(|hit| hit.twins).collect()
     });
     assert_eq!(twins, [2, 2]);
+}
+
+// ------------------------------------------------------- the footer menu --
+
+/// The menu of a web login lists its main action, its copies, showing it in
+/// FerrisPass and the app's commands, in the order of the command table;
+/// with nothing selected only the app's commands, and while locked only the
+/// settings and closing. While Return waits for a production system to be
+/// picked, the main action is left out.
+#[gpui::test]
+fn the_more_menu_lists_the_panel_commands_enabled_for_the_selection(cx: &mut TestAppContext) {
+    let mut entries = sample();
+    entries[1].starred = true;
+    entries[2].starred = false;
+    let app = open_app(cx, &entries);
+    let panel = app.open_panel(cx);
+    let menu = |cx: &mut TestAppContext| app.vm(cx).read_with(cx, |vm, _| vm.menu());
+    let app_commands = [
+        CommandId::APP_LOCK_ALL,
+        CommandId::APP_SETTINGS,
+        CommandId::PANEL_CLOSE,
+    ];
+
+    // The empty search starts on NHP 100, a production system.
+    assert_eq!(app.selected_title(cx).as_deref(), Some("NHP 100"));
+    let waiting = menu(cx);
+    assert!(
+        !waiting.contains(&CommandId::ENTRY_SAP_LOGIN),
+        "{waiting:?}"
+    );
+    assert!(waiting.contains(&CommandId::ENTRY_COPY_PASSWORD));
+
+    type_into(cx, panel, "webmail");
+    let mut expected = vec![
+        CommandId::ENTRY_OPEN_WEBSITE,
+        CommandId::ENTRY_COPY_PASSWORD,
+        CommandId::ENTRY_COPY_USERNAME,
+        CommandId::ENTRY_COPY_URL,
+        CommandId::ENTRY_OPEN_URL,
+        CommandId::ENTRY_SHOW_IN_APP,
+    ];
+    expected.extend(app_commands);
+    assert_eq!(menu(cx), expected);
+
+    keys(cx, panel, "escape");
+    type_into(cx, panel, "zzz");
+    assert_eq!(menu(cx), app_commands, "nothing selected");
+
+    // Locked, nothing can be locked and no entry is offered.
+    assert_eq!(
+        PanelVm::default().menu(),
+        [CommandId::APP_SETTINGS, CommandId::PANEL_CLOSE],
+        "the locked panel"
+    );
+}
+
+/// Every row of the menu is the pair `Shortcut::for_command` makes from the
+/// command table: the command's first keys and its word. No row is written
+/// by hand.
+#[gpui::test]
+fn every_menu_row_is_a_shortcut_pair_from_the_command_table(cx: &mut TestAppContext) {
+    let app = open_app(cx, &[sales()]);
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "sales");
+    let commands = app.vm(cx).read_with(cx, |vm, _| vm.menu());
+    assert!(commands.len() > 3, "{commands:?}");
+    for command in commands {
+        let spec = crate::app::registry::command(command).expect("a row in the table");
+        let row = crate::ui::windows::panel::view::menu_row(command);
+        let table = Shortcut::for_command(command);
+        assert_eq!(row.label(), &(spec.label)(), "{}", command.as_str());
+        assert_eq!(row.keys_text(), table.keys_text(), "{}", command.as_str());
+    }
+    let view = squeezed(&source_of("src/ui/windows/panel/view.rs"));
+    let row = function(&view, "fnmenu_row(");
+    assert_eq!(row, "{Shortcut::for_command(command)}");
+    let menu = function(&view, "fnfooter_menu(");
+    assert!(menu.contains("letpair=menu_row(command);"), "{menu}");
+    assert!(menu.contains(".child(pair)"), "{menu}");
+    assert!(!menu.contains("from_keystroke"), "{menu}");
+}
+
+/// The footer's menu button opens a popover over the footer and says that
+/// the menu is open; the search keeps the keyboard. A click on a row runs
+/// its command, Escape closes the menu before it clears the search.
+#[gpui::test]
+fn menu_open_is_set_while_the_popover_shows(cx: &mut TestAppContext) {
+    let app = open_app(cx, &[sales()]);
+    let panel = app.open_panel(cx);
+    type_into(cx, panel, "sales");
+    let vm = app.vm(cx);
+    assert!(!drawn(cx, panel, "fp-panel-menu"));
+    cx.update(super::super::toggle_menu);
+    cx.run_until_parked();
+    assert!(vm.read_with(cx, |vm, _| vm.menu_open()));
+    assert!(drawn(cx, panel, "fp-panel-menu"), "the popover shows");
+    let expanded = probe::in_frame(cx, {
+        let vm = vm.clone();
+        move |window, cx| {
+            let model = vm.read(cx).footer();
+            let parts = crate::ui::ds::components::PanelFooter::parts(
+                || footer(&model).menu_open(true),
+                window,
+                cx,
+            );
+            parts
+                .into_iter()
+                .find(|part| part.name == "menu")
+                .and_then(|part| part.node.is_expanded())
+        }
+    });
+    assert_eq!(expanded, Some(true));
+    let search_focused = panel
+        .update(cx, |_, window, cx| {
+            let view = view_for_test(cx).expect("the view");
+            let search = view.read(cx).search.clone();
+            search.read(cx).focus_handle(cx).is_focused(window)
+        })
+        .expect("the panel");
+    assert!(search_focused, "the search keeps the keyboard");
+
+    keys(cx, panel, "escape");
+    assert!(
+        !vm.read_with(cx, |vm, _| vm.menu_open()),
+        "Escape closes it"
+    );
+    assert_eq!(app.query(cx), "sales", "and leaves the search");
+    assert!(!drawn(cx, panel, "fp-panel-menu"));
+
+    // A row runs its command: copy the user name.
+    cx.update(super::super::toggle_menu);
+    cx.run_until_parked();
+    let rows = vm.read_with(cx, |vm, _| vm.menu());
+    let index = rows
+        .iter()
+        .position(|command| *command == CommandId::ENTRY_COPY_USERNAME)
+        .expect("copy the user name");
+    let selector: &'static str = Box::leak(format!("fp-panel-menu-row-{index}").into_boxed_str());
+    click(cx, panel, selector);
+    assert_eq!(
+        app.copied(),
+        (1, Some("petra.engel@example.com".to_string()))
+    );
+    assert!(!vm.read_with(cx, |vm, _| vm.menu_open()), "the menu closed");
+    assert!(panel_is_open(cx));
 }

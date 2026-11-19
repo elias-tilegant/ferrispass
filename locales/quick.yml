@@ -35,6 +35,9 @@ quick:
       one_time_code:
         en: One-time code copied
         de: Einmalcode kopiert
+      address:
+        en: Address copied
+        de: Adresse kopiert
     # When other vaults are parked, the panel only searches the open one.
     other_vaults:
       en: You switch to other vaults in the main window.
