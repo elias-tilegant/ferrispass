@@ -16,7 +16,7 @@ use crate::ui::ds::components::CopyState;
 use crate::ui::ds::components::Shortcut;
 use crate::ui::vm::panel::PanelError;
 use crate::ui::windows::panel::view::{
-    PreviewFlags, PreviewValues, error_line, no_match, preview, preview_flags,
+    PreviewFlags, PreviewParts, PreviewValues, error_line, no_match, preview, preview_flags,
 };
 
 thread_local! {
@@ -215,8 +215,19 @@ fn activation_is_the_only_place_that_unhides_or_orders_windows() {
 // --------------------------------------------------------- the preview --
 
 /// The preview names the user and shows the password as twelve dots and the
-/// code as "••• •••": neither reaches a node of the secret field or the
-/// ring, in any spelling, whether VoiceOver runs or not.
+/// code as "••• •••": neither reaches the title, the user line or a node of
+/// the secret field or the ring, in any spelling, whether VoiceOver runs or
+/// not. Every part `preview` hands out is read by name, so a part added to
+/// `PreviewParts` does not compile until it is read here; the badge shows
+/// the vault and nothing of the entry.
+///
+/// The two copy buttons write their node only once the design system has
+/// turned them into GPUI's, which the panel's tests cannot reach, so they
+/// are read in the source. `preview` builds each with a literal id, the copy
+/// glyph and a name from `tr!` with a literal key, and neither `preview`
+/// nor `assemble_preview`, which puts the buttons in place, gives anything
+/// a description, an accessibility id, a tooltip or an `aria_` property;
+/// `render_open` hands what `preview` builds straight to `assemble_preview`.
 #[gpui::test]
 fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestAppContext) {
     let app = open_app(cx, &[sales()]);
@@ -245,14 +256,20 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
                 password,
                 otp: Some(otp),
             };
-            let parts = preview(
+            let PreviewParts {
+                title,
+                badge: _,
+                user,
+                password,
+                code: ring,
+            } = preview(
                 &model,
                 values,
                 assistive,
                 |_| CopyState::Idle,
                 Rc::new(|_, _, _| {}),
             );
-            let mut texts = Vec::new();
+            let mut texts = vec![format!("title: {title}")];
             let mut read = |parts: Vec<probe::ComponentPart>| {
                 for part in parts {
                     for (name, text) in part.texts() {
@@ -262,10 +279,12 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
                     }
                 }
             };
-            read(parts.password.expect("the secret field").parts(window, cx));
-            let (ring, _) = parts.code.expect("the ring");
+            read(password.expect("the secret field").parts(window, cx));
+            // The copy buttons are read in the source, below.
+            let (ring, _copy_code) = ring.expect("the ring");
             read(ring.parts(window, cx));
-            let (user, _) = parts.user.expect("the user name");
+            let (user, _copy_user) = user.expect("the user line");
+            texts.push(format!("user line: {user}"));
             (texts, user.to_string(), code)
         });
         assert_eq!(user, "petra.engel@example.com");
@@ -282,6 +301,57 @@ fn the_preview_shows_the_user_and_hides_the_secret_and_the_code(cx: &mut TestApp
             }
         }
     }
+
+    // The copy buttons, in the source.
+    let view = source_of("src/ui/windows/panel/view.rs");
+    let mut buttons = Vec::new();
+    for start in ["fn preview(", "fn assemble_preview("] {
+        let body = function(&view, start);
+        for call in [
+            ".description(",
+            "accessibility_",
+            "tooltip",
+            "aria_",
+            "a11y_",
+        ] {
+            assert!(!body.contains(call), "{start} hands a button {call}");
+        }
+        for (at, call) in body.match_indices("IconButton::new(") {
+            buttons.push(probe::call_arguments(body, at + call.len() - 1));
+        }
+    }
+    assert_eq!(buttons.len(), 2, "the two copy buttons: {buttons:?}");
+    let literal = |text: &str, prefix: &str, suffix: &str, allowed: &str| {
+        text.strip_prefix(prefix)
+            .and_then(|text| text.strip_suffix(suffix))
+            .is_some_and(|inner| {
+                !inner.is_empty()
+                    && inner
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || allowed.contains(c))
+            })
+    };
+    for arguments in &buttons {
+        let &[id, _glyph, name] = arguments.as_slice() else {
+            panic!("a copy button built otherwise: {arguments:?}");
+        };
+        assert!(
+            literal(id, "\"", "\"", "-"),
+            "a copy button's id is no literal: {id}"
+        );
+        assert!(
+            literal(name, "tr!(\"", "\")", "._"),
+            "a copy button is named otherwise than from tr! with a literal key: {name}"
+        );
+    }
+    let render = squeezed(function(&view, "fn render_open("));
+    let (_, after) = render
+        .split_once("letparts=preview(")
+        .expect("render_open builds the preview");
+    assert!(
+        after.matches("parts").count() == 1 && after.contains(".child(assemble_preview(parts,"),
+        "render_open changes what preview builds before it is put in place: {after}"
+    );
 }
 
 /// The flags the preview hands its secret field and its ring, read where
